@@ -2,10 +2,11 @@
  * @file utils.cppm
  * @brief Shared alignment utilities: unified scoring matrix.
  *
- * Provides ScoringMatrix<R> — a single scoring-matrix type that replaces
+ * Provides ScoringMatrix<Source> — a single scoring-matrix type that replaces
  * the old KswScoringMatrix (used by KSW2) and BlockSIMDMatrix (used by
  * the block aligner). The matrix dimension is deduced from the sequence
- * range's alphabet traits.
+ * logical alphabet alone, independent of packed width or representation.
+ * Logical alphabets and packed sequence brands canonicalize to the same type.
  */
 module;
 
@@ -23,6 +24,7 @@ module;
 
 export module bioseq.alignment.utils;
 
+import bioseq.common.sequan_compat;
 import bioseq.sequences;
 
 export {
@@ -37,7 +39,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 // ============================================================================
 
 /**
- * @brief Unified scoring matrix templated on a compact_sequence_range type.
+ * @brief Canonical scoring-matrix storage templated on the logical alphabet.
  *
  * Replaces both KswScoringMatrix<AlphabetDim> (used by KSW2) and
  * BlockSIMDMatrix<AlphabetDim> (used by the block aligner) with a single
@@ -50,13 +52,14 @@ namespace hn = hwy::HWY_NAMESPACE;
  * with INT8_MIN for NULL/padding, used by the block aligner's PSHUFB
  * score lookup.
  *
- * @tparam R           A type satisfying supports_compact_sequence_range.
+ * @tparam Alphabet    A Bioseq/SeqAn logical alphabet type.
  * @tparam AlphabetDim Alphabet dimension (including wildcard), defaults to
- *                     the range's alphabet_size_n trait.
+ *                     the alphabet size plus the existing wildcard rank.
  */
-template<supports_compact_sequence_range R,
-         size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
-struct ScoringMatrix {
+template<sequence_alphabet Alphabet, size_t AlphabetDim>
+struct ScoringMatrixStorage {
+    using alphabet_type = Alphabet;
+    static constexpr size_t alphabet_dim = AlphabetDim;
     static_assert(AlphabetDim > 1, "Requires alphabet dimension > 1.");
 
     static constexpr size_t entry_count =
@@ -241,10 +244,10 @@ struct ScoringMatrix {
      * @param mismatch_pen Penalty for mismatches  (positive value, negated)
      * @param sc_ambi      Penalty for ambiguous   (positive value, negated)
      */
-    static ScoringMatrix generate(
+    static ScoringMatrixStorage generate(
         int8_t match_score, int8_t mismatch_pen, int8_t sc_ambi)
     {
-        ScoringMatrix matrix{};
+        ScoringMatrixStorage matrix{};
         constexpr int base_count = dim - 1;
 
         const int8_t pos_match =
@@ -279,6 +282,27 @@ struct ScoringMatrix {
         return matrix;
     }
 };
+
+/**
+ * @brief Unified scoring matrix normalized to a source's logical alphabet.
+ *
+ * `Source` may be the logical alphabet used by the canonical lazy-view APIs or
+ * any established compact-sequence brand. Both spellings resolve through the
+ * same `compact_sequence_range<Source>::traits` contract and therefore denote
+ * the same matrix type for a given alphabet and dimension.
+ */
+template<supports_compact_sequence_range Source,
+         size_t AlphabetDim =
+             compact_sequence_range<Source>::traits::alphabet_size_n>
+using ScoringMatrix = ScoringMatrixStorage<
+    typename compact_sequence_range<Source>::traits::alphabet_type,
+    AlphabetDim>;
+
+static_assert(std::is_same_v<
+    ScoringMatrix<seq::dna4>,
+    ScoringMatrix<sequence_custom_alphabet<seq::dna4, std::uint64_t>>>);
+static_assert(ScoringMatrix<seq::dna4>::alphabet_dim == 5u);
+static_assert(ScoringMatrix<seq::dna5>::alphabet_dim == 6u);
 
 }  // namespace bioseq::simd::HWY_NAMESPACE
 

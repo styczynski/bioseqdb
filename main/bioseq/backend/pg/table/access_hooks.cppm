@@ -13,9 +13,12 @@ module;
 
 extern "C" {
 #include "catalog/catalog.h"
+#include "catalog/namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/partition.h"
 #include "catalog/pg_inherits.h"
+#include "catalog/pg_type.h"
+#include "commands/copy.h"
 #include "storage/lock.h"
 #include "utils/acl.h"
 #include "utils/inval.h"
@@ -36,6 +39,8 @@ import bioseq.scheduler.supervisor_pg;
 import bioseq.storage.metadata;
 import bioseq.storage.manager;
 import bioseq.column.tam;
+import bioseq.codegen.sql.annotation_model;
+import bioseq.table.sql_rows;
 import :access_identity;
 
 namespace {
@@ -595,6 +600,74 @@ BioseqColumnTableAMObjectAccessHook(ObjectAccessType access, Oid classId,
 }
 
 static void
+PreflightTypmodlessLetterTextCopy(Node *parsetree)
+{
+	if (!IsA(parsetree, CopyStmt))
+	{
+		return;
+	}
+	auto *copy = reinterpret_cast<CopyStmt *>(parsetree);
+	if (!copy->is_from || copy->relation == nullptr)
+	{
+		return;
+	}
+
+	CopyFormatOptions options{};
+	ProcessCopyOptions(nullptr, &options, true, copy->options);
+	if (options.binary)
+	{
+		/* Binary letter input carries and validates its physical alphabet. */
+		return;
+	}
+
+	const Oid namespace_oid = get_namespace_oid("bioseq", true);
+	if (!OidIsValid(namespace_oid))
+	{
+		return;
+	}
+	const Oid letter_oid = GetSysCacheOid2(
+		TYPENAMENSP, Anum_pg_type_oid,
+		PointerGetDatum("letter"), ObjectIdGetDatum(namespace_oid));
+	if (!OidIsValid(letter_oid))
+	{
+		return;
+	}
+
+	Relation relation = table_openrv(copy->relation, RowExclusiveLock);
+	List *attribute_numbers = CopyGetAttnums(
+		RelationGetDescr(relation), relation, copy->attlist);
+	ListCell *cell = nullptr;
+	foreach(cell, attribute_numbers)
+	{
+		const AttrNumber attribute_number = static_cast<AttrNumber>(
+			lfirst_int(cell));
+		if (attribute_number <= 0
+			|| attribute_number > RelationGetDescr(relation)->natts)
+		{
+			continue;
+		}
+		Form_pg_attribute attribute = TupleDescAttr(
+			RelationGetDescr(relation), attribute_number - 1);
+		if (!attribute->attisdropped
+			&& attribute->atttypid == letter_oid
+			&& attribute->atttypmod < 0)
+		{
+			char *attribute_name = pstrdup(NameStr(attribute->attname));
+			list_free(attribute_numbers);
+			table_close(relation, NoLock);
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("bioseq.letter text COPY requires an alphabet typmod"),
+				 errdetail("target column \"%s\" has base type bioseq.letter without an alphabet typmod",
+					 attribute_name),
+				 errhint("declare the target as bioseq.letter('dna4') or another supported alphabet, or use validated binary COPY")));
+		}
+	}
+	list_free(attribute_numbers);
+	table_close(relation, NoLock);
+}
+
+static void
 BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 							   const char *queryString,
 						   bool readOnlyTree,
@@ -610,6 +683,7 @@ BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 	}
 
 	Node *parsetree = pstmt->utilityStmt;
+	PreflightTypmodlessLetterTextCopy(parsetree);
 
 	if (IsA(parsetree, IndexStmt))
 	{
@@ -650,7 +724,7 @@ BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 	{
 		try
 		{
-			PrevProcessUtilityHook_compat(pstmt, queryString, false, context,
+			PrevProcessUtilityHook_compat(pstmt, queryString, readOnlyTree, context,
 									  params, queryEnv, dest, completionTag);
 		}
 		catch (...)
@@ -730,34 +804,40 @@ InstallBioseqColumnTableHooks()
 	ProcessUtility_hook = BioseqColumnProcessUtility;
 }
 
-/*
- * Integration-only proof that a fresh backend used the lazy-load lock
- * fallback without manufacturing stale relation/OID revisits. This function
- * is diagnostic only: it snapshots the two counters and cannot reset or
- * influence teardown state.
+export namespace bioseq::table {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::unsafe,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::all,
+    .from = bioseq::sql::public_role,
+})]]
+/**
+ * @brief Returns backend-local DROP EXTENSION lock-fallback and missing-relation
+ * counters.
  */
-POSTGRES_FN(bioseq_internal_teardown_diagnostics)
-{
-	TupleDesc tupdesc = nullptr;
-	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE)
-	{
-		ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("bioseq_internal.teardown_diagnostics() must be called as a composite-returning function")));
-	}
-	tupdesc = BlessTupleDesc(tupdesc);
-
-	Datum values[2]{};
-	bool nulls[2]{};
-	values[0] = Int64GetDatum(static_cast<std::int64_t>(
-		std::min<std::uint64_t>(
-			BioseqExtensionDropLockFallbackClassifications,
-			static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))));
-	values[1] = Int64GetDatum(static_cast<std::int64_t>(
-		std::min<std::uint64_t>(
-			BioseqExtensionMissingRelationObservations,
-			static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))));
-
-	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
-	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+[[nodiscard]] bioseq::pg_utils::named_out<teardown_diagnostics_row>
+teardown_diagnostics() noexcept {
+    const auto clamp_counter = [](std::uint64_t value) noexcept {
+        return static_cast<std::int64_t>(
+            std::min<std::uint64_t>(
+                value,
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max())));
+    };
+    return bioseq::pg_utils::named_out<teardown_diagnostics_row>{
+        teardown_diagnostics_row{
+            .lock_fallback_classifications =
+                clamp_counter(
+                    BioseqExtensionDropLockFallbackClassifications),
+            .missing_relation_observations =
+                clamp_counter(
+                    BioseqExtensionMissingRelationObservations),
+        }};
 }
+
+}  // namespace bioseq::table

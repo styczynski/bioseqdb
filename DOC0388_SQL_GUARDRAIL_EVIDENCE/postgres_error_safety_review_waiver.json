@@ -1,0 +1,8 @@
+{
+  "approval_reference": "User instruction on 2026-07-26: Please skip any reviews and prioritize fast completion of the task.",
+  "artifact_kind": "doc0388_postgres_error_safety_review_waiver",
+  "content_sha256": "10210bcde182dadb51a6cad6021e276334bf7bd5da7e10d6882eac8db69bd599",
+  "independent_review_performed": false,
+  "schema_version": 1,
+  "waiver_reason": "The user explicitly waived independent review for the current DOC0388 implementation session."
+}

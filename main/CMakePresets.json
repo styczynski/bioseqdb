@@ -65,6 +65,8 @@
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",
           "BIOSEQ_TEST_INDEXES": "OFF",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",
@@ -80,6 +82,112 @@
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "postgres-error-safety-production",
+        "inherits": "bench-opt",
+        "displayName": "PostgreSQL error-safety production profile",
+        "description": "Isolated local production-profile tree for sealed PostgreSQL error-safety runtime evidence.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_TESTS": "OFF",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/fixtures/doc0388_runtime_cases.json",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR": "${sourceDir}/build/postgres-error-safety-test-indexes",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "OFF"
+        }
+      },
+      {
+        "name": "postgres-error-safety-test-indexes",
+        "inherits": "test-opt",
+        "displayName": "PostgreSQL error-safety test-index profile",
+        "description": "Isolated local test-index-profile tree for sealed PostgreSQL error-safety runtime evidence.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_TESTS": "ON",
+          "BIOSEQ_TEST_INDEXES": "ON",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/fixtures/doc0388_runtime_cases.json",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "OFF"
+        }
+      },
+      {
+        "name": "test-opt-sanitizer",
+        "inherits": "test-opt",
+        "hidden": true,
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext"
+        }
+      },
+      {
+        "name": "test-opt-asan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "AddressSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 ownership and lifetime checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with AddressSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=address"
+        }
+      },
+      {
+        "name": "test-opt-ubsan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "UndefinedBehaviorSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 arithmetic, representation, and lifecycle checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with UndefinedBehaviorSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=undefined",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=undefined",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=undefined"
+        }
+      },
+      {
+        "name": "test-opt-tsan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "ThreadSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 async-owner, TBB, and DSM publication checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with ThreadSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=thread",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports-tsan"
+        }
+      },
+      {
+        "name": "test-opt-level2",
+        "inherits": "test-opt",
+        "displayName": "Optimised level-2 qualification config",
+        "description": "Isolated unit/integration qualification tree with the full dna4/dna5 and 1/2/4/8-byte PostgreSQL profile. The checked-in everyday optimization level remains zero.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "2"
+        }
+      },
+      {
+        "name": "test-opt-level2-trace",
+        "inherits": "test-opt-level2",
+        "displayName": "Optimised level-2 compiler-trace qualification config",
+        "description": "Isolated DOC0377 compiler-instantiation evidence tree. Emits complete Clang time-trace events without changing the everyday test-opt or level-2 qualification trees.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TIME_TRACE": "ON",
+          "BIOSEQ_TIME_TRACE_GRANULARITY": "0"
         }
       },
       {

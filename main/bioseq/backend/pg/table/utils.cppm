@@ -19,7 +19,7 @@ module;
 
 
 export module bioseq.table:utils;
-// Minimal import set (DOC0283). This TU only references `enable_logging`
+// Minimal import set (DOC0283). This TU only references `bioseq::settings::logging`
 // (mlogging, reached through the bioseq_log<DBG> macro) and the PBitmapset / PList /
 // BioseqReport wrappers (pg_utils, via its re-exported :bitmapset / :lists /
 // :logging partitions). The columnar I/O, physical-storage, metadata and

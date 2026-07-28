@@ -47,7 +47,8 @@ TEST_CASE("btree index on bioseq.seq returns the expected row on equality",
     REQUIRE(query_int_column(
                 ctx, fmt::format(
                          "SELECT pk FROM {} "
-                         "WHERE seq0 = 'TTTTTT'::bioseq.seq('dna4', 64) "
+                         "WHERE seq0 OPERATOR(bioseq.=) "
+                         "      'TTTTTT'::bioseq.seq('dna4', 64) "
                          "ORDER BY pk;",
                          kTable)) == std::vector<long long>{5});
 }
@@ -60,8 +61,10 @@ TEST_CASE("btree-indexed range query returns rows in lexicographic order",
     REQUIRE(query_int_column(
                 ctx, fmt::format(
                          "SELECT pk FROM {} "
-                         "WHERE seq0 >= 'C'::bioseq.seq('dna4', 64) "
-                         "  AND seq0 <  'T'::bioseq.seq('dna4', 64) "
+                         "WHERE seq0 OPERATOR(bioseq.>=) "
+                         "      'C'::bioseq.seq('dna4', 64) "
+                         "  AND seq0 OPERATOR(bioseq.<) "
+                         "      'T'::bioseq.seq('dna4', 64) "
                          "ORDER BY seq0;",
                          kTable)) ==
             std::vector<long long>{3, 4});
@@ -76,6 +79,25 @@ TEST_CASE("btree index path is correct when enable_seqscan is forced off",
     REQUIRE(query_int_column(
                 ctx, fmt::format(
                          "SELECT pk FROM {} "
-                         "WHERE seq0 = 'AAAA'::bioseq.seq('dna4', 64);",
+                         "WHERE seq0 OPERATOR(bioseq.=) "
+                         "      'AAAA'::bioseq.seq('dna4', 64);",
                          kTable)) == std::vector<long long>{1});
+}
+
+TEST_CASE("hash opclass lookup agrees with bioseq sequence equality",
+          "[btree][hash][opclass]") {
+    auto ctx = fresh_context({kTable});
+    seed_heap(ctx);
+    exec_sqlf(ctx, "DROP INDEX {0}_seq_idx;", kTable);
+    exec_sqlf(ctx,
+              "CREATE INDEX {0}_hash_idx ON {0} USING hash "
+              "(seq0 bioseq.seq_hash_ops);",
+              kTable);
+    guc_scope no_seq(ctx, "enable_seqscan", "off");
+    REQUIRE(query_int_column(
+                ctx, fmt::format(
+                         "SELECT pk FROM {} "
+                         "WHERE seq0 OPERATOR(bioseq.=) "
+                         "      'ACGT'::bioseq.seq('dna4',64);",
+                         kTable)) == std::vector<long long>{2});
 }

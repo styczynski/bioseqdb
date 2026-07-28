@@ -3923,10 +3923,14 @@ static_assert([] {
                     input.targets_acgt[pair_index],
                     dispatch.params);
             } else {
-                // DOC0263 — minimap_port now takes lazy_compact_sequence&; wrap the
-                // in-memory ranges in the zero-overhead no-fragment lazy wrapper.
+                // Keep the in-memory owners alive while the canonical lazy facade
+                // views are consumed by the minimap entry points.
                 auto bench_lazy_query  = bioseq::storage::make_lazy_in_memory(pair.query);
                 auto bench_lazy_target = bioseq::storage::make_lazy_in_memory(*pair.target);
+                const auto bench_query_view =
+                    bioseq::storage::as_lazy_sequence_view(bench_lazy_query);
+                const auto bench_target_view =
+                    bioseq::storage::as_lazy_sequence_view(bench_lazy_target);
                 if (dispatch.params.minimizer_algorithm
                     == MinimizerAlgorithmType::PAPER_NTHASH_SIMD) {
                     // Paper ntHash uses a 32-bit hash plus segment-local position
@@ -3935,10 +3939,10 @@ static_assert([] {
                     // select a query-sized position layout and correctly rejects
                     // the 500-Mbp target rather than truncating coordinates.
                     results = bioseq::simd::HWY_NAMESPACE::minimap_port_segmented(
-                        bench_lazy_query, bench_lazy_target, dispatch.params);
+                        bench_query_view, bench_target_view, dispatch.params);
                 } else {
                     results = bioseq::simd::HWY_NAMESPACE::minimap_port(
-                        bench_lazy_query, bench_lazy_target, dispatch.params);
+                        bench_query_view, bench_target_view, dispatch.params);
                 }
             }
         } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& exception) {
@@ -4244,9 +4248,11 @@ struct UniquePrimaryView {
     dispatch.params.max_chain_skip = fixture.max_chain_skip;
     auto lazy_query = bioseq::storage::make_lazy_in_memory(fixture.pair.query);
     auto lazy_target = bioseq::storage::make_lazy_in_memory(*fixture.pair.target);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto target_view = bioseq::storage::as_lazy_sequence_view(lazy_target);
     MatchResultCollection results =
         bioseq::simd::HWY_NAMESPACE::minimap_port(
-            lazy_query, lazy_target, dispatch.params);
+            query_view, target_view, dispatch.params);
     try {
         route_proof_accepted = require_selected_route_execution(
             algorithm, dispatch, results, /*strict_xxl_gate=*/false);

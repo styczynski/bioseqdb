@@ -66,7 +66,9 @@ export namespace bioseq::codegen::website {
             entity.qualified_name = schema + "." + entity.display_name;
             entity.canonical_id = sql_canonical_id(schema, entity.display_name, "type");
             if (!result.is_null(row, 1)) {
-                entity.summary_text = std::string(result.value(row, 1));
+                entity.attributes.emplace(
+                    "catalog_comment",
+                    std::string(result.value(row, 1)));
             }
             entities.push_back(std::move(entity));
         }
@@ -86,9 +88,9 @@ export namespace bioseq::codegen::website {
     // format_type() qualifies every type that is not on the search path, so pinning
     // the path to pg_catalog gives schema-qualified identity types for extension
     // types (bioseq.seq, public.bioseq_aligner_options) while built-ins stay bare
-    // (text) - the parameter-name-free, canonically-spelled form §12.1 requires and
-    // that sql_api.yaml is authored in. pg_get_function_identity_arguments keeps the
-    // parameter names, so we rebuild the signature structurally instead.
+    // (text). The generated manifest uses this parameter-name-free canonical
+    // spelling for its install-resolved identities. pg_get_function_identity_arguments
+    // keeps parameter names, so we rebuild the signature structurally instead.
     connection.exec("set search_path = pg_catalog");
     for (const std::string& schema : include_schemas) {
         // Only pg_depend members of extension bioseq (deptype 'e') are candidates
@@ -122,7 +124,9 @@ export namespace bioseq::codegen::website {
             entity.canonical_id = sql_canonical_id(
                 schema, entity.display_name + "(" + arguments + ")", "function");
             if (!result.is_null(row, 3)) {
-                entity.summary_text = std::string(result.value(row, 3));
+                entity.attributes.emplace(
+                    "catalog_comment",
+                    std::string(result.value(row, 3)));
             }
             entities.push_back(std::move(entity));
         }

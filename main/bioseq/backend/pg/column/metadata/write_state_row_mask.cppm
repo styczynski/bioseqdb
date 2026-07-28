@@ -2,7 +2,7 @@
  *
  * write_state_row_mask.cppm
  *
- * Transaction-scoped management of RowMaskWriteStateEntry records used to
+ * Transaction-scoped management of row-mask catalog records used to
  * aggregate row-mask updates (DELETEs against columnar stripes). Commits
  * flush the pending mask deltas into bioseq.row_mask via FlushRowMaskCache.
  *
@@ -16,24 +16,29 @@ module;
 
 #include "common.h"
 
+#include <new>
 
 export module bioseq.storage.metadata:write_state_row_mask;
 
 import :core;            // FlushRowMaskCache, UpdateChunkGroupDeletedRows, BioseqColumnRowMask*RelationId
-import bioseq.config;           // DOC0322 §6.5 — Anum_bioseq_row_mask_* (was config.h macros via columnar.h)
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
+import bioseq.storage.metadata.sql_row_codecs;
+
+using row_mask_codec =
+	bioseq::storage::metadata::sql_row_codecs::row_mask_codec;
+export using row_mask_row = row_mask_codec::row_type;
 
 /*
- * Per-subtransaction node. rowMaskWriteStateEntryList accumulates the
- * pending row-mask deltas; lastRowMaskWriteStateEntry is a one-slot cache
+ * Per-subtransaction node. row_mask_rows accumulates the pending row-mask
+ * deltas; last_row_mask is a one-slot cache
  * so repeated lookups for the same row number hit the fast path.
  */
 struct RowMaskSubXidWriteFrame
 {
 	SubTransactionId subXid;
-	PList<RowMaskWriteStateEntry> rowMaskWriteStateEntryList;
-	RowMaskWriteStateEntry* lastRowMaskWriteStateEntry;
+	PList<row_mask_row> row_mask_rows;
+	row_mask_row* last_row_mask;
 	RowMaskSubXidWriteFrame* next;
 };
 
@@ -56,19 +61,22 @@ static TxnScopedHtab<RowMaskWriteStateMapEntry> RowMaskStateCache{"row mask cach
 
 
 /*
- * InitRowMaskEntry allocates a fresh RowMaskWriteStateEntry, copies the
+ * InitRowMaskEntry allocates a fresh catalog row, copies the
  * caller-supplied mask (so we own the storage) and zero-initialises the
- * remaining fields. Caller is responsible for filling
- * startRowNumber/endRowNumber/chunkId/stripeId/deletedRows.
+ * remaining fields. The caller fills the row range, stripe and chunk
+ * identifiers, and deleted-row count.
  */
-static RowMaskWriteStateEntry*
+static row_mask_row*
 InitRowMaskEntry(uint64_t storage_id, bytea* mask)
 {
-	RowMaskWriteStateEntry* row_mask = make0<RowMaskWriteStateEntry>();
-
-	row_mask->storageId = storage_id;
-	row_mask->mask = reinterpret_cast<bytea*>(palloc0(VARSIZE(mask) + VARHDRSZ));
-	memcpy(row_mask->mask, mask, VARSIZE(mask) + VARHDRSZ);
+	const Size mask_size = VARSIZE(mask);
+	bytea* owned_mask = reinterpret_cast<bytea*>(palloc(mask_size));
+	memcpy(owned_mask, mask, mask_size);
+	void* storage = palloc(sizeof(row_mask_row));
+	row_mask_row* row_mask = new (storage) row_mask_row{
+		.storage_id = static_cast<std::int64_t>(storage_id),
+		.mask = owned_mask,
+	};
 
 	return row_mask;
 }
@@ -79,25 +87,29 @@ InitRowMaskEntry(uint64_t storage_id, bytea* mask)
  * counters so query planning stays in sync.
  */
 static void
-RowMaskFlushPendingWriteState(const PList<RowMaskWriteStateEntry>& row_mask_write_state_list)
+RowMaskFlushPendingWriteState(const PList<row_mask_row>& row_mask_write_state_list)
 {
 	for (auto* row_mask_cache : row_mask_write_state_list)
 	{
 		FlushRowMaskCache(row_mask_cache);
-		UpdateChunkGroupDeletedRows(row_mask_cache->storageId, row_mask_cache->stripeId,
-									row_mask_cache->chunkId, row_mask_cache->deletedRows);
-		pfree(row_mask_cache->mask);
+		UpdateChunkGroupDeletedRows(
+			static_cast<std::uint64_t>(row_mask_cache->storage_id),
+			static_cast<std::uint64_t>(row_mask_cache->stripe_id),
+			static_cast<std::uint32_t>(row_mask_cache->chunk_id),
+			row_mask_cache->deleted_rows);
+		Assert(row_mask_cache->mask.has_value());
+		pfree(*row_mask_cache->mask);
 	}
 }
 
 
 /*
  * RowMaskInitWriteState locates (or creates) the stack entry for the given
- * relation/subtransaction and appends a new RowMaskWriteStateEntry built
+ * relation/subtransaction and appends a new row-mask catalog record built
  * from the supplied mask. Returns the entry; caller fills remaining fields
  * (chunk/stripe identifiers, row range) before the entry is flushed.
  */
-export RowMaskWriteStateEntry*
+export row_mask_row*
 RowMaskInitWriteState(Oid relfilelocator,
 					  uint64 storage_id,
 					  SubTransactionId current_sub_xid,
@@ -129,15 +141,15 @@ RowMaskInitWriteState(Oid relfilelocator,
 		stack_entry = RowMaskStateCache.alloc_in_context<RowMaskSubXidWriteFrame>();
 		stack_entry->subXid = current_sub_xid;
 		stack_entry->next = hash_entry->writeStateStack;
-		stack_entry->lastRowMaskWriteStateEntry = nullptr;
+		stack_entry->last_row_mask = nullptr;
 		hash_entry->writeStateStack = stack_entry;
 	}
 
-	RowMaskWriteStateEntry* row_mask_write_state = nullptr;
+	row_mask_row* row_mask_write_state = nullptr;
 	{
 		MemoryContextScope context_guard(RowMaskStateCache.context());
 		row_mask_write_state = InitRowMaskEntry(storage_id, row_mask);
-		stack_entry->rowMaskWriteStateEntryList.append(row_mask_write_state);
+		stack_entry->row_mask_rows.append(row_mask_write_state);
 	}
 
 	return row_mask_write_state;
@@ -159,8 +171,9 @@ export void RowMaskFlushWriteStateForRelfilenode(Oid relfilelocator,
 		RowMaskSubXidWriteFrame* stack_entry = entry->writeStateStack;
 		if (stack_entry->subXid == current_sub_xid)
 		{
-			RowMaskFlushPendingWriteState(stack_entry->rowMaskWriteStateEntryList);
-			stack_entry->rowMaskWriteStateEntryList.clear();
+			RowMaskFlushPendingWriteState(stack_entry->row_mask_rows);
+			stack_entry->last_row_mask = nullptr;
+			stack_entry->row_mask_rows.clear();
 		}
 	}
 }
@@ -169,9 +182,9 @@ export void RowMaskFlushWriteStateForRelfilenode(Oid relfilelocator,
 /*
  * RowMaskFindWriteState returns the accumulated row-mask entry that
  * contains the given row id, scanning the per-subtransaction list and
- * consulting lastRowMaskWriteStateEntry first as a fast path.
+ * consulting last_row_mask first as a fast path.
  */
-export RowMaskWriteStateEntry*
+export row_mask_row*
 RowMaskFindWriteState(Oid relfilelocator, SubTransactionId current_sub_xid,
 					  uint64 row_id)
 {
@@ -187,18 +200,23 @@ RowMaskFindWriteState(Oid relfilelocator, SubTransactionId current_sub_xid,
 		{
 			continue;
 		}
-		if (stack_frame->lastRowMaskWriteStateEntry != nullptr &&
-			stack_frame->lastRowMaskWriteStateEntry->startRowNumber <= row_id &&
-			stack_frame->lastRowMaskWriteStateEntry->endRowNumber >= row_id)
+		if (stack_frame->last_row_mask != nullptr &&
+			stack_frame->last_row_mask->start_row_number
+				<= static_cast<std::int64_t>(row_id) &&
+			stack_frame->last_row_mask->end_row_number
+				>= static_cast<std::int64_t>(row_id))
 		{
-			return stack_frame->lastRowMaskWriteStateEntry;
+			return stack_frame->last_row_mask;
 		}
 
-		for (auto* row_mask : stack_frame->rowMaskWriteStateEntryList)
+		for (auto* row_mask : stack_frame->row_mask_rows)
 		{
-			if (row_mask->startRowNumber <= row_id && row_mask->endRowNumber >= row_id)
+			if (row_mask->start_row_number
+					<= static_cast<std::int64_t>(row_id)
+				&& row_mask->end_row_number
+					>= static_cast<std::int64_t>(row_id))
 			{
-				stack_frame->lastRowMaskWriteStateEntry = row_mask;
+				stack_frame->last_row_mask = row_mask;
 				return row_mask;
 			}
 		}
@@ -218,7 +236,9 @@ RowMaskPopWriteStateForAllRels(SubTransactionId current_sub_xid,
 							   SubTransactionId parent_sub_xid,
 							   bool commit)
 {
-	RowMaskStateCache.for_each([&](RowMaskWriteStateMapEntry* entry) {
+	RowMaskStateCache.for_each(
+		[current_sub_xid, parent_sub_xid, commit](
+				RowMaskWriteStateMapEntry* entry) {
 		/* The drop marker outlives the final row-mask write frame.  Process it
 		 * first so an ERROR during DROP followed by transaction abort restores
 		 * the relation's backend-local visibility state. */
@@ -245,7 +265,7 @@ RowMaskPopWriteStateForAllRels(SubTransactionId current_sub_xid,
 		{
 			if (commit)
 			{
-				RowMaskFlushPendingWriteState(stack_head->rowMaskWriteStateEntryList);
+				RowMaskFlushPendingWriteState(stack_head->row_mask_rows);
 			}
 			entry->writeStateStack = stack_head->next;
 		}
@@ -298,7 +318,7 @@ RowMaskPendingWritesInUpperTransactions(Oid relfilelocator, SubTransactionId cur
 	for (auto* stack_entry : IntrusiveList<RowMaskSubXidWriteFrame>(entry->writeStateStack))
 	{
 		if (stack_entry->subXid != current_sub_xid &&
-			!stack_entry->rowMaskWriteStateEntryList.empty())
+			!stack_entry->row_mask_rows.empty())
 		{
 			return true;
 		}
@@ -320,12 +340,8 @@ GetRowMaskWriteStateContextForDebug()
 
 
 /*
- * UpdateRowMask flips the deletion bit for the given row number. It lives
- * here (relocated from storage_metadata:core, DOC0322 §7.1) because it
- * drives the row-mask write-state cache via RowMaskFindWriteState /
- * RowMaskInitWriteState, which are local to this partition. The heap-side
- * lookup helpers (BioseqColumnRowMask{,Index}RelationId, FlushRowMaskCache) come
- * from :core; the Anum_bioseq_row_mask_* attribute numbers come from `config`.
+ * UpdateRowMask records a row deletion in the transaction-scoped cache,
+ * loading the persisted mask when necessary.
  */
 export bool
 UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
@@ -333,7 +349,7 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 {
 	bytea *rowMask = NULL;
 
-	RowMaskWriteStateEntry *rowMaskEntry =
+	row_mask_row *rowMaskEntry =
 		RowMaskFindWriteState(relfilelocator.relNumber, GetCurrentSubTransactionId(), rowNumber);
 
 	if (rowMaskEntry == NULL)
@@ -347,15 +363,19 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 
 		Relation index = index_open(BioseqColumnRowMaskIndexRelationId(), AccessShareLock);
 
-		ScanKeyInit(&scanKey[0], Anum_bioseq_row_mask_storage_id,
-					BTEqualStrategyNumber, F_INT8EQ,
-					bioseq::pg_utils::pg_datum::from_uint64(storageId).raw());
-		ScanKeyInit(&scanKey[1], Anum_bioseq_row_mask_start_row_number,
-					BTLessEqualStrategyNumber, F_INT8LE,
-					bioseq::pg_utils::pg_datum::from_uint64(rowNumber).raw());
-		ScanKeyInit(&scanKey[2], Anum_bioseq_row_mask_end_row_number,
-					BTGreaterEqualStrategyNumber, F_INT8GE,
-					bioseq::pg_utils::pg_datum::from_uint64(rowNumber).raw());
+		scanKey[0] =
+			row_mask_codec::scan_key<&row_mask_row::storage_id>(
+				static_cast<std::int64_t>(storageId));
+		scanKey[1] =
+			row_mask_codec::scan_key<
+				&row_mask_row::start_row_number,
+				bioseq::pg_utils::scan_comparison::less_equal>(
+					static_cast<std::int64_t>(rowNumber));
+		scanKey[2] =
+			row_mask_codec::scan_key<
+				&row_mask_row::end_row_number,
+				bioseq::pg_utils::scan_comparison::greater_equal>(
+					static_cast<std::int64_t>(rowNumber));
 
 		SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
 																index,
@@ -365,57 +385,34 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 
 		if (HeapTupleIsValid(rowMaskHeapTuple))
 		{
-			bool isnull;
-
-			Datum mask =
-					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_mask,
-								tupleDescriptor, &isnull);
+			const row_mask_row stored_row = row_mask_codec::deform(
+				rowMaskHeapTuple,
+				tupleDescriptor,
+				CurrentMemoryContext);
+			if (!stored_row.mask.has_value()
+				|| *stored_row.mask == nullptr)
+			{
+				bioseq_log<ERR, PG>("row mask catalog entry has a NULL mask");
+			}
 
 			rowMaskEntry = RowMaskInitWriteState(relfilelocator.relNumber,
 												 storageId,
 												 GetCurrentSubTransactionId(),
-												 bioseq::pg_utils::pg_datum::from_raw(mask).to_bytea_p());
+												 *stored_row.mask);
+			pfree(*stored_row.mask);
 			/*
 			 * Populate row mask cache with values from heap table
 			 */
-			rowMaskEntry->id = bioseq::pg_utils::pg_datum::to_uint64(
-				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
-					rowMaskHeapTuple, Anum_bioseq_row_mask_id,
-					tupleDescriptor, &isnull)));
+			rowMaskEntry->id = stored_row.id;
+			rowMaskEntry->storage_id = stored_row.storage_id;
+			rowMaskEntry->stripe_id = stored_row.stripe_id;
+			rowMaskEntry->chunk_id = stored_row.chunk_id;
+			rowMaskEntry->start_row_number =
+				stored_row.start_row_number;
+			rowMaskEntry->deleted_rows = stored_row.deleted_rows;
+			rowMaskEntry->end_row_number = stored_row.end_row_number;
 
-			rowMaskEntry->storageId = bioseq::pg_utils::pg_datum::to_uint64(
-				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
-					rowMaskHeapTuple, Anum_bioseq_row_mask_storage_id,
-					tupleDescriptor, &isnull)));
-
-			rowMaskEntry->stripeId = bioseq::pg_utils::pg_datum::to_uint64(
-				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
-					rowMaskHeapTuple, Anum_bioseq_row_mask_stripe_id,
-					tupleDescriptor, &isnull)));
-
-			rowMaskEntry->chunkId = bioseq::pg_utils::pg_datum::to<std::int32_t>(
-				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
-					rowMaskHeapTuple, Anum_bioseq_row_mask_chunk_id,
-					tupleDescriptor, &isnull)));
-
-			rowMaskEntry->startRowNumber = static_cast<std::uint64_t>(
-				bioseq::pg_utils::pg_datum::to<std::int64_t>(
-					bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
-						rowMaskHeapTuple, Anum_bioseq_row_mask_start_row_number,
-						tupleDescriptor, &isnull))));
-
-			rowMaskEntry->deletedRows = bioseq::pg_utils::pg_datum::to<std::int32_t>(
-				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
-					rowMaskHeapTuple, Anum_bioseq_row_mask_deleted_rows,
-					tupleDescriptor, &isnull)));
-
-			rowMaskEntry->endRowNumber = static_cast<std::uint64_t>(
-				bioseq::pg_utils::pg_datum::to<std::int64_t>(
-					bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
-						rowMaskHeapTuple, Anum_bioseq_row_mask_end_row_number,
-						tupleDescriptor, &isnull))));
-
-			rowMask = rowMaskEntry->mask;
+			rowMask = *rowMaskEntry->mask;
 		}
 		else
 		{
@@ -435,10 +432,14 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 	}
 	else
 	{
-		rowMask = rowMaskEntry->mask;
+		Assert(rowMaskEntry->mask.has_value());
+		rowMask = *rowMaskEntry->mask;
 	}
 
-	int16_t rowByteMask = rowNumber - rowMaskEntry->startRowNumber;
+	int16_t rowByteMask = static_cast<int16_t>(
+		rowNumber
+		- static_cast<std::uint64_t>(
+			rowMaskEntry->start_row_number));
 
 	/*
 	 * IF we have been blocked by advisory lock for storage, maybe row
@@ -449,7 +450,7 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 
 	VARDATA(rowMask)[rowByteMask / 8] |= 1 << (rowByteMask % 8);
 
-	rowMaskEntry->deletedRows++;
+	rowMaskEntry->deleted_rows++;
 
 	CommandCounterIncrement();
 

@@ -40,14 +40,24 @@ namespace {
 
 constexpr std::string_view kTable = "test_index_admin_t";
 
+#ifdef BIOSEQ_TEST_INDEXES
+[[nodiscard]] std::int64_t facade_source_counter(connection_test_context &ctx,
+                                                 std::string_view name) {
+  return query_scalar_int(
+      ctx, fmt::format("SELECT (bioseq_internal.sequence_source_counters()"
+                       "        ->>'{}')::bigint;",
+                       name));
+}
+#endif
+
 [[nodiscard]] std::string nonaligned_three_fragment_dna4_source() {
-    std::string source;
-    source.reserve(65'549);
-    for (std::size_t i = 0; i < 16'387; ++i) {
-        source.append("ACGT");
-    }
-    source.push_back('A');
-    return source;
+  std::string source;
+  source.reserve(65'549);
+  for (std::size_t i = 0; i < 16'387; ++i) {
+    source.append("ACGT");
+  }
+  source.push_back('A');
+  return source;
 }
 
 // Test-local, bit-at-a-time CRC-64/ECMA-182 implementation.  This deliberately
@@ -377,7 +387,7 @@ void require_preserved_ready_bioseq_source(
         expected_oid);
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("list_metadata reports all production index kinds for a fresh bioseq table",
           "[index_admin][list]") {
@@ -1069,7 +1079,7 @@ TEST_CASE("DOC0383 relation descriptor publication replaces and rolls back atomi
     const auto build = [&] {
         return query_one(ctx, fmt::format(
             "SELECT * FROM "
-            "bioseq_internal.rev3_test_build_ready_mpf_generation("
+            "bioseq_internal.build_ready_mpf_generation("
             "'{}'::regclass,'minimizers_per_fragment',{},'scalar');",
             table, rowno));
     };
@@ -1142,7 +1152,7 @@ TEST_CASE("DOC0383 relation descriptor publication replaces and rolls back atomi
         table, rowno);
     const auto missing_live = sql_error(ctx, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_build_ready_mpf_generation("
+        "bioseq_internal.build_ready_mpf_generation("
         "'{}'::regclass,'minimizers_per_fragment',{},'scalar');",
         table, rowno));
     REQUIRE(missing_live.contains(
@@ -1854,14 +1864,14 @@ TEST_CASE("DOC0373 normal generation ensure is non-destructive and OID stable",
     const auto rowno = only_column_row_number(ctx, table);
 
     const auto legacy = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'warm_legacy_residency');",
         table, rowno));
     REQUIRE(legacy.size() == 7);
     const long long legacy_oid = std::stoll(legacy[0].value());
     const auto legacy_error = sql_error(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'ensure_generation_without_clear');",
         table, rowno));
@@ -1872,7 +1882,7 @@ TEST_CASE("DOC0373 normal generation ensure is non-destructive and OID stable",
         legacy_oid)) == 1);
 
     const auto built = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "15::smallint, 10::smallint, 3::smallint);",
         table, rowno));
@@ -1881,7 +1891,7 @@ TEST_CASE("DOC0373 normal generation ensure is non-destructive and OID stable",
         "SELECT 'bioseq_internal.{}'::regclass::oid::bigint;",
         sidecar));
     const auto reused = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'ensure_generation');",
         table, rowno));
@@ -1894,7 +1904,7 @@ TEST_CASE("DOC0373 normal generation ensure is non-destructive and OID stable",
         "ALTER TABLE bioseq_internal.{} SET (fillfactor=99);",
         sidecar);
     const auto malformed_error = sql_error(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'ensure_generation_without_clear');",
         table, rowno));
@@ -1924,7 +1934,7 @@ TEST_CASE("DOC0371 generation storage rebinds one handle after speculative reset
     const auto rowno = only_column_row_number(ctx, table);
 
     const auto state = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'savepoint_rollback');",
         table, rowno));
@@ -1987,7 +1997,7 @@ TEST_CASE("DOC0371 committed generation reset evicts both residency forms in ano
     REQUIRE(session_a_pid != session_b_pid);
 
     const auto warmed = query_one(session_a, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'warm_legacy_residency');",
         table, rowno));
@@ -2002,7 +2012,7 @@ TEST_CASE("DOC0371 committed generation reset evicts both residency forms in ano
 
     exec_sql(session_b, "BEGIN;");
     const auto ensured = query_one(session_b, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'ensure_generation');",
         table, rowno));
@@ -2022,7 +2032,7 @@ TEST_CASE("DOC0371 committed generation reset evicts both residency forms in ano
     // No command runs in session A between warming and this probe.  The helper
     // explicitly drains sinval before looking up the exact same two keys.
     const auto probed = query_one(session_a, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'probe_residency');",
         table, rowno));
@@ -2053,7 +2063,7 @@ TEST_CASE("DOC0371 generation clear savepoint restores relation head and exact a
     const auto rowno = only_column_row_number(ctx, table);
     const auto built = query_one(ctx, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_build_ready_mpf_generation("
+        "bioseq_internal.build_ready_mpf_generation("
         "'{}'::regclass, 'minimizers_per_fragment', {}, 'scalar');",
         table, rowno));
     REQUIRE(built.size() == 45);
@@ -2113,7 +2123,7 @@ TEST_CASE("DOC0371 generation clear savepoint restores relation head and exact a
         table, table, table);
 
     const auto warmed = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'warm_generation_residency');",
         table, rowno));
@@ -2145,7 +2155,7 @@ TEST_CASE("DOC0371 generation clear savepoint restores relation head and exact a
     REQUIRE(age_before.size() == 3);
 
     const auto cleared = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'clear_generation_savepoint_rollback');",
         table, rowno));
@@ -2208,12 +2218,12 @@ TEST_CASE("DOC0371 committed generation clear drops every sidecar and evicts ano
     const long long rowno_b = std::stoll(rows[1][0].value());
     const auto built_a = query_one(setup, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_build_ready_mpf_generation("
+        "bioseq_internal.build_ready_mpf_generation("
         "'{}'::regclass, 'minimizers_per_fragment', {}, 'scalar');",
         table, rowno_a));
     const auto built_b = query_one(setup, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_build_ready_mpf_generation("
+        "bioseq_internal.build_ready_mpf_generation("
         "'{}'::regclass, 'minimizers_per_fragment', {}, 'scalar');",
         table, rowno_b));
     REQUIRE(built_a.size() == 45);
@@ -2297,7 +2307,7 @@ TEST_CASE("DOC0371 committed generation clear drops every sidecar and evicts ano
     REQUIRE(session_a_pid != query_scalar_int(
         session_b, "SELECT pg_backend_pid();"));
     const auto warmed = query_one(session_a, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'warm_generation_residency');",
         table, rowno_a));
@@ -2308,7 +2318,7 @@ TEST_CASE("DOC0371 committed generation clear drops every sidecar and evicts ano
 
     exec_sql(session_b, "BEGIN;");
     const auto cleared = query_one(session_b, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'clear_generation');",
         table, rowno_a));
@@ -2323,7 +2333,7 @@ TEST_CASE("DOC0371 committed generation clear drops every sidecar and evicts ano
     REQUIRE(cleared[6].value() == "f");
 
     const auto probed = query_one(session_a, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'probe_residency');",
         table, rowno_a));
@@ -2372,7 +2382,7 @@ TEST_CASE("DOC0371 committed generation clear drops every sidecar and evicts ano
         sidecar_a, sidecar_b)) == 0);
 
     const auto absent = query_one(session_b, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_generation_storage_state("
+        "SELECT * FROM bioseq_internal.inspect_generation_storage_transition("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "'clear_generation_absent');",
         table, rowno_a));
@@ -2431,7 +2441,7 @@ TEST_CASE("DOC0371 MPF coordinator executes real scalar and SIMD PostgreSQL scan
         row_t& observed = observations[backend_index];
         observed = query_one(ctx, fmt::format(
             "SELECT * FROM "
-            "bioseq_internal.rev3_test_build_ready_mpf_generation("
+            "bioseq_internal.build_ready_mpf_generation("
             "'{}'::regclass, 'minimizers_per_fragment', {}, '{}');",
             table, rowno, backend));
         REQUIRE(observed.size() == 45);
@@ -2532,7 +2542,7 @@ TEST_CASE("DOC0371 MPF coordinator executes real scalar and SIMD PostgreSQL scan
         table)) == metadata_age_before);
     const auto fmgr_error = sql_error(ctx, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_build_ready_mpf_generation("
+        "bioseq_internal.build_ready_mpf_generation("
         "'{}'::regclass, 'minimizers_per_fragment', {}, 'invalid');",
         table, rowno));
     REQUIRE(fmgr_error.contains("backend is invalid"));
@@ -2556,14 +2566,14 @@ TEST_CASE("DOC0371 PostgreSQL full-generation reader rejects same-scheme produce
 	const auto build = [&](std::string_view backend) {
 		return query_one(ctx, fmt::format(
 			"SELECT * FROM "
-			"bioseq_internal.rev3_test_build_ready_mpf_generation("
+			"bioseq_internal.build_ready_mpf_generation("
 			"'{}'::regclass, 'minimizers_per_fragment', {}, '{}');",
 			table, rowno, backend));
 	};
 	const auto read = [&](std::string_view backend) {
 		return fmt::format(
 			"SELECT * FROM "
-			"bioseq_internal.rev3_test_read_full_generation_fixture("
+			"bioseq_internal.scan_minimizer_generation_fixture("
 			"'{}'::regclass, 'minimizers_per_fragment', {}, "
 			"15::smallint, 10::smallint, 5::smallint, '{}');",
 			table, rowno, backend);
@@ -2627,7 +2637,7 @@ TEST_CASE("DOC0371 MPS coordinator publishes proof-bound PostgreSQL spill genera
     for (const std::string_view backend : backends) {
         row_t observed = query_one(ctx, fmt::format(
             "SELECT * FROM "
-            "bioseq_internal.rev3_test_build_ready_mps_generation("
+            "bioseq_internal.build_ready_mps_generation("
             "'{}'::regclass, 'minimizers_per_sequence', {}, '{}');",
             table, rowno, backend));
         REQUIRE(observed.size() == 72);
@@ -2780,7 +2790,7 @@ TEST_CASE("DOC0371 MPS coordinator publishes proof-bound PostgreSQL spill genera
         table)) == metadata_age_before);
     const auto fmgr_error = sql_error(ctx, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_build_ready_mps_generation("
+        "bioseq_internal.build_ready_mps_generation("
         "'{}'::regclass, 'minimizers_per_sequence', {}, 'invalid');",
         table, rowno));
     REQUIRE(fmgr_error.contains("backend is invalid"));
@@ -2885,7 +2895,7 @@ TEST_CASE("DOC0371 bridged PostgreSQL build and publication leaves preserve READ
     const auto build = [&ctx, rowno](std::string_view backend) {
         return query_one(ctx, fmt::format(
             "SELECT * FROM "
-            "bioseq_internal.rev3_test_build_ready_mps_generation("
+            "bioseq_internal.build_ready_mps_generation("
             "'doc0371_ready_mps_pg_recovery'::regclass, "
             "'minimizers_per_sequence', {}, '{}');",
             rowno, backend));
@@ -2918,7 +2928,7 @@ TEST_CASE("DOC0371 bridged PostgreSQL build and publication leaves preserve READ
     for (const FailureProbe& probe : probes) {
         const auto error = sql_error(ctx, fmt::format(
             "SELECT * FROM "
-            "bioseq_internal.rev3_test_build_ready_mps_generation("
+            "bioseq_internal.build_ready_mps_generation("
             "'{}'::regclass, 'minimizers_per_sequence', {}, '{}');",
             table, rowno, probe.backend));
         REQUIRE(error.sqlstate == probe.sqlstate);
@@ -2988,7 +2998,7 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
         INFO(fmt::format("selective telemetry wire_format={}", wire_format));
         FormatObservation& sample = observed[format_index];
         sample.build = query_one(ctx, fmt::format(
-            "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+            "SELECT * FROM bioseq_internal.build_minimizer_fixture("
             "'doc0371_rev3_live'::regclass, 'minimizers_per_fragment', "
             "{}, 15::smallint, 10::smallint, {}::smallint);",
             rowno, wire_format));
@@ -3030,7 +3040,7 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
             REQUIRE(query_scalar_int(reader, "SELECT pg_backend_pid();") !=
                 builder_pid);
             sample.read = query_one(reader, fmt::format(
-                "SELECT * FROM bioseq_internal.rev3_test_read_fixture("
+                "SELECT * FROM bioseq_internal.read_minimizer_fixture("
                 "'doc0371_rev3_live'::regclass, "
                 "'minimizers_per_fragment', {}, 15::smallint, "
                 "10::smallint, {}::smallint);",
@@ -3045,7 +3055,7 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
             const row_t selective_proof = query_one(reader, fmt::format(
                 "WITH fixture AS (SELECT "
                 "selective_cold_index_preparation AS cold FROM "
-                "bioseq_internal.rev3_test_read_fixture("
+                "bioseq_internal.read_minimizer_fixture("
                 "'doc0371_rev3_live'::regclass, "
                 "'minimizers_per_fragment', {}, 15::smallint, "
                 "10::smallint, {}::smallint)) SELECT "
@@ -3276,7 +3286,7 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
     // revision-3 inspector and its source-drift adversary retain their exact
     // production-facing proof without warming either measured read.
     const auto inspection_fixture = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'doc0371_rev3_live'::regclass, 'minimizers_per_fragment', "
         "{}, 15::smallint, 10::smallint, 3::smallint);", rowno));
     const auto inspected = query_one(ctx, fmt::format(
@@ -3305,7 +3315,7 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
     REQUIRE(rev3_absence_audit[2].value() == "1");
 
     exec_sql(ctx, fmt::format(
-        "SELECT bioseq_internal.rev3_test_remove_source_fragment("
+        "SELECT bioseq_internal.remove_sequence_fragment("
         "'doc0371_rev3_live'::regclass, 'minimizers_per_fragment', {}, 2);",
         rowno));
     const auto fragment_error = sql_error(ctx, fmt::format(
@@ -3332,7 +3342,7 @@ TEST_CASE("DOC0371 revision-3 inspection rejects schema mutations and non-owner 
         "(1, repeat('ACGT', 1024)::bioseq.seq('dna4', 64));");
     const auto rowno = only_column_row_number(ctx, "doc0371_rev3_adversarial");
     const auto fixture = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'doc0371_rev3_adversarial'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "3::smallint);",
@@ -3391,7 +3401,7 @@ TEST_CASE("DOC0371 revision-3 inspection rejects schema mutations and non-owner 
         "WHERE query_key >= 0;",
         sidecar);
     exec_sqlf(ctx,
-        "SELECT bioseq_internal.rev3_test_copy_primary_index_shape("
+        "SELECT bioseq_internal.copy_primary_index_shape("
         "'bioseq_internal.{}'::regclass, "
         "'bioseq_internal.doc0371_rev3_partial_donor'::regclass, 'partial');",
         sidecar);
@@ -3421,7 +3431,7 @@ TEST_CASE("DOC0371 revision-3 inspection rejects schema mutations and non-owner 
         "((query_key + 0),generation_id,position_segment,sub_key,chunk_no);",
         sidecar);
     exec_sqlf(ctx,
-        "SELECT bioseq_internal.rev3_test_copy_primary_index_shape("
+        "SELECT bioseq_internal.copy_primary_index_shape("
         "'bioseq_internal.{}'::regclass, "
         "'bioseq_internal.doc0371_rev3_expression_donor'::regclass, 'expression');",
         sidecar);
@@ -3481,7 +3491,7 @@ TEST_CASE("DOC0371 source decode rejects self-consistent head and manifest corru
         "(1, repeat('ACGT', 2048)::bioseq.seq('dna4', 64));");
     const auto rowno = only_column_row_number(ctx, "doc0371_rev3_source_crc");
     const auto fixture = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'doc0371_rev3_source_crc'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "3::smallint);",
@@ -3492,7 +3502,7 @@ TEST_CASE("DOC0371 source decode rejects self-consistent head and manifest corru
     // CRCs. Metadata is internally self-consistent; only decoding the visible
     // source bases and comparing the independently derived CRC can reject it.
     exec_sqlf(ctx,
-        "SELECT bioseq_internal.rev3_test_rewrite_source_checksum("
+        "SELECT bioseq_internal.rewrite_source_checksum("
         "'bioseq_internal.{}'::regclass, {}, 1);",
         sidecar, rowno);
     const auto err = sql_error(ctx, fmt::format(
@@ -3517,7 +3527,7 @@ TEST_CASE("DOC0371 source proof shares MVCC visibility and rejects post-snapshot
         "(1, repeat('ACGT', 2048)::bioseq.seq('dna4', 64));");
     const auto rowno = only_column_row_number(reader, "doc0371_rev3_mvcc");
     const auto fixture = query_one(reader, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'doc0371_rev3_mvcc'::regclass, 'minimizers_per_fragment', "
         "{}, 15::smallint, 10::smallint, 3::smallint);", rowno));
     const std::string sidecar = fixture[0].value();
@@ -3560,7 +3570,7 @@ TEST_CASE("DOC0371 revision-3 read session fails closed and restores backend res
         "(1, repeat('ACGT', 2048)::bioseq.seq('dna4', 64));");
     const auto rowno = only_column_row_number(ctx, "doc0371_rev3_session");
     const auto fixture = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'doc0371_rev3_session'::regclass, 'minimizers_per_fragment', "
         "{}, 15::smallint, 10::smallint, 3::smallint);", rowno));
     const std::string sidecar = fixture[0].value();
@@ -3581,7 +3591,7 @@ TEST_CASE("DOC0371 revision-3 read session fails closed and restores backend res
     const auto backend_pid = query_scalar_int(ctx, "SELECT pg_backend_pid();");
     for (const auto& [mode, message] : failures) {
         const auto err = sql_error(ctx, fmt::format(
-            "SELECT bioseq_internal.rev3_test_session_failure("
+            "SELECT bioseq_internal.exercise_generation_session_failure("
             "'doc0371_rev3_session'::regclass, "
             "'minimizers_per_fragment', {}, '{}');",
             rowno, mode));
@@ -4016,7 +4026,7 @@ TEST_CASE("ordinary Format-6 replacement preserves its active generation when a 
     // locator, before publishing a replacement head. The stable sidecar and
     // previously committed READY generation must remain byte-exact.
     exec_sql(ctx, fmt::format(
-        "SELECT bioseq_internal.rev3_test_remove_source_fragment("
+        "SELECT bioseq_internal.remove_sequence_fragment("
         "'{}'::regclass, 'minimizers_per_sequence', {}, 2);",
         table, rowno));
 
@@ -4024,31 +4034,213 @@ TEST_CASE("ordinary Format-6 replacement preserves its active generation when a 
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
         table));
-    REQUIRE(error.contains("catalog"));
+    // The immutable-source guard owns this failure before the replacement
+    // publisher can enter a generation-catalog operation.
+    REQUIRE(error.sqlstate == "55000");
+    REQUIRE(error.contains(
+        "bioseq locator no longer matches its immutable source"));
+    REQUIRE(error.contains("source epoch"));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(capture_generation_rows() == generation_rows_before);
     REQUIRE(capture_schema_identity() == schema_identity_before);
     REQUIRE(capture_metadata_age() == metadata_age_before);
 }
 
-TEST_CASE("update_index('minimizers_per_fragment') builds the per-fragment index",
-          "[index_admin][update][backfill]") {
-    auto ctx = fresh_context({kTable});
-    // seed_small_bioseq_column sets bioseq.update_index_on_insert = on, so the two
-    // default UPDATE_ON_INSERT indexes (minimizers_per_fragment, symbol_counts)
-    // are populated incrementally at INSERT time.
-    seed_small_bioseq_column(ctx, kTable);
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("DOC0377 PG index streaming poisons contiguous access and resident "
+          "MPS admits once",
+          "[index_admin][source-backed][slice][batch][poison][admission]") {
+  constexpr std::string_view source_table = "doc0377_index_poison_source";
+  constexpr std::string_view target_table = "doc0377_index_poison_target";
+  auto ctx = fresh_context({source_table, target_table});
+  exec_sql(ctx, "SET bioseq.update_index_on_insert=off;"
+                "SET bioseq.recompute_async_persist=off;"
+                "SET bioseq.aligner.minimizer_algorithm='scalar';"
+                "CREATE TABLE doc0377_index_poison_source ("
+                " id int, value bioseq.seq('dna4',64)) USING bioseq;"
+                "INSERT INTO doc0377_index_poison_source VALUES ("
+                " 1, repeat('ACGT',32775)::bioseq.seq('dna4',64));"
+                "CREATE TABLE doc0377_index_poison_target ("
+                " id int, value bioseq.seq('dna4',64)) USING bioseq;"
+                "INSERT INTO doc0377_index_poison_target "
+                "SELECT id, value[3:32771] OPERATOR(bioseq.||) "
+                "       bioseq.reverse(value[32771:65539]) "
+                "FROM doc0377_index_poison_source;");
 
-    REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", kTable) > 0);
-    REQUIRE(index_table_row_count(ctx, "symbol_counts", kTable) > 0);
-
-    // Explicit rebuild of the per-fragment index returns the count of
-    // sequences (re)indexed — three seeded rows.
+  for (const std::string_view index_name : std::array<std::string_view, 2>{
+           "minimizers_per_fragment", "symbol_counts"}) {
+    exec_sql(ctx, "SELECT bioseq_internal.reset_sequence_source_counters();"
+                  "SELECT bioseq_internal.arm_sequence_source_failure("
+                  " 'facade_contiguous_access');");
     REQUIRE(query_scalar_int(
                 ctx,
-                fmt::format("SELECT bioseq.update_index('{}'::regclass, "
-                            "'minimizers_per_fragment');",
-                            kTable)) == 3);
+                fmt::format("SELECT bioseq.update_index('{}'::regclass, '{}');",
+                            target_table, index_name)) == 1);
+    exec_sql(ctx, "SELECT bioseq_internal.disarm_sequence_source_failure();");
+    INFO("streaming index=" << index_name);
+    REQUIRE(facade_source_counter(ctx, "facade_source_stream_callbacks") > 0);
+    REQUIRE(facade_source_counter(ctx, "facade_source_resident_probes") == 0);
+    REQUIRE(facade_source_counter(ctx, "facade_declared_materializations") ==
+            0);
+    REQUIRE(facade_source_counter(ctx, "facade_completed_materializations") ==
+            0);
+    REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 0);
+  }
+
+  // max_concurrency is PGC_SIGHUP and cannot be changed by a session.  Use
+  // the cluster's effective pool width; the exact resident-probe and
+  // materialization counters below prove that this branch was admitted.
+  exec_sql(ctx,
+           "SET bioseq.scheduler.pipeline_concurrency_mode='task_parallel';"
+           "SELECT bioseq_internal.reset_sequence_source_counters();");
+  const long long mps_rows_before = index_table_row_count(
+      ctx, "minimizers_per_sequence", target_table);
+  const long long reserved_before = query_scalar_int(
+      ctx, "SELECT index_memory_reserved_bytes "
+           "FROM bioseq.scheduler_stats();");
+  exec_sql(ctx, "SELECT bioseq_internal.arm_sequence_source_failure("
+                " 'facade_materialization');");
+  const auto materialization_error = sql_error(
+      ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                       " 'minimizers_per_sequence');",
+                       target_table));
+  exec_sql(ctx, "SELECT bioseq_internal.disarm_sequence_source_failure();");
+
+  REQUIRE(materialization_error.sqlstate == "XX000");
+  REQUIRE(materialization_error.contains(
+      "poisoned PostgreSQL sequence facade materialization"));
+  REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+  REQUIRE(index_table_row_count(
+              ctx, "minimizers_per_sequence", target_table) ==
+          mps_rows_before);
+  REQUIRE(query_scalar_int(
+              ctx, "SELECT index_memory_reserved_bytes "
+                   "FROM bioseq.scheduler_stats();") == reserved_before);
+  REQUIRE(facade_source_counter(ctx, "facade_source_resident_probes") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_declared_materializations") ==
+          1);
+  REQUIRE(facade_source_counter(ctx, "facade_completed_materializations") ==
+          0);
+  REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 1);
+
+  exec_sql(ctx, "SELECT bioseq_internal.reset_sequence_source_counters();");
+  REQUIRE(query_scalar_int(
+              ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                               " 'minimizers_per_sequence');",
+                               target_table)) == 1);
+  REQUIRE(index_table_row_count(
+              ctx, "minimizers_per_sequence", target_table) >
+          mps_rows_before);
+  REQUIRE(facade_source_counter(ctx, "facade_source_stream_callbacks") > 0);
+  REQUIRE(facade_source_counter(ctx, "facade_source_resident_probes") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_declared_materializations") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_completed_materializations") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 0);
+}
+
+TEST_CASE("DOC0377 checked Paper failures unwind grouped MPF and MPS publishers",
+          "[index_admin][doc0377][paper][sqlstate][publisher-cleanup][error]") {
+  struct FailureRoute {
+    std::string_view table;
+    std::string_view index_name;
+    std::string_view operation;
+  };
+  constexpr std::array<FailureRoute, 2> routes{{
+      {"doc0377_paper_forced_mpf", "minimizers_per_fragment",
+       "MPF generation replay"},
+      {"doc0377_paper_forced_mps", "minimizers_per_sequence",
+       "minimizers_per_sequence build"},
+  }};
+
+  for (const FailureRoute& route : routes) {
+    DYNAMIC_SECTION(route.index_name) {
+      auto ctx = fresh_context({route.table});
+      exec_sql(ctx,
+               "SET bioseq.update_index_on_insert=off;"
+               "SET bioseq.index_async_persist=off;"
+               "SET bioseq.recompute_async_persist=off;"
+               "SET bioseq.aligner.grouped32_persisted_generation_enabled=on;"
+               "SET bioseq.aligner.minimizer_algorithm='paper_nthash_simd';");
+      exec_sqlf(ctx,
+                "CREATE TABLE {} "
+                "(id int, seq bioseq.seq('dna4',64)) USING bioseq;"
+                "INSERT INTO {} VALUES "
+                "(1,(repeat('ACGT',16391)||'A')::"
+                "bioseq.seq('dna4',64));",
+                route.table, route.table);
+      REQUIRE(only_column_row_number(ctx, route.table) > 0);
+      const long long backend_pid =
+          query_scalar_int(ctx, "SELECT pg_backend_pid();");
+      const long long admission_before = query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();");
+
+      exec_sql(ctx,
+               "SET bioseq.test_force_paper_index_failure="
+               "'unsupported_vector_shape';");
+      const auto rejected = sql_error(ctx, fmt::format(
+          "SELECT bioseq.update_index('{}'::regclass,'{}');",
+          route.table, route.index_name));
+      exec_sql(ctx,
+               "SET bioseq.test_force_paper_index_failure='none';");
+
+      REQUIRE(rejected.sqlstate == "0A000");
+      REQUIRE(rejected.contains("status=unsupported_vector_shape"));
+      REQUIRE(rejected.contains(route.operation));
+      REQUIRE_FALSE(rejected.sqlstate == "XX000");
+      REQUIRE_FALSE(rejected.sqlstate == "XX001");
+      REQUIRE(query_scalar_int(ctx, "SELECT pg_backend_pid();") ==
+              backend_pid);
+      REQUIRE(index_table_row_count(ctx, route.index_name, route.table) == 0);
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT count(*) FROM bioseq_internal.metadata_age_log "
+          "WHERE user_relid='{}'::regclass AND index_name='{}';",
+          route.table, route.index_name)) == 0);
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT count(*) FROM "
+          "bioseq_internal.minimizer_generation_storage "
+          "WHERE user_relid='{}'::regclass AND index_name='{}';",
+          route.table, route.index_name)) == 0);
+      REQUIRE(query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();") == admission_before);
+      REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+      // The same Paper backend succeeds through the same publisher immediately,
+      // proving the one-shot failure arm, writer, spill, and source owner were
+      // all cleared by the rejected statement.
+      exec_sql(ctx,
+               "SET bioseq.aligner.minimizer_algorithm='paper_nthash_simd';");
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT bioseq.update_index('{}'::regclass,'{}');",
+          route.table, route.index_name)) == 1);
+      REQUIRE(index_table_row_count(ctx, route.index_name, route.table) > 0);
+      REQUIRE(query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();") == admission_before);
+    }
+  }
+}
+#endif
+
+TEST_CASE(
+    "update_index('minimizers_per_fragment') builds the per-fragment index",
+    "[index_admin][update][backfill]") {
+  auto ctx = fresh_context({kTable});
+  // seed_small_bioseq_column sets bioseq.update_index_on_insert = on, so the
+  // two default UPDATE_ON_INSERT indexes (minimizers_per_fragment,
+  // symbol_counts) are populated incrementally at INSERT time.
+  seed_small_bioseq_column(ctx, kTable);
+
+  REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", kTable) > 0);
+  REQUIRE(index_table_row_count(ctx, "symbol_counts", kTable) > 0);
+
+  // Explicit rebuild of the per-fragment index returns the count of
+  // sequences (re)indexed — three seeded rows.
+  REQUIRE(query_scalar_int(
+              ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                               "'minimizers_per_fragment');",
+                               kTable)) == 3);
 }
 
 TEST_CASE("update_index rejects an unknown index name",
@@ -4092,6 +4284,59 @@ TEST_CASE("ExactSimd update_index accepts DNA5 without scalar fallback",
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
         table)) == 1);
+}
+
+TEST_CASE("DOC0377 Paper update_index maps checked DNA5 rejection to 0A000",
+          "[index_admin][doc0377][paper][dna5][sqlstate][error]") {
+    struct FailureRoute {
+        std::string_view table;
+        std::string_view index_name;
+        std::string_view operation;
+    };
+    constexpr std::array<FailureRoute, 2> routes{{
+        {"doc0377_paper_grouped_mpf", "minimizers_per_fragment",
+         "grouped minimizer generation preflight"},
+        {"doc0377_paper_grouped_mps", "minimizers_per_sequence",
+         "grouped minimizer generation preflight"},
+    }};
+
+    for (const FailureRoute& route : routes) {
+        DYNAMIC_SECTION("grouped " << route.index_name) {
+            auto ctx = fresh_context({route.table});
+            exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+            exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+            exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+            exec_sql(ctx,
+                "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+            exec_sql(ctx,
+                "SET bioseq.aligner.minimizer_algorithm = 'paper_nthash_simd';");
+            exec_sqlf(ctx,
+                "CREATE TABLE {} "
+                "(id int, seq bioseq.seq('dna5', 64)) USING bioseq;",
+                route.table);
+            exec_sqlf(ctx,
+                "INSERT INTO {} VALUES "
+                "(1, (repeat('ACGTN', 13113) || 'A')::"
+                "bioseq.seq('dna5', 64));",
+                route.table);
+
+            // This source is locator-backed and long enough to enter the
+            // selected Paper producer. In particular, grouped MPS used to
+            // erase unsupported_alphabet into compatibility_mismatch and
+            // report XX001 from the publication encoder.
+            REQUIRE(only_column_row_number(ctx, route.table) > 0);
+            const auto rejected = sql_error(ctx, fmt::format(
+                "SELECT bioseq.update_index('{}'::regclass, '{}');",
+                route.table, route.index_name));
+            REQUIRE(rejected.sqlstate == "0A000");
+            REQUIRE(rejected.contains("Paper ntHash SIMD"));
+            REQUIRE(rejected.contains("status=unsupported_alphabet"));
+            REQUIRE(rejected.contains(route.operation));
+            REQUIRE(index_table_row_count(
+                ctx, route.index_name, route.table) == 0);
+            REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+        }
+    }
 }
 #endif
 
@@ -4265,4 +4510,284 @@ TEST_CASE("update_index on an empty bioseq table returns 0 and list_metadata "
         REQUIRE(row.size() == 2);
         REQUIRE(row[1].value() == "0 bytes");
     }
+}
+
+TEST_CASE("drop_all_index_tables applies the exact table selector and fires "
+          "drop events",
+          "[index_admin][drop_all][native_spi]") {
+    auto ctx = fresh_context();
+    exec_sql(ctx, "BEGIN;");
+    exec_sql(ctx,
+        "CREATE TABLE public.native_drop_event_log ("
+        "object_type text, schema_name text, object_name text);");
+    exec_sql(ctx,
+        "CREATE FUNCTION public.capture_native_index_drops() "
+        "RETURNS event_trigger LANGUAGE plpgsql AS $capture$ "
+        "BEGIN "
+        "  INSERT INTO public.native_drop_event_log "
+        "      (object_type, schema_name, object_name) "
+        "  SELECT object_type, schema_name, object_name "
+        "  FROM pg_event_trigger_dropped_objects(); "
+        "END "
+        "$capture$;");
+    exec_sql(ctx,
+        "CREATE EVENT TRIGGER capture_native_index_drops "
+        "ON sql_drop WHEN TAG IN ('DROP TABLE') "
+        "EXECUTE FUNCTION public.capture_native_index_drops();");
+
+    exec_sql(ctx,
+        "CREATE TABLE bioseq_internal.seqidx_native_plain (value int);"
+        "CREATE TABLE bioseq_internal.seqidxtab_native_plain (value int);"
+        "CREATE TABLE bioseq_internal.\"seqidx_native Ω\"\"quoted\" "
+        "    (value int);"
+        "CREATE VIEW public.native_drop_dependency AS "
+        "    SELECT value FROM bioseq_internal.seqidx_native_plain;"
+        "CREATE VIEW bioseq_internal.seqidx_native_view_survives AS "
+        "    SELECT 1 AS value;"
+        "CREATE TABLE bioseq_internal.seqidx (value int);"
+        "CREATE TABLE bioseq_internal.seqidxnear (value int);"
+        "CREATE TABLE bioseq_internal.seqidxtab (value int);"
+        "CREATE TABLE bioseq_internal.seqidxtabnear (value int);"
+        "CREATE TABLE bioseq_internal.seqid (value int);"
+        "CREATE TABLE bioseq_internal.seqid_ (value int);"
+        "CREATE TABLE bioseq_internal.seqid_native_near (value int);");
+
+    exec_sql(ctx, "SELECT bioseq.drop_all_index_tables();");
+    exec_sql(ctx, "SELECT bioseq.drop_all_index_tables();");
+
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT count(*) "
+        "FROM pg_catalog.pg_class AS c "
+        "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'bioseq_internal' "
+        "AND c.relname::text IN ("
+        "  'seqidx_native_plain',"
+        "  'seqidxtab_native_plain',"
+        "  'seqidx_native Ω\"quoted'"
+        ");") == 0);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT count(*) "
+        "FROM pg_catalog.pg_class AS c "
+        "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'bioseq_internal' "
+        "AND c.relname::text IN ("
+        "  'seqidx', 'seqidxnear', 'seqidxtab', 'seqidxtabnear',"
+        "  'seqid', 'seqid_', 'seqid_native_near'"
+        ");") == 7);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT count(*) "
+        "FROM pg_catalog.pg_class AS c "
+        "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'bioseq_internal' "
+        "AND c.relname = 'seqidx_native_view_survives' "
+        "AND c.relkind = 'v';") == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (to_regclass('public.native_drop_dependency') IS NULL)::int;"
+        ) == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT count(*) FROM public.native_drop_event_log "
+        "WHERE object_type = 'table' "
+        "AND schema_name = 'bioseq_internal' "
+        "AND object_name IN ("
+        "  'seqidx_native_plain',"
+        "  'seqidxtab_native_plain',"
+        "  'seqidx_native Ω\"quoted'"
+        ");") == 3);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT count(*) FROM public.native_drop_event_log "
+        "WHERE object_type = 'view' "
+        "AND schema_name = 'public' "
+        "AND object_name = 'native_drop_dependency';") == 1);
+    exec_sql(ctx, "ROLLBACK;");
+}
+
+TEST_CASE("prefix index clearing selects the exact prefix and preserves "
+          "DROP TABLE CASCADE behavior",
+          "[index_admin][update][native_spi][prefix]") {
+    constexpr std::string_view table = "native_prefix_selector_source";
+    auto ctx = fresh_context({table});
+    seed_small_bioseq_column(ctx, table);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.update_index('{}'::regclass, "
+        "'minimizers_per_fragment');", table)) == 3);
+
+    const std::string sidecar_name = query_scalar(ctx,
+        "SELECT c.relname "
+        "FROM pg_catalog.pg_class AS c "
+        "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'bioseq_internal' "
+        "AND c.relkind = 'r' "
+        "AND starts_with(c.relname::text, 'seqidx_mpf_') "
+        "ORDER BY c.oid LIMIT 1;");
+    constexpr std::string_view physical_name_stem = "seqidx_mpf_";
+    constexpr std::size_t identity_hash_hex_size = 16;
+    const std::size_t clear_prefix_size =
+        physical_name_stem.size() + identity_hash_hex_size + 1;
+    REQUIRE(sidecar_name.size() > clear_prefix_size);
+    const std::string selected_prefix =
+        sidecar_name.substr(0, clear_prefix_size);
+    REQUIRE(selected_prefix.back() == '_');
+    const std::string selected_name =
+        fmt::format("{}native Ω\"quoted", selected_prefix);
+    const std::string selected_identifier =
+        fmt::format("\"{}native Ω\"\"quoted\"", selected_prefix);
+    const std::string near_miss_name =
+        fmt::format("{}x_native_near", selected_prefix.substr(
+            0, selected_prefix.size() - 1));
+
+    exec_sql(ctx, "BEGIN;");
+    exec_sqlf(ctx,
+        "CREATE TABLE bioseq_internal.{} (value int);"
+        "CREATE VIEW public.native_prefix_dependency AS "
+        "SELECT value FROM bioseq_internal.{};"
+        "CREATE TABLE bioseq_internal.{} (value int);",
+        selected_identifier,
+        selected_identifier,
+        near_miss_name);
+
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.update_index('{}'::regclass, "
+        "'minimizers_per_fragment');", table)) == 3);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT (to_regclass(format("
+        "'bioseq_internal.%I', '{}')) IS NULL)::int;",
+        selected_name)) == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (to_regclass('public.native_prefix_dependency') "
+        "IS NULL)::int;") == 1);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT (to_regclass('bioseq_internal.{}') "
+        "IS NOT NULL)::int;",
+        near_miss_name)) == 1);
+    exec_sql(ctx, "ROLLBACK;");
+}
+
+TEST_CASE("drop_all_index_tables preserves PostgreSQL ownership checks",
+          "[index_admin][drop_all][native_spi][ownership]") {
+    auto ctx = fresh_context();
+    exec_sql(ctx, "BEGIN;");
+    exec_sql(ctx,
+        "CREATE ROLE native_drop_owner NOLOGIN;"
+        "CREATE ROLE native_drop_caller NOLOGIN;"
+        "CREATE TABLE bioseq_internal.seqidx_native_owned (value int);"
+        "ALTER TABLE bioseq_internal.seqidx_native_owned "
+        "    OWNER TO native_drop_owner;"
+        "GRANT USAGE ON SCHEMA bioseq, bioseq_internal "
+        "    TO native_drop_caller;"
+        "GRANT EXECUTE ON FUNCTION bioseq.drop_all_index_tables() "
+        "    TO native_drop_caller;"
+        "SET LOCAL ROLE native_drop_caller;");
+    const auto denied =
+        sql_error(ctx, "SELECT bioseq.drop_all_index_tables();");
+    exec_sql(ctx, "ROLLBACK;");
+
+    REQUIRE(denied.sqlstate == "42501");
+    REQUIRE(denied.contains("must be owner"));
+}
+
+TEST_CASE("drop_all_index_tables rolls back an earlier drop when the second "
+          "selected drop fails",
+          "[index_admin][drop_all][native_spi][rollback]") {
+    auto ctx = fresh_context();
+    exec_sql(ctx, "BEGIN;");
+    exec_sql(ctx,
+        "CREATE TABLE public.native_second_drop_counter (call_no int NOT NULL);"
+        "INSERT INTO public.native_second_drop_counter VALUES (0);"
+        "CREATE TABLE bioseq_internal.seqidx_native_atomic_a (value int);"
+        "CREATE TABLE bioseq_internal.seqidx_native_atomic_b (value int);");
+    exec_sql(ctx,
+        "CREATE FUNCTION public.fail_second_native_index_drop() "
+        "RETURNS event_trigger LANGUAGE plpgsql AS $failure$ "
+        "DECLARE next_call int; "
+        "BEGIN "
+        "  IF EXISTS ("
+        "    SELECT 1 FROM pg_event_trigger_dropped_objects() "
+        "    WHERE original AND object_type = 'table' "
+        "    AND schema_name = 'bioseq_internal' "
+        "    AND object_name IN ("
+        "      'seqidx_native_atomic_a', 'seqidx_native_atomic_b')) "
+        "  THEN "
+        "    UPDATE public.native_second_drop_counter "
+        "    SET call_no = call_no + 1 "
+        "    RETURNING call_no INTO next_call; "
+        "    IF next_call = 2 THEN "
+        "      RAISE EXCEPTION 'forced second selected drop failure' "
+        "      USING ERRCODE = 'XX000'; "
+        "    END IF; "
+        "  END IF; "
+        "END "
+        "$failure$;");
+    exec_sql(ctx,
+        "CREATE EVENT TRIGGER fail_second_native_index_drop "
+        "ON sql_drop WHEN TAG IN ('DROP TABLE') "
+        "EXECUTE FUNCTION public.fail_second_native_index_drop();");
+
+    const long long first_oid = query_scalar_int(ctx,
+        "SELECT 'bioseq_internal.seqidx_native_atomic_a'::regclass"
+        "::oid::bigint;");
+    const long long second_oid = query_scalar_int(ctx,
+        "SELECT 'bioseq_internal.seqidx_native_atomic_b'::regclass"
+        "::oid::bigint;");
+    exec_sql(ctx, "SAVEPOINT before_native_index_drop;");
+    const auto forced_failure =
+        sql_error(ctx, "SELECT bioseq.drop_all_index_tables();");
+    exec_sql(ctx, "ROLLBACK TO SAVEPOINT before_native_index_drop;");
+
+    REQUIRE(forced_failure.sqlstate == "XX000");
+    REQUIRE(forced_failure.contains("forced second selected drop failure"));
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT 'bioseq_internal.seqidx_native_atomic_a'::regclass"
+        "::oid::bigint;") == first_oid);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT 'bioseq_internal.seqidx_native_atomic_b'::regclass"
+        "::oid::bigint;") == second_oid);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT call_no FROM public.native_second_drop_counter;") == 0);
+    exec_sql(ctx, "ROLLBACK;");
+}
+
+TEST_CASE("prefix index clearing rejects a wrong relation kind and rolls back "
+          "prior drops",
+          "[index_admin][update][native_spi][rollback]") {
+    constexpr std::string_view table = "native_prefix_rollback_source";
+    auto ctx = fresh_context({table});
+    seed_small_bioseq_column(ctx, table);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.update_index('{}'::regclass, "
+        "'minimizers_per_fragment');", table)) == 3);
+
+    const std::string sidecar_name = query_scalar(ctx,
+        "SELECT c.relname "
+        "FROM pg_catalog.pg_class AS c "
+        "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'bioseq_internal' "
+        "AND c.relkind = 'r' "
+        "AND starts_with(c.relname::text, 'seqidx_mpf_') "
+        "ORDER BY c.oid LIMIT 1;");
+    const long long original_oid = query_scalar_int(ctx, fmt::format(
+        "SELECT 'bioseq_internal.{}'::regclass::oid::bigint;",
+        sidecar_name));
+    const long long original_rows = query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM bioseq_internal.{};", sidecar_name));
+    REQUIRE(original_rows > 0);
+    const std::string wrong_kind_name =
+        fmt::format("{}_wrong_relkind", sidecar_name);
+
+    exec_sql(ctx, "BEGIN;");
+    exec_sqlf(ctx,
+        "CREATE VIEW bioseq_internal.{} AS SELECT 1 AS value;",
+        wrong_kind_name);
+    const auto wrong_kind = sql_error(ctx, fmt::format(
+        "SELECT bioseq.update_index('{}'::regclass, "
+        "'minimizers_per_fragment');", table));
+    exec_sql(ctx, "ROLLBACK;");
+
+    REQUIRE(wrong_kind.sqlstate == "42809");
+    REQUIRE(wrong_kind.contains("is not a table"));
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT 'bioseq_internal.{}'::regclass::oid::bigint;",
+        sidecar_name)) == original_oid);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM bioseq_internal.{};",
+        sidecar_name)) == original_rows);
 }

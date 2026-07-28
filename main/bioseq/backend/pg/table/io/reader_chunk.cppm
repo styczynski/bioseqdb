@@ -269,7 +269,7 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64_t chunkIndex,
 		{
 			ColumnChunkBuffers *chunkBuffers =
 				columnBuffers->chunkBuffersArray[chunkIndex];
-			bool shouldCache = bioseq_enable_page_cache == true &&
+			bool shouldCache = bioseq::settings::enable_column_cache == true &&
 				chunkBuffers->valueCompressionType != COMPRESSION_NONE;
 
 			if (shouldCache)
@@ -463,6 +463,9 @@ ReadChunkGroupNextVector(ChunkGroupReadState *chunkGroupReadState, Datum *column
 						 uint64 *rowNumber,
 						 uint64 stripeFirstRowNumber)
 {
+	(void) tupleDesc;
+	(void) columnValueOffset;
+
 	if (chunkGroupReadState->currentRow >= chunkGroupReadState->rowCount)
 	{
 		Assert(chunkGroupReadState->currentRow == chunkGroupReadState->rowCount);
@@ -507,34 +510,15 @@ ReadChunkGroupNextVector(ChunkGroupReadState *chunkGroupReadState, Datum *column
 			const uint32_t columnIndex = attno - 1;
 
 			VectorColumn* vectorColumn = reinterpret_cast<VectorColumn*>(columnValues[columnIndex]);
-
-			if (chunkGroupData->existsArray[columnIndex][rowIndex])
-			{
-				int8_t *writeColumnRowPosition =
-					reinterpret_cast<int8_t *>(vectorColumn->value) + columnValueOffset[columnIndex];
-
-				/*
-				 * For data types which have len less or equal sizeof(Datum) we can
-				 * use `store_att_byval` function.
-				 */
-				if (vectorColumn->columnTypeLen <= sizeof(Datum))
-				{
-					store_att_byval(writeColumnRowPosition,
-									chunkGroupData->valueArray[columnIndex][rowIndex],
-									vectorColumn->columnTypeLen);
-				}
-				else
-				{
-					memcpy(writeColumnRowPosition,
-						   reinterpret_cast<int8_t *>(chunkGroupData->valueArray[columnIndex][rowIndex]),
-						   vectorColumn->columnTypeLen);
-				}
-
-				vectorColumn->isnull[vectorColumn->dimension] = false;
-			}
-
-			vectorColumn->dimension++;
-			columnValueOffset[columnIndex] += vectorColumn->columnTypeLen;
+			const bool is_null =
+				!chunkGroupData->existsArray[columnIndex][rowIndex];
+			WriteDatumToVectorColumn(
+				vectorColumn,
+				is_null
+					? static_cast<Datum>(0)
+					: chunkGroupData->valueArray[columnIndex][rowIndex],
+				is_null,
+				vectorColumn->dimension);
 		}
 
 		(*chunkReadRows)++;

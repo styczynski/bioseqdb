@@ -2,10 +2,8 @@
 //
 // DOC0263 §11.3 — aligner CIGAR/score parity under fragmentation.
 //
-// The aligners (KSW2 / block aligner) were migrated to take
-// lazy_compact_sequence<R, Scanner>& and encode regions via the wrapper's
-// to_encoded_into (which forwards for scanner_none and stitches fragments for
-// a fragmented scanner). Since to_encoded_into is byte-identical across
+// The aligners (KSW2 / block aligner) consume canonical lazy views backed by
+// live concrete owners. Since encoded access is byte-identical across
 // scanners (locked by lazy_compact_sequence_test.cpp), the aligner output must
 // be bit-identical too. This test runs KSW2 z2_align over the SAME query/target
 // region through the no-fragment lazy wrapper and through three chunked
@@ -59,7 +57,10 @@ template <class LazyQ, class LazyT>
     params.band_width = -1;
     params.z_drop     = -1;
     params.end_bonus  = 0;
-    return HwyKsw2Aligner::z2_align<false>(q, t, 0, qlen, 0, tlen, sm, params);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(q);
+    const auto target_view = bioseq::storage::as_lazy_sequence_view(t);
+    return HwyKsw2Aligner::z2_align<false>(
+        query_view, target_view, 0, qlen, 0, tlen, sm, params);
 }
 
 }  // namespace

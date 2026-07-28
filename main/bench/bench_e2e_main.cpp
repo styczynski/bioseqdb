@@ -55,9 +55,11 @@ import bioseq.io.options;                   // sequence_io_file_type, writer_opt
 import bioseq.indexing.type;                 // canonical minimizer index names
 import bioseq.indexing.minimizer_hashmap;    // exact-SIMD sketch proof + rev3 sizing constants
 import bioseq.parallelism.memory_admission;  // bounded prototype-owned routing state
+import bioseq.storage.lazy;                  // canonical lazy sequence facade
 import bioseq.sequences.kmers;               // sketch_collector / MinimapSketchData
 import bioseq.sequences.chaining.utils;      // Anchor exact-final-byte equation
 import bioseq.sequences.pipe;                // canonical execution-stage matrix
+import bioseq.bench.sql_codegen_guardrail;
 
 #ifndef BIOSEQ_E2E_REPORT_DIR
 #error "BIOSEQ_E2E_REPORT_DIR must be defined by the build system"
@@ -146,6 +148,8 @@ constexpr std::string_view kMinimizersPerFragmentIndex =
     bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
 constexpr std::string_view kMinimizersPerSequenceIndex =
     bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+constexpr std::string_view kDoc0377SlicedNoIndexAlgorithm =
+    "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced";
 
 enum class JustIndexSetupKind {
     Scalar,
@@ -225,6 +229,12 @@ struct E2eInput {
     bool truth_is_reverse = false;
     std::int64_t target_bp = 0;
 };
+
+[[nodiscard]] constexpr bool doc0377_sliced_pipeline_proof_config_valid(
+        std::string_view algorithm,
+        const bool cigar_projection) noexcept {
+    return algorithm != kDoc0377SlicedNoIndexAlgorithm || cigar_projection;
+}
 
 struct ColdNoIndexPolicyAbsenceEvidence {
     std::int64_t target_rows = -1;
@@ -1292,7 +1302,8 @@ void parse_bioseq_rows(const it::rowset_t& rows, const E2eInput& in, E2eOutput& 
 void parse_bioseq_batch_rows(
         const it::rowset_t& rows,
         const E2eInput& in,
-        E2eOutput& out)
+        E2eOutput& out,
+        const std::int64_t target_coordinate_origin = 0)
 {
     std::vector<std::uint8_t> row_counts(in.queries.size(), 0);
     std::vector<double> offsets(in.queries.size(), kNoMatchOffsetSentinel);
@@ -1321,8 +1332,16 @@ void parse_bioseq_batch_rows(
         ++row_counts[qid];
         if (row_counts[qid] != 1) malformed_or_extra = true;
         const std::int64_t target_start = *target_start_value;
+        if (target_coordinate_origin < 0
+            || in.queries[qid].truth_target_start
+                < target_coordinate_origin) {
+            malformed_or_extra = true;
+            continue;
+        }
+        const std::int64_t expected_local_target_start =
+            in.queries[qid].truth_target_start - target_coordinate_origin;
         const double offset = static_cast<double>(
-            std::llabs(target_start - in.queries[qid].truth_target_start));
+            std::llabs(target_start - expected_local_target_start));
         offsets[qid] = offset;
         const bool coordinate_correct =
             offset < static_cast<double>(kPositionToleranceBp);
@@ -1338,7 +1357,7 @@ void parse_bioseq_batch_rows(
             ++out.correct_strand_count;
         }
         if (qid == 0) {
-            out.target_start = target_start;
+            out.target_start = target_start + target_coordinate_origin;
             out.is_reverse = is_reverse;
         }
         if (!in.cigar_projection) continue;
@@ -1363,7 +1382,8 @@ void parse_bioseq_batch_rows(
             && is_expected_benchmark_cigar(cigar, in)
             && replay_benchmark_cigar(
                 cigar, in, in.queries[qid], *query_start, *query_end,
-                target_start, *target_end, is_reverse)) {
+                target_start + target_coordinate_origin,
+                *target_end + target_coordinate_origin, is_reverse)) {
             ++out.correct_cigar_count;
             ++out.cigar_replay_count;
         }
@@ -7927,6 +7947,45 @@ void load_e2e_query_table(const it::connection_test_context& c,
         projection, target_table, index_read_requirement);
 }
 
+[[nodiscard]] std::string batched_transformed_coord_sql(
+        const std::string& target_table,
+        std::string_view projection,
+        const int index_read_requirement,
+        const std::int64_t target_coordinate_origin)
+{
+    const std::int64_t concat_join = target_coordinate_origin + 16;
+    // The benchmark connection intentionally keeps the default search_path.
+    // Sequence operators live in the extension-owned bioseq schema, so use
+    // PostgreSQL's schema-qualified operator syntax just like production SQL
+    // that does not opt in to `bioseq` on its search path.
+    return fmt::format(
+        "SELECT q.id, t.header, {} "
+        "FROM {} t JOIN e2e_queries q ON mmsearch("
+        "t.seq[{}:{}] OPERATOR(bioseq.||) t.seq[{}:], "
+        "q.seq[0:], aligner_options(index_read_requirement => {})) "
+        "ORDER BY q.id, t.header",
+        projection, target_table, target_coordinate_origin, concat_join,
+        concat_join, index_read_requirement);
+}
+
+[[nodiscard]] std::int64_t doc0377_transformed_target_origin(
+        const E2eInput& in) {
+    if (in.queries.empty()) return 0;
+    std::int64_t minimum_truth = in.queries.front().truth_target_start;
+    for (const E2eQueryTruth& query : in.queries) {
+        minimum_truth = std::min(minimum_truth, query.truth_target_start);
+    }
+    if (minimum_truth <= 0) {
+        std::fputs(
+            "[bench_e2e] DOC0377 nonzero target slice requires every "
+            "generated truth_target_start to be positive\n",
+            stderr);
+        std::fflush(stderr);
+        std::abort();
+    }
+    return std::min<std::int64_t>(4096, minimum_truth);
+}
+
 [[nodiscard]] std::string e2e_projection_sql(const E2eInput& in) {
     if (!in.cigar_projection) {
         return "bioseq.target_start(header) AS tstart, "
@@ -7943,6 +8002,22 @@ void load_e2e_query_table(const it::connection_test_context& c,
 
 [[nodiscard]] E2eOutput e2e_run(std::string_view algo, const ParamMap& params,
                                 const E2eInput& in) {
+    // This named DOC0377 case is a full SIMD-pipeline proof, not a
+    // coordinate-only mapping check. BlockAligner runs only when a downstream
+    // result helper requests CIGAR data; without that demand, fail before the
+    // expensive cold setup instead of later reporting a truthful but opaque
+    // mixed-invalid all-stage attestation.
+    if (!doc0377_sliced_pipeline_proof_config_valid(
+            algo, in.cigar_projection)) {
+        std::fprintf(
+            stderr,
+            "[bench_e2e] DOC0377-SLICED-PROOF-CONFIG-FAIL "
+            "algo=%.*s requires data.cigar_projection=true so the "
+            "BlockAligner stage is executed and attested\n",
+            static_cast<int>(algo.size()), algo.data());
+        std::fflush(stderr);
+        std::abort();
+    }
     E2eOutput out;
     const std::string pipeline_mode = param_string(params, "pipeline_mode", "single");
     const int fair_workers = fair_scheduler_worker_count(*in.conn);
@@ -8185,7 +8260,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
             minimizer_index);
 
     } else if (algo == "bioseq_no_index"
-               || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index") {
+               || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index"
+               || algo == kDoc0377SlicedNoIndexAlgorithm) {
         const bool recompute_async_persist =
             param_string(params, "recompute_async_persist", "off") == "on";
         if (recompute_async_persist) {
@@ -8208,8 +8284,14 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_no_index_storage_session(*in.conn);
         capture_cold_no_index_absence(
             *in.conn, in, out, ColdNoIndexAuditPhase::post_restart);
-        const std::string align_sql =
-            batched_coord_sql(in.no_index_table, proj, 1);
+        const bool transformed_recipe =
+            algo == kDoc0377SlicedNoIndexAlgorithm;
+        const std::int64_t transformed_target_origin = transformed_recipe
+            ? doc0377_transformed_target_origin(in) : 0;
+        const std::string align_sql = transformed_recipe
+            ? batched_transformed_coord_sql(
+                in.no_index_table, proj, 1, transformed_target_origin)
+            : batched_coord_sql(in.no_index_table, proj, 1);
         const AlignmentSnapshotIdentity prior_alignment =
             capture_prior_alignment_identity(*in.conn);
         ScopedResourceMonitor resources;
@@ -8218,7 +8300,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
             auto _scope = bioseq::instr::region(kMeasuredRegion);
             load_e2e_query_table(*in.conn, in);
             parse_bioseq_batch_rows(
-                it::query_rows(*in.conn, align_sql), in, out);
+                it::query_rows(*in.conn, align_sql), in, out,
+                transformed_target_origin);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
@@ -9487,9 +9570,6 @@ template <class Sequence>
         std::uint16_t kmer_size,
         std::uint64_t& peak_transient_bytes,
         bioseq::indexing::ExactSimdIndexExecutionProof& aggregate_proof) {
-    using sequence_type = std::remove_cvref_t<Sequence>;
-    using traits = typename sequence_type::traits;
-    constexpr std::uint64_t letters_per_unit = traits::letters_per_unit;
     const std::uint64_t target_bp = sequence.bp_size();
     const std::uint64_t halo = static_cast<std::uint64_t>(window_size)
         + kmer_size - 2u;
@@ -9499,17 +9579,14 @@ template <class Sequence>
         target_bp,
         core_end_bp > target_bp - std::min(target_bp, halo)
             ? target_bp : core_end_bp + halo);
-    const std::uint64_t begin_unit = collect_begin / letters_per_unit;
-    const std::uint64_t end_unit = collect_end / letters_per_unit
-        + (collect_end % letters_per_unit != 0u ? 1u : 0u);
-    const std::uint64_t emitted_base = begin_unit * letters_per_unit;
+    const std::uint64_t emitted_base = collect_begin;
 
     bioseq::indexing::sketch_collector collector;
     const auto proof = bioseq::indexing::collect_exact_simd_index_range_or_throw(
         collector,
-        sequence,
-        static_cast<std::size_t>(begin_unit),
-        static_cast<std::size_t>(end_unit),
+        bioseq::storage::as_lazy_sequence_view(sequence),
+        collect_begin,
+        collect_end,
         window_size,
         kmer_size,
         0u,
@@ -9555,9 +9632,9 @@ template <class Sequence>
     bioseq::indexing::sketch_collector collector;
     const auto proof = bioseq::indexing::collect_exact_simd_index_range_or_throw(
         collector,
-        sequence,
+        bioseq::storage::as_lazy_sequence_view(sequence),
         0u,
-        static_cast<std::size_t>(sequence.size()),
+        sequence.bp_size(),
         window_size,
         kmer_size,
         0u,
@@ -11662,6 +11739,7 @@ int main(int argc, char** argv) {
             routing_est, routing_inp, routing_run, routing_evl, routing_cln),
         bioseq::bench_framework::create_benchmark<SortScanInput, SortScanOutput>(
             "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
-            "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln));
+            "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln),
+        bioseq::bench::make_sql_codegen_guardrail_benchmark());
 }
 #endif

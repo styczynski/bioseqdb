@@ -66,6 +66,7 @@ import bioseq.sequences.kmers.mm_sketch_baseline;
 import bioseq.parallelism.memory_admission;
 import bioseq.storage.lazy;
 import bioseq.storage.scanner;
+import bioseq.storage.size;
 
 using namespace seq::literals;
 
@@ -593,23 +594,40 @@ baseline_dna5_ordered_oracle(
     return result;
 }
 
-template<class Sequence>
-[[nodiscard]] static continuation_result run_exact_driver(
-    Sequence& source,
+template<class Alphabet>
+[[nodiscard]] static continuation_result run_exact_driver_view(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> source,
     std::size_t w,
     std::size_t k)
 {
+    ASSERT(source.bp_size()
+            <= static_cast<bioseq::storage::sequence_size_t>(
+                (std::numeric_limits<std::size_t>::max)()),
+        "ExactSimd test source must fit size_t coordinates");
+    const auto total_bp = static_cast<std::size_t>(source.bp_size());
     sketch_collector collector;
-    const auto exact =
-        collect_minimizers_two_stack_nthash_exact_range_checked<
+    TwoStackFinalizeResult exact{};
+    if (source.try_resident_packed(0u, source.bp_size(), 4u).has_value()) {
+        exact = collect_minimizers_two_stack_nthash_exact_range_checked<
             0, 0, MinimapSketchData>(
-                collector,
-                source,
-                0,
-                static_cast<std::size_t>(source.size()),
-                w,
-                k,
-                0);
+                collector, source, 0u, total_bp, w, k, 0u);
+    } else {
+        const std::uint64_t admitted_bytes =
+            bioseq::storage::packed_region_admission_bytes<Alphabet>(
+                source.bp_size(), 4u);
+        auto permit =
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .try_reserve(admitted_bytes);
+        ASSERT(permit.has_value(),
+            "ExactSimd test canonical-u32 materialization must be admitted",
+            admitted_bytes);
+        auto canonical_owner = bioseq::storage::materialize_packed_region(
+            source, 0u, source.bp_size(), 4u, std::move(*permit));
+        const auto canonical_view = canonical_owner.view();
+        exact = collect_minimizers_two_stack_nthash_exact_range_checked<
+            0, 0, MinimapSketchData>(
+                collector, canonical_view, 0u, total_bp, w, k, 0u);
+    }
     ASSERT(exact.ok(),
         "valid nucleotide ExactSimd driver must succeed",
         two_stack_status_name(exact.status));
@@ -617,6 +635,26 @@ template<class Sequence>
         .records = exact_records(collector),
         .proof = exact.proof,
     };
+}
+
+template<class Sequence>
+[[nodiscard]] static continuation_result run_exact_driver(
+    Sequence& source,
+    std::size_t w,
+    std::size_t k)
+{
+    if constexpr (requires {
+            bioseq::storage::as_lazy_sequence_view(source);
+        }) {
+        const auto source_view =
+            bioseq::storage::as_lazy_sequence_view(source);
+        return run_exact_driver_view(source_view, w, k);
+    } else {
+        auto source_owner = bioseq::storage::make_lazy_in_memory(source);
+        const auto source_view =
+            bioseq::storage::as_lazy_sequence_view(source_owner);
+        return run_exact_driver_view(source_view, w, k);
+    }
 }
 
 using xxl_fast_minimizer = MinimizerRepr<33, 15>;
@@ -629,14 +667,17 @@ using xxl_fast_range = compact_sequence_range<xxl_fast_sequence>;
     std::size_t emitted_position_base = 0)
 {
     xxl_fast_range source(data);
+    auto source_owner = bioseq::storage::make_lazy_in_memory(source);
+    const auto source_view =
+        bioseq::storage::as_lazy_sequence_view(source_owner);
     sketch_collector_t<xxl_fast_minimizer> collector;
     const auto exact =
         collect_minimizers_two_stack_nthash_exact_range_checked<
             10, 15, xxl_fast_minimizer>(
                 collector,
-                source,
-                0,
-                static_cast<std::size_t>(source.size()),
+                source_view,
+                0u,
+                static_cast<std::size_t>(source_view.bp_size()),
                 10,
                 15,
                 emitted_position_base);
@@ -794,18 +835,57 @@ static void assert_exact_driver_storage_width(
     range_type source(data);
     ASSERT(hi_unit <= static_cast<std::size_t>(source.size()),
         fmt::format("{}: test range must fit packed source", fixture));
+    constexpr std::size_t letters_per_unit =
+        range_type::traits::letters_per_unit;
+    const std::size_t lo_bp = lo_unit * letters_per_unit;
+    const std::size_t hi_bp = std::min(
+        hi_unit * letters_per_unit,
+        static_cast<std::size_t>(source.bp_size()));
+
+    auto source_owner = bioseq::storage::make_lazy_in_memory(source);
+    const auto source_view =
+        bioseq::storage::as_lazy_sequence_view(source_owner);
 
     sketch_collector exact_collector;
-    const auto exact =
-        collect_minimizers_two_stack_nthash_exact_range_checked<
+    TwoStackFinalizeResult exact{};
+    if (source_view.try_resident_packed(lo_bp, hi_bp, 4u).has_value()) {
+        exact = collect_minimizers_two_stack_nthash_exact_range_checked<
             0, 0, MinimapSketchData>(
                 exact_collector,
-                source,
-                lo_unit,
-                hi_unit,
+                source_view,
+                lo_bp,
+                hi_bp,
                 5,
                 7,
-                0);
+                0u);
+    } else {
+        const std::uint64_t admitted_bytes =
+            bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+                source_view.bp_size(), 4u);
+        auto permit =
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .try_reserve(admitted_bytes);
+        ASSERT(permit.has_value(),
+            fmt::format("{}: canonical-u32 materialization must be admitted",
+                fixture),
+            admitted_bytes);
+        auto canonical_owner = bioseq::storage::materialize_packed_region(
+            source_view,
+            0u,
+            source_view.bp_size(),
+            4u,
+            std::move(*permit));
+        const auto canonical_view = canonical_owner.view();
+        exact = collect_minimizers_two_stack_nthash_exact_range_checked<
+            0, 0, MinimapSketchData>(
+                exact_collector,
+                canonical_view,
+                lo_bp,
+                hi_bp,
+                5,
+                7,
+                0u);
+    }
     ASSERT(exact.ok(),
         fmt::format("{}: ExactSimd checked driver must accept storage width",
             fixture),
@@ -2341,9 +2421,10 @@ TEST_CASE("ExactSimd checked driver — fragmented scanner range parity and tail
     constexpr std::size_t runtime_k = 7;
     constexpr std::size_t lo_unit = 1;
     const std::size_t hi_unit = static_cast<std::size_t>(resident.size());
-    const std::size_t expected_bp =
-        static_cast<std::size_t>(resident.bp_size())
-        - lo_unit * range_type::traits::letters_per_unit;
+    const std::size_t lo_bp =
+        lo_unit * range_type::traits::letters_per_unit;
+    const std::size_t hi_bp = static_cast<std::size_t>(resident.bp_size());
+    const std::size_t expected_bp = hi_bp - lo_bp;
     const std::size_t expected_candidates = expected_bp - (runtime_k - 1);
     const std::size_t lanes = hn::Lanes(hn::ScalableTag<std::uint64_t>{});
     const std::size_t expected_masked_tail =
@@ -2353,16 +2434,29 @@ TEST_CASE("ExactSimd checked driver — fragmented scanner range parity and tail
         expected_bp, expected_candidates, lanes);
 
     sketch_collector exact_collector;
+    const auto fragmented_view =
+        bioseq::storage::as_lazy_sequence_view(fragmented);
+    const std::uint64_t admitted_bytes =
+        bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+            expected_bp, 4u);
+    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+        .try_reserve(admitted_bytes);
+    ASSERT(permit.has_value(),
+        "fragmented bounded canonical-u32 materialization must be admitted",
+        admitted_bytes);
+    auto canonical_owner = bioseq::storage::materialize_packed_region(
+        fragmented_view, lo_bp, hi_bp, 4u, std::move(*permit));
+    const auto canonical_view = canonical_owner.view();
     const auto exact =
         collect_minimizers_two_stack_nthash_exact_range_checked<
             0, 0, MinimapSketchData>(
                 exact_collector,
-                fragmented,
-                lo_unit,
-                hi_unit,
+                canonical_view,
+                0u,
+                expected_bp,
                 5,
                 runtime_k,
-                0);
+                0u);
     ASSERT(exact.ok(),
         "fragmented checked driver must accept a bounded multi-fragment range",
         two_stack_status_name(exact.status));
@@ -2401,17 +2495,20 @@ TEST_CASE("ExactSimd checked driver — two-word representation fails before cor
 
     auto data = continuation_fixture(96);
     continuation_range source(data);
+    auto source_owner = bioseq::storage::make_lazy_in_memory(source);
+    const auto source_view =
+        bioseq::storage::as_lazy_sequence_view(source_owner);
     unreachable_collector collector;
     const auto rejected =
         collect_minimizers_two_stack_nthash_exact_range_checked<
             0, 0, unsupported_repr>(
                 collector,
-                source,
-                0,
-                static_cast<std::size_t>(source.size()),
+                source_view,
+                0u,
+                static_cast<std::size_t>(source_view.bp_size()),
                 10,
                 15,
-                0);
+                0u);
     ASSERT(rejected.status
             == TwoStackContinuationStatus::unsupported_representation,
         "two-word minimizer representation must fail closed");
@@ -2427,12 +2524,12 @@ TEST_CASE("ExactSimd checked driver — two-word representation fails before cor
         (void)collect_minimizers_two_stack_nthash_exact_range_or_throw<
             0, 0, unsupported_repr>(
                 collector,
-                source,
-                0,
-                static_cast<std::size_t>(source.size()),
+                source_view,
+                0u,
+                static_cast<std::size_t>(source_view.bp_size()),
                 10,
                 15,
-                0,
+                0u,
                 "unsupported representation test");
     } catch (const ExactSimdRuntimeError& err) {
         threw = err.status()
@@ -2452,17 +2549,20 @@ TEST_CASE("ExactSimd checked driver — unsupported shapes fail without scalar f
         amino_data[i].assign_rank(static_cast<std::uint8_t>(i % 27));
     }
     amino_range amino_source(amino_data);
+    auto amino_owner = bioseq::storage::make_lazy_in_memory(amino_source);
+    const auto amino_view =
+        bioseq::storage::as_lazy_sequence_view(amino_owner);
     sketch_collector amino_collector;
     const auto unsupported_alphabet =
         collect_minimizers_two_stack_nthash_exact_range_checked<
             0, 0, MinimapSketchData>(
                 amino_collector,
-                amino_source,
-                0,
-                static_cast<std::size_t>(amino_source.size()),
+                amino_view,
+                0u,
+                static_cast<std::size_t>(amino_view.bp_size()),
                 5,
                 7,
-                0);
+                0u);
     ASSERT(unsupported_alphabet.status
             == TwoStackContinuationStatus::unsupported_alphabet,
         "non-nucleotide alphabets must fail closed instead of selecting scalar sketching");
@@ -2475,17 +2575,20 @@ TEST_CASE("ExactSimd checked driver — unsupported shapes fail without scalar f
 
     auto dna4_data = continuation_fixture(96);
     continuation_range dna4_source(dna4_data);
+    auto dna4_owner = bioseq::storage::make_lazy_in_memory(dna4_source);
+    const auto dna4_view =
+        bioseq::storage::as_lazy_sequence_view(dna4_owner);
     sketch_collector invalid_shape_collector;
     const auto invalid_w =
         collect_minimizers_two_stack_nthash_exact_range_checked<
             0, 0, MinimapSketchData>(
                 invalid_shape_collector,
-                dna4_source,
-                0,
-                static_cast<std::size_t>(dna4_source.size()),
+                dna4_view,
+                0u,
+                static_cast<std::size_t>(dna4_view.bp_size()),
                 0,
                 7,
-                0);
+                0u);
     ASSERT(invalid_w.status
             == TwoStackContinuationStatus::invalid_window_size,
         "W=0 must fail closed");
@@ -2495,12 +2598,12 @@ TEST_CASE("ExactSimd checked driver — unsupported shapes fail without scalar f
         (void)collect_minimizers_two_stack_nthash_exact_range_or_throw<
             0, 0, MinimapSketchData>(
                 invalid_shape_collector,
-                dna4_source,
-                0,
-                static_cast<std::size_t>(dna4_source.size()),
+                dna4_view,
+                0u,
+                static_cast<std::size_t>(dna4_view.bp_size()),
                 5,
                 two_stack_exact_max_kmer + 1,
-                0,
+                0u,
                 "ExactSimd fail-closed test");
     } catch (const ExactSimdRuntimeError& err) {
         threw = err.status()

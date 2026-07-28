@@ -57,7 +57,7 @@ void AbortCurrentTransaction(void);
 
 export module bioseq.scheduler.supervisor_pg;
 import bioseq.common.mlogging;
-import bioseq.config;                  // DOC0322 §9.3 — bioseq_scheduler_*, bioseq_index_async_persist, bioseq_index_memory_cap_mb GUCs
+import bioseq.config;                  // DOC0322 §9.3 — bioseq_scheduler_*, bioseq::settings::index_async_persist, bioseq::settings::index_memory_cap_mb GUCs
 import bioseq.instr;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -71,6 +71,7 @@ import bioseq.indexing.type;
 import bioseq.indexing.minimizer_sequence;   // DOC0345 Patch K — re-exports MinimizerSketchBackend + minimizer_sketch_backend_name (no HWY_NAMESPACE macro needed here)
 import bioseq.storage.manager;
 import bioseq.storage.lazy;
+import bioseq.storage.scanner;
 import bioseq.storage.scanner_pg;
 import bioseq.types.pg_compact_sequence;
 import bioseq.sequences;
@@ -456,7 +457,7 @@ void supervisor_sighup(SIGNAL_ARGS) {
     unsigned concurrency = configured == 0
         ? bioseq::parallelism::default_concurrency()
         : configured;
-    if (IsParallelWorker() && !bioseq_scheduler_allow_pg_parallel_composition) {
+    if (IsParallelWorker() && !bioseq::scheduler::settings::allow_pg_parallel_composition) {
         concurrency = 1;
     }
     return std::max(1u, concurrency);
@@ -523,6 +524,14 @@ enum class AsyncMpsWorkerPgFailure : std::uint32_t {
     materialize_scanner_read = 10,
 };
 
+inline constexpr std::uint32_t kAsyncMpsWorkerInjectedFailureFlag =
+    std::uint32_t{1} << 31u;
+
+#ifdef BIOSEQ_TEST_INDEXES
+inline thread_local AsyncMpsWorkerPgFailure
+    g_async_mps_worker_injected_failure = AsyncMpsWorkerPgFailure::none;
+#endif
+
 struct AsyncMpsWorkerBoundaryStatsSnapshot {
     std::uint64_t relation_leaf_calls = 0;
     std::uint64_t spi_leaf_calls = 0;
@@ -536,6 +545,7 @@ struct AsyncMpsWorkerBoundaryStatsSnapshot {
     std::uint64_t materialize_admission_mismatches = 0;
     AsyncMpsWorkerPgFailure last_failure_point =
         AsyncMpsWorkerPgFailure::none;
+    bool last_failure_injected = false;
     AsyncMpsWorkerPgFailure armed_failure_point =
         AsyncMpsWorkerPgFailure::none;
 };
@@ -560,37 +570,55 @@ enum class AsyncMpsStagePgFailure : std::uint8_t {
     dsm_detach = 4,
 };
 
+#ifdef BIOSEQ_TEST_INDEXES
 inline thread_local AsyncMpsStagePgFailure
     g_async_mps_stage_pg_failure = AsyncMpsStagePgFailure::none;
 inline thread_local std::uint64_t
     g_async_mps_stage_injected_failures = 0;
+#endif
 
 [[nodiscard]] bool arm_async_mps_stage_pg_failure(
         AsyncMpsStagePgFailure point) noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     if (point == AsyncMpsStagePgFailure::none
         || point > AsyncMpsStagePgFailure::dsm_detach) {
         return false;
     }
     g_async_mps_stage_pg_failure = point;
     return true;
+#else
+    (void)point;
+    return false;
+#endif
 }
 
 void disarm_async_mps_stage_pg_failure() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     g_async_mps_stage_pg_failure = AsyncMpsStagePgFailure::none;
+#endif
 }
 
 [[nodiscard]] AsyncMpsStagePgFailure
 async_mps_stage_pg_failure_armed() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     return g_async_mps_stage_pg_failure;
+#else
+    return AsyncMpsStagePgFailure::none;
+#endif
 }
 
 [[nodiscard]] std::uint64_t
 async_mps_stage_injected_failure_count() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     return g_async_mps_stage_injected_failures;
+#else
+    return 0u;
+#endif
 }
 
 void inject_async_mps_stage_pg_failure_leaf(
         AsyncMpsStagePgFailure point) {
+#ifdef BIOSEQ_TEST_INDEXES
     if (g_async_mps_stage_pg_failure != point) {
         return;
     }
@@ -600,6 +628,9 @@ void inject_async_mps_stage_pg_failure_leaf(
         (errcode(ERRCODE_INTERNAL_ERROR),
          errmsg("injected asynchronous MPS staging PostgreSQL leaf failure"),
          errdetail("failure_point=%u", static_cast<unsigned>(point))));
+#else
+    (void)point;
+#endif
 }
 
 template <class F>
@@ -971,7 +1002,7 @@ void ensure_persist_xact_callback_registered() {
 #if 0  // Deleted with the identity-queue replacement; retained only for archaeology.
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    if (!bioseq_index_async_persist || chunks.empty() || target.index_name.empty()) {
+    if (!bioseq::settings::index_async_persist || chunks.empty() || target.index_name.empty()) {
         return false;
     }
     if (!async_persist_queue_available()) {
@@ -1078,7 +1109,7 @@ void ensure_persist_xact_callback_registered() {
 #if 0  // Deleted with the identity-queue replacement; retained only for archaeology.
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    if (!bioseq_index_async_persist
+    if (!bioseq::settings::index_async_persist
         || target.index_name.empty()
         || temp_file_path.empty()
         || chunk_count == 0) {
@@ -1198,7 +1229,7 @@ void ensure_persist_xact_callback_registered() {
     }
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    if (!bioseq_index_async_persist
+    if (!bioseq::settings::index_async_persist
         || !OidIsValid(target.db_oid)
         || !OidIsValid(target.user_relid)
         || !OidIsValid(target.main_relfilenode)
@@ -1463,7 +1494,7 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
     inputs.variants.max_workgroup_invocations = 256u;
     inputs.variants.max_shared_memory_bytes = 32u * 1024u;
     inputs.variants.default_window_size =
-        static_cast<std::uint32_t>(std::max(1, bioseq_aligner_window_size));
+        static_cast<std::uint32_t>(std::max(1, bioseq::aligner::settings::window_size));
     inputs.msl = bioseq::gpu::vulkan::MslVersion{3u, 2u, 0u};
     inputs.moltenvk_build = "conservative-no-device-probe";
     inputs.device_uuid = "conservative-no-device-probe";
@@ -1579,9 +1610,9 @@ install_verified_runtime_archive_configuration(
     bioseq::parallelism::GlobalPool::instance().configure(
         bioseq::parallelism::PoolConfig{
             .max_concurrency = effective_max_concurrency(
-                static_cast<unsigned>(std::max(0, bioseq_scheduler_max_concurrency))),
+                static_cast<unsigned>(std::max(0, bioseq::scheduler::settings::max_concurrency))),
             .mode = bioseq::parallelism::mode_from_int(
-                bioseq_scheduler_pipeline_concurrency_mode),
+                static_cast<int>(bioseq::scheduler::settings::pipeline_concurrency_mode.value())),
         });
 
     constexpr std::uint64_t kPeakCompileBytes = 256ull << 20;
@@ -2423,9 +2454,9 @@ void backend_sync() {
         : 0;
     const unsigned configured = g_shared != nullptr
         ? pg_atomic_read_u32(&g_shared->cfg_max_concurrency)
-        : static_cast<unsigned>(std::max(0, bioseq_scheduler_max_concurrency));
+        : static_cast<unsigned>(std::max(0, bioseq::scheduler::settings::max_concurrency));
     const auto mode = bioseq::parallelism::mode_from_int(
-        bioseq_scheduler_pipeline_concurrency_mode);
+        static_cast<int>(bioseq::scheduler::settings::pipeline_concurrency_mode.value()));
 
     if (!pool.active() || pool.adopted_generation() != generation) {
         pool.configure(bioseq::parallelism::PoolConfig{
@@ -2437,8 +2468,8 @@ void backend_sync() {
         pool.set_mode(mode);
     }
 
-    const std::uint64_t index_cap = bioseq_index_memory_cap_mb > 0
-        ? (static_cast<std::uint64_t>(bioseq_index_memory_cap_mb) << 20)
+    const std::uint64_t index_cap = bioseq::settings::index_memory_cap_mb > 0
+        ? (static_cast<std::uint64_t>(bioseq::settings::index_memory_cap_mb) << 20)
         : 0;
     bioseq::parallelism::MemoryAdmissionController::instance()
         .set_index_memory_cap_bytes(index_cap);
@@ -2503,16 +2534,16 @@ void restart_cluster() {
     if (g_shared != nullptr) {
         pg_atomic_write_u32(
             &g_shared->cfg_max_concurrency,
-            static_cast<std::uint32_t>(std::max(0, bioseq_scheduler_max_concurrency)));
+            static_cast<std::uint32_t>(std::max(0, bioseq::scheduler::settings::max_concurrency)));
         pg_atomic_fetch_add_u32(&g_shared->cfg_generation, 1);
         reset_shared_stats(g_shared->stats, now);
     }
     auto& pool = bioseq::parallelism::GlobalPool::instance();
     pool.restart(bioseq::parallelism::PoolConfig{
         .max_concurrency = effective_max_concurrency(
-            static_cast<unsigned>(std::max(0, bioseq_scheduler_max_concurrency))),
+            static_cast<unsigned>(std::max(0, bioseq::scheduler::settings::max_concurrency))),
         .mode = bioseq::parallelism::mode_from_int(
-            bioseq_scheduler_pipeline_concurrency_mode),
+            static_cast<int>(bioseq::scheduler::settings::pipeline_concurrency_mode.value())),
     });
     pool.reset_stats(now);
 }
@@ -2647,8 +2678,12 @@ async_mps_worker_boundary_stats_snapshot() noexcept {
         pg_atomic_read_u64(&src.materialize_admission_restored);
     out.materialize_admission_mismatches =
         pg_atomic_read_u64(&src.materialize_admission_mismatches);
+    const std::uint32_t last_failure =
+        pg_atomic_read_u32(&src.last_failure_point);
     out.last_failure_point = static_cast<AsyncMpsWorkerPgFailure>(
-        pg_atomic_read_u32(&src.last_failure_point));
+        last_failure & ~kAsyncMpsWorkerInjectedFailureFlag);
+    out.last_failure_injected =
+        (last_failure & kAsyncMpsWorkerInjectedFailureFlag) != 0u;
     out.armed_failure_point = static_cast<AsyncMpsWorkerPgFailure>(
         pg_atomic_read_u32(&src.armed_failure_point));
     return out;
@@ -2656,6 +2691,7 @@ async_mps_worker_boundary_stats_snapshot() noexcept {
 
 [[nodiscard]] bool arm_async_mps_worker_pg_failure(
         AsyncMpsWorkerPgFailure point) noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr
         || point == AsyncMpsWorkerPgFailure::none
         || point > AsyncMpsWorkerPgFailure::materialize_scanner_read) {
@@ -2665,15 +2701,21 @@ async_mps_worker_boundary_stats_snapshot() noexcept {
         &g_shared->async_mps_worker_boundary_stats.armed_failure_point,
         static_cast<std::uint32_t>(point));
     return true;
+#else
+    (void)point;
+    return false;
+#endif
 }
 
 void disarm_async_mps_worker_pg_failure() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr) {
         return;
     }
     pg_atomic_write_u32(
         &g_shared->async_mps_worker_boundary_stats.armed_failure_point,
         static_cast<std::uint32_t>(AsyncMpsWorkerPgFailure::none));
+#endif
 }
 
 [[nodiscard]] const char* async_mps_worker_failure_point_name(
@@ -2745,14 +2787,26 @@ void record_async_mps_worker_pg_leaf_failure(
     }
     PgAsyncMpsWorkerBoundaryStats& stats =
         g_shared->async_mps_worker_boundary_stats;
+    bool injected = false;
+#ifdef BIOSEQ_TEST_INDEXES
+    if (g_async_mps_worker_injected_failure == point) {
+        injected = true;
+        g_async_mps_worker_injected_failure =
+            AsyncMpsWorkerPgFailure::none;
+    }
+#endif
     pg_atomic_fetch_add_u64(&stats.pg_leaf_failures, 1);
+    const std::uint32_t encoded_failure =
+        static_cast<std::uint32_t>(point) |
+        (injected ? kAsyncMpsWorkerInjectedFailureFlag : 0u);
     pg_atomic_write_u32(
-        &stats.last_failure_point, static_cast<std::uint32_t>(point));
+        &stats.last_failure_point, encoded_failure);
 }
 
 /* Must be called from one invoke_pg_as_cpp callback, never from C++ scope. */
 void inject_async_mps_worker_pg_failure_leaf(
         AsyncMpsWorkerPgFailure point) {
+#ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr) {
         return;
     }
@@ -2766,13 +2820,15 @@ void inject_async_mps_worker_pg_failure_leaf(
         return;
     }
     pg_atomic_fetch_add_u64(&stats.injected_pg_leaf_failures, 1);
-    pg_atomic_write_u32(
-        &stats.last_failure_point, static_cast<std::uint32_t>(point));
+    g_async_mps_worker_injected_failure = point;
     ereport(ERROR,
         (errcode(ERRCODE_INTERNAL_ERROR),
          errmsg("injected asynchronous MPS worker PostgreSQL leaf failure"),
          errdetail("failure_point=%s",
             async_mps_worker_failure_point_name(point))));
+#else
+    (void)point;
+#endif
 }
 
 template <class F>
@@ -3071,167 +3127,95 @@ void finish_persist_claim(const PersistClaim& claim) noexcept {
     return spi.enabled && spi.update_on_insert;
 }
 
-template <class R>
+template <sequence_alphabet Alphabet>
 struct AsyncMpsResidentTarget {
-    using traits = typename compact_sequence_range<R>::traits;
-    using storage_unit = typename traits::storage_unit;
-    using resident_config = sequence_custom_alphabet<
-        typename traits::alphabet_type,
-        storage_unit,
-        traits::bits_per_char>;
-    using resident_range = compact_sequence_range<resident_config>;
-
-    bioseq::parallelism::MemoryPermit permit;
-    resident_range range;
+    bioseq::storage::admitted_packed_region<Alphabet> owner;
     std::uint64_t packed_bytes = 0;
 };
 
-template <class R, class Scanner>
-[[nodiscard]] std::optional<AsyncMpsResidentTarget<R>>
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<AsyncMpsResidentTarget<Alphabet>>
 try_materialize_async_mps_worker_target(
-        const bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+        std::uint8_t requested_width,
         std::uint64_t sequence_rowno,
         std::string_view index_name) {
-    if constexpr (!Scanner::supports_fragments()) {
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    if (!bioseq::parallelism::task_parallel(pool.mode())
+        || pool.max_concurrency() <= 1) {
         return std::nullopt;
-    } else {
-        auto& pool = bioseq::parallelism::GlobalPool::instance();
-        if (!bioseq::parallelism::task_parallel(pool.mode())
-            || pool.max_concurrency() <= 1) {
-            return std::nullopt;
-        }
-
-        using resident_t = AsyncMpsResidentTarget<R>;
-        using storage_unit = typename resident_t::storage_unit;
-        static_assert(std::is_trivially_destructible_v<
-            std::span<const storage_unit>>);
-        const std::uint64_t total_units64 =
-            static_cast<std::uint64_t>(seq.size());
-        if (total_units64
-            > static_cast<std::uint64_t>(
-                (std::numeric_limits<std::size_t>::max)())) {
-            const std::string owned_index_name{index_name};
-            const char* const index_name_cstr = owned_index_name.c_str();
-            invoke_async_mps_worker_pg_leaf(
-                AsyncMpsWorkerPgFailure::materialize_error_log,
-                [sequence_rowno, index_name_cstr, total_units64] {
-                    inject_async_mps_worker_pg_failure_leaf(
-                        AsyncMpsWorkerPgFailure::materialize_error_log);
-                    ereport(ERROR,
-                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                         errmsg("asynchronous MPS worker target is too large to materialize"),
-                         errdetail("row=%llu index=%s packed_units=%llu",
-                            static_cast<unsigned long long>(sequence_rowno),
-                            index_name_cstr,
-                            static_cast<unsigned long long>(total_units64))));
-                });
-            pg_unreachable();
-        }
-        const std::size_t total_units =
-            static_cast<std::size_t>(total_units64);
+    }
+    const auto access = bioseq::storage::plan_sequence_access(
+        seq,
+        bioseq::storage::sequence_access_requirement::contiguous_resident,
+        0u,
+        seq.bp_size(),
+        requested_width);
+    if (access.route
+        == bioseq::storage::sequence_access_route::borrow_resident) {
+        return std::nullopt;
+    }
+    constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
+    const std::uint64_t reserve_bytes = access.admission_bytes
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - context_reserve_bytes
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : access.admission_bytes + context_reserve_bytes;
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t reserved_before = admission.reserved_bytes();
+    auto permit = admission.try_reserve(reserve_bytes);
+    if (!permit) {
+        bioseq_log<DBG>(
+            "[bioseq] index: async mps worker row={} index={} target_bp={} "
+            "admitted_bytes={} not admitted for resident materialization; "
+            "using rank stream",
+            static_cast<unsigned long long>(sequence_rowno), index_name,
+            static_cast<unsigned long long>(seq.bp_size()),
+            static_cast<unsigned long long>(access.admission_bytes));
+        return std::nullopt;
+    }
+    record_async_mps_materialize_admission();
+    try {
+        invoke_async_mps_worker_pg_leaf(
+            AsyncMpsWorkerPgFailure::materialize_error_log,
+            [] {
+                inject_async_mps_worker_pg_failure_leaf(
+                    AsyncMpsWorkerPgFailure::materialize_error_log);
+            });
+        invoke_async_mps_worker_pg_leaf(
+            AsyncMpsWorkerPgFailure::materialize_interrupt,
+            [] {
+                inject_async_mps_worker_pg_failure_leaf(
+                    AsyncMpsWorkerPgFailure::materialize_interrupt);
+                CHECK_FOR_INTERRUPTS();
+            });
+        invoke_async_mps_worker_pg_leaf(
+            AsyncMpsWorkerPgFailure::materialize_scanner_read,
+            [] {
+                inject_async_mps_worker_pg_failure_leaf(
+                    AsyncMpsWorkerPgFailure::materialize_scanner_read);
+            });
+        auto owner = bioseq::storage::materialize_packed_region(
+            seq, 0u, seq.bp_size(), requested_width, std::move(*permit));
+        const auto& descriptor = owner.descriptor();
         const std::uint64_t packed_bytes =
-            bioseq::parallelism::saturating_mul(
-                total_units64,
-                static_cast<std::uint64_t>(sizeof(storage_unit)));
-        constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
-        const std::uint64_t reserve_bytes =
-            packed_bytes
-                    > (std::numeric_limits<std::uint64_t>::max)()
-                        - context_reserve_bytes
-                ? (std::numeric_limits<std::uint64_t>::max)()
-                : packed_bytes + context_reserve_bytes;
-
-        auto& admission =
-            bioseq::parallelism::MemoryAdmissionController::instance();
-        const std::uint64_t reserved_before = admission.reserved_bytes();
-        auto permit = admission.try_reserve(reserve_bytes);
-        if (!permit) {
-            bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} target_bp={} "
-                    "fragments={} packed_bytes={} not admitted for resident "
-                    "materialization; using scanner_pg",
-                    static_cast<unsigned long long>(sequence_rowno),
-                    index_name,
-                    static_cast<unsigned long long>(seq.bp_size()),
-                    seq.number_of_fragments(),
-                    static_cast<unsigned long long>(packed_bytes));
-            return std::nullopt;
-        }
-        record_async_mps_materialize_admission();
-
-        /*
-         * The vector lives only inside this try block.  Therefore it is
-         * destroyed before the handler releases the permit and records the
-         * post-unwind admission balance.  Every PostgreSQL-capable operation
-         * in the loop is a leaf that first converts ERROR to a C++ exception.
-         */
-        try {
-			typename resident_t::resident_range::base_container packed(
-				total_units);
-			// Testable normal-size entry to the same error-diagnostic leaf used
-			// by the oversize guard. When armed, this proves a PostgreSQL ERROR
-			// unwinds through both the live packed vector and admission permit
-			// before any fallback.
-			invoke_async_mps_worker_pg_leaf(
-				AsyncMpsWorkerPgFailure::materialize_error_log,
-				[] {
-					inject_async_mps_worker_pg_failure_leaf(
-						AsyncMpsWorkerPgFailure::materialize_error_log);
-				});
-            const std::size_t fragment_units = Scanner::fragment_storage_units;
-            auto* const scanner = std::addressof(seq.scanner());
-            for (std::size_t fragment_no = 0;
-                 fragment_no < seq.number_of_fragments();
-                 ++fragment_no) {
-                if ((fragment_no & std::size_t{0x3ff}) == 0) {
-                    invoke_async_mps_worker_pg_leaf(
-                        AsyncMpsWorkerPgFailure::materialize_interrupt,
-                        [] {
-                            inject_async_mps_worker_pg_failure_leaf(
-                                AsyncMpsWorkerPgFailure::materialize_interrupt);
-                            CHECK_FOR_INTERRUPTS();
-                        });
-                }
-                const std::span<const storage_unit> fragment =
-                    invoke_async_mps_worker_pg_leaf(
-                        AsyncMpsWorkerPgFailure::materialize_scanner_read,
-                        [scanner, fragment_no] {
-                            inject_async_mps_worker_pg_failure_leaf(
-                                AsyncMpsWorkerPgFailure::materialize_scanner_read);
-                            return scanner->read_fragment(fragment_no);
-                        });
-                const std::size_t dst_offset = fragment_no * fragment_units;
-                if (dst_offset >= packed.size()) {
-                    scanner->release_fragment(fragment_no);
-                    break;
-                }
-                const std::size_t copy_units =
-                    std::min(fragment.size(), packed.size() - dst_offset);
-                std::copy_n(
-                    fragment.data(), copy_units, packed.data() + dst_offset);
-                scanner->release_fragment(fragment_no);
-            }
-
-            bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} target_bp={} "
-                    "fragments={} packed_bytes={} materialized resident target",
-                    static_cast<unsigned long long>(sequence_rowno),
-                    index_name,
-                    static_cast<unsigned long long>(seq.bp_size()),
-                    seq.number_of_fragments(),
-                    static_cast<unsigned long long>(packed_bytes));
-
-            return resident_t{
-                std::move(*permit),
-                resident_t::resident_range::from_packed(
-                    std::move(packed), seq.padding()),
-                packed_bytes};
-        } catch (...) {
-            /* `packed` is already gone; now return its admission exactly. */
-            permit->release();
-            const std::uint64_t reserved_after = admission.reserved_bytes();
-            record_async_mps_materialize_failure_unwind(
-                reserved_after == reserved_before);
-            throw;
-        }
+            static_cast<std::uint64_t>(descriptor.unit_count)
+            * descriptor.storage_unit_byte_width;
+        bioseq_log<DBG>(
+            "[bioseq] index: async mps worker row={} index={} target_bp={} "
+            "packed_bytes={} materialized resident target",
+            static_cast<unsigned long long>(sequence_rowno), index_name,
+            static_cast<unsigned long long>(seq.bp_size()),
+            static_cast<unsigned long long>(packed_bytes));
+        return AsyncMpsResidentTarget<Alphabet>{
+            std::move(owner), packed_bytes};
+    } catch (...) {
+        permit->release();
+        const std::uint64_t reserved_after = admission.reserved_bytes();
+        record_async_mps_materialize_failure_unwind(
+            reserved_after == reserved_before);
+        throw;
     }
 }
 
@@ -3278,8 +3262,8 @@ void process_mps_build_claim_cpp(
     MemoryContext work = nullptr;
     bioseq::storage::seq_caches* caches = nullptr;
 
-    const auto previous_sort_impl =
-        bioseq::indexing::detail::pair_run_sort_impl();
+    const auto previous_sort_override =
+        bioseq::indexing::detail::current_pair_run_sort_override();
     bool sort_impl_changed = false;
     const auto worker_mode =
         bioseq::parallelism::mode_from_int(meta->pipeline_mode);
@@ -3367,7 +3351,7 @@ void process_mps_build_claim_cpp(
                      errdetail("legacy MPS payloads do not record a minimizer-scheme identity; the queued build is rejected without fallback")));
             });
         }
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
             meta->alphabet_code,
             meta->storage_unit_byte_width,
             [&]<class S>() {
@@ -3383,33 +3367,33 @@ void process_mps_build_claim_cpp(
                     caches,
                     work);
                 try {
+                    const bioseq::storage::postgres_lazy_sequence_binding<S>
+                        source_binding{
+                            target.db_oid, target.tablespace_oid,
+                            target.main_relfilenode, target.column_attno,
+                            meta->locator, meta->last_fragment_padding,
+                            registered_snapshot, caches, work};
                     bioseq::storage::with_lazy_postgres<S>(
-                        target.db_oid,
-                        target.tablespace_oid,
-                        target.main_relfilenode,
-                        target.column_attno,
-                        meta->locator,
-                        meta->last_fragment_padding,
-                        registered_snapshot,
-                        caches,
-                        work,
-                        [&](auto& lazy) {
+                        source_binding,
+                        [&lazy_worker_shareable, meta, &target, &store,
+                         worker_backend](auto source_view) {
                             const bool pg_lazy_worker_shareable =
-                                bioseq::storage::lazy_is_worker_shareable(lazy);
+                                bioseq::storage::lazy_is_worker_shareable(
+                                    source_view);
                             lazy_worker_shareable = pg_lazy_worker_shareable;
                             if (!pg_lazy_worker_shareable) {
                                 if (auto resident =
                                         try_materialize_async_mps_worker_target(
-                                            lazy,
+                                            source_view,
+                                            meta->storage_unit_byte_width,
                                             target.sequence_rowno,
                                             meta->index_name);
                                     resident.has_value()) {
-                                    auto resident_lazy =
-                                        bioseq::storage::make_lazy_in_memory(
-                                            resident->range);
+                                    const auto resident_view =
+                                        resident->owner.view();
                                     lazy_worker_shareable =
                                         bioseq::storage::lazy_is_worker_shareable(
-                                            resident_lazy);
+                                            resident_view);
                                     bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} "
                                             "using resident target packed_bytes={} "
                                             "lazy_worker_shareable={}",
@@ -3421,7 +3405,7 @@ void process_mps_build_claim_cpp(
                                             lazy_worker_shareable);
                                     bioseq::indexing::MinimizerSequenceMergedIndex<
                                         bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
-                                            store, resident_lazy, worker_backend);
+                                            store, resident_view, worker_backend);
                                     return;
                                 }
                             }
@@ -3433,7 +3417,7 @@ void process_mps_build_claim_cpp(
                                     lazy_worker_shareable);
                             bioseq::indexing::MinimizerSequenceMergedIndex<
                                 bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
-                                    store, lazy, worker_backend);
+                                    store, source_view, worker_backend);
                         });
                     store.close_checked();
                 } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
@@ -3460,20 +3444,21 @@ void process_mps_build_claim_cpp(
         MemoryContext finished_work = std::exchange(work, nullptr);
         bioseq::pg_utils::invoke_pg_as_cpp(
             [finished_work] { MemoryContextDelete(finished_work); });
-        bioseq::indexing::detail::set_pair_run_sort_impl(previous_sort_impl);
+        bioseq::indexing::detail::restore_pair_run_sort_override(
+            previous_sort_override);
         sort_impl_changed = false;
     } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
         if (sort_impl_changed) {
-            bioseq::indexing::detail::set_pair_run_sort_impl(
-                previous_sort_impl);
+            bioseq::indexing::detail::restore_pair_run_sort_override(
+                previous_sort_override);
             sort_impl_changed = false;
         }
         abandon_pg_resources_noexcept();
         throw;
     } catch (...) {
         if (sort_impl_changed) {
-            bioseq::indexing::detail::set_pair_run_sort_impl(
-                previous_sort_impl);
+            bioseq::indexing::detail::restore_pair_run_sort_override(
+                previous_sort_override);
             sort_impl_changed = false;
         }
         abandon_pg_resources_noexcept();
@@ -3893,7 +3878,7 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
 
     pg_atomic_write_u32(
         &g_shared->cfg_max_concurrency,
-        static_cast<std::uint32_t>(std::max(0, bioseq_scheduler_max_concurrency)));
+        static_cast<std::uint32_t>(std::max(0, bioseq::scheduler::settings::max_concurrency)));
     pg_atomic_write_u32(&g_shared->state, 1);
     pg_atomic_fetch_add_u32(&g_shared->cfg_generation, 1);
     reset_shared_stats(
@@ -3916,7 +3901,7 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
             pg_atomic_write_u32(
                 &g_shared->cfg_max_concurrency,
                 static_cast<std::uint32_t>(
-                    std::max(0, bioseq_scheduler_max_concurrency)));
+                    std::max(0, bioseq::scheduler::settings::max_concurrency)));
             pg_atomic_fetch_add_u32(&g_shared->cfg_generation, 1);
         }
 

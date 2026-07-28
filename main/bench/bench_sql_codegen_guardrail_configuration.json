@@ -1,0 +1,338 @@
+{
+  "params": {
+    "qualification_reference": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Zero-valued comparison row used by blocking qualification rules."
+      }
+    },
+    "from_array_arity_2": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Generated two-argument from_array boundary with an absolute reviewed runtime threshold."
+      }
+    },
+    "from_array_arity_3": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Generated three-argument from_array boundary with an absolute reviewed runtime threshold."
+      }
+    },
+    "typed_wrapper_generated_vs_handwritten": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Generated vemptycount optional-bigint fmgr boundary measured against an implementation-equivalent retained handwritten identity boundary."
+      }
+    },
+    "mmsearch_arity_2": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Two-argument mmsearch planner/custom-scan query over a pinned one-row self-alignment fixture."
+      }
+    },
+    "mmsearch_arity_3": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Three-argument mmsearch planner/custom-scan query over a pinned one-row self-alignment fixture, including generated aligner-options decoding."
+      }
+    },
+    "row_codec_generated_vs_handwritten": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Generated 36-field scalar aligner-options codec plus the 8-field row-mask codec with a copied bytea field, measured against retained test-only handwritten deform/checksum paths."
+      }
+    }
+  },
+  "test_cases": {
+    "SQL_CODEGEN_BOUNDARY_SMALL": {
+      "concurrency": 1,
+      "data": {},
+      "description": "Fixed in-database inputs with pinned results for both from_array and mmsearch arities plus the generated-versus-handwritten row-codec comparator."
+    }
+  },
+  "bench_sql_codegen_guardrail": {
+    "tags": [
+      "e2e",
+      "sql-codegen",
+      "boundary",
+      "row-codec",
+      "qualification"
+    ],
+    "description": "DOC0388 fail-closed SQL code-generation qualification. Ordinary runs require a sealed reviewed Stage-0 baseline, or a recovered_post_cutover baseline carrying an explicit reviewer-approved spec deviation. Blocking rules consume measured generator, RSS, generated-size, affected-target compile-delta, typed-wrapper, mmsearch, and row-codec evidence; calibration reports remain visibly non-qualifying.",
+    "fast": true,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 388
+    },
+    "matrix": {
+      "for": {
+        "SQL_CODEGEN_BOUNDARY_SMALL": 15
+      },
+      "over": {
+        "qualification_reference": {},
+        "from_array_arity_2": {},
+        "from_array_arity_3": {},
+        "typed_wrapper_generated_vs_handwritten": {},
+        "mmsearch_arity_2": {},
+        "mmsearch_arity_3": {},
+        "row_codec_generated_vs_handwritten": {}
+      },
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "qualification_reference",
+          "from_array_arity_2",
+          "from_array_arity_3",
+          "typed_wrapper_generated_vs_handwritten",
+          "mmsearch_arity_2",
+          "mmsearch_arity_3",
+          "row_codec_generated_vs_handwritten"
+        ],
+        "exact_test_case_iterations": {
+          "SQL_CODEGEN_BOUNDARY_SMALL": 15
+        },
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            ["from_array_arity_2_wall_clock_measured", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_wall_clock_measured", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_wall_clock_measured", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_2_wall_clock_measured", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_wall_clock_measured", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["row_codec_wall_clock_measured", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "query_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_query_measured", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_query_measured", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_query_measured", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_2_query_measured", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_query_measured", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_query_measured", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_query_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_generated_measured", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_generated_measured", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_generated_measured", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_2_generated_measured", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_generated_measured", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_generated_measured", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "handwritten_query_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["typed_wrapper_handwritten_measured", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_handwritten_measured", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_to_handwritten_ratio": {
+          "type": "evaluation",
+          "rules": [
+            ["typed_wrapper_ratio_measured", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_ratio_measured", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "correctness_passed": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_correct", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_correct", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_correct", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_2_correct", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_correct", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_correct", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "arity": {
+          "type": "evaluation",
+          "rules": [
+            ["row_codec_arity_is_zero", {"key": "row_codec_generated_vs_handwritten"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_arity_is_one", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_2_is_two", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "typed_wrapper_generated_vs_handwritten"}],
+            ["from_array_arity_3_is_three", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "from_array_arity_2"}],
+            ["mmsearch_arity_2_matches_two", {"key": "mmsearch_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "from_array_arity_2"}],
+            ["mmsearch_arity_3_matches_three", {"key": "mmsearch_arity_3"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "from_array_arity_3"}]
+          ]
+        },
+        "generated_typed_wrapper": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_generated_wrapper", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_generated_wrapper", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["representative_generated_wrapper", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "direct_fmgr_wrapper_path": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_direct_fmgr", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_direct_fmgr", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["representative_direct_fmgr", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "planner_custom_scan_path": {
+          "type": "evaluation",
+          "rules": [
+            ["mmsearch_arity_2_custom_scan", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_custom_scan", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_row_codec_fields": {
+          "type": "evaluation",
+          "rules": [
+            ["mmsearch_arity_3_row_codec", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_comparator_fields", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "performance_gate_passed": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_p50_within_reviewed_limit", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_p50_within_reviewed_limit", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_p50_within_reviewed_limit", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_2_p50_within_reviewed_limit", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_p50_within_reviewed_limit", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["row_codec_p50_within_reviewed_limit", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "build_qualification_passed": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_build_qualified", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_build_qualified", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_build_qualified", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_2_build_qualified", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_build_qualified", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_build_qualified", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "qualification_baseline_kind": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_reviewed_provenance", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_reviewed_provenance", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_reviewed_provenance", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_2_reviewed_provenance", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_reviewed_provenance", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_reviewed_provenance", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "live_measurement_attested": {
+          "type": "evaluation",
+          "rules": [
+            ["from_array_arity_2_live_attested", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["from_array_arity_3_live_attested", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["typed_wrapper_live_attested", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_2_live_attested", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["mmsearch_arity_3_live_attested", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["row_codec_live_attested", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "run_nonce": {
+          "type": "evaluation",
+          "rules": [
+            ["mcp_run_nonce_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generator_cold_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["cold_generator_measurement_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generator_noop_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["noop_generator_measurement_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generator_peak_rss_bytes": {
+          "type": "evaluation",
+          "rules": [
+            ["generator_rss_measurement_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "compile_postgresql_bioseq_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["postgresql_bioseq_compile_measurement_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "compile_bioseq_bench_e2e_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["bioseq_bench_e2e_compile_measurement_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "compile_postgresql_bioseq_delta_percent": {
+          "type": "evaluation",
+          "rules": [
+            ["postgresql_bioseq_compile_delta_consistent", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "from_array_arity_3"}]
+          ]
+        },
+        "compile_bioseq_bench_e2e_delta_percent": {
+          "type": "evaluation",
+          "rules": [
+            ["bioseq_bench_e2e_compile_delta_consistent", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "from_array_arity_3"}]
+          ]
+        },
+        "generated_sql_bytes": {
+          "type": "evaluation",
+          "rules": [
+            ["generated_sql_bytes_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_sql_files": {
+          "type": "evaluation",
+          "rules": [
+            ["generated_sql_inventory_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_json_bytes": {
+          "type": "evaluation",
+          "rules": [
+            ["generated_json_bytes_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_json_files": {
+          "type": "evaluation",
+          "rules": [
+            ["generated_json_inventory_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_cpp_bytes": {
+          "type": "evaluation",
+          "rules": [
+            ["generated_cpp_bytes_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_cpp_files": {
+          "type": "evaluation",
+          "rules": [
+            ["generated_cpp_inventory_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        }
+      }
+    }
+  }
+}

@@ -499,7 +499,7 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     required_tooltips = {
         "sql:type:bioseq.seq",
         "sql:function:bioseq.len(bioseq.seq)",
-        "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)",
+        "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
         "sql:function:bioseq.query_start(anyelement)",
         "sql:function:bioseq.query_end(anyelement)",
         "sql:function:bioseq.target_start(anyelement)",
@@ -1612,7 +1612,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _assert_tutorial_sidebar(page, base_path, version)
                 _exercise_copy(page)
                 _exercise_code_entities(page, {
-                    "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)",
+                    "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
                     "sql:function:bioseq.query_start(anyelement)",
                     "sql:function:bioseq.query_end(anyelement)",
                     "sql:function:bioseq.target_start(anyelement)",

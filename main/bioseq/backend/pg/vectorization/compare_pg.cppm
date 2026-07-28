@@ -1,13 +1,8 @@
 /*-------------------------------------------------------------------------
  *
- * vectorization/compare_pg.cppm   (module bioseq_column_vector_compare_pg)
+ * vectorization/compare_pg.cppm
  *
- * Domain-P binding for the Domain-N comparison kernel. Supplies the concrete
- * VectorColumn-backed result sink that SATISFIES bioseq::column::vec::
- * is_compare_result_sink, plus the templated per-operator marshaller
- * (vector_cmp) that the 84 SQL comparison UDFs in types/int.cppm and
- * types/date.cppm call. This is the "Postgres satisfies the concept" side of
- * the boundary; it ends with a static_assert that locks the concept.
+ * Typed comparison of one vector column and one scalar constant.
  *
  *-------------------------------------------------------------------------
  */
@@ -15,63 +10,185 @@ module;
 
 #include "common.h"
 
+extern "C" {
+#include "utils/builtins.h"
+#include "utils/varlena.h"
+}
+
+#include <concepts>
+#include <cstddef>
 #include <span>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 
 export module bioseq.column.vector_compare_pg;
 
-import bioseq.vector.types;          // VectorColumn, BuildVectorColumn, VectorFnArgument
-export import bioseq.column.vector_compare; // the Domain-N kernel + concept (re-export so the
-                                            // int.cppm/date.cppm wrappers see CmpOp + the kernel)
-import bioseq.pg_utils;
+export import bioseq.column.vector_compare;
+import bioseq.codegen.sql.annotation_model;
+import bioseq.pg_utils.sql_boundary;
 
-using namespace bioseq::column::vec;
+export namespace bioseq::column {
 
-/*
- * The concrete sink that SATISFIES is_compare_result_sink: allocates a bool
- * result column via the existing BuildVectorColumn (palloc) and hands the
- * kernel its two writable spans.
- */
-export struct vector_column_result_sink {
-	VectorColumn* res = nullptr;
-	// allocate() sizes the result column ONCE per batch; value_data()/null_data()
-	// then hand the kernel the raw writable bool bases. We deliberately return
-	// plain `bool*` (never a span/pair by value): an aggregate return across this
-	// Domain-P -> Domain-N module boundary is mis-marshalled by clang's modules
-	// ABI and shifts the kernel's write pointer (DOC0322 §6.4).
-	void allocate(std::uint32_t n) {
-		res = BuildVectorColumn(n, /*typeLen=*/1, /*isVal=*/true, /*rowNumber=*/nullptr);
-		res->dimension = n;
-	}
-	bool* value_data() { return reinterpret_cast<bool*>(res->value); }
-	bool* null_data()  { return res->isnull; }
-};
-static_assert(is_compare_result_sink<vector_column_result_sink>);  // boundary lock (LOAD-BEARING)
+using bioseq::column::vec::CmpOp;
 
-/*
- * Shared templated marshaller: collapses the 84 macro-expanded
- * _BUILD_CMP_OP_INT bodies into ONE instantiable kernel call. LT is the
- * left/column-value type, RT is the right/constant type (matching the original
- * macro's LTYPE/RTYPE). The two branches pass swapped <ValueT,ConstT> to the
- * kernel, reproducing the macro's cross-width behaviour.
- */
-export template <CmpOp Op, class LT, class RT>
-[[gnu::always_inline]] inline Datum vector_cmp(FunctionCallInfo fcinfo) {
-	auto* left  = reinterpret_cast<VectorFnArgument*>(PG_GETARG_POINTER(0));
-	auto* right = reinterpret_cast<VectorFnArgument*>(PG_GETARG_POINTER(1));
-	vector_column_result_sink sink;                 // satisfies is_compare_result_sink
-
-	if (left->type == VECTOR_FN_ARG_VAR && right->type == VECTOR_FN_ARG_CONSTANT) {
-		auto* col = reinterpret_cast<VectorColumn*>(left->arg);          // column read as LT
-		compare_column<Op, LT, RT>(                                      // ValueT=LT, ConstT=RT
-			reinterpret_cast<const LT*>(col->value), col->isnull, col->dimension,
-			static_cast<RT>(right->arg), sink);
-	} else if (left->type == VECTOR_FN_ARG_CONSTANT && right->type == VECTOR_FN_ARG_VAR) {
-		auto* col = reinterpret_cast<VectorColumn*>(right->arg);         // column read as RT
-		compare_column<Op, RT, LT>(                                      // ValueT=RT, ConstT=LT
-			reinterpret_cast<const RT*>(col->value), col->isnull, col->dimension,
-			static_cast<LT>(left->arg), sink);
-	}
-	// else (CONST/CONST or VAR/VAR) -> sink.res stays null, exactly like the macro's empty else.
-	PG_RETURN_POINTER(sink.res);
+template<CmpOp Operation, class Left, class Right>
+[[nodiscard]] inline bool compare_scalar_values(
+        const Left& left,
+        const Right& right) {
+    if constexpr (Operation == CmpOp::eq) {
+        return left == right;
+    } else if constexpr (Operation == CmpOp::ne) {
+        return left != right;
+    } else if constexpr (Operation == CmpOp::gt) {
+        return left > right;
+    } else if constexpr (Operation == CmpOp::lt) {
+        return left < right;
+    } else if constexpr (Operation == CmpOp::le) {
+        return left <= right;
+    } else {
+        return left >= right;
+    }
 }
+
+template<CmpOp Operation>
+[[nodiscard]] inline bool compare_scalar_values(
+        const bioseq::pg_utils::bpchar_view& left,
+        const bioseq::pg_utils::bpchar_view& right) {
+    const std::string_view left_bytes = left.normalized_bytes();
+    const std::string_view right_bytes = right.normalized_bytes();
+    if (left.collation() != right.collation()) {
+        throw bioseq::pg_utils::sql_boundary_conversion_error{
+            "vector character operands carry different collations"};
+    }
+    const char* const left_data = left_bytes.data();
+    const char* const right_data = right_bytes.data();
+    const int left_size = static_cast<int>(left_bytes.size());
+    const int right_size = static_cast<int>(right_bytes.size());
+    const Oid collation = left.collation();
+    const int comparison = bioseq::pg_utils::invoke_pg_as_cpp(
+        [left_data, left_size, right_data, right_size, collation] {
+            return varstr_cmp(
+                left_data,
+                left_size,
+                right_data,
+                right_size,
+                collation);
+        });
+    return compare_scalar_values<Operation>(comparison, 0);
+}
+
+template<
+    CmpOp Operation,
+    auto LeftSqlType,
+    class LeftLane,
+    auto RightSqlType,
+    class RightLane>
+[[nodiscard]] inline bioseq::pg_utils::vector_result<
+    bioseq::sql::pg::boolean, bool>
+compare_vector_operands(
+        bioseq::pg_utils::vector_operand<
+            LeftSqlType, LeftLane> left,
+        bioseq::pg_utils::vector_operand<
+            RightSqlType, RightLane> right) {
+    const bool column_is_left =
+        left.is_column() && right.is_constant();
+    const bool column_is_right =
+        left.is_constant() && right.is_column();
+    if (!column_is_left && !column_is_right) {
+        throw bioseq::pg_utils::sql_boundary_conversion_error{
+            "vector comparison requires exactly one column and one "
+            "constant"};
+    }
+
+    constexpr bool character_comparison =
+        std::same_as<LeftLane, bioseq::pg_utils::bpchar_view>
+        || std::same_as<RightLane, bioseq::pg_utils::bpchar_view>;
+    if constexpr (!character_comparison) {
+        const std::size_t lane_count = column_is_left
+            ? left.column().size()
+            : right.column().size();
+        auto result = bioseq::pg_utils::vector_result<
+            bioseq::sql::pg::boolean, bool>::allocate(lane_count);
+        std::span<bool> result_values = result.values();
+        std::span<bool> result_nulls = result.nulls();
+
+        if (column_is_left) {
+            auto column = left.column();
+            const auto constant = right.constant();
+            for (std::size_t lane_index = 0;
+                 lane_index < lane_count;
+                 ++lane_index) {
+                result_nulls[lane_index] =
+                    column.is_null(lane_index);
+                if (result_nulls[lane_index]) {
+                    result_values[lane_index] = false;
+                    continue;
+                }
+                result_values[lane_index] =
+                    compare_scalar_values<Operation>(
+                        column.value(lane_index), constant);
+            }
+        } else {
+            auto column = right.column();
+            const auto constant = left.constant();
+            for (std::size_t lane_index = 0;
+                 lane_index < lane_count;
+                 ++lane_index) {
+                result_nulls[lane_index] =
+                    column.is_null(lane_index);
+                if (result_nulls[lane_index]) {
+                    result_values[lane_index] = false;
+                    continue;
+                }
+                result_values[lane_index] =
+                    compare_scalar_values<Operation>(
+                        constant, column.value(lane_index));
+            }
+        }
+        return result;
+    } else {
+        const std::size_t lane_count = column_is_left
+            ? left.column().size()
+            : right.column().size();
+        auto result = bioseq::pg_utils::vector_result<
+            bioseq::sql::pg::boolean, bool>::allocate(lane_count);
+        std::span<bool> result_values = result.values();
+        std::span<bool> result_nulls = result.nulls();
+
+        if (column_is_left) {
+            auto column = left.column();
+            auto constant = right.constant();
+            for (std::size_t lane_index = 0;
+                 lane_index < lane_count;
+                 ++lane_index) {
+                result_nulls[lane_index] = column.is_null(lane_index);
+                if (result_nulls[lane_index]) {
+                    result_values[lane_index] = false;
+                    continue;
+                }
+                auto lane = column.value(lane_index);
+                result_values[lane_index] =
+                    compare_scalar_values<Operation>(lane, constant);
+            }
+        } else {
+            auto constant = left.constant();
+            auto column = right.column();
+            for (std::size_t lane_index = 0;
+                 lane_index < lane_count;
+                 ++lane_index) {
+                result_nulls[lane_index] = column.is_null(lane_index);
+                if (result_nulls[lane_index]) {
+                    result_values[lane_index] = false;
+                    continue;
+                }
+                auto lane = column.value(lane_index);
+                result_values[lane_index] =
+                    compare_scalar_values<Operation>(constant, lane);
+            }
+        }
+        return result;
+    }
+}
+
+}  // namespace bioseq::column

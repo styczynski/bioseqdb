@@ -108,9 +108,17 @@ class CacheModeResolutionTest(unittest.TestCase):
                             elif details.preset_family == "cache":
                                 expected = server._default_cache_preset(
                                     core_preset, combined=False)
-                            else:
+                            elif details.preset_family == "cache-bioseq":
                                 expected = server._default_cache_preset(
                                     core_preset, combined=True)
+                            elif details.preset_family == "website":
+                                expected = (
+                                    server.WEBSITE_DEBUG_BUILD_PRESET
+                                    if debug else server.WEBSITE_BUILD_PRESET)
+                            else:
+                                self.fail(
+                                    "unhandled preset family "
+                                    f"{details.preset_family!r}")
 
                             self.assertEqual(
                                 server.preset_for(mode, debug), expected)

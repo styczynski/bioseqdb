@@ -12,9 +12,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -117,10 +119,13 @@ struct ReferenceRun {
     range_t reference_range(reference_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_reference = bioseq::storage::make_lazy_in_memory(reference_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto reference_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_reference);
 
     ReferenceRun run;
     run.result = HwyBlockAligner::align<false>(
-        lazy_query, lazy_reference,
+        query_view, reference_view,
         0, query.size(), 0, reference.size(), scoring, params, &run.proof);
     return run;
 }
@@ -149,11 +154,14 @@ template<bool strand_reversed, bool enable_diagonal_certificate, class Sequence>
     typed_range_t reference_range(reference_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_reference = bioseq::storage::make_lazy_in_memory(reference_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto reference_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_reference);
 
     ReferenceRun run;
     run.result = HwyBlockAligner::align<
         strand_reversed, enable_diagonal_certificate>(
-            lazy_query, lazy_reference,
+            query_view, reference_view,
             query_start, query_end, reference_start, reference_end,
             scoring, params, &run.proof,
             &run.construction);
@@ -217,10 +225,13 @@ void check_align_result_identical(
     range_t reference_range(reference_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_reference = bioseq::storage::make_lazy_in_memory(reference_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto reference_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_reference);
 
     ReferenceRun run;
     run.result = HwyBlockAligner::align<false>(
-        lazy_query, lazy_reference,
+        query_view, reference_view,
         query_start, query_end, reference_start, reference_end,
         scoring, params, &run.proof);
     return run;
@@ -267,7 +278,122 @@ void check_region_alignment_identical(
     CHECK(format_cigar(optimized.cigar) == format_cigar(forced_dp.cigar));
 }
 
+struct ScoringMatrixGenerationCase {
+    std::int8_t match;
+    std::int8_t mismatch;
+    std::int8_t ambiguity;
+    std::string_view description;
+};
+
+constexpr std::array<ScoringMatrixGenerationCase, 6>
+    scoring_matrix_generation_cases{{
+        {4, 6, 1, "positive penalty magnitudes"},
+        {-4, -6, -1, "fully signed scores"},
+        {7, -3, -2, "positive match and signed penalties"},
+        {-7, 3, 2, "signed match and positive penalties"},
+        {0, 0, 0, "zero scores"},
+        {127, 126, 125, "positive int8 limits"},
+    }};
+
+template<class Alphabet>
+void check_scoring_matrix_facade_parity(std::string_view alphabet_name) {
+    using legacy_source =
+        sequence_custom_alphabet<Alphabet, std::uint64_t>;
+    using canonical_matrix = ScoringMatrix<Alphabet>;
+    using legacy_matrix = ScoringMatrix<legacy_source>;
+
+    static_assert(std::is_same_v<canonical_matrix, legacy_matrix>);
+    static_assert(std::is_same_v<
+        typename canonical_matrix::alphabet_type, Alphabet>);
+    static_assert(canonical_matrix::alphabet_dim
+                  == legacy_matrix::alphabet_dim);
+    static_assert(canonical_matrix::SIMD_ROWS
+                  == legacy_matrix::SIMD_ROWS);
+    static_assert(canonical_matrix::SIMD_COLS
+                  == legacy_matrix::SIMD_COLS);
+    static_assert(canonical_matrix::NULL_BYTE
+                  == legacy_matrix::NULL_BYTE);
+
+    constexpr auto sentinel = std::numeric_limits<std::int8_t>::min();
+    constexpr std::size_t dim = canonical_matrix::alphabet_dim;
+    static_assert(dim > 1u);
+    static_assert(canonical_matrix::SIMD_ROWS == dim + 1u);
+    static_assert(canonical_matrix::SIMD_COLS >= dim + 1u);
+    static_assert(canonical_matrix::NULL_BYTE == dim);
+
+    for (const auto& generation : scoring_matrix_generation_cases) {
+        const auto canonical = canonical_matrix::generate(
+            generation.match, generation.mismatch, generation.ambiguity);
+        const auto legacy = legacy_matrix::generate(
+            generation.match, generation.mismatch, generation.ambiguity);
+
+        INFO("alphabet=" << alphabet_name
+             << " score-case=" << generation.description
+             << " scores=(" << static_cast<int>(generation.match)
+             << ',' << static_cast<int>(generation.mismatch)
+             << ',' << static_cast<int>(generation.ambiguity) << ')');
+        REQUIRE(canonical.block_layout_valid());
+        REQUIRE(legacy.block_layout_valid());
+        CHECK(canonical.block_semantic_identity()
+              == legacy.block_semantic_identity());
+        CHECK(canonical.match_score() == legacy.match_score());
+        CHECK(canonical.mismatch_score() == legacy.mismatch_score());
+        CHECK(canonical.wildcard_score() == legacy.wildcard_score());
+
+        const auto expected_match = generation.match > 0
+            ? generation.match
+            : static_cast<std::int8_t>(-generation.match);
+        const auto expected_mismatch = generation.mismatch > 0
+            ? static_cast<std::int8_t>(-generation.mismatch)
+            : generation.mismatch;
+        const auto expected_ambiguity = generation.ambiguity > 0
+            ? static_cast<std::int8_t>(-generation.ambiguity)
+            : generation.ambiguity;
+
+        for (std::size_t row = 0; row < dim; ++row) {
+            for (std::size_t col = 0; col < dim; ++col) {
+                INFO("scalar-cell row=" << row << " col=" << col);
+                const auto expected = row == dim - 1u || col == dim - 1u
+                    ? expected_ambiguity
+                    : row == col ? expected_match : expected_mismatch;
+                CHECK(canonical.at(static_cast<int>(row),
+                                   static_cast<int>(col)) == expected);
+                CHECK(legacy.at(static_cast<int>(row),
+                                static_cast<int>(col)) == expected);
+                CHECK(legacy.at(static_cast<int>(row),
+                                static_cast<int>(col))
+                      == canonical.at(static_cast<int>(row),
+                                      static_cast<int>(col)));
+            }
+        }
+
+        for (std::size_t row = 0;
+             row < canonical_matrix::SIMD_ROWS; ++row) {
+            for (std::size_t col = 0;
+                 col < canonical_matrix::SIMD_COLS; ++col) {
+                INFO("simd-cell row=" << row << " col=" << col);
+                const auto expected = row < dim && col < dim
+                    ? canonical.at(static_cast<int>(row),
+                                   static_cast<int>(col))
+                    : sentinel;
+                CHECK(canonical.simd_row_ptr(row)[col] == expected);
+                CHECK(legacy.simd_row_ptr(row)[col] == expected);
+                CHECK(legacy.simd_row_ptr(row)[col]
+                      == canonical.simd_row_ptr(row)[col]);
+            }
+        }
+    }
+}
+
 }  // namespace
+
+TEST_CASE("ScoringMatrix boundary adapters exhaustively match the canonical facade",
+          "[block-aligner][scoring-matrix][facade][doc0377]") {
+    check_scoring_matrix_facade_parity<seq::dna4>("dna4");
+    check_scoring_matrix_facade_parity<seq::dna5>("dna5");
+    check_scoring_matrix_facade_parity<seq::aa20>("aa20");
+    check_scoring_matrix_facade_parity<seq::aa27>("aa27");
+}
 
 TEST_CASE("Block Aligner Global score/endpoints/CIGAR match scan_block.rs",
           "[block-aligner][reference-golden][global]") {
@@ -582,7 +708,8 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
     params.gap_open = 4;
     params.gap_extend = 2;
     const BlockGlobalGapCertificatePlan plan =
-        HwyBlockAligner::prepare_global_gap_certificate(scoring, params);
+        HwyBlockAligner::prepare_global_gap_certificate<seq::dna4>(
+            scoring, params);
     REQUIRE(plan.contract_supported);
     REQUIRE(plan.generated_matrix_supported);
 
@@ -620,9 +747,13 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
         range_t target_range(target_data);
         auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
         auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+        const auto query_view =
+            bioseq::storage::as_lazy_sequence_view(lazy_query);
+        const auto target_view =
+            bioseq::storage::as_lazy_sequence_view(lazy_target);
         const BlockPackedCertificateAttempt attempt =
             HwyBlockAligner::try_packed_global_gap<false>(
-                lazy_query, lazy_target,
+                query_view, target_view,
                 query_start, query_start + length,
                 target_start, target_start + length, plan);
         REQUIRE(attempt.decision
@@ -670,9 +801,13 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
         bioseq::storage::make_lazy_in_memory(reverse_query_range);
     auto lazy_reverse_target =
         bioseq::storage::make_lazy_in_memory(reverse_target_range);
+    const auto reverse_query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_reverse_query);
+    const auto reverse_target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_reverse_target);
     const BlockPackedCertificateAttempt reverse_attempt =
         HwyBlockAligner::try_packed_global_gap<true>(
-            lazy_reverse_query, lazy_reverse_target,
+            reverse_query_view, reverse_target_view,
             reverse_query_start, reverse_query_start + reverse_length,
             reverse_target_start, reverse_target_start + reverse_length,
             plan);
@@ -712,8 +847,12 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
         bioseq::storage::make_lazy_in_memory(decision_query_range);
     auto lazy_decision_target =
         bioseq::storage::make_lazy_in_memory(decision_target_range);
+    const auto decision_query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_decision_query);
+    const auto decision_target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_decision_target);
     const auto one_substitution = HwyBlockAligner::try_packed_global_gap<false>(
-        lazy_decision_query, lazy_decision_target,
+        decision_query_view, decision_target_view,
         decision_query_start, decision_query_start + decision_length,
         decision_target_start, decision_target_start + decision_length,
         plan);
@@ -742,8 +881,10 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
     range_t rejected_target_range(rejected_target_data);
     auto lazy_rejected_target =
         bioseq::storage::make_lazy_in_memory(rejected_target_range);
+    const auto rejected_target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_rejected_target);
     const auto rejected = HwyBlockAligner::try_packed_global_gap<false>(
-        lazy_decision_query, lazy_rejected_target,
+        decision_query_view, rejected_target_view,
         decision_query_start, decision_query_start + decision_length,
         decision_target_start, decision_target_start + decision_length,
         plan);
@@ -752,10 +893,11 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
     BlockAlignerParams tie_params = params;
     tie_params.gap_open = 1;
     tie_params.gap_extend = 1;
-    const auto tie_plan = HwyBlockAligner::prepare_global_gap_certificate(
-        scoring, tie_params);
+    const auto tie_plan =
+        HwyBlockAligner::prepare_global_gap_certificate<seq::dna4>(
+            scoring, tie_params);
     const auto tie = HwyBlockAligner::try_packed_global_gap<false>(
-        lazy_decision_query, lazy_decision_target,
+        decision_query_view, decision_target_view,
         decision_query_start, decision_query_start + decision_length,
         decision_target_start, decision_target_start + decision_length,
         tie_plan);
@@ -786,6 +928,8 @@ TEST_CASE("Packed gap executor matches forced-old mixed production region",
     range_t target_range(target_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto target_view = bioseq::storage::as_lazy_sequence_view(lazy_target);
     const auto scoring = ScoringMatrix<dna4_u64>::generate(2, 4, 1);
     std::vector<::bioseq::chaining::Anchor> anchors{
         make_anchor_at(0u, 0u),
@@ -817,14 +961,14 @@ TEST_CASE("Packed gap executor matches forced-old mixed production region",
         std::span<AlignRegion>{&optimized, 1u},
         std::span<const ::bioseq::chaining::Anchor>{
             anchors.data(), anchors.size()},
-        lazy_query, lazy_target, scoring, params, &optimized_proof);
+        query_view, target_view, scoring, params, &optimized_proof);
     AlignRegion forced_dp = fixture;
     BlockAlignerExecutionProof forced_proof;
     align_regions<BaseAlignmentAlgorithmType::BLOCK_ALIGNER, false>(
         std::span<AlignRegion>{&forced_dp, 1u},
         std::span<const ::bioseq::chaining::Anchor>{
             anchors.data(), anchors.size()},
-        lazy_query, lazy_target, scoring, params, &forced_proof);
+        query_view, target_view, scoring, params, &forced_proof);
     check_region_alignment_identical(optimized, forced_dp);
     CHECK(optimized_proof.accepted());
     CHECK(forced_proof.accepted());
@@ -842,7 +986,7 @@ TEST_CASE("Packed gap executor matches forced-old mixed production region",
         std::span<AlignRegion>{&score_only_optimized, 1u},
         std::span<const ::bioseq::chaining::Anchor>{
             anchors.data(), anchors.size()},
-        lazy_query, lazy_target, scoring, params,
+        query_view, target_view, scoring, params,
         &score_only_optimized_proof);
     AlignRegion score_only_forced = fixture;
     BlockAlignerExecutionProof score_only_forced_proof;
@@ -850,7 +994,7 @@ TEST_CASE("Packed gap executor matches forced-old mixed production region",
         std::span<AlignRegion>{&score_only_forced, 1u},
         std::span<const ::bioseq::chaining::Anchor>{
             anchors.data(), anchors.size()},
-        lazy_query, lazy_target, scoring, params,
+        query_view, target_view, scoring, params,
         &score_only_forced_proof);
     check_region_alignment_identical(score_only_optimized, score_only_forced);
     CHECK(score_only_optimized.cigar.empty());
@@ -867,8 +1011,9 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
     BlockAlignerParams params = global_params(16, 64);
     params.gap_open = 4;
     params.gap_extend = 2;
-    const auto plan = HwyBlockAligner::prepare_global_gap_certificate(
-        scoring, params);
+    const auto plan =
+        HwyBlockAligner::prepare_global_gap_certificate<seq::dna4>(
+            scoring, params);
     std::string sequence(1057u, 'A');
     constexpr std::string_view cycle = "ACGT";
     for (std::size_t i = 0; i < sequence.size(); ++i) {
@@ -885,22 +1030,26 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
         chunk1::from_range(query_range)};
     bioseq::storage::lazy_compact_sequence<dna4_u64, chunk1> fragmented_target{
         chunk1::from_range(target_range)};
+    const auto fragmented_query_view =
+        bioseq::storage::as_lazy_sequence_view(fragmented_query);
+    const auto fragmented_target_view =
+        bioseq::storage::as_lazy_sequence_view(fragmented_target);
     const auto fragmented_attempt =
         HwyBlockAligner::try_packed_global_gap<false>(
-            fragmented_query, fragmented_target,
+            fragmented_query_view, fragmented_target_view,
             0u, sequence.size(), 0u, sequence.size(), plan);
     CHECK(fragmented_attempt.decision
           == BlockPackedCertificateDecision::NotEligible);
     BlockAlignerExecutionProof fragmented_current_proof;
     const KswAlignResult fragmented_current = HwyBlockAligner::align<
         false, true>(
-            fragmented_query, fragmented_target,
+            fragmented_query_view, fragmented_target_view,
             0u, sequence.size(), 0u, sequence.size(), scoring, params,
             &fragmented_current_proof);
     BlockAlignerExecutionProof fragmented_forced_proof;
     const KswAlignResult fragmented_forced = HwyBlockAligner::align<
         false, false>(
-            fragmented_query, fragmented_target,
+            fragmented_query_view, fragmented_target_view,
             0u, sequence.size(), 0u, sequence.size(), scoring, params,
             &fragmented_forced_proof);
     check_align_result_identical(fragmented_current, fragmented_forced);
@@ -920,20 +1069,24 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
         chunk32::from_range(query_range)};
     bioseq::storage::lazy_compact_sequence<dna4_u64, chunk32> reverse_target{
         chunk32::from_range(reverse_target_range)};
+    const auto reverse_query_view =
+        bioseq::storage::as_lazy_sequence_view(reverse_query);
+    const auto reverse_target_view =
+        bioseq::storage::as_lazy_sequence_view(reverse_target);
     const auto reverse_fragmented_attempt =
         HwyBlockAligner::try_packed_global_gap<true>(
-            reverse_query, reverse_target,
+            reverse_query_view, reverse_target_view,
             0u, sequence.size(), 0u, sequence.size(), plan);
     CHECK(reverse_fragmented_attempt.decision
           == BlockPackedCertificateDecision::NotEligible);
     BlockAlignerExecutionProof reverse_current_proof;
     const KswAlignResult reverse_current = HwyBlockAligner::align<true, true>(
-        reverse_query, reverse_target,
+        reverse_query_view, reverse_target_view,
         0u, sequence.size(), 0u, sequence.size(), scoring, params,
         &reverse_current_proof);
     BlockAlignerExecutionProof reverse_forced_proof;
     const KswAlignResult reverse_forced = HwyBlockAligner::align<true, false>(
-        reverse_query, reverse_target,
+        reverse_query_view, reverse_target_view,
         0u, sequence.size(), 0u, sequence.size(), scoring, params,
         &reverse_forced_proof);
     check_align_result_identical(reverse_current, reverse_forced);
@@ -953,10 +1106,15 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
         bioseq::storage::make_lazy_in_memory(dna5_query_range);
     auto lazy_dna5_target =
         bioseq::storage::make_lazy_in_memory(dna5_target_range);
-    const auto dna5_plan = HwyBlockAligner::prepare_global_gap_certificate(
-        dna5_scoring, params);
+    const auto dna5_query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_dna5_query);
+    const auto dna5_target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_dna5_target);
+    const auto dna5_plan =
+        HwyBlockAligner::prepare_global_gap_certificate<seq::dna5>(
+            dna5_scoring, params);
     const auto dna5_attempt = HwyBlockAligner::try_packed_global_gap<false>(
-        lazy_dna5_query, lazy_dna5_target,
+        dna5_query_view, dna5_target_view,
         0u, dna5_text.size(), 0u, dna5_text.size(), dna5_plan);
     CHECK(dna5_attempt.decision
           == BlockPackedCertificateDecision::NotEligible);
@@ -966,14 +1124,18 @@ TEST_CASE("Packed gap certificate preserves fragmented DNA5 and matrix fallbacks
     unsupported_scoring.simd_scores[1] = 3;
     REQUIRE(unsupported_scoring.block_layout_valid());
     const auto unsupported_plan =
-        HwyBlockAligner::prepare_global_gap_certificate(
+        HwyBlockAligner::prepare_global_gap_certificate<seq::dna4>(
             unsupported_scoring, params);
     CHECK_FALSE(unsupported_plan.generated_matrix_supported);
     auto resident_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto resident_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto resident_query_view =
+        bioseq::storage::as_lazy_sequence_view(resident_query);
+    const auto resident_target_view =
+        bioseq::storage::as_lazy_sequence_view(resident_target);
     const auto unsupported_attempt =
         HwyBlockAligner::try_packed_global_gap<false>(
-            resident_query, resident_target,
+            resident_query_view, resident_target_view,
             0u, sequence.size(), 0u, sequence.size(), unsupported_plan);
     CHECK(unsupported_attempt.decision
           == BlockPackedCertificateDecision::NotEligible);
@@ -1259,6 +1421,9 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and proof is exac
     range_t reference_range(reference_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_reference = bioseq::storage::make_lazy_in_memory(reference_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto reference_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_reference);
 
     Minimap2Params first_params;
     first_params.gap_open1 = 1;
@@ -1276,12 +1441,12 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and proof is exac
 
     BlockAlignerExecutionProof first_proof;
     const KswAlignResult first = block_aligner_align_pair<false>(
-        lazy_query, lazy_reference,
+        query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1, first_params,
         BlockAlignerPhase::GapExtension, &first_proof);
     BlockAlignerExecutionProof changed_proof;
     const KswAlignResult changed = block_aligner_align_pair<false>(
-        lazy_query, lazy_reference,
+        query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1,
         dormant_changed, BlockAlignerPhase::GapExtension, &changed_proof);
 
@@ -1300,7 +1465,7 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and proof is exac
         ScoringMatrix<dna4_u64>::generate(2, 1, 1);
     BlockAlignerExecutionProof scoring_proof;
     (void)block_aligner_align_pair<false>(
-        lazy_query, lazy_reference,
+        query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), changed_scoring,
         first_params, BlockAlignerPhase::GapExtension, &scoring_proof);
     CHECK(scoring_proof.config_identity_xor
@@ -1316,12 +1481,12 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and proof is exac
 
     BlockAlignerExecutionProof left_proof;
     const KswAlignResult projected_left = block_aligner_align_pair<false>(
-        lazy_query, lazy_reference,
+        query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1, first_params,
         BlockAlignerPhase::LeftExtension, &left_proof);
     BlockAlignerExecutionProof right_proof;
     const KswAlignResult projected_right = block_aligner_align_pair<false>(
-        lazy_query, lazy_reference,
+        query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1, first_params,
         BlockAlignerPhase::RightExtension, &right_proof);
     CHECK(projected_left.score >= 0);
@@ -1401,6 +1566,8 @@ TEST_CASE("Block production router executes left global-gap and right phases",
     range_t target_range(target_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto target_view = bioseq::storage::as_lazy_sequence_view(lazy_target);
     const auto scoring = ScoringMatrix<dna4_u64>::generate(1, 1, 1);
 
     std::vector<::bioseq::chaining::Anchor> anchors{
@@ -1427,7 +1594,7 @@ TEST_CASE("Block production router executes left global-gap and right phases",
         std::span<AlignRegion>{regions.data(), regions.size()},
         std::span<const ::bioseq::chaining::Anchor>{
             anchors.data(), anchors.size()},
-        lazy_query, lazy_target, scoring, params, &proof);
+        query_view, target_view, scoring, params, &proof);
 
     CHECK(regions[0].has_alignment);
     CHECK_FALSE(regions[0].cigar.empty());
@@ -1496,6 +1663,8 @@ TEST_CASE("Block production proof reduction is deterministic in parallel",
     range_t target_range(target_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto target_view = bioseq::storage::as_lazy_sequence_view(lazy_target);
     const auto scoring = ScoringMatrix<dna4_u64>::generate(1, 1, 1);
 
     std::vector<::bioseq::chaining::Anchor> anchors;
@@ -1538,7 +1707,7 @@ TEST_CASE("Block production proof reduction is deterministic in parallel",
             std::span<AlignRegion>{regions.data(), regions.size()},
             std::span<const ::bioseq::chaining::Anchor>{
                 anchors.data(), anchors.size()},
-            lazy_query, lazy_target, scoring, params, &proof);
+            query_view, target_view, scoring, params, &proof);
         return std::pair{std::move(regions), proof};
     };
 
@@ -1598,10 +1767,12 @@ TEST_CASE("Block SIMD scoring covers ranks above one shuffle table",
     aa27_range_t target_range(target_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto target_view = bioseq::storage::as_lazy_sequence_view(lazy_target);
     const auto scoring = ScoringMatrix<aa27_u64>::generate(2, 1, 1);
     BlockAlignerExecutionProof proof;
     const KswAlignResult result = HwyBlockAligner::align<false, false>(
-        lazy_query, lazy_target,
+        query_view, target_view,
         0, query_data.size(), 0, target_data.size(),
         scoring, global_params(16, 32), &proof);
 

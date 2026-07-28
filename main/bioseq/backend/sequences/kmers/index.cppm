@@ -27,6 +27,7 @@ import bioseq.sequences.simd;
 import bioseq.sequences.kmers.hashers;
 import bioseq.common.circular_append_buffer;
 import bioseq.instr;
+import bioseq.storage.lazy;
 import bioseq.storage.size;                     // DOC0345 Patch A — bioseq::storage::sequence_size_t
 
 // // remove
@@ -729,11 +730,20 @@ private:
     bool failed_ = false;
 };
 
+template <class View>
+inline constexpr std::size_t logical_bits_per_symbol_v = [] {
+    using traits = typename std::remove_cvref_t<View>::traits;
+    if constexpr (requires { traits::logical_bits_per_symbol; }) {
+        return static_cast<std::size_t>(traits::logical_bits_per_symbol);
+    } else {
+        return static_cast<std::size_t>(traits::bits_per_char);
+    }
+}();
+
 // DOC0263 §8 — `SeqView` (was `supports_compact_sequence_range R`) so this
-// scalar kernel runs over EITHER a compact_sequence_range OR a
-// lazy_compact_sequence<R, Scanner> (forwarding to the underlying range under
-// scanner_none — zero overhead; streaming one fragment at a time under a
-// fragmented scanner). The kernel only ever touches `seq` via `SeqView::traits`
+// scalar kernel runs over either a compact range or an erased lazy view
+// (zero overhead for resident input; streaming one fragment at a time for
+// fragmented input). The kernel only ever touches `seq` via `SeqView::traits`
 // and `seq.iter<BP>(...)`, both of which the lazy wrapper provides; this is how
 // the fragmented minimizer reuses the bit-identical scalar logic (DOC0263 §8.4)
 // without the SIMD lane-replay's boundary-emit-gate fragility (§11.2.2).
@@ -827,7 +837,8 @@ inline void collect_minimizers_view(
 				is_ambiguous = (code >= kNt4Sentinel);
 			} else {
 				code = static_cast<std::uint8_t>(nucl);
-				is_ambiguous = (seq_traits::bits_per_char > 2 && nucl >= 4);
+				is_ambiguous = (logical_bits_per_symbol_v<SeqView> > 2
+                    && nucl >= 4);
 			}
 			if(is_ambiguous) {
 				// DOC0286 §10.2 — ambiguous base (dna5 N): reset BOTH the window
@@ -978,59 +989,24 @@ minimizer_sketch_backend_is_vulkan(MinimizerSketchBackend backend) noexcept {
 
 using minimizer_sorted_pair_t = std::pair<std::uint64_t, std::uint64_t>;
 
-template <class MinimizerT, class Seq, class Collector>
+template <class MinimizerT, sequence_alphabet Alphabet, class Collector>
 [[gnu::always_inline]] inline void collect_minimizers_segment_scalar(
     Collector& collector,
-    Seq& seq,
-    bioseq::storage::sequence_size_t lo_unit,
-    bioseq::storage::sequence_size_t hi_unit,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+    bioseq::storage::sequence_size_t lo_bp,
+    bioseq::storage::sequence_size_t hi_bp,
     std::size_t window_size,
     std::size_t kmer_size)
 {
-    if constexpr (requires { typename Seq::scanner_type; }) {
-        if constexpr (!Seq::scanner_type::supports_fragments()) {
-            auto& underlying =
-                const_cast<std::remove_cvref_t<decltype(seq.underlying())>&>(
-                    seq.underlying());
-            auto begin_iter = underlying.begin();
-            auto end_iter = underlying.begin();
-            std::advance(
-                begin_iter,
-                static_cast<
-                    typename std::iterator_traits<decltype(begin_iter)>::difference_type>(
-                    lo_unit));
-            std::advance(
-                end_iter,
-                static_cast<
-                    typename std::iterator_traits<decltype(end_iter)>::difference_type>(
-                    hi_unit));
-            collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-                collector, underlying, begin_iter, end_iter, window_size, kmer_size);
-        } else {
-            auto begin_iter = seq.begin();
-            auto end_iter = seq.begin();
-            begin_iter += lo_unit;
-            end_iter += hi_unit;
-            collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-                collector, seq, begin_iter, end_iter, window_size, kmer_size);
-        }
-    } else {
-        auto& range = const_cast<std::remove_cvref_t<Seq>&>(seq);
-        auto begin_iter = range.begin();
-        auto end_iter = range.begin();
-        std::advance(
-            begin_iter,
-            static_cast<
-                typename std::iterator_traits<decltype(begin_iter)>::difference_type>(
-                lo_unit));
-        std::advance(
-            end_iter,
-            static_cast<
-                typename std::iterator_traits<decltype(end_iter)>::difference_type>(
-                hi_unit));
-        collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-            collector, range, begin_iter, end_iter, window_size, kmer_size);
+    if (lo_bp > hi_bp || hi_bp > seq.bp_size()) {
+        throw std::out_of_range("minimizer BP segment exceeds lazy sequence");
     }
+    auto begin_iter = seq.begin();
+    auto end_iter = seq.begin();
+    begin_iter += static_cast<std::ptrdiff_t>(lo_bp);
+    end_iter += static_cast<std::ptrdiff_t>(hi_bp);
+    collect_minimizers_view<minimap_int_hasher, MinimizerT>(
+        collector, seq, begin_iter, end_iter, window_size, kmer_size);
 }
 
 template <class Seq>
@@ -1088,6 +1064,30 @@ inline void collect_minimizers(
 		collector, seq, seq_begin, seq_end, w, k);
 }
 
+#ifdef BIOSEQ_TEST_INDEXES
+/// Algorithm-local receipt for the legacy reference-SIMD minimizer kernel.
+/// Dispatcher tests reset/snapshot this thread-local seam around one call; a
+/// scalar substitution cannot fabricate callback batches or active lane work.
+struct ReferenceSimdMinimizerTestReceipt {
+    std::uint64_t kernel_calls = 0u;
+    std::uint64_t vector_callback_batches = 0u;
+    std::uint64_t vector_lane_visits = 0u;
+    std::uint64_t last_storage_unit_bytes = 0u;
+};
+
+inline thread_local ReferenceSimdMinimizerTestReceipt
+    reference_simd_minimizer_test_receipt{};
+
+inline void reset_reference_simd_minimizer_test_receipt() noexcept {
+    reference_simd_minimizer_test_receipt = {};
+}
+
+[[nodiscard]] inline ReferenceSimdMinimizerTestReceipt
+reference_simd_minimizer_test_receipt_snapshot() noexcept {
+    return reference_simd_minimizer_test_receipt;
+}
+#endif
+
 template<
 	template<typename H_A> typename simd_hash_t,
 	class MinimizerT,
@@ -1116,6 +1116,12 @@ inline void collect_minimizers_simd(
 
     using seq_traits = compact_sequence_range<R>::traits;
     using storage_unit = typename seq_traits::storage_unit;
+
+#ifdef BIOSEQ_TEST_INDEXES
+    ++reference_simd_minimizer_test_receipt.kernel_calls;
+    reference_simd_minimizer_test_receipt.last_storage_unit_bytes =
+        sizeof(storage_unit);
+#endif
 
     using dd_t = hn::ScalableTag<storage_unit>;
 	const dd_t dd;
@@ -1250,6 +1256,11 @@ inline void collect_minimizers_simd(
 	// just finished.
 	hash_mask_t prev_new_min_mask = hn::MaskFalse(dd);
 	iterate_sequence_bp_simd_offsets(seq, seq_begin, seq_end, k+w-1, [&]<bool is_full>(std::bool_constant<is_full>, auto const& offsets, auto& d, auto& mask, auto&& incoming, auto outgoing_mask, auto outgoing){ //auto&& bp_del1
+#ifdef BIOSEQ_TEST_INDEXES
+        ++reference_simd_minimizer_test_receipt.vector_callback_batches;
+        reference_simd_minimizer_test_receipt.vector_lane_visits +=
+            static_cast<std::uint64_t>(hn::CountTrue(d, mask));
+#endif
         //bioseq_log<DBG>("got vec: {} {}", hwy_str_as<typename seq_traits::alphabet_type>(d, incoming), hwy_str_as<typename seq_traits::alphabet_type>(d, outgoing));
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
         //bioseq_log<DBG>("  . hash        (<==) = {}", hwy_str(d, hash_vec));

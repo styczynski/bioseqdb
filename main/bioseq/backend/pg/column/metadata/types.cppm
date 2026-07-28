@@ -179,8 +179,14 @@ export enum StripeWriteStateEnum
 /* Parallel Custom Scan shared data */
 export struct ParallelBioseqColumnScanData
 {
-	slock_t mutex;
-	pg_atomic_uint64 nextStripeId;	/* Fetch next stripe id to be read and increment */
+	pg_atomic_uint64 nextStripeId;	/* CAS cursor; claims may skip aborted-id gaps */
+	/* DOC0377: fixed, pointer-free instrumentation header.  These fields must
+	 * precede snapshotData because the latter is a flexible-array member. */
+	std::uint32_t version;
+	std::uint64_t counters_offset;
+	std::uint32_t entry_count;
+	std::uint32_t slot_count;
+	std::uint64_t slot_stride;
 	char snapshotData[FLEXIBLE_ARRAY_MEMBER];
 };
 export typedef struct ParallelBioseqColumnScanData *ParallelBioseqColumnScan;
@@ -231,19 +237,6 @@ export struct EmptyStripeReservation
 {
 	uint64 stripeId;
 	uint64 stripeFirstRowNumber;
-};
-
-/* RowMaskWriteStateEntry represents write state entry of bioseq.row_mask row */
-export struct RowMaskWriteStateEntry
-{
-	uint64 id;
-	uint64 storageId;
-	uint64 stripeId;
-	uint32 chunkId;
-	int64 startRowNumber;
-	int64 endRowNumber;
-	int32 deletedRows;
-	bytea *mask;
 };
 
 export struct ChunkGroupReadState
@@ -402,10 +395,17 @@ static_assert(std::is_standard_layout_v<BioseqColumnWriteState> &&
 
 struct _ParallelBioseqColumnScanData_ref
 {
-	slock_t mutex;
 	pg_atomic_uint64 nextStripeId;
+	std::uint32_t version;
+	std::uint64_t counters_offset;
+	std::uint32_t entry_count;
+	std::uint32_t slot_count;
+	std::uint64_t slot_stride;
 	char snapshotData[FLEXIBLE_ARRAY_MEMBER];
 };
 static_assert(std::is_standard_layout_v<ParallelBioseqColumnScanData>,
-			  "ParallelBioseqColumnScanData must stay standard-layout (FAM struct, reinterpret_cast'd across modules)");
+				  "ParallelBioseqColumnScanData must stay standard-layout (FAM struct, reinterpret_cast'd across modules)");
+static_assert(offsetof(ParallelBioseqColumnScanData, snapshotData)
+				  == offsetof(_ParallelBioseqColumnScanData_ref, snapshotData),
+				  "ParallelBioseqColumnScanData fixed header drift");
 }  // namespace

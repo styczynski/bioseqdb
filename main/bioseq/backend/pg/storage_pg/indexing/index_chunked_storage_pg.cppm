@@ -39,15 +39,18 @@ extern "C" {
 #include "storage/buffile.h"
 #include "storage/dsm.h"
 #include "storage/fd.h"
+#include "storage/ipc.h"
 #include "storage/procarray.h"
 #include "storage/relfilelocator.h"
 #include "storage/shm_toc.h"
 #include "utils/lsyscache.h"
+#include "utils/builtins.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/xid8.h"
 #include "port.h"
 }
@@ -98,7 +101,7 @@ import bioseq.indexing.minimizer_format5_compact_h32_adapter;
 import bioseq.table.io;                // BioseqColumnBeginRead/ReadNextRow/EndRead/ReadState
 import bioseq.storage.scanner_pg;      // with_lazy_postgres, make_scanner_pg_in_memory (for_each_sequence)
 import bioseq.storage.lazy;            // lazy_compact_sequence
-import bioseq.types.pg_compact_sequence;  // pgseq_t, dispatch_instance
+import bioseq.types.pg_compact_sequence;  // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;               // compact_sequence_range
 import bioseq.sequences.simd;          // canonical bounded base decoding for source proof
 import bioseq.parallelism.memory_admission;
@@ -111,7 +114,29 @@ import bioseq.instr;
 import bioseq.column.tam;                    // DOC0322 §7.4 — IsBioseqColumnTableAmTable (leaf)
 import bioseq.storage.metadata;                     // DOC0322 §7.4 — BioseqColumnTableRowCount (moved to storage_metadata:core)
 import bioseq.storage.physical;
+import bioseq.storage.indexing_pg.sql_row_codecs;
+import bioseq.storage.manager.sql_row_codecs;
+import bioseq.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
+
+namespace indexing_entity_handles =
+    bioseq::sql::generated::core::
+        storage_indexing_pg_chunked_storage::entity_handles;
+using minimizer_generation_storage_catalog_row =
+    bioseq::storage::catalog_rows::minimizer_generation_storage;
+using minimizer_generation_storage_codec =
+    bioseq::storage::manager::sql_row_codecs::
+        minimizer_generation_storage_codec;
+using metadata_age_log_catalog_row =
+    bioseq::storage::indexing::catalog_rows::metadata_age_log;
+using metadata_age_log_codec =
+    bioseq::storage::indexing_pg::sql_row_codecs::
+        metadata_age_log_codec;
+
+static_assert(
+    indexing_entity_handles::minimizer_generation_id_seq
+        .schema_binding()
+    == bioseq::pg_utils::sql_schema_binding::fixed);
 
 export namespace bioseq::storage::indexing {
 
@@ -1428,7 +1453,7 @@ struct MinimizerGenerationRelationOpenFailurePg {
 /// primary index row. Tests execute it inside a transaction and roll back,
 /// proving PG17's varlena `indpred`/`indexprs` path rather than fabricating a
 /// C++ Relation object.
-inline void rev3_test_copy_primary_index_shape_pg(
+inline void copy_primary_index_shape_pg(
         Oid table_oid,
         Oid donor_index_oid,
         bool copy_predicate) {
@@ -1566,33 +1591,32 @@ inline void rev3_test_copy_primary_index_shape_pg(
         [] { return bioseq_internal_ns_pg_leaf(); });
 }
 
-/// Run a DDL string inside an internal sub-transaction (matches
-/// sequence_storage_manager's lazy-CREATE pattern). Returns nothing; throws on error.
+/// Runs one DDL statement inside a rollback-safe SQL subtransaction.
 inline void run_internal_ddl(const char* ddl) {
-    MemoryContext saved_ctx   = CurrentMemoryContext;
-    ResourceOwner saved_owner = CurrentResourceOwner;
-    BeginInternalSubTransaction("bioseq index DDL");
-    MemoryContextSwitchTo(saved_ctx);
-    PG_TRY();
-    {
-        if (SPI_connect() != SPI_OK_CONNECT) bioseq_log<ERR, PG>( "bioseq index: SPI_connect failed");
-        const int rc = SPI_execute(ddl, /*read_only=*/false, /*tcount=*/0);
-        if (rc != SPI_OK_UTILITY && rc != SPI_OK_SELECT)
-            bioseq_log<ERR, PG>( "bioseq index: DDL failed (SPI rc={})", rc);
-        SPI_finish();
-        ReleaseCurrentSubTransaction();
-        MemoryContextSwitchTo(saved_ctx);
-        CurrentResourceOwner = saved_owner;
+    auto subtransaction =
+        bioseq::pg_utils::sql_subtransaction::begin();
+    bioseq::pg_utils::scoped_spi_session spi;
+    const int connect_status = spi.connect();
+    if (connect_status != SPI_OK_CONNECT) {
+        rev3_storage_error(
+            "SPI_connect failed while running index DDL");
     }
-    PG_CATCH();
-    {
-        MemoryContextSwitchTo(saved_ctx);
-        RollbackAndReleaseCurrentSubTransaction();
-        MemoryContextSwitchTo(saved_ctx);
-        CurrentResourceOwner = saved_owner;
-        PG_RE_THROW();
+    const int execute_status =
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [ddl] {
+                return SPI_execute(
+                    ddl, /*read_only=*/false, /*tcount=*/0);
+            });
+    if (execute_status != SPI_OK_UTILITY
+        && execute_status != SPI_OK_SELECT) {
+        rev3_storage_error(
+            "index DDL returned an unexpected SPI status");
     }
-    PG_END_TRY();
+    if (spi.finish() != SPI_OK_FINISH) {
+        rev3_storage_error(
+            "SPI_finish failed while running index DDL");
+    }
+    subtransaction.commit();
 }
 
 /// Persistence keyword inherited from the user relation (UNLOGGED if parent is).
@@ -1622,6 +1646,369 @@ inline void run_internal_ddl(const char* ddl) {
 [[noreturn]] inline void rev3_storage_error(std::string_view message) {
     rev3_storage_error_as_cpp(message);
     pg_unreachable();
+}
+
+inline void validate_metadata_age_log_primary_key(Relation relation) {
+    const Oid primary_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+        [relation] { return find_primary_key_oid(relation); });
+    if (!OidIsValid(primary_oid)) {
+        rev3_storage_error(
+            "metadata_age_log primary key is missing");
+    }
+    Relation primary = bioseq::pg_utils::invoke_pg_as_cpp(
+        [primary_oid] {
+            return index_open(primary_oid, AccessShareLock);
+        });
+    const Form_pg_index form = primary->rd_index;
+    constexpr std::array<AttrNumber, 4> expected_columns{
+        1, 2, 3, 4};
+    bool valid = form != nullptr
+        && form->indisvalid
+        && form->indisready
+        && form->indislive
+        && form->indisunique
+        && form->indisprimary
+        && form->indnkeyatts
+            == static_cast<std::int16_t>(
+                expected_columns.size());
+    for (std::size_t index = 0;
+         valid && index < expected_columns.size();
+         ++index) {
+        valid =
+            form->indkey.values[index]
+            == expected_columns[index];
+    }
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [primary] {
+            index_close(primary, AccessShareLock);
+        });
+    if (!valid) {
+        rev3_storage_error(
+            "metadata_age_log primary key shape changed");
+    }
+}
+
+/**
+ * Insert or refresh one metadata-age row using the generated row codec as the
+ * sole C++/Datum boundary.  SPI owns only the fixed SQL statement; no value is
+ * string-formatted into SQL.
+ */
+[[nodiscard]] inline std::uint64_t
+upsert_metadata_age_log_pg(
+        Oid user_relid,
+        Oid main_relfilenode,
+        std::int16_t column_attno,
+        std::string_view index_name) {
+    const Oid namespace_oid = bioseq_internal_ns();
+    const Oid relation_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+        [namespace_oid] {
+            return get_relname_relid(
+                "metadata_age_log", namespace_oid);
+        });
+    if (!OidIsValid(relation_oid)) {
+        rev3_storage_error(
+            "metadata_age_log catalog relation is missing");
+    }
+
+    Relation relation = bioseq::pg_utils::invoke_pg_as_cpp(
+        [relation_oid] {
+            return table_open(relation_oid, RowExclusiveLock);
+        });
+    MemoryContext operation_context = nullptr;
+    try {
+        operation_context =
+            bioseq::pg_utils::invoke_pg_as_cpp([] {
+                return AllocSetContextCreate(
+                    CurrentMemoryContext,
+                    "metadata_age_log upsert operation",
+                    ALLOCSET_SMALL_SIZES);
+            });
+        if (RelationGetNamespace(relation) != namespace_oid
+            || relation->rd_rel->relkind != RELKIND_RELATION
+            || std::string_view{RelationGetRelationName(relation)}
+                != "metadata_age_log") {
+            rev3_storage_error(
+                "metadata_age_log catalog identity changed");
+        }
+        metadata_age_log_codec::validate_descriptor(
+            RelationGetDescr(relation));
+        validate_metadata_age_log_primary_key(relation);
+
+        text* const name_value = bioseq::pg_utils::invoke_pg_as_cpp(
+            [index_name, operation_context] {
+                MemoryContext previous =
+                    MemoryContextSwitchTo(operation_context);
+                text* const result = cstring_to_text_with_len(
+                    index_name.data(),
+                    static_cast<int>(index_name.size()));
+                MemoryContextSwitchTo(previous);
+                return result;
+            });
+        auto encoded = metadata_age_log_codec::encode(
+            metadata_age_log_catalog_row{
+                .user_relid = user_relid,
+                .main_relfilenode = main_relfilenode,
+                .column_attno = column_attno,
+                .index_name = name_value,
+                .last_updated = GetCurrentTimestamp(),
+            },
+            operation_context);
+        const auto tuple_data =
+            encoded.tuple_data(RelationGetDescr(relation));
+        std::array<Oid, metadata_age_log_codec::fields_count>
+            argument_types{
+                OIDOID,
+                OIDOID,
+                INT2OID,
+                TEXTOID,
+                TIMESTAMPTZOID,
+            };
+        std::array<Datum, metadata_age_log_codec::fields_count>
+            argument_values{};
+        std::copy_n(
+            tuple_data.values,
+            argument_values.size(),
+            argument_values.begin());
+
+        bioseq::pg_utils::scoped_spi_session spi;
+        const int connect_status = spi.connect();
+        if (connect_status != SPI_OK_CONNECT) {
+            rev3_storage_error(
+                "metadata_age_log SPI_connect failed");
+        }
+        static constexpr char statement[] =
+            "INSERT INTO bioseq_internal.metadata_age_log "
+            "(user_relid, main_relfilenode, column_attno, "
+            " index_name, last_updated) "
+            "VALUES ($1, $2, $3, $4, $5) "
+            "ON CONFLICT "
+            "(user_relid, main_relfilenode, column_attno, index_name) "
+            "DO UPDATE SET last_updated = EXCLUDED.last_updated";
+        const int execute_status =
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [&argument_types, &argument_values] {
+                    return SPI_execute_with_args(
+                        statement,
+                        static_cast<int>(argument_types.size()),
+                        argument_types.data(),
+                        argument_values.data(),
+                        /*Nulls=*/nullptr,
+                        /*read_only=*/false,
+                        /*tcount=*/0);
+                });
+        const std::uint64_t affected_rows = SPI_processed;
+        if (execute_status != SPI_OK_INSERT
+            || affected_rows != 1) {
+            rev3_storage_error(fmt::format(
+                "metadata_age_log upsert failed "
+                "(SPI status={}, affected rows={})",
+                execute_status,
+                affected_rows));
+        }
+        if (spi.finish() != SPI_OK_FINISH) {
+            rev3_storage_error(
+                "metadata_age_log SPI_finish failed");
+        }
+        MemoryContext finished_context =
+            std::exchange(operation_context, nullptr);
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [finished_context] {
+                MemoryContextDelete(finished_context);
+            });
+        Relation relation_to_close =
+            std::exchange(relation, nullptr);
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [relation_to_close] {
+                table_close(
+                    relation_to_close, RowExclusiveLock);
+            });
+        return affected_rows;
+    } catch (...) {
+        const std::exception_ptr original =
+            std::current_exception();
+        if (operation_context != nullptr) {
+            MemoryContext doomed_context =
+                std::exchange(operation_context, nullptr);
+            try {
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [doomed_context] {
+                        MemoryContextDelete(doomed_context);
+                    });
+            } catch (...) {
+                std::terminate();
+            }
+        }
+        if (relation != nullptr) {
+            try {
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [relation] {
+                        table_close(
+                            relation, RowExclusiveLock);
+                    });
+            } catch (...) {
+                std::terminate();
+            }
+        }
+        std::rethrow_exception(original);
+    }
+}
+
+/**
+ * Delete one metadata-age row through generated codec-encoded key Datums.
+ */
+[[nodiscard]] inline std::uint64_t
+delete_metadata_age_log_pg(
+        Oid user_relid,
+        Oid main_relfilenode,
+        std::int16_t column_attno,
+        std::string_view index_name) {
+    const Oid namespace_oid = bioseq_internal_ns();
+    const Oid relation_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+        [namespace_oid] {
+            return get_relname_relid(
+                "metadata_age_log", namespace_oid);
+        });
+    if (!OidIsValid(relation_oid)) {
+        rev3_storage_error(
+            "metadata_age_log catalog relation is missing");
+    }
+
+    Relation relation = bioseq::pg_utils::invoke_pg_as_cpp(
+        [relation_oid] {
+            return table_open(relation_oid, RowExclusiveLock);
+        });
+    MemoryContext operation_context = nullptr;
+    try {
+        operation_context =
+            bioseq::pg_utils::invoke_pg_as_cpp([] {
+                return AllocSetContextCreate(
+                    CurrentMemoryContext,
+                    "metadata_age_log delete operation",
+                    ALLOCSET_SMALL_SIZES);
+            });
+        if (RelationGetNamespace(relation) != namespace_oid
+            || relation->rd_rel->relkind != RELKIND_RELATION
+            || std::string_view{RelationGetRelationName(relation)}
+                != "metadata_age_log") {
+            rev3_storage_error(
+                "metadata_age_log catalog identity changed");
+        }
+        metadata_age_log_codec::validate_descriptor(
+            RelationGetDescr(relation));
+        validate_metadata_age_log_primary_key(relation);
+
+        text* const name_value = bioseq::pg_utils::invoke_pg_as_cpp(
+            [index_name, operation_context] {
+                MemoryContext previous =
+                    MemoryContextSwitchTo(operation_context);
+                text* const result = cstring_to_text_with_len(
+                    index_name.data(),
+                    static_cast<int>(index_name.size()));
+                MemoryContextSwitchTo(previous);
+                return result;
+            });
+        auto encoded = metadata_age_log_codec::encode(
+            metadata_age_log_catalog_row{
+                .user_relid = user_relid,
+                .main_relfilenode = main_relfilenode,
+                .column_attno = column_attno,
+                .index_name = name_value,
+                .last_updated = GetCurrentTimestamp(),
+            },
+            operation_context);
+        const auto tuple_data =
+            encoded.tuple_data(RelationGetDescr(relation));
+        std::array<Oid, 4> argument_types{
+            OIDOID,
+            OIDOID,
+            INT2OID,
+            TEXTOID,
+        };
+        std::array<Datum, 4> argument_values{};
+        std::copy_n(
+            tuple_data.values,
+            argument_values.size(),
+            argument_values.begin());
+
+        bioseq::pg_utils::scoped_spi_session spi;
+        const int connect_status = spi.connect();
+        if (connect_status != SPI_OK_CONNECT) {
+            rev3_storage_error(
+                "metadata_age_log SPI_connect failed");
+        }
+        static constexpr char statement[] =
+            "DELETE FROM bioseq_internal.metadata_age_log "
+            "WHERE user_relid = $1 "
+            "  AND main_relfilenode = $2 "
+            "  AND column_attno = $3 "
+            "  AND index_name = $4";
+        const int execute_status =
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [&argument_types, &argument_values] {
+                    return SPI_execute_with_args(
+                        statement,
+                        static_cast<int>(argument_types.size()),
+                        argument_types.data(),
+                        argument_values.data(),
+                        /*Nulls=*/nullptr,
+                        /*read_only=*/false,
+                        /*tcount=*/0);
+                });
+        const std::uint64_t affected_rows = SPI_processed;
+        if (execute_status != SPI_OK_DELETE
+            || affected_rows > 1) {
+            rev3_storage_error(fmt::format(
+                "metadata_age_log delete failed "
+                "(SPI status={}, affected rows={})",
+                execute_status,
+                affected_rows));
+        }
+        if (spi.finish() != SPI_OK_FINISH) {
+            rev3_storage_error(
+                "metadata_age_log SPI_finish failed");
+        }
+        MemoryContext finished_context =
+            std::exchange(operation_context, nullptr);
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [finished_context] {
+                MemoryContextDelete(finished_context);
+            });
+        Relation relation_to_close =
+            std::exchange(relation, nullptr);
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [relation_to_close] {
+                table_close(
+                    relation_to_close, RowExclusiveLock);
+            });
+        return affected_rows;
+    } catch (...) {
+        const std::exception_ptr original =
+            std::current_exception();
+        if (operation_context != nullptr) {
+            MemoryContext doomed_context =
+                std::exchange(operation_context, nullptr);
+            try {
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [doomed_context] {
+                        MemoryContextDelete(doomed_context);
+                    });
+            } catch (...) {
+                std::terminate();
+            }
+        }
+        if (relation != nullptr) {
+            try {
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [relation] {
+                        table_close(
+                            relation, RowExclusiveLock);
+                    });
+            } catch (...) {
+                std::terminate();
+            }
+        }
+        std::rethrow_exception(original);
+    }
 }
 
 /// Stable administration-lock key shared by the legacy administrator and the
@@ -1664,11 +2051,13 @@ inline void acquire_index_advisory_xact_lock(
     const std::int64_t signed_key = std::bit_cast<std::int64_t>(
         index_advisory_xact_lock_key(
             db, tablespace, relfilenode, attno, index_name));
-    DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(signed_key));
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [signed_key] {
+            DirectFunctionCall1(
+                pg_advisory_xact_lock_int8,
+                Int64GetDatum(signed_key));
+        });
 }
-
-inline constexpr std::string_view kMinimizerGenerationSequenceName =
-    "minimizer_generation_id_seq";
 
 enum class MinimizerGenerationSequenceError : std::uint8_t {
     none,
@@ -1715,12 +2104,9 @@ struct MinimizerGenerationSequenceInspection {
 inspect_minimizer_generation_sequence_contract() {
     const Oid internal_namespace = bioseq::pg_utils::invoke_pg_as_cpp(
         [] { return bioseq_internal_ns(); });
-    const Oid sequence_oid = bioseq::pg_utils::invoke_pg_as_cpp(
-        [internal_namespace] {
-            return get_relname_relid(
-                kMinimizerGenerationSequenceName.data(),
-                internal_namespace);
-        });
+    const Oid sequence_oid =
+        indexing_entity_handles::minimizer_generation_id_seq.resolve_oid(
+            bioseq::pg_utils::catalog_missing_policy::return_invalid);
     if (!OidIsValid(sequence_oid)) {
         return {.error = MinimizerGenerationSequenceError::missing};
     }
@@ -2223,10 +2609,12 @@ derive_rev3_authoritative_source_proof_pg(
             switch_context(previous_context);
             rev3_storage_error("authoritative source row is not visible");
         }
-        pgseq_t* source_header = bioseq::pg_utils::invoke_pg_as_cpp([&] {
-            return reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(
-                values[identity.column_attno - 1]));
-        });
+        bioseq::pg_types::seq* source_header =
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [values, column_attno = identity.column_attno] {
+                    return reinterpret_cast<bioseq::pg_types::seq*>(
+                        PG_DETOAST_DATUM(values[column_attno - 1]));
+                });
         const std::uint8_t alphabet_code = static_cast<std::uint8_t>(
             source_header->alphabet_code);
         const std::uint8_t storage_width =
@@ -2288,7 +2676,7 @@ derive_rev3_authoritative_source_proof_pg(
         std::uint64_t decoded_bp = 0;
         const auto consume_visible_fragment = [&content_checksum, &decoded_bp,
                 &rev3_storage_error, alphabet_code,
-                storage_width](const pgseq_t* fragment) {
+                storage_width](const bioseq::pg_types::seq* fragment) {
             if (fragment == nullptr || is_locator_stub(fragment)
                 || static_cast<std::uint8_t>(fragment->alphabet_code)
                     != alphabet_code
@@ -2376,10 +2764,12 @@ derive_rev3_authoritative_source_proof_pg(
                     rev3_storage_error("authoritative source fragment row is missing");
                 }
                 switch_context(state->fragment_context);
-                pgseq_t* fragment = bioseq::pg_utils::invoke_pg_as_cpp([&] {
-                    return reinterpret_cast<pgseq_t*>(
-                        PG_DETOAST_DATUM(fragment_values[0]));
-                });
+                bioseq::pg_types::seq* fragment =
+                    bioseq::pg_utils::invoke_pg_as_cpp(
+                        [fragment_datum = fragment_values[0]] {
+                            return reinterpret_cast<bioseq::pg_types::seq*>(
+                                PG_DETOAST_DATUM(fragment_datum));
+                        });
                 if ((fragment_no + 1u != locator.num_fragments
                         && fragment->padding_letters != 0)
                     || (fragment_no + 1u == locator.num_fragments
@@ -2674,10 +3064,12 @@ derive_rev3_catalog_source_proof_pg(
         }
         ++proof.counters_.parent_rows_read;
         proof.cold_stats_.parent_random_reads = 1;
-        pgseq_t* source_header = bioseq::pg_utils::invoke_pg_as_cpp([&] {
-            return reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(
-                values[identity.column_attno - 1]));
-        });
+        bioseq::pg_types::seq* source_header =
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [values, column_attno = identity.column_attno] {
+                    return reinterpret_cast<bioseq::pg_types::seq*>(
+                        PG_DETOAST_DATUM(values[column_attno - 1]));
+                });
         if (!is_locator_stub(source_header)) {
             switch_context(previous_context);
             rev3_storage_error(
@@ -2930,25 +3322,8 @@ struct MinimizerGenerationStorageDescriptorPg {
         MinimizerGenerationStorageStatePg::live;
 };
 
-inline constexpr AttrNumber kStorageDescriptorAttDatabaseOid = 1;
-inline constexpr AttrNumber kStorageDescriptorAttTablespaceOid = 2;
-inline constexpr AttrNumber kStorageDescriptorAttMainRelfilenode = 3;
-inline constexpr AttrNumber kStorageDescriptorAttUserRelid = 4;
-inline constexpr AttrNumber kStorageDescriptorAttColumnAttno = 5;
-inline constexpr AttrNumber kStorageDescriptorAttIndexName = 6;
-inline constexpr AttrNumber kStorageDescriptorAttQueryKey = 7;
-inline constexpr AttrNumber kStorageDescriptorAttGenerationId = 8;
-inline constexpr AttrNumber kStorageDescriptorAttProvider = 9;
-inline constexpr AttrNumber kStorageDescriptorAttPayloadRelationOid = 10;
-inline constexpr AttrNumber kStorageDescriptorAttPayloadDatabaseOid = 11;
-inline constexpr AttrNumber kStorageDescriptorAttPayloadTablespaceOid = 12;
-inline constexpr AttrNumber kStorageDescriptorAttPayloadRelfilenode = 13;
-inline constexpr AttrNumber kStorageDescriptorAttPayloadRelationName = 14;
-inline constexpr AttrNumber kStorageDescriptorAttImageBytes = 15;
-inline constexpr AttrNumber kStorageDescriptorAttHeaderChecksum = 16;
-inline constexpr AttrNumber kStorageDescriptorAttRetireFullXid = 17;
-inline constexpr AttrNumber kStorageDescriptorAttState = 18;
-inline constexpr std::size_t kStorageDescriptorAttributeCount = 18u;
+inline constexpr std::size_t kStorageDescriptorAttributeCount =
+    minimizer_generation_storage_codec::fields_count;
 
 [[nodiscard]] inline bool exact_storage_descriptor_identity(
         const MinimizerGenerationStorageDescriptorPg& descriptor,
@@ -3173,34 +3548,45 @@ read_live_minimizer_generation_storage_descriptor_pg(
     bioseq::pg_utils::invoke_pg_as_cpp([&] {
         namestrcpy(&index_name, identity.index_name.c_str());
     });
-    ScanKeyData keys[7];
-    ScanKeyInit(&keys[0], kStorageDescriptorAttDatabaseOid,
-        BTEqualStrategyNumber, F_OIDEQ,
-        ObjectIdGetDatum(identity.database_oid));
-    ScanKeyInit(&keys[1], kStorageDescriptorAttTablespaceOid,
-        BTEqualStrategyNumber, F_OIDEQ,
-        ObjectIdGetDatum(identity.tablespace_oid));
-    ScanKeyInit(&keys[2], kStorageDescriptorAttMainRelfilenode,
-        BTEqualStrategyNumber, F_OIDEQ,
-        ObjectIdGetDatum(identity.main_relfilenode));
-    ScanKeyInit(&keys[3], kStorageDescriptorAttUserRelid,
-        BTEqualStrategyNumber, F_OIDEQ,
-        ObjectIdGetDatum(identity.user_relid));
-    ScanKeyInit(&keys[4], kStorageDescriptorAttColumnAttno,
-        BTEqualStrategyNumber, F_INT2EQ,
-        Int16GetDatum(identity.column_attno));
-    ScanKeyInit(&keys[5], kStorageDescriptorAttIndexName,
-        BTEqualStrategyNumber, F_NAMEEQ, NameGetDatum(&index_name));
-    ScanKeyInit(&keys[6], kStorageDescriptorAttQueryKey,
-        BTEqualStrategyNumber, F_INT8EQ,
-        Int64GetDatum(static_cast<std::int64_t>(query_key)));
+    std::array<ScanKeyData, 7> keys{
+        minimizer_generation_storage_codec::scan_key<
+            &minimizer_generation_storage_catalog_row::database_oid>(
+                identity.database_oid),
+        minimizer_generation_storage_codec::scan_key<
+            &minimizer_generation_storage_catalog_row::tablespace_oid>(
+                identity.tablespace_oid),
+        minimizer_generation_storage_codec::scan_key<
+            &minimizer_generation_storage_catalog_row::main_relfilenode>(
+                identity.main_relfilenode),
+        minimizer_generation_storage_codec::scan_key<
+            &minimizer_generation_storage_catalog_row::user_relid>(
+                identity.user_relid),
+        minimizer_generation_storage_codec::scan_key<
+            &minimizer_generation_storage_catalog_row::column_attno>(
+                identity.column_attno),
+        {},
+        minimizer_generation_storage_codec::scan_key<
+            &minimizer_generation_storage_catalog_row::query_key>(
+                static_cast<std::int64_t>(query_key)),
+    };
+    ScanKeyInit(
+        &keys[5],
+        minimizer_generation_storage_codec::attribute_number<
+            &minimizer_generation_storage_catalog_row::index_name>(),
+        BTEqualStrategyNumber,
+        minimizer_generation_storage_codec::field<
+            &minimizer_generation_storage_catalog_row::index_name>::
+                comparison_procedure(
+                    bioseq::pg_utils::scan_comparison::equal),
+        NameGetDatum(&index_name));
 
     SysScanDesc scan = nullptr;
     try {
         scan = bioseq::pg_utils::invoke_pg_as_cpp([&] {
             return systable_beginscan_ordered(
                 storage_relation, live_index_relation,
-                registered_snapshot, 7, keys);
+                registered_snapshot,
+                static_cast<int>(keys.size()), keys.data());
         });
         HeapTuple tuple = bioseq::pg_utils::invoke_pg_as_cpp([&] {
             return systable_getnext_ordered(scan, ForwardScanDirection);
@@ -3210,26 +3596,26 @@ read_live_minimizer_generation_storage_descriptor_pg(
                 "LIVE generation storage descriptor is missing");
         }
 
-        Datum values[kStorageDescriptorAttributeCount]{};
-        bool nulls[kStorageDescriptorAttributeCount]{};
-        bioseq::pg_utils::invoke_pg_as_cpp([&] {
-            heap_deform_tuple(
-                tuple, RelationGetDescr(storage_relation), values, nulls);
-        });
-        constexpr std::array<std::size_t, 12u> required_non_null{
-            0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 14u, 15u, 17u};
-        for (const std::size_t attribute : required_non_null) {
-            if (nulls[attribute]) {
-                rev3_storage_error_as_cpp(
-                    "LIVE generation descriptor has a NULL required attribute");
-            }
+        std::optional<minimizer_generation_storage_catalog_row>
+            decoded_catalog;
+        try {
+            decoded_catalog.emplace(
+                minimizer_generation_storage_codec::deform(
+                    tuple,
+                    RelationGetDescr(storage_relation),
+                    CurrentMemoryContext));
+        } catch (const bioseq::pg_utils::row_codec_error& error) {
+            rev3_storage_error_as_cpp(error.what());
         }
+        const minimizer_generation_storage_catalog_row& catalog =
+            *decoded_catalog;
 
-        const std::int64_t query_key_sql = DatumGetInt64(values[6]);
-        const std::int64_t generation_id_sql = DatumGetInt64(values[7]);
-        const std::int16_t provider_sql = DatumGetInt16(values[8]);
-        const std::int64_t image_bytes_sql = DatumGetInt64(values[14]);
-        const std::int16_t state_sql = DatumGetInt16(values[17]);
+        const std::int64_t query_key_sql = catalog.query_key;
+        const std::int64_t generation_id_sql =
+            catalog.generation_id;
+        const std::int16_t provider_sql = catalog.provider;
+        const std::int64_t image_bytes_sql = catalog.image_bytes;
+        const std::int16_t state_sql = catalog.state;
         if (query_key_sql < 0 || generation_id_sql <= 0
             || image_bytes_sql
                 < static_cast<std::int64_t>(kMpf5V2HeaderBytes)
@@ -3240,38 +3626,31 @@ read_live_minimizer_generation_storage_descriptor_pg(
         }
 
         MinimizerGenerationStorageDescriptorPg descriptor{
-            .database_oid = DatumGetObjectId(values[0]),
-            .tablespace_oid = DatumGetObjectId(values[1]),
-            .main_relfilenode = DatumGetObjectId(values[2]),
-            .user_relid = DatumGetObjectId(values[3]),
-            .column_attno = DatumGetInt16(values[4]),
-            .index_name = NameStr(*DatumGetName(values[5])),
+            .database_oid = catalog.database_oid,
+            .tablespace_oid = catalog.tablespace_oid,
+            .main_relfilenode = catalog.main_relfilenode,
+            .user_relid = catalog.user_relid,
+            .column_attno = catalog.column_attno,
+            .index_name = NameStr(catalog.index_name),
             .query_key = static_cast<std::uint64_t>(query_key_sql),
             .generation_id = static_cast<std::uint64_t>(generation_id_sql),
             .provider = static_cast<Mpf5V2Provider>(provider_sql),
-            .payload_relation_oid = nulls[9]
-                ? std::nullopt
-                : std::optional<Oid>{DatumGetObjectId(values[9])},
-            .payload_database_oid = nulls[10]
-                ? std::nullopt
-                : std::optional<Oid>{DatumGetObjectId(values[10])},
-            .payload_tablespace_oid = nulls[11]
-                ? std::nullopt
-                : std::optional<Oid>{DatumGetObjectId(values[11])},
-            .payload_relfilenode = nulls[12]
-                ? std::nullopt
-                : std::optional<Oid>{DatumGetObjectId(values[12])},
-            .payload_relation_name = nulls[13]
-                ? std::nullopt
-                : std::optional<std::string>{
-                    NameStr(*DatumGetName(values[13]))},
+            .payload_relation_oid = catalog.payload_relation_oid,
+            .payload_database_oid = catalog.payload_database_oid,
+            .payload_tablespace_oid = catalog.payload_tablespace_oid,
+            .payload_relfilenode = catalog.payload_relfilenode,
+            .payload_relation_name = catalog.payload_relation_name
+                ? std::optional<std::string>{
+                    NameStr(*catalog.payload_relation_name)}
+                : std::nullopt,
             .image_bytes = static_cast<std::uint64_t>(image_bytes_sql),
             .header_checksum = checksum_from_pg_bigint(
-                DatumGetInt64(values[15])),
-            .retire_full_xid = nulls[16]
-                ? std::nullopt
-                : std::optional<std::uint64_t>{U64FromFullTransactionId(
-                    DatumGetFullTransactionId(values[16]))},
+                catalog.header_checksum),
+            .retire_full_xid = catalog.retire_full_xid
+                ? std::optional<std::uint64_t>{
+                    U64FromFullTransactionId(
+                        *catalog.retire_full_xid)}
+                : std::nullopt,
             .state = static_cast<MinimizerGenerationStorageStatePg>(
                 state_sql),
         };
@@ -11746,7 +12125,7 @@ IndexStorageFragmentGenerationReadSessionPg::read_chunks_in_range<
 /// head source-content fields, the head's manifest checksum, and both physical
 /// row CRCs are rewritten together. Only an independent source-row decode can
 /// detect the corruption.
-inline void rev3_test_rewrite_source_checksum_pg(
+inline void rewrite_source_checksum_pg(
         Oid table_oid,
         std::uint64_t query_key,
         std::uint64_t xor_mask) {
@@ -16495,7 +16874,6 @@ public:
             std::string prefix;
             std::string owned_shards_sql;
             std::string discover_sql;
-            std::string delete_age_sql;
             std::string ddl_sql;
             std::vector<std::pair<std::uint8_t, std::uint32_t>>
                 owned_shards;
@@ -16748,47 +17126,12 @@ public:
                 state->result.dropped_relation_count =
                     static_cast<std::uint64_t>(state->relations.size());
 
-                state->quoted_literal = quote_literal_cstr(
-                    state->index_name.c_str());
-                state->delete_age_sql = fmt::format(
-                    "DELETE FROM bioseq_internal.metadata_age_log "
-                    "WHERE user_relid={}::oid "
-                    "AND main_relfilenode={}::oid "
-                    "AND column_attno={}::smallint AND index_name={}",
-                    static_cast<unsigned>(user_relid_),
-                    static_cast<unsigned>(main_relfilenode_),
-                    static_cast<int>(column_attno_),
-                    state->quoted_literal);
-                pfree(state->quoted_literal);
-                state->quoted_literal = nullptr;
-                const int metadata_connect_rc = SPI_connect();
-                if (metadata_connect_rc != SPI_OK_CONNECT) {
-                    ereport(ERROR,
-                        (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear metadata SPI_connect failed"),
-                         errdetail("SPI rc=%d", metadata_connect_rc)));
-                }
-                state->spi_active = true;
-                const int delete_age_rc = SPI_execute(
-                    state->delete_age_sql.c_str(), false, 0);
-                if (delete_age_rc != SPI_OK_DELETE || SPI_processed > 1) {
-                    ereport(ERROR,
-                        (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear metadata deletion failed"),
-                         errdetail("SPI rc=%d rows=%llu", delete_age_rc,
-                            static_cast<unsigned long long>(SPI_processed))));
-                }
                 state->result.deleted_metadata_age_rows =
-                    static_cast<std::uint64_t>(SPI_processed);
-                const int metadata_finish_rc = SPI_finish();
-                state->spi_active =
-                    metadata_finish_rc != SPI_OK_FINISH;
-                if (metadata_finish_rc != SPI_OK_FINISH) {
-                    ereport(ERROR,
-                        (errcode(ERRCODE_INTERNAL_ERROR),
-                         errmsg("bioseq revision-3 index: generation clear metadata SPI_finish failed"),
-                         errdetail("SPI rc=%d", metadata_finish_rc)));
-                }
+                    delete_metadata_age_log_pg(
+                        user_relid_,
+                        main_relfilenode_,
+                        column_attno_,
+                        state->index_name);
                 CommandCounterIncrement();
 
                 // Re-discover broadly, but fail only if a canonical,
@@ -18645,7 +18988,7 @@ struct IndexStorageTablePg {
     void clear(std::string_view name);
 };
 
-// ---- shared drop-by-prefix helper -----------------------------------------
+// ---- shared native relation-drop helper -----------------------------------
 [[noreturn]] inline void index_clear_spi_error_as_cpp(
         const char* stage,
         int status) {
@@ -18659,49 +19002,404 @@ struct IndexStorageTablePg {
     pg_unreachable();
 }
 
-inline void clear_with_prefix_(const std::string& prefix) {
-    // Build and own all variable-length formatting before entering any
-    // PostgreSQL leaf. Escape SQL quotes plus LIKE metacharacters in the
-    // literal prefix; relation identifiers are quoted again by format(%I).
-    std::string escaped;
-    escaped.reserve(prefix.size());
-    for (const char byte : prefix) {
-        if (byte == '\'') {
-            escaped.push_back('\'');
-        }
-        if (byte == '_' || byte == '%' || byte == '\\') {
-            escaped.push_back('\\');
-        }
-        escaped.push_back(byte);
-    }
-    const std::string sql = fmt::format(
-        "DO $$ DECLARE r record; BEGIN "
-        "FOR r IN SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-        "WHERE n.nspname='bioseq_internal' AND c.relname LIKE '{}%' ESCAPE '\\' LOOP "
-        "EXECUTE format('DROP TABLE IF EXISTS bioseq_internal.%I CASCADE', r.relname); END LOOP; END $$;",
-        escaped);
+struct drop_index_relation_selector
+{
+    enum class kind : std::uint8_t
+    {
+        all_index_tables_best_effort,
+        prefix_strict
+    };
 
-    struct SpiClearState {
-        int connect_status = 0;
-        int execute_status = 0;
-        int finish_status = 0;
-    } state{};
-    const char* sql_data = sql.c_str();
-    bioseq::pg_utils::invoke_pg_as_cpp([&state, sql_data] noexcept {
-        state.connect_status = SPI_connect();
-        if (state.connect_status != SPI_OK_CONNECT) return;
-        state.execute_status = SPI_execute(sql_data, false, 0);
-        state.finish_status = SPI_finish();
-    });
-    if (state.connect_status != SPI_OK_CONNECT) {
-        index_clear_spi_error_as_cpp("SPI_connect", state.connect_status);
+    kind selected_kind;
+    std::string_view prefix;
+
+    [[nodiscard]] static constexpr drop_index_relation_selector
+    all_index_tables() noexcept
+    {
+        return {
+            .selected_kind = kind::all_index_tables_best_effort,
+            .prefix = {}
+        };
     }
-    if (state.execute_status != SPI_OK_UTILITY) {
-        index_clear_spi_error_as_cpp("SPI_execute", state.execute_status);
+
+    [[nodiscard]] static constexpr drop_index_relation_selector
+    with_prefix(std::string_view selected_prefix) noexcept
+    {
+        return {
+            .selected_kind = kind::prefix_strict,
+            .prefix = selected_prefix
+        };
     }
-    if (state.finish_status != SPI_OK_FINISH) {
-        index_clear_spi_error_as_cpp("SPI_finish", state.finish_status);
+};
+
+}  // namespace bioseq::storage::indexing
+
+namespace bioseq::storage::indexing {
+namespace {
+
+enum class drop_index_spi_stage : std::uint8_t
+{
+    connect,
+    discovery,
+    drop,
+    finish
+};
+
+enum class drop_index_return_code_action : std::uint8_t
+{
+    continue_operation,
+    return_without_error,
+    finish_then_return,
+    raise_strict_error
+};
+
+[[nodiscard]] constexpr int
+expected_drop_index_spi_status(drop_index_spi_stage stage) noexcept
+{
+    switch (stage) {
+        case drop_index_spi_stage::connect:
+            return SPI_OK_CONNECT;
+        case drop_index_spi_stage::discovery:
+            return SPI_OK_SELECT;
+        case drop_index_spi_stage::drop:
+            return SPI_OK_UTILITY;
+        case drop_index_spi_stage::finish:
+            return SPI_OK_FINISH;
     }
+    return SPI_ERROR_OPUNKNOWN;
+}
+
+[[nodiscard]] constexpr drop_index_return_code_action
+drop_index_return_code_policy(
+        drop_index_relation_selector::kind selector_kind,
+        drop_index_spi_stage stage,
+        int status) noexcept
+{
+    if (status == expected_drop_index_spi_status(stage))
+        return drop_index_return_code_action::continue_operation;
+    if (selector_kind
+            == drop_index_relation_selector::kind::prefix_strict) {
+        return drop_index_return_code_action::raise_strict_error;
+    }
+    if (stage == drop_index_spi_stage::discovery
+        || stage == drop_index_spi_stage::drop) {
+        return drop_index_return_code_action::finish_then_return;
+    }
+    return drop_index_return_code_action::return_without_error;
+}
+
+[[nodiscard]] constexpr const char*
+drop_index_spi_stage_name(drop_index_spi_stage stage) noexcept
+{
+    switch (stage) {
+        case drop_index_spi_stage::connect:
+            return "SPI_connect";
+        case drop_index_spi_stage::discovery:
+        case drop_index_spi_stage::drop:
+            return "SPI_execute";
+        case drop_index_spi_stage::finish:
+            return "SPI_finish";
+    }
+    return "unknown SPI stage";
+}
+
+using drop_index_selector_kind = drop_index_relation_selector::kind;
+using drop_index_status_action = drop_index_return_code_action;
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::all_index_tables_best_effort,
+    drop_index_spi_stage::connect,
+    SPI_ERROR_CONNECT)
+    == drop_index_status_action::return_without_error);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::all_index_tables_best_effort,
+    drop_index_spi_stage::discovery,
+    SPI_ERROR_ARGUMENT)
+    == drop_index_status_action::finish_then_return);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::all_index_tables_best_effort,
+    drop_index_spi_stage::drop,
+    SPI_ERROR_TRANSACTION)
+    == drop_index_status_action::finish_then_return);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::all_index_tables_best_effort,
+    drop_index_spi_stage::finish,
+    SPI_ERROR_UNCONNECTED)
+    == drop_index_status_action::return_without_error);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::prefix_strict,
+    drop_index_spi_stage::connect,
+    SPI_ERROR_CONNECT)
+    == drop_index_status_action::raise_strict_error);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::prefix_strict,
+    drop_index_spi_stage::discovery,
+    SPI_ERROR_ARGUMENT)
+    == drop_index_status_action::raise_strict_error);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::prefix_strict,
+    drop_index_spi_stage::drop,
+    SPI_ERROR_TRANSACTION)
+    == drop_index_status_action::raise_strict_error);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::prefix_strict,
+    drop_index_spi_stage::finish,
+    SPI_ERROR_UNCONNECTED)
+    == drop_index_status_action::raise_strict_error);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::all_index_tables_best_effort,
+    drop_index_spi_stage::connect,
+    SPI_OK_CONNECT)
+    == drop_index_status_action::continue_operation);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::prefix_strict,
+    drop_index_spi_stage::discovery,
+    SPI_OK_SELECT)
+    == drop_index_status_action::continue_operation);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::all_index_tables_best_effort,
+    drop_index_spi_stage::drop,
+    SPI_OK_UTILITY)
+    == drop_index_status_action::continue_operation);
+static_assert(drop_index_return_code_policy(
+    drop_index_selector_kind::prefix_strict,
+    drop_index_spi_stage::finish,
+    SPI_OK_FINISH)
+    == drop_index_status_action::continue_operation);
+
+class drop_index_spi_session
+{
+    bool active_ = false;
+
+public:
+    drop_index_spi_session() = default;
+    drop_index_spi_session(const drop_index_spi_session&) = delete;
+    drop_index_spi_session& operator=(const drop_index_spi_session&) = delete;
+
+    [[nodiscard]] int connect()
+    {
+        const int status = bioseq::pg_utils::invoke_pg_as_cpp(
+            [] noexcept { return SPI_connect(); });
+        active_ = status == SPI_OK_CONNECT;
+        return status;
+    }
+
+    [[nodiscard]] int finish()
+    {
+        const int status = bioseq::pg_utils::invoke_pg_as_cpp(
+            [] noexcept { return SPI_finish(); });
+        active_ = false;
+        return status;
+    }
+
+    [[nodiscard]] bool handle_returned_status(
+            drop_index_relation_selector selector,
+            drop_index_spi_stage stage,
+            int status)
+    {
+        switch (drop_index_return_code_policy(
+                    selector.selected_kind, stage, status)) {
+            case drop_index_return_code_action::continue_operation:
+                return true;
+            case drop_index_return_code_action::return_without_error:
+                return false;
+            case drop_index_return_code_action::finish_then_return:
+                (void) finish();
+                return false;
+            case drop_index_return_code_action::raise_strict_error:
+                index_clear_spi_error_as_cpp(
+                    drop_index_spi_stage_name(stage), status);
+        }
+        pg_unreachable();
+    }
+
+    ~drop_index_spi_session() noexcept
+    {
+        if (!active_)
+            return;
+
+        volatile int finish_status = SPI_ERROR_UNCONNECTED;
+        PG_TRY();
+        {
+            finish_status = SPI_finish();
+        }
+        PG_CATCH();
+        {
+            FlushErrorState();
+            proc_exit(1);
+        }
+        PG_END_TRY();
+
+        active_ = false;
+        if (finish_status != SPI_OK_FINISH)
+            proc_exit(1);
+    }
+};
+
+struct discovered_index_relation_name
+{
+    NameData value{};
+    bool is_null = true;
+};
+
+[[nodiscard]] std::string
+quote_index_relation_name(const std::string& relation_name)
+{
+    char* quoted = bioseq::pg_utils::invoke_pg_as_cpp(
+        [relation_name_data = relation_name.c_str()] noexcept {
+            return quote_qualified_identifier(
+                "bioseq_internal", relation_name_data);
+        });
+
+    std::string result;
+    try {
+        result.assign(quoted);
+    } catch (...) {
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [quoted] noexcept { pfree(quoted); });
+        throw;
+    }
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [quoted] noexcept { pfree(quoted); });
+    return result;
+}
+
+}  // namespace
+}  // namespace bioseq::storage::indexing
+
+export namespace bioseq::storage::indexing {
+
+void
+drop_index_relations(drop_index_relation_selector selector)
+{
+    static constexpr char all_index_tables_query[] =
+        "SELECT c.relname "
+        "FROM pg_catalog.pg_class AS c "
+        "WHERE c.relnamespace = $1::oid "
+        "AND c.relkind = 'r'::\"char\" "
+        "AND (starts_with(c.relname::text, 'seqidx_') "
+        "OR starts_with(c.relname::text, 'seqidxtab_'))";
+    static constexpr char prefix_query[] =
+        "SELECT c.relname "
+        "FROM pg_catalog.pg_class AS c "
+        "WHERE c.relnamespace = $1::oid "
+        "AND starts_with(c.relname::text, $2::text)";
+
+    const std::string owned_prefix{selector.prefix};
+    const Oid internal_namespace =
+        bioseq::pg_utils::invoke_pg_as_cpp([] noexcept {
+            return get_namespace_oid("bioseq_internal", false);
+        });
+
+    drop_index_spi_session spi_session;
+    const int connect_status = spi_session.connect();
+    if (!spi_session.handle_returned_status(
+            selector, drop_index_spi_stage::connect, connect_status)) {
+        return;
+    }
+
+    std::vector<std::string> relation_names;
+    const int discovery_status =
+        selector.selected_kind
+            == drop_index_relation_selector::kind::
+                all_index_tables_best_effort
+        ? bioseq::pg_utils::invoke_pg_as_cpp(
+            [internal_namespace] noexcept {
+                Oid argument_types[1] = {OIDOID};
+                Datum argument_values[1] = {
+                    ObjectIdGetDatum(internal_namespace)
+                };
+                return SPI_execute_with_args(
+                    all_index_tables_query,
+                    1, argument_types, argument_values, nullptr,
+                    true, 0);
+            })
+        : bioseq::pg_utils::invoke_pg_as_cpp(
+            [internal_namespace,
+             prefix_data = owned_prefix.c_str()] noexcept {
+                Oid argument_types[2] = {OIDOID, TEXTOID};
+                Datum argument_values[2] = {
+                    ObjectIdGetDatum(internal_namespace),
+                    CStringGetTextDatum(prefix_data)
+                };
+                const int status = SPI_execute_with_args(
+                    prefix_query,
+                    2, argument_types, argument_values, nullptr,
+                    true, 0);
+                pfree(DatumGetPointer(argument_values[1]));
+                return status;
+            });
+
+    if (discovery_status != SPI_OK_SELECT || SPI_tuptable == nullptr) {
+        const int effective_status = discovery_status == SPI_OK_SELECT
+            ? SPI_ERROR_NOATTRIBUTE
+            : discovery_status;
+        (void) spi_session.handle_returned_status(
+            selector, drop_index_spi_stage::discovery, effective_status);
+        return;
+    }
+
+    bool invalid_discovery_row = false;
+    {
+        SPITupleTable* const discovery_table = SPI_tuptable;
+        const std::uint64_t discovered_count = SPI_processed;
+        relation_names.reserve(static_cast<std::size_t>(discovered_count));
+        for (std::uint64_t row = 0; row < discovered_count; ++row) {
+            const discovered_index_relation_name discovered =
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [discovery_table, row] noexcept {
+                        discovered_index_relation_name result;
+                        const Datum name = SPI_getbinval(
+                            discovery_table->vals[row],
+                            discovery_table->tupdesc,
+                            1,
+                            &result.is_null);
+                        if (!result.is_null)
+                            result.value = *DatumGetName(name);
+                        return result;
+                    });
+            if (discovered.is_null) {
+                invalid_discovery_row = true;
+                break;
+            }
+            relation_names.emplace_back(NameStr(discovered.value));
+        }
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [discovery_table] noexcept {
+                SPI_freetuptable(discovery_table);
+            });
+    }
+
+    if (invalid_discovery_row) {
+        (void) spi_session.handle_returned_status(
+            selector,
+            drop_index_spi_stage::discovery,
+            SPI_ERROR_NOATTRIBUTE);
+        return;
+    }
+
+    for (const std::string& relation_name : relation_names) {
+        const std::string qualified_name =
+            quote_index_relation_name(relation_name);
+        const std::string drop_statement = fmt::format(
+            "DROP TABLE IF EXISTS {} CASCADE", qualified_name);
+        const int drop_status = bioseq::pg_utils::invoke_pg_as_cpp(
+            [statement = drop_statement.c_str()] noexcept {
+                return SPI_execute(statement, false, 0);
+            });
+        if (!spi_session.handle_returned_status(
+                selector, drop_index_spi_stage::drop, drop_status)) {
+            return;
+        }
+    }
+
+    const int finish_status = spi_session.finish();
+    (void) spi_session.handle_returned_status(
+        selector, drop_index_spi_stage::finish, finish_status);
+}
+
+inline void clear_with_prefix_(const std::string& prefix) {
+    drop_index_relations(
+        drop_index_relation_selector::with_prefix(prefix));
 }
 
 inline void IndexStorageFragmentPg::clear(std::string_view name) {
@@ -19308,85 +20006,16 @@ inline void write_serialized_index_chunk_pg(
     }
 }
 
-[[noreturn]] inline void serialized_index_write_marker_error_as_cpp(
-        const char* stage,
-        int status) {
-    bioseq::pg_utils::invoke_pg_as_cpp([stage, status] {
-        ereport(ERROR,
-            (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("bioseq index write-success marker failed"),
-             errdetail("stage=%s status=%d", stage, status)));
-    });
-    pg_unreachable();
-}
-
 inline void mark_serialized_index_write_successful_pg(
         Oid user_relid,
         Oid main_relfilenode,
         std::int16_t column_attno,
         std::string_view index_name) {
-    const std::string owned_index_name{index_name};
-    const char* index_name_data = owned_index_name.c_str();
-    char* quoted_pg = bioseq::pg_utils::invoke_pg_as_cpp(
-        [index_name_data] { return quote_literal_cstr(index_name_data); });
-    std::string quoted_index_name;
-    try {
-        quoted_index_name.assign(quoted_pg);
-    } catch (...) {
-        bioseq::pg_utils::invoke_pg_as_cpp(
-            [quoted_pg] { pfree(quoted_pg); });
-        throw;
-    }
-    bioseq::pg_utils::invoke_pg_as_cpp(
-        [quoted_pg] { pfree(quoted_pg); });
-
-    const std::string sql = fmt::format(
-        "INSERT INTO bioseq_internal.metadata_age_log "
-        "(user_relid, main_relfilenode, column_attno, index_name, last_updated) "
-        "VALUES ({}::oid, {}::oid, {}, {}, now()) "
-        "ON CONFLICT (user_relid, main_relfilenode, column_attno, index_name) "
-        "DO UPDATE SET last_updated = now()",
-        static_cast<unsigned>(user_relid),
-        static_cast<unsigned>(main_relfilenode),
-        static_cast<int>(column_attno),
-        quoted_index_name);
-    struct SpiWriteMarkerState {
-        int connect_status = 0;
-        int execute_status = 0;
-        int finish_status = 0;
-        std::uint64_t affected_rows = 0;
-    } state{};
-    const char* sql_data = sql.c_str();
-    bioseq::pg_utils::invoke_pg_as_cpp([&state, sql_data] noexcept {
-        state.connect_status = SPI_connect();
-        if (state.connect_status != SPI_OK_CONNECT) return;
-        state.execute_status = SPI_execute(sql_data, false, 0);
-        state.affected_rows = SPI_processed;
-        state.finish_status = SPI_finish();
-    });
-    if (state.connect_status != SPI_OK_CONNECT) {
-        serialized_index_write_marker_error_as_cpp(
-            "SPI_connect", state.connect_status);
-    }
-    if (state.execute_status != SPI_OK_INSERT) {
-        serialized_index_write_marker_error_as_cpp(
-            "SPI_execute", state.execute_status);
-    }
-    if (state.affected_rows != 1) {
-        bioseq::pg_utils::invoke_pg_as_cpp([&state] {
-            ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("bioseq index write-success marker failed"),
-                 errdetail("stage=SPI_execute affected_rows=%llu",
-                           static_cast<unsigned long long>(
-                               state.affected_rows))));
-        });
-        pg_unreachable();
-    }
-    if (state.finish_status != SPI_OK_FINISH) {
-        serialized_index_write_marker_error_as_cpp(
-            "SPI_finish", state.finish_status);
-    }
+    static_cast<void>(upsert_metadata_age_log_pg(
+        user_relid,
+        main_relfilenode,
+        column_attno,
+        index_name));
 }
 
 // ---- IndexStorageTablePg::for_each_sequence (test-only CHUNKED_PER_TABLE) ---
@@ -19409,32 +20038,37 @@ inline void IndexStorageTablePg::for_each_sequence(F&& loader) {
 	        if (nulls[column_attno_ - 1]) continue;
 	        MemoryContextReset(inner);
 	        MemoryContext old = MemoryContextSwitchTo(inner);
-	        auto hdr_detoasted = bioseq::pg_utils::detoast_as<pgseq_t>(
+	        auto hdr_detoasted = bioseq::pg_utils::detoast_as<bioseq::pg_types::seq>(
 	            bioseq::pg_utils::pg_datum::from_raw(valp[column_attno_ - 1]));
-	        pgseq_t* hdr = hdr_detoasted.ptr;
+	        bioseq::pg_types::seq* hdr = hdr_detoasted.ptr;
 	        MemoryContextSwitchTo(old);
         const std::uint8_t alpha = hdr->alphabet_code;
         const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
         if (!is_locator_stub(hdr)) {
-            pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
+            bioseq::pg_types::seq::dispatch_instance(
+                alpha, bw, [hdr, &loader, rowno, total]<class S>() {
                 compact_sequence_range<S> rng{*hdr};
-                bioseq::storage::lazy_compact_sequence<S, bioseq::storage::sequence_scanner_pg<S>>
-                    lazy{ bioseq::storage::make_scanner_pg_in_memory<S>(rng) };
-                loader(lazy, (std::size_t)rowno, total);
+                const auto view =
+                    bioseq::storage::as_lazy_sequence_view(rng);
+                loader(view, static_cast<std::size_t>(rowno), total);
             });
         } else {
             const seq_locator loc = decode_locator_from_stub(hdr);
-            pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
-                constexpr std::size_t lpu = compact_sequence_range<S>::traits::letters_per_unit;
-                const std::size_t pad = (loc.total_bp_size % lpu) == 0
-                    ? 0
-                    : static_cast<std::size_t>(
-                        lpu - loc.total_bp_size % lpu);
-                bioseq::storage::with_lazy_postgres<S>(
+            bioseq::pg_types::seq::dispatch_instance(
+                alpha,
+                bw,
+                [this, &loader, loc, rowno, total, rs, inner]<class S>() {
+                using SourceBinding =
+                    bioseq::storage::postgres_lazy_sequence_binding<S>;
+                const SourceBinding source_binding{
                     db_oid_, tablespace_oid_, main_relfilenode_,
-                    column_attno_, loc, pad, rs->snapshot, read_caches_, inner,
-                    [&](auto& lazy_seq){
-                        loader(lazy_seq, static_cast<std::size_t>(rowno), total);
+                    column_attno_, loc,
+                    SourceBinding::expected_last_fragment_padding(loc),
+                    rs->snapshot, read_caches_, inner};
+                bioseq::storage::with_lazy_postgres<S>(
+                    source_binding,
+                    [&loader, rowno, total](auto view){
+                        loader(view, static_cast<std::size_t>(rowno), total);
                     });
             });
         }

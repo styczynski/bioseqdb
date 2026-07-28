@@ -165,6 +165,7 @@ add_custom_command(
   COMMAND "${BIOSEQ_CODEGEN_EXECUTABLE}" self_test external
   COMMAND "${BIOSEQ_CODEGEN_EXECUTABLE}"
     external generate
+    --generator-binary "${BIOSEQ_CODEGEN_EXECUTABLE}"
     --source-root "${_bioseq_external_source_root}"
     --output-root "${BIOSEQ_EXTERNAL_GENERATED_ROOT}"
     --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
@@ -191,7 +192,23 @@ set(OATPP_INSTALL OFF CACHE BOOL "" FORCE)
 set(OATPP_LINK_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 set(OATPP_LINK_ATOMIC ON CACHE BOOL "" FORCE)
 
+# Every static archive that reaches the extension shared object must be PIC.
+# Seed the directory default before either the repo-local or fetched Oat++
+# source is added.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(_bioseq_oatpp_root "${BIOSEQ_REPOSITORY_ROOT}/oatpp-master")
+if(NOT EXISTS "${_bioseq_oatpp_root}/src/oatpp/Environment.hpp")
+  include(FetchContent)
+  FetchContent_Declare(bioseq_oatpp
+    GIT_REPOSITORY "https://github.com/oatpp/oatpp.git"
+    GIT_TAG "f83d648fd82dc222ef88aabbafb68efbd7d7bf50"
+    GIT_SHALLOW FALSE
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(bioseq_oatpp)
+  set(_bioseq_oatpp_root "${bioseq_oatpp_SOURCE_DIR}")
+endif()
+
 file(STRINGS "${_bioseq_oatpp_root}/src/oatpp/Environment.hpp"
   _bioseq_oatpp_version_line
   REGEX "^#define OATPP_VERSION \"1\\.4\\.[0-9]+\"$")
@@ -200,14 +217,6 @@ if(NOT _bioseq_oatpp_version_line)
     "The repo-local oatpp-master dependency must provide Oat++ 1.4.x")
 endif()
 
-# DOC0372 — the postgresql_bioseq extension is a shared object, so every static
-# archive that reaches its link (oatpp, via the provider adapters ->
-# bioseq_external_https) must be position-independent. oatpp's own CMake does not
-# force PIC, and its thread-local members emit R_X86_64_TPOFF32 relocations that a
-# shared object rejects ("recompile with -fPIC"). Force PIC on the whole oatpp
-# subtree by seeding the directory default before add_subdirectory; the standalone
-# external test exec (a PIE executable) is unaffected.
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT TARGET oatpp)
   add_subdirectory("${_bioseq_oatpp_root}"
     "${CMAKE_CURRENT_BINARY_DIR}/oatpp" EXCLUDE_FROM_ALL)
@@ -370,6 +379,37 @@ target_link_libraries(bioseq_external_io PUBLIC
 # Provider-core + adapter tests run inside the existing external integration exec
 # so the `external-api` MCP mode builds and runs them without a sequence/PG target.
 if(TARGET bioseq_external_integration_tests_exec)
+  # DOC0377 §17.3 — this target is the compile/link proof that the reusable
+  # rank-pack core, checked fixed-span writer, and admitted-region adapter stay
+  # outside PostgreSQL. Keep the checked closure explicit: broad globbing would
+  # make an unrelated PG-facing source weaken the value of this denylist.
+  set(_bioseq_pg_free_pack_sources
+    "${_bioseq_external_source_root}/backend/sequences/rank_pack_core.cppm"
+    "${_bioseq_external_source_root}/backend/sequences/rank_pack.cppm"
+    "${_bioseq_external_source_root}/backend/storage/lazy_compact_sequence.cppm")
+  set(_bioseq_forbidden_pack_source_regexes
+    "#[ \t]*include[ \t]*[<\"](postgres(\\.h)?|fmgr\\.h|headers/pg_compat\\.h|pg_compat\\.h|access/|catalog/|commands/|executor/|nodes/|utils/)"
+    "(^|[^A-Za-z0-9_])(ereport|elog|palloc|palloc0|pfree)[ \t]*\\("
+    "(^|[^A-Za-z0-9_])(Datum|PG_FUNCTION_ARGS)([^A-Za-z0-9_]|$)"
+    "(^|[ \t])import[ \t]+bioseq\\.[^;\r\n]*pg[^;\r\n]*;")
+  foreach(_bioseq_pg_free_pack_source IN LISTS _bioseq_pg_free_pack_sources)
+    file(READ "${_bioseq_pg_free_pack_source}"
+      _bioseq_pg_free_pack_source_contents)
+    foreach(_bioseq_forbidden_pack_source_regex IN LISTS
+            _bioseq_forbidden_pack_source_regexes)
+      string(REGEX MATCH "${_bioseq_forbidden_pack_source_regex}"
+        _bioseq_forbidden_pack_source_match
+        "${_bioseq_pg_free_pack_source_contents}")
+      if(NOT "${_bioseq_forbidden_pack_source_match}" STREQUAL "")
+        message(FATAL_ERROR
+          "DOC0377 PostgreSQL dependency '${_bioseq_pg_free_pack_source_match}' "
+          "entered PG-free packing source ${_bioseq_pg_free_pack_source}")
+      endif()
+    endforeach()
+  endforeach()
+  target_compile_definitions(bioseq_external_integration_tests_exec PRIVATE
+    BIOSEQ_PG_PACK_DENYLIST_ENABLED=1)
+
   file(GLOB _bioseq_provider_test_sources CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp")
   target_sources(bioseq_external_integration_tests_exec PRIVATE

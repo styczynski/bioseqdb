@@ -26,7 +26,9 @@ module;
 
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -36,6 +38,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>        // DOC0345 Patch C — std::pair / std::declval for segment pair path
 #include <vector>
@@ -51,6 +54,8 @@ import bioseq.gpu.vulkan.phase_b_abi;
 import bioseq.gpu.vulkan.phase_c_abi;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
 import bioseq.storage.size;  // DOC0345 Patch C — bioseq::storage::sequence_size_t
 import bioseq.instr;  // DOC0310 §21 — phase_c_* timing labels
 
@@ -548,6 +553,373 @@ template <class Seq>
     return lut;
 }
 
+#ifdef BIOSEQ_TEST_INDEXES
+struct VulkanAdmittedWindowTestSnapshot {
+  std::uint64_t admitted_materializations = 0u;
+  std::uint64_t live_admitted_windows = 0u;
+  std::uint64_t live_admitted_permit_bytes = 0u;
+  std::uintptr_t live_admitted_buffer_address = 0u;
+  std::uint64_t backend_thread_materializations = 0u;
+  std::uint64_t off_backend_materializations = 0u;
+};
+
+namespace admitted_window_test_detail {
+inline std::atomic<std::uint8_t> enabled{0u};
+inline std::atomic<std::uint64_t> admitted_materializations{0u};
+inline std::atomic<std::uint64_t> live_admitted_windows{0u};
+inline std::atomic<std::uint64_t> live_admitted_permit_bytes{0u};
+inline std::atomic<std::uintptr_t> live_admitted_buffer_address{0u};
+inline std::atomic<std::uint64_t> backend_thread_materializations{0u};
+inline std::atomic<std::uint64_t> off_backend_materializations{0u};
+inline std::thread::id backend_thread{};
+} // namespace admitted_window_test_detail
+
+inline void arm_vulkan_admitted_window_test_seam() noexcept {
+  using namespace admitted_window_test_detail;
+  enabled.store(0u, std::memory_order_release);
+  admitted_materializations.store(0u, std::memory_order_relaxed);
+  live_admitted_windows.store(0u, std::memory_order_relaxed);
+  live_admitted_permit_bytes.store(0u, std::memory_order_relaxed);
+  live_admitted_buffer_address.store(0u, std::memory_order_relaxed);
+  backend_thread_materializations.store(0u, std::memory_order_relaxed);
+  off_backend_materializations.store(0u, std::memory_order_relaxed);
+  backend_thread = std::this_thread::get_id();
+  enabled.store(1u, std::memory_order_release);
+}
+
+inline void reset_vulkan_admitted_window_test_seam() noexcept {
+  admitted_window_test_detail::enabled.store(0u, std::memory_order_release);
+}
+
+[[nodiscard]] inline VulkanAdmittedWindowTestSnapshot
+vulkan_admitted_window_test_snapshot() noexcept {
+  using namespace admitted_window_test_detail;
+  return {
+      .admitted_materializations =
+          admitted_materializations.load(std::memory_order_acquire),
+      .live_admitted_windows =
+          live_admitted_windows.load(std::memory_order_acquire),
+      .live_admitted_permit_bytes =
+          live_admitted_permit_bytes.load(std::memory_order_acquire),
+      .live_admitted_buffer_address =
+          live_admitted_buffer_address.load(std::memory_order_acquire),
+      .backend_thread_materializations =
+          backend_thread_materializations.load(std::memory_order_acquire),
+      .off_backend_materializations =
+          off_backend_materializations.load(std::memory_order_acquire),
+  };
+}
+
+[[nodiscard]] inline bool note_vulkan_admitted_window_begin(
+    std::uint64_t permit_bytes, std::uintptr_t buffer_address) noexcept {
+  using namespace admitted_window_test_detail;
+  if (enabled.load(std::memory_order_acquire) == 0u) {
+    return false;
+  }
+  admitted_materializations.fetch_add(1u, std::memory_order_relaxed);
+  live_admitted_windows.fetch_add(1u, std::memory_order_release);
+  live_admitted_permit_bytes.store(permit_bytes, std::memory_order_release);
+  live_admitted_buffer_address.store(buffer_address,
+                                     std::memory_order_release);
+  if (std::this_thread::get_id() == backend_thread) {
+    backend_thread_materializations.fetch_add(1u, std::memory_order_relaxed);
+  } else {
+    off_backend_materializations.fetch_add(1u, std::memory_order_relaxed);
+  }
+  return true;
+}
+
+inline void note_vulkan_admitted_window_end(bool tracked) noexcept {
+  if (tracked) {
+    using namespace admitted_window_test_detail;
+    live_admitted_buffer_address.store(0u, std::memory_order_release);
+    live_admitted_permit_bytes.store(0u, std::memory_order_release);
+    live_admitted_windows.fetch_sub(
+        1u, std::memory_order_release);
+  }
+}
+#endif
+
+namespace admitted_sequence_detail {
+
+struct borrowed_packed_header {
+  const void *data = nullptr;
+  bioseq::storage::sequence_size_t bp_size = 0;
+  std::uint8_t storage_unit_byte_width = 0;
+  std::uint16_t padding_letters = 0;
+};
+
+template <sequence_alphabet Alphabet> struct borrowed_u32_instance {
+  using alphabet_type = Alphabet;
+  using storage_unit = std::uint32_t;
+  using compact_sequence_stdc_type = borrowed_packed_header;
+
+  static constexpr std::size_t letter_bit_width =
+      bioseq::storage::basic_lazy_sequence_view<
+          Alphabet>::traits::logical_bits_per_symbol;
+  static constexpr std::size_t byte_width = sizeof(storage_unit);
+  static constexpr bool is_valid_compact_sequence_stdc_instance = true;
+};
+
+/// Construct a typed u32 range only when the descriptor is backed by a real
+/// u32 object array (native resident storage or admitted u32 materialization).
+/// Reinterpreted byte descriptors are routed through byte_upload_range below
+/// and must never reach this function.
+template <sequence_alphabet Alphabet, class Fn>
+decltype(auto) with_typed_u32_range(
+    const typename bioseq::storage::basic_lazy_sequence_view<
+        Alphabet>::resident_packed_region &descriptor,
+    Fn &&fn) {
+  using instance = borrowed_u32_instance<Alphabet>;
+  using range_type = compact_sequence_range<instance>;
+  borrowed_packed_header header{
+      .data = descriptor.units,
+      .bp_size = descriptor.bp_length,
+      .storage_unit_byte_width = descriptor.storage_unit_byte_width,
+      .padding_letters = descriptor.trailing_padding_letters,
+  };
+    range_type range{header};
+  return std::forward<Fn>(fn)(range);
+}
+
+/// Unit iterator for a packed upload whose backing allocation has a different
+/// effective type.  Arithmetic is performed exclusively on object-
+/// representation bytes while each iterator step still means one logical u32
+/// packed unit to the Vulkan geometry code.
+template <std::size_t UnitBytes>
+struct byte_packed_unit_iterator {
+  const std::byte *address = nullptr;
+
+  byte_packed_unit_iterator &operator+=(std::size_t units) noexcept {
+    if (units != 0u) {
+      DEBUG_ASSERT(address != nullptr,
+                   "nonempty byte upload iterator requires backing bytes");
+      address += units * UnitBytes;
+    }
+    return *this;
+  }
+
+  friend byte_packed_unit_iterator operator+(
+      byte_packed_unit_iterator it, std::size_t units) noexcept {
+    it += units;
+    return it;
+  }
+
+  friend bool operator==(const byte_packed_unit_iterator &,
+                         const byte_packed_unit_iterator &) = default;
+};
+
+/// Upload-only sequence surface for a layout-compatible packed byte region.
+/// It deliberately has no dereference or `operator[]`: callers can derive
+/// byte addresses and biological/unit geometry, but cannot form a typed u32
+/// load from the u64-backed allocation.
+template <sequence_alphabet Alphabet>
+class byte_upload_range {
+public:
+  using instance = borrowed_u32_instance<Alphabet>;
+  using traits = typename compact_sequence_range<instance>::traits;
+  using iterator = byte_packed_unit_iterator<sizeof(std::uint32_t)>;
+  static constexpr bool is_byte_addressed_upload_only = true;
+
+private:
+  using descriptor_type = typename bioseq::storage::basic_lazy_sequence_view<
+      Alphabet>::resident_packed_region;
+  descriptor_type descriptor_{};
+
+public:
+  explicit byte_upload_range(const descriptor_type &descriptor) noexcept
+      : descriptor_(descriptor) {
+    DEBUG_ASSERT(
+        descriptor.storage_unit_byte_width == sizeof(std::uint32_t),
+        "byte-addressed Vulkan range requires canonical u32 geometry");
+  }
+
+  [[nodiscard]] std::size_t size() const noexcept {
+    return descriptor_.unit_count;
+  }
+  [[nodiscard]] std::size_t byte_size() const noexcept {
+    return descriptor_.unit_count * sizeof(std::uint32_t);
+  }
+  [[nodiscard]] std::size_t bp_size() const noexcept {
+    return static_cast<std::size_t>(descriptor_.bp_length);
+  }
+  [[nodiscard]] std::size_t padding() const noexcept {
+    return descriptor_.trailing_padding_letters;
+  }
+  [[nodiscard]] iterator cbegin() const noexcept {
+    return iterator{static_cast<const std::byte *>(descriptor_.units)};
+  }
+  [[nodiscard]] iterator cend() const noexcept {
+    return cbegin() + size();
+  }
+  // BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN byte_upload_range_address_adapter
+  [[nodiscard]] const std::byte *read_cptr(const iterator &it) const noexcept {
+    return it.address;
+  }
+  // BIOSEQ_DOC0377_PRIVATE_PACKED_END byte_upload_range_address_adapter
+};
+
+template <sequence_alphabet Alphabet> struct canonical_u32_window {
+  using owner_type = bioseq::storage::admitted_packed_region<Alphabet>;
+  using descriptor_type = typename bioseq::storage::basic_lazy_sequence_view<
+      Alphabet>::resident_packed_region;
+
+  std::optional<owner_type> owner;
+  descriptor_type descriptor{};
+  bioseq::storage::sequence_resident_borrow_kind borrow_kind{
+      bioseq::storage::sequence_resident_borrow_kind::none};
+#ifdef BIOSEQ_TEST_INDEXES
+  bool test_admitted_window_tracked = false;
+#endif
+
+  explicit canonical_u32_window(owner_type &&admitted)
+      : owner(std::in_place, std::move(admitted)),
+        descriptor(owner->descriptor())
+#ifdef BIOSEQ_TEST_INDEXES
+        ,
+        test_admitted_window_tracked(note_vulkan_admitted_window_begin(
+            owner->test_admission_bytes(), owner->test_storage_address()))
+#endif
+  {
+  }
+
+  explicit canonical_u32_window(
+      const descriptor_type &borrowed,
+      bioseq::storage::sequence_resident_borrow_kind kind) noexcept
+      : descriptor(borrowed), borrow_kind(kind) {
+    DEBUG_ASSERT(
+        kind != bioseq::storage::sequence_resident_borrow_kind::none,
+        "borrowed Vulkan canonical window requires a truthful borrow kind");
+  }
+
+  canonical_u32_window(canonical_u32_window &&other) noexcept
+      : owner(std::move(other.owner)), descriptor(other.descriptor),
+        borrow_kind(other.borrow_kind)
+#ifdef BIOSEQ_TEST_INDEXES
+        ,
+        test_admitted_window_tracked(
+            std::exchange(other.test_admitted_window_tracked, false))
+#endif
+  {
+  }
+  ~canonical_u32_window() {
+#ifdef BIOSEQ_TEST_INDEXES
+    note_vulkan_admitted_window_end(test_admitted_window_tracked);
+#endif
+  }
+  canonical_u32_window &operator=(canonical_u32_window &&) = delete;
+  canonical_u32_window(const canonical_u32_window &) = delete;
+  canonical_u32_window &operator=(const canonical_u32_window &) = delete;
+};
+
+/// Visit canonical Vulkan input without ever representing an effective-type
+/// reinterpretation as a typed range.  Native/admitted u32 storage retains the
+/// established compact range.  A u64-backed byte-layout borrow instead gets a
+/// non-dereferenceable byte_upload_range whose unit stepping is std::byte
+/// arithmetic.
+template <sequence_alphabet Alphabet, class Fn>
+decltype(auto) with_canonical_u32_upload_source(
+    const canonical_u32_window<Alphabet> &window, Fn &&fn) {
+  if (window.borrow_kind
+      == bioseq::storage::sequence_resident_borrow_kind::
+          reinterpreted_bytes) {
+    byte_upload_range<Alphabet> bytes{window.descriptor};
+    return std::forward<Fn>(fn)(bytes);
+  }
+  DEBUG_ASSERT(
+      window.owner.has_value()
+          || window.borrow_kind
+              == bioseq::storage::sequence_resident_borrow_kind::
+                  native_typed_storage,
+      "typed Vulkan range requires native or admitted u32 storage");
+  return with_typed_u32_range<Alphabet>(
+      window.descriptor, std::forward<Fn>(fn));
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<canonical_u32_window<Alphabet>>
+prepare_canonical_u32_window(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    bioseq::storage::sequence_size_t from, bioseq::storage::sequence_size_t to,
+    VulkanSketchDecline *decline_out) {
+  if (from > to || to > sequence.bp_size()) {
+    if (decline_out != nullptr) {
+      decline_out->reason =
+          VulkanSketchDeclineReason::sequence_type_unsupported;
+    }
+    return std::nullopt;
+  }
+  const auto access = bioseq::storage::plan_sequence_access(
+      sequence,
+      bioseq::storage::sequence_access_requirement::contiguous_resident, from,
+      to, sizeof(std::uint32_t),
+      bioseq::storage::sequence_resident_borrow_policy::
+          byte_upload_compatible);
+  if (access.route
+          == bioseq::storage::sequence_access_route::borrow_resident
+      && access.resident.has_value()) {
+    // All facade Vulkan entry points below use the range only to derive byte
+    // addresses and upload its object representation; they never load a
+    // requested-width storage unit on the CPU.  They also complete upload,
+    // submission, fence drain, and result delivery before returning.  A
+    // validated stable native descriptor or cross-width byte descriptor can
+    // therefore be borrowed for that synchronous interval without an
+    // admitted O(n) repack/copy.
+    return std::optional<canonical_u32_window<Alphabet>>{
+        std::in_place, *access.resident, access.resident_borrow_kind};
+  }
+  bioseq::parallelism::MemoryAdmissionFailure failure{};
+  auto permit =
+      bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+          access.admission_bytes, &failure);
+  if (!permit) {
+    if (decline_out != nullptr) {
+      decline_out->reason = VulkanSketchDeclineReason::memory_admission_denied;
+      decline_out->admission = failure;
+    }
+    return std::nullopt;
+  }
+  auto owner = bioseq::storage::materialize_packed_region(
+      sequence, from, to, sizeof(std::uint32_t), std::move(*permit));
+  return std::optional<canonical_u32_window<Alphabet>>{std::in_place,
+                                                       std::move(owner)};
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] bool validate_facade_sketch_shape(
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+        std::size_t window_size,
+        std::size_t kmer_size,
+        VulkanSketchDecline* decline_out) noexcept {
+    using instance = borrowed_u32_instance<Alphabet>;
+    using traits = typename compact_sequence_range<instance>::traits;
+    if (decline_out != nullptr) {
+        *decline_out = VulkanSketchDecline{
+            .bp_size = sequence.bp_size(),
+            .window_size = window_size,
+            .kmer_size = kmer_size,
+        };
+    }
+    auto reject = [decline_out](VulkanSketchDeclineReason reason) noexcept {
+        if (decline_out != nullptr) {
+            decline_out->reason = reason;
+        }
+        return false;
+    };
+    if constexpr (!vulkan_minimizer_alphabet_shape_supported<traits>()) {
+        return reject(VulkanSketchDeclineReason::alphabet_unsupported);
+    }
+    if (!vulkan_minimizer_kmer_size_supported<traits>(kmer_size)) {
+        return reject(VulkanSketchDeclineReason::kmer_size_unsupported);
+    }
+    if (!vulkan_minimizer_window_size_supported(window_size)) {
+        return reject(VulkanSketchDeclineReason::window_size_unsupported);
+    }
+    return true;
+}
+
+} // namespace admitted_sequence_detail
+
 // ===========================================================================
 // Sequence upload view (DOC0307 §4.3)
 // ===========================================================================
@@ -557,6 +929,7 @@ template <class Seq>
 /// byte/bp/padding accessors. Fragmented lazy sequences are excluded by the
 /// separate fragmentation guard; selected Vulkan segment callers use the
 /// checked segment upload path below and throw on GPU declines.
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN vulkan_sketchable_sequence
 template <class Seq>
 concept vulkan_sketchable_sequence = requires (const Seq& seq) {
     typename std::remove_cvref_t<Seq>::traits;
@@ -568,41 +941,7 @@ concept vulkan_sketchable_sequence = requires (const Seq& seq) {
     { seq.padding() };
     { seq.read_cptr(seq.cbegin()) };
 };
-
-/// True when `Seq` is a fragmented `lazy_compact_sequence` whose single-arg
-/// `read_cptr` returns only the current fragment (not a single contiguous run).
-template <class Seq>
-[[nodiscard]] constexpr bool is_fragmented_sequence() noexcept {
-    if constexpr (requires { typename std::remove_cvref_t<Seq>::scanner_type; }) {
-        return std::remove_cvref_t<Seq>::scanner_type::supports_fragments();
-    } else {
-        return false;
-    }
-}
-
-/// DOC0345 Patch C — a sequence whose lazy fragmented storage can be stitched
-/// into one contiguous window via the 3-argument `read_cptr(it, scratch, n)`
-/// stitch. Uses the iterator expression `seq.cbegin()` (not a `Seq::iterator`
-/// member) so production `lazy_compact_sequence` (which exposes `iterator_impl`)
-/// satisfies it.
-template <class Seq>
-concept vulkan_sketchable_segment_sequence =
-    requires (
-        const Seq& seq,
-        decltype(std::declval<const Seq&>().cbegin()) iter,
-        std::span<typename std::remove_cvref_t<Seq>::traits::storage_unit> scratch,
-        std::size_t count) {
-        typename std::remove_cvref_t<Seq>::traits;
-        typename std::remove_cvref_t<Seq>::traits::storage_unit;
-        typename std::remove_cvref_t<Seq>::traits::alphabet_type;
-        { seq.cbegin() };
-        { seq.size() } -> std::convertible_to<std::uint64_t>;
-        { seq.bp_size() } -> std::convertible_to<std::uint64_t>;
-        { seq.padding() };
-        { seq.read_cptr(iter, scratch, count) }
-            -> std::convertible_to<
-                const typename std::remove_cvref_t<Seq>::traits::storage_unit*>;
-    };
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END vulkan_sketchable_sequence
 
 struct SequenceUploadView {
     const void* bytes = nullptr;
@@ -677,6 +1016,7 @@ template <class Traits>
         static_cast<std::size_t>(ceil_div_u64(context_bp, lpu)));
 }
 
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN compute_segment_descriptor
 template <class Seq>
 [[nodiscard]] SegmentUploadDescriptor compute_segment_descriptor(
     const Seq& seq,
@@ -704,7 +1044,9 @@ template <class Seq>
         .tail_padding = tail_padding,
     };
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END compute_segment_descriptor
 
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN make_phase_c_segment_window
 template <class Seq>
 [[nodiscard]] PhaseCSegmentWindow make_phase_c_segment_window(
     const Seq& seq,
@@ -736,6 +1078,7 @@ template <class Seq>
         .collected_bp = sub_descriptor.window_bp,
     };
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END make_phase_c_segment_window
 
 template <class Seq>
 [[nodiscard]] bool split_phase_c_segment_window(
@@ -822,6 +1165,7 @@ template <class MinimizerT, class Traits>
     return collected_floor_bp;
 }
 
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN phase_c_segment_windows
 template <class MinimizerT, class Seq>
 [[nodiscard]] std::vector<PhaseCSegmentWindow> phase_c_segment_windows(
     const Seq& seq,
@@ -880,23 +1224,32 @@ template <class MinimizerT, class Seq>
     }
     return windows;
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END phase_c_segment_windows
 
-template <class Seq, class StorageUnit>
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN make_upload_view_from_window
+template <class Seq, class AddressedElement>
 [[nodiscard]] inline SequenceUploadView make_upload_view_from_window(
     const Seq&,
-    const StorageUnit* base,
+    const AddressedElement* base,
     const SegmentUploadDescriptor& descriptor)
 {
     using traits = typename std::remove_cvref_t<Seq>::traits;
+    using logical_storage_unit = typename traits::storage_unit;
+    static_assert(
+        std::same_as<std::remove_cv_t<AddressedElement>, logical_storage_unit>
+        || std::same_as<std::remove_cv_t<AddressedElement>, std::byte>
+        || std::same_as<std::remove_cv_t<AddressedElement>, unsigned char>,
+        "Vulkan uploads accept native storage pointers or byte addresses");
     const std::uint64_t byte_size =
         static_cast<std::uint64_t>(descriptor.hi_unit - descriptor.lo_unit)
-        * static_cast<std::uint64_t>(sizeof(StorageUnit));
+        * static_cast<std::uint64_t>(sizeof(logical_storage_unit));
     return SequenceUploadView{
         .bytes = byte_size == 0u ? nullptr : static_cast<const void*>(base),
         .byte_size = byte_size,
         .padded_byte_size = round_up4(byte_size),
         .bp_size = descriptor.window_bp,
-        .unit_bits = static_cast<std::uint32_t>(sizeof(StorageUnit) * 8u),
+        .unit_bits = static_cast<std::uint32_t>(
+            sizeof(logical_storage_unit) * 8u),
         .bits_per_char = static_cast<std::uint32_t>(traits::bits_per_char),
         .letters_per_unit = static_cast<std::uint32_t>(traits::letters_per_unit),
         .alphabet_size = static_cast<std::uint32_t>(traits::alphabet_size),
@@ -905,13 +1258,13 @@ template <class Seq, class StorageUnit>
         .alphabet_kind = alphabet_kernel_kind_of_traits<traits>(),
     };
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END make_upload_view_from_window
 
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN make_sequence_upload_view
 template <vulkan_sketchable_sequence Seq>
 [[nodiscard]] inline SequenceUploadView make_sequence_upload_view(const Seq& seq) {
-    using traits = typename std::remove_cvref_t<Seq>::traits;
-    using storage_unit = typename traits::storage_unit;
     auto begin = seq.cbegin();
-    const storage_unit* ptr =
+    const auto* ptr =
         seq.byte_size() == 0 ? nullptr : seq.read_cptr(begin);
     const SegmentUploadDescriptor descriptor{
         .lo_unit = 0,
@@ -921,6 +1274,82 @@ template <vulkan_sketchable_sequence Seq>
     };
     return make_upload_view_from_window<Seq>(seq, ptr, descriptor);
 }
+
+/* Canonical lazy-facade bridge for callers that admitted a contiguous packed
+ * region explicitly.  The descriptor's backing owner must outlive the Vulkan
+ * upload and completion fence; this view never acquires or copies ownership. */
+template <sequence_alphabet Alphabet>
+[[nodiscard]] inline SequenceUploadView make_sequence_upload_view(
+    const bioseq::storage::admitted_packed_region<Alphabet>& owner) {
+    using lazy_traits = bioseq::storage::lazy_rank_stream_traits<Alphabet>;
+    const auto& descriptor = owner.descriptor();
+    constexpr std::uint32_t bits = static_cast<std::uint32_t>(
+        lazy_traits::logical_bits_per_symbol);
+    const std::uint32_t letters_per_unit = static_cast<std::uint32_t>(
+        bioseq::storage::lazy_packed_letters_per_unit(
+            descriptor.storage_unit_byte_width,
+            static_cast<std::uint8_t>(bits)));
+    const std::uint64_t expected_units = letters_per_unit == 0u
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : descriptor.bp_length / letters_per_unit
+            + static_cast<std::uint64_t>(
+                descriptor.bp_length % letters_per_unit != 0u);
+    const bool geometry_overflow = letters_per_unit == 0u
+        || expected_units > (std::numeric_limits<std::uint64_t>::max)()
+            / std::max<std::uint32_t>(letters_per_unit, 1u);
+    const std::uint64_t expected_padding = geometry_overflow
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : expected_units * letters_per_unit - descriptor.bp_length;
+    const bool bytes_overflow = descriptor.unit_count
+        > (std::numeric_limits<std::uint64_t>::max)()
+            / std::max<std::uint8_t>(
+                descriptor.storage_unit_byte_width, 1u);
+    if (descriptor.bit_order
+            != bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                packed_bit_order::least_significant_symbol_first
+        || descriptor.leading_symbol_offset != 0u
+        || descriptor.bits_per_symbol != bits
+        || letters_per_unit == 0u
+        || geometry_overflow
+        || descriptor.unit_count != expected_units
+        || descriptor.trailing_padding_letters != expected_padding
+        || bytes_overflow
+        || (descriptor.unit_count != 0u && descriptor.units == nullptr)) {
+        throw VulkanRuntimeError(
+            "admitted packed-region upload descriptor is invalid");
+    }
+    const std::uint64_t bytes = static_cast<std::uint64_t>(
+        descriptor.unit_count) * descriptor.storage_unit_byte_width;
+    constexpr AlphabetKernelKind kernel = [] {
+        if constexpr (seqan3::nucleotide_alphabet<Alphabet>
+            && bits == 2u && seqan3::alphabet_size<Alphabet> == 4u) {
+            return AlphabetKernelKind::dna4_nt4;
+        } else if constexpr (seqan3::nucleotide_alphabet<Alphabet>
+            && bits == 3u && seqan3::alphabet_size<Alphabet> == 5u) {
+            return AlphabetKernelKind::dna5_nt4;
+        } else {
+            return AlphabetKernelKind::generic;
+        }
+    }();
+    return SequenceUploadView{
+        .bytes = bytes == 0u ? nullptr : descriptor.units,
+        .byte_size = bytes,
+        .padded_byte_size = round_up4(bytes),
+        .bp_size = descriptor.bp_length,
+        .unit_bits = static_cast<std::uint32_t>(
+            descriptor.storage_unit_byte_width * 8u),
+        .bits_per_char = bits,
+        .letters_per_unit = letters_per_unit,
+        .alphabet_size = static_cast<std::uint32_t>(
+            seqan3::alphabet_size<Alphabet>),
+        .char_mask = bits == 32u
+            ? std::numeric_limits<std::uint32_t>::max()
+            : static_cast<std::uint32_t>((std::uint64_t{1u} << bits) - 1u),
+        .padding_letters = descriptor.trailing_padding_letters,
+        .alphabet_kind = kernel,
+    };
+}
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END make_sequence_upload_view
 
 // ===========================================================================
 // Device minimizer storage + sketch result (DOC0307 §4.3)
@@ -2123,12 +2552,12 @@ build_gpu_index_from_upload_on_device(
 /// GPU minimizer sketch with full memory admission, returning both the host
 /// minimizers (for the arena slab) and the resident device buffer (for
 /// seed-lookup reuse). Returns `std::nullopt` for pre-dispatch shapes the GPU
-/// cannot run (fragmented, oversized k/alphabet, no usable device, or admission
+/// cannot run (oversized k/alphabet, no usable device, or admission
 /// failure). Selected Vulkan pipeline callers convert that decline into a hard
 /// error; runtime errors propagate directly.
 template <class MinimizerT, class Seq>
 [[nodiscard]] std::optional<VulkanSketchResult<MinimizerT>>
-collect_minimizers_vulkan_result(
+collect_minimizers_vulkan_result_resident_impl(
     const Seq& seq,
     std::size_t window_size,
     std::size_t kmer_size,
@@ -2150,56 +2579,7 @@ collect_minimizers_vulkan_result(
             decline_out->reason = reason;
         }
     };
-    if constexpr (is_fragmented_sequence<bare>()) {
-        if constexpr (!vulkan_sketchable_segment_sequence<bare>) {
-            decline(VulkanSketchDeclineReason::fragmented_sequence_unsupported);
-            return std::nullopt;
-        } else {
-            using traits = typename bare::traits;
-            using storage_unit = typename traits::storage_unit;
-            if constexpr (traits::alphabet_size > 256 || traits::bits_per_char == 0
-                          || traits::bits_per_char > 32) {
-                decline(VulkanSketchDeclineReason::alphabet_unsupported);
-                return std::nullopt;
-            } else {
-                constexpr std::size_t step_bits =
-                    alphabet_kernel_kind_of_traits<traits>() == AlphabetKernelKind::generic
-                        ? traits::bits_per_char
-                        : std::size_t{2};
-                if (kmer_size == 0 || kmer_size > 64 / step_bits || kmer_size > 32) {
-                    decline(VulkanSketchDeclineReason::kmer_size_unsupported);
-                    return std::nullopt;
-                }
-                if (window_size == 0 || window_size > 256) {
-                    decline(VulkanSketchDeclineReason::window_size_unsupported);
-                    return std::nullopt;
-                }
-                const SegmentUploadDescriptor descriptor =
-                    compute_segment_descriptor(seq, 0u, static_cast<std::size_t>(seq.size()));
-                std::vector<storage_unit> scratch;
-                scratch.resize(descriptor.hi_unit - descriptor.lo_unit);
-                const storage_unit* base = seq.read_cptr(
-                    seq.cbegin(),
-                    std::span<storage_unit>{scratch.data(), scratch.size()},
-                    scratch.size());
-                const SequenceUploadView upload =
-                    make_upload_view_from_window<bare>(seq, base, descriptor);
-                const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
-                return sketch_uploaded_window_result<MinimizerT>(
-                    upload,
-                    rank_lut,
-                    window_size,
-                    kmer_size,
-                    0u,
-                    nullptr,
-                    {},
-                    decline_out,
-                    nullptr,
-                    0u,
-                    host_ownership_route);
-            }
-        }
-    } else if constexpr (!vulkan_sketchable_sequence<bare>) {
+    if constexpr (!vulkan_sketchable_sequence<bare>) {
         decline(VulkanSketchDeclineReason::sequence_type_unsupported);
         return std::nullopt;
     } else {
@@ -2782,7 +3162,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
 /// The returned `GpuBuiltIndex` owns the resident
 /// slots/positions device buffers — the indexing layer adopts them.
 template <class MinimizerT, class Seq>
-[[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_index_on_device(
+[[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_index_on_device_resident_impl(
     const Seq& seq,
     std::size_t window_size,
     std::size_t kmer_size,
@@ -2808,61 +3188,7 @@ template <class MinimizerT, class Seq>
             decline_out->reason = reason;
         }
     };
-    if constexpr (is_fragmented_sequence<bare>()) {
-        if constexpr (!vulkan_sketchable_segment_sequence<bare>) {
-            decline(VulkanSketchDeclineReason::fragmented_sequence_unsupported);
-            return std::nullopt;
-        } else {
-            using traits = typename bare::traits;
-            using storage_unit = typename traits::storage_unit;
-            if constexpr (traits::alphabet_size > 256 || traits::bits_per_char == 0 ||
-                          traits::bits_per_char > 32) {
-                decline(VulkanSketchDeclineReason::alphabet_unsupported);
-                return std::nullopt;
-            } else {
-                constexpr std::size_t step_bits =
-                    alphabet_kernel_kind_of_traits<traits>() == AlphabetKernelKind::generic
-                        ? traits::bits_per_char : std::size_t{2};
-                if (kmer_size == 0 || kmer_size > 64 / step_bits || kmer_size > 32) {
-                    decline(VulkanSketchDeclineReason::kmer_size_unsupported);
-                    return std::nullopt;
-                }
-                if (window_size == 0 || window_size > 256) {
-                    decline(VulkanSketchDeclineReason::window_size_unsupported);
-                    return std::nullopt;
-                }
-
-                const SegmentUploadDescriptor descriptor =
-                    compute_segment_descriptor(seq, 0u, static_cast<std::size_t>(seq.size()));
-                std::vector<storage_unit> scratch;
-                scratch.resize(descriptor.hi_unit - descriptor.lo_unit);
-                const storage_unit* base = seq.read_cptr(
-                    seq.cbegin(),
-                    std::span<storage_unit>{scratch.data(), scratch.size()},
-                    scratch.size());
-                const SequenceUploadView upload =
-                    make_upload_view_from_window<bare>(seq, base, descriptor);
-                const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
-                const std::uint64_t scratch_capacity_bytes =
-                    bioseq::parallelism::saturating_mul(
-                        static_cast<std::uint64_t>(scratch.capacity()),
-                        sizeof(storage_unit));
-                auto release_scratch =
-                    [scratch = std::move(scratch)]() mutable noexcept {
-                        std::vector<storage_unit>{}.swap(scratch);
-                    };
-                return build_gpu_index_from_upload_on_device<MinimizerT>(
-                    upload,
-                    rank_lut,
-                    window_size,
-                    kmer_size,
-                    query_gate,
-                    decline_out,
-                    scratch_capacity_bytes,
-                    std::move(release_scratch));
-            }
-        }
-    } else if constexpr (!vulkan_sketchable_sequence<bare>) {
+    if constexpr (!vulkan_sketchable_sequence<bare>) {
         decline(VulkanSketchDeclineReason::sequence_type_unsupported);
         return std::nullopt;
     } else {
@@ -2900,8 +3226,9 @@ template <class MinimizerT, class Seq>
 /// Build a dense GPU-resident minimizer index for one stitched segment window.
 /// Positions in the returned index are local to `lo_unit`; callers that seed
 /// against the full target must attach the global base to the resident handle.
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN build_gpu_segment_index_on_device_resident_impl
 template <class MinimizerT, class Seq>
-[[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_segment_index_on_device(
+[[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_segment_index_on_device_resident_impl(
     const Seq& seq,
     std::size_t lo_unit,
     std::size_t hi_unit,
@@ -2929,13 +3256,11 @@ template <class MinimizerT, class Seq>
             decline_out->reason = reason;
         }
     };
-    if constexpr (!vulkan_sketchable_segment_sequence<bare>
-                  && !vulkan_sketchable_sequence<bare>) {
+    if constexpr (!vulkan_sketchable_sequence<bare>) {
         decline(VulkanSketchDeclineReason::sequence_type_unsupported);
         return std::nullopt;
     } else {
         using traits = typename bare::traits;
-        using storage_unit = typename traits::storage_unit;
         if constexpr (traits::alphabet_size > 256 || traits::bits_per_char == 0 ||
                       traits::bits_per_char > 32) {
             decline(VulkanSketchDeclineReason::alphabet_unsupported);
@@ -2971,57 +3296,33 @@ template <class MinimizerT, class Seq>
             auto begin_iter = seq.cbegin();
             begin_iter += static_cast<bioseq::storage::sequence_size_t>(
                 descriptor.lo_unit);
-            const storage_unit* base = nullptr;
-            std::vector<storage_unit> scratch;
-            if constexpr (vulkan_sketchable_segment_sequence<bare>) {
-                const std::size_t unit_count =
-                    descriptor.hi_unit - descriptor.lo_unit;
-                scratch.resize(unit_count);
-                base = seq.read_cptr(
-                    begin_iter,
-                    std::span<storage_unit>{scratch.data(), scratch.size()},
-                    unit_count);
-            } else {
-                base = seq.read_cptr(begin_iter);
-            }
+            const auto* base = seq.read_cptr(begin_iter);
             const SequenceUploadView upload =
                 make_upload_view_from_window<bare>(seq, base, descriptor);
             const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
-            const std::uint64_t scratch_capacity_bytes =
-                bioseq::parallelism::saturating_mul(
-                    static_cast<std::uint64_t>(scratch.capacity()),
-                    sizeof(storage_unit));
-            std::function<void()> release_scratch;
-            if (!scratch.empty()) {
-                release_scratch =
-                    [scratch = std::move(scratch)]() mutable noexcept {
-                        std::vector<storage_unit>{}.swap(scratch);
-                    };
-            }
             return build_gpu_index_from_upload_on_device<MinimizerT>(
                 upload,
                 rank_lut,
                 window_size,
                 kmer_size,
                 query_gate,
-                decline_out,
-                scratch_capacity_bytes,
-                std::move(release_scratch));
+                decline_out);
         }
     }
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END build_gpu_segment_index_on_device_resident_impl
 
 /// Collector-compatible wrapper for existing minimizer call sites. Feeds the
 /// GPU sketch into `collector`; returns false only for pre-dispatch ineligible
 /// shapes. Runtime failures propagate.
 template <class MinimizerT, class Collector, class Seq>
 [[nodiscard]] std::optional<VulkanSketchDispatchToken>
-collect_minimizers_vulkan(
+collect_minimizers_vulkan_resident_impl(
     Collector& collector, const Seq& seq,
     std::size_t window_size, std::size_t kmer_size,
     VulkanSketchDecline* decline_out = nullptr)
 {
-    auto result = collect_minimizers_vulkan_result<MinimizerT>(
+    auto result = collect_minimizers_vulkan_result_resident_impl<MinimizerT>(
         seq, window_size, kmer_size, decline_out);
     if (!result) {
         return std::nullopt;
@@ -3078,9 +3379,10 @@ decode_sorted_pair_bytes(
 /// sorted by
 /// (kmer, encoded_pos).
 /// Throws `VulkanRuntimeError` on every selected-GPU decline — no scalar fallback.
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
 template <class Seq>
 [[nodiscard]] VulkanOwnedSegmentPairs
-collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
     const Seq& seq,
     std::size_t lo_unit,
     std::size_t hi_unit,
@@ -3102,7 +3404,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
         .window_size = window_size,
         .kmer_size = kmer_size,
     };
-    if constexpr (!vulkan_sketchable_segment_sequence<bare>) {
+    if constexpr (!vulkan_sketchable_sequence<bare>) {
         path_decline.reason =
             VulkanSketchDeclineReason::fragmented_sequence_unsupported;
         throw_vulkan_strict_decline(
@@ -3396,11 +3698,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
                 auto begin_iter = seq.cbegin();
                 begin_iter += static_cast<bioseq::storage::sequence_size_t>(
                     sub_descriptor.lo_unit);
-                const storage_unit* base = seq.read_cptr(
-                    begin_iter,
-                    std::span<storage_unit>{
-                        owner.scratch.data(), owner.scratch.size()},
-                    unit_count);
+                const auto* base = seq.read_cptr(begin_iter);
                 const SequenceUploadView upload =
                     make_upload_view_from_window<bare>(seq, base, sub_descriptor);
                 const std::uint64_t max_minimizers =
@@ -3544,11 +3842,13 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
         }
     }
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
 
 /// Collector-compatible segment sketch kept for tests and target alignment. It
 /// is checked and throws when used as a selected Vulkan path.
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_minimizers_vulkan_segment_resident_impl_or_throw
 template <class MinimizerT, class Collector, class Seq>
-void collect_minimizers_vulkan_segment_or_throw(
+void collect_minimizers_vulkan_segment_resident_impl_or_throw(
     Collector& collector,
     const Seq& seq,
     std::size_t lo_unit,
@@ -3565,14 +3865,13 @@ void collect_minimizers_vulkan_segment_or_throw(
         .window_size = window_size,
         .kmer_size = kmer_size,
     };
-    if constexpr (!vulkan_sketchable_segment_sequence<bare>) {
+    if constexpr (!vulkan_sketchable_sequence<bare>) {
         path_decline.reason =
             VulkanSketchDeclineReason::fragmented_sequence_unsupported;
         throw_vulkan_strict_decline(
             "Vulkan segment minimizer sketch", path_decline);
     } else {
         using traits = typename bare::traits;
-        using storage_unit = typename traits::storage_unit;
         using MinimizerLimit = bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 
         if constexpr (!vulkan_minimizer_alphabet_shape_supported<traits>()) {
@@ -3648,17 +3947,10 @@ void collect_minimizers_vulkan_segment_or_throw(
                     < static_cast<std::uint64_t>(window_size + kmer_size)) {
                 continue;
             }
-            const std::size_t unit_count =
-                sub_descriptor.hi_unit - sub_descriptor.lo_unit;
-            std::vector<storage_unit> scratch;
-            scratch.resize(unit_count);
             auto begin_iter = seq.cbegin();
             begin_iter += static_cast<bioseq::storage::sequence_size_t>(
                 sub_descriptor.lo_unit);
-            const storage_unit* base = seq.read_cptr(
-                begin_iter,
-                std::span<storage_unit>{scratch.data(), scratch.size()},
-                unit_count);
+            const auto* base = seq.read_cptr(begin_iter);
             const SequenceUploadView upload =
                 make_upload_view_from_window<bare>(seq, base, sub_descriptor);
 
@@ -3736,6 +4028,222 @@ void collect_minimizers_vulkan_segment_or_throw(
             }
         }
     }
+}
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_minimizers_vulkan_segment_resident_impl_or_throw
+
+template <class MinimizerT, sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<VulkanSketchResult<MinimizerT>>
+collect_minimizers_vulkan_result(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    VulkanSketchDecline* decline_out = nullptr,
+    VulkanSketchHostOwnershipRoute host_ownership_route =
+        VulkanSketchHostOwnershipRoute::collector_compatible)
+{
+    if (!admitted_sequence_detail::validate_facade_sketch_shape(
+            sequence, window_size, kmer_size, decline_out)) {
+        return std::nullopt;
+    }
+    auto window = admitted_sequence_detail::prepare_canonical_u32_window(
+        sequence, 0u, sequence.bp_size(), decline_out);
+    if (!window) {
+        return std::nullopt;
+    }
+    return admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
+        [window_size, kmer_size, decline_out, host_ownership_route]
+        <class Range>(Range& resident) {
+            return collect_minimizers_vulkan_result_resident_impl<MinimizerT>(
+                resident,
+                window_size,
+                kmer_size,
+                decline_out,
+                host_ownership_route);
+        });
+}
+
+template <class MinimizerT, class Collector, sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<VulkanSketchDispatchToken>
+collect_minimizers_vulkan(
+    Collector& collector,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    VulkanSketchDecline* decline_out = nullptr)
+{
+    auto result = collect_minimizers_vulkan_result<MinimizerT>(
+        sequence, window_size, kmer_size, decline_out);
+    if (!result) {
+        return std::nullopt;
+    }
+    for (const MinimizerT& minimizer : result->host_minimizers) {
+        collector.collect(minimizer);
+    }
+    if (!result->dispatch_token.accepted()) {
+        throw VulkanRuntimeError{
+            "Vulkan minimizer sketch returned without a completed dispatch token"};
+    }
+    return result->dispatch_token;
+}
+
+template <class MinimizerT, sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_index_on_device(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    VulkanSketchQueryGate query_gate = {},
+    VulkanSketchDecline* decline_out = nullptr)
+{
+    if (!admitted_sequence_detail::validate_facade_sketch_shape(
+            sequence, window_size, kmer_size, decline_out)) {
+        return std::nullopt;
+    }
+    auto window = admitted_sequence_detail::prepare_canonical_u32_window(
+        sequence, 0u, sequence.bp_size(), decline_out);
+    if (!window) {
+        return std::nullopt;
+    }
+    return admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
+        [window_size, kmer_size, query_gate, decline_out]
+        <class Range>(Range& resident) {
+            return build_gpu_index_on_device_resident_impl<MinimizerT>(
+                resident,
+                window_size,
+                kmer_size,
+                query_gate,
+                decline_out);
+        });
+}
+
+template <class MinimizerT, sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_segment_index_on_device(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    bioseq::storage::sequence_size_t lo_bp,
+    bioseq::storage::sequence_size_t hi_bp,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    VulkanSketchQueryGate query_gate = {},
+    VulkanSketchDecline* decline_out = nullptr)
+{
+    if (!admitted_sequence_detail::validate_facade_sketch_shape(
+            sequence, window_size, kmer_size, decline_out)) {
+        return std::nullopt;
+    }
+    if (lo_bp > hi_bp || hi_bp > sequence.bp_size()) {
+        if (decline_out != nullptr) {
+            decline_out->reason =
+                VulkanSketchDeclineReason::sequence_type_unsupported;
+        }
+        return std::nullopt;
+    }
+    auto window = admitted_sequence_detail::prepare_canonical_u32_window(
+        sequence, lo_bp, hi_bp, decline_out);
+    if (!window) {
+        return std::nullopt;
+    }
+    return admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
+        [window_size, kmer_size, query_gate, decline_out]
+        <class Range>(Range& resident) {
+            return build_gpu_segment_index_on_device_resident_impl<MinimizerT>(
+                resident,
+                0u,
+                static_cast<std::size_t>(resident.size()),
+                window_size,
+                kmer_size,
+                query_gate,
+                decline_out);
+        });
+}
+
+template <class MinimizerT, class Collector, sequence_alphabet Alphabet>
+void collect_minimizers_vulkan_segment_or_throw(
+    Collector& collector,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    bioseq::storage::sequence_size_t lo_bp,
+    bioseq::storage::sequence_size_t hi_bp,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    VulkanSketchQueryGate query_gate = {})
+{
+    VulkanSketchDecline decline{};
+    if (!admitted_sequence_detail::validate_facade_sketch_shape(
+            sequence, window_size, kmer_size, &decline)
+        || lo_bp > hi_bp || hi_bp > sequence.bp_size()) {
+        if (!decline.declined()) {
+            decline.reason = VulkanSketchDeclineReason::sequence_type_unsupported;
+        }
+        throw_vulkan_strict_decline(
+            "Vulkan segment minimizer sketch", decline);
+    }
+    auto window = admitted_sequence_detail::prepare_canonical_u32_window(
+        sequence, lo_bp, hi_bp, &decline);
+    if (!window) {
+        throw_vulkan_strict_decline(
+            "Vulkan segment minimizer sketch", decline);
+    }
+    admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
+        [&collector, window_size, kmer_size, query_gate]
+        <class Range>(Range& resident) {
+            collect_minimizers_vulkan_segment_resident_impl_or_throw<MinimizerT>(
+                collector,
+                resident,
+                0u,
+                static_cast<std::size_t>(resident.size()),
+                window_size,
+                kmer_size,
+                query_gate);
+        });
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] VulkanOwnedSegmentPairs
+collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    bioseq::storage::sequence_size_t lo_bp,
+    bioseq::storage::sequence_size_t hi_bp,
+    bioseq::storage::sequence_size_t emit_base_bp,
+    bioseq::storage::sequence_size_t core_lo_bp,
+    bioseq::storage::sequence_size_t core_hi_bp,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    VulkanSegmentPairExecutionProof* execution_proof_out = nullptr)
+{
+    VulkanSketchDecline decline{};
+    if (!admitted_sequence_detail::validate_facade_sketch_shape(
+            sequence, window_size, kmer_size, &decline)
+        || lo_bp > hi_bp || hi_bp > sequence.bp_size()) {
+        if (!decline.declined()) {
+            decline.reason = VulkanSketchDeclineReason::sequence_type_unsupported;
+        }
+        throw_vulkan_strict_decline(
+            "Vulkan segment minimizer pair path", decline);
+    }
+    auto window = admitted_sequence_detail::prepare_canonical_u32_window(
+        sequence, lo_bp, hi_bp, &decline);
+    if (!window) {
+        throw_vulkan_strict_decline(
+            "Vulkan segment minimizer pair path", decline);
+    }
+    return admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
+        [emit_base_bp, core_lo_bp, core_hi_bp, window_size, kmer_size,
+         execution_proof_out]
+        <class Range>(Range& resident) {
+            return collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
+                resident,
+                0u,
+                static_cast<std::size_t>(resident.size()),
+                emit_base_bp,
+                core_lo_bp,
+                core_hi_bp,
+                window_size,
+                kmer_size,
+                execution_proof_out);
+        });
 }
 
 } // namespace bioseq::gpu::vulkan

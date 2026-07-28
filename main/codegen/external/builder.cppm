@@ -74,7 +74,8 @@ namespace bioseq::codegen::external {
             throw std::runtime_error("missing value for " + std::string(argument));
         }
         const std::string value = argv[++index];
-        if (argument == "--source-root") result.source_root = value;
+        if (argument == "--generator-binary") result.generator_binary = fs::absolute(value);
+        else if (argument == "--source-root") result.source_root = value;
         else if (argument == "--output-root") result.output_root = value;
         else if (argument == "--clang-binary") result.clang_binary = value;
         else if (argument == "--compiler-id") result.compiler_id = value;

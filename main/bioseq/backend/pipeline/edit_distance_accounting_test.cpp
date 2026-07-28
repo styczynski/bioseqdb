@@ -179,6 +179,8 @@ enum class FixtureKind {
     range_t target_range(target_data);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto target_view = bioseq::storage::as_lazy_sequence_view(lazy_target);
     const auto scoring = ScoringMatrix<dna4_u64>::generate(2, 4, 1);
     Minimap2Params params = exact_alignment_params();
     params.max_gap = max_gap;
@@ -201,13 +203,13 @@ enum class FixtureKind {
 
     align_regions<BaseAlignmentAlgorithmType::KSW2>(
         std::span<AlignRegion>{&result.ksw2, 1},
-        anchor_span, lazy_query, lazy_target, scoring, params);
+        anchor_span, query_view, target_view, scoring, params);
     align_regions<BaseAlignmentAlgorithmType::BLOCK_ALIGNER>(
         std::span<AlignRegion>{&result.block, 1},
-        anchor_span, lazy_query, lazy_target, scoring, params);
+        anchor_span, query_view, target_view, scoring, params);
     align_regions_batched(
         std::span<AlignRegion>{&result.batched, 1},
-        anchor_span, lazy_query, lazy_target, scoring, params);
+        anchor_span, query_view, target_view, scoring, params);
     return result;
 }
 

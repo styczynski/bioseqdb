@@ -72,9 +72,9 @@ import bioseq.external.io.datasets_stream;
 import bioseq.common.context;
 import bioseq.parallelism.pool;
 
-/* Register the CustomScan methods and the external path builder. Called once
- * from bioseq_init() after the external TAM and the columnar custom scan. */
-export void bioseq_external_scan_init(void);
+/* Register the CustomScan methods and the external path builder after the
+ * external table access method and the columnar custom scan. */
+extern "C" void bioseq_external_scan_init(void);
 
 namespace {
 
@@ -1120,7 +1120,7 @@ bioseq_external_try_add_paths(PlannerInfo *root, RelOptInfo *rel,
 
 }  // namespace
 
-void
+extern "C" void
 bioseq_external_scan_init(void)
 {
     RegisterCustomScanMethods(&BioseqExternalScanMethods);

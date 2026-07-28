@@ -100,9 +100,15 @@ struct AlignmentExecutionSnapshot {
  * A later ExecCustomScan then raises instead of dereferencing escaped state.
  */
 struct AlignmentCollectorBinding {
+    struct NodeRegistration {
+        std::uint32_t scan_node_id = 0;
+        std::size_t node_index = unregistered_node_index;
+    };
+
     AlignmentExecutionCollector* root = nullptr;
     bool* nested_alignment_invoked = nullptr;
     bool retired = false;
+    std::vector<NodeRegistration> node_registrations{};
 };
 
 struct AlignmentNodeRegistrationHandle {
@@ -179,6 +185,23 @@ inline void ensure_alignment_node_registered(
     if (handle.registered()) {
         return;
     }
+    for (const AlignmentCollectorBinding::NodeRegistration& registration :
+         handle.binding->node_registrations) {
+        if (registration.scan_node_id != handle.scan_node_id) {
+            continue;
+        }
+        if (registration.node_index
+                >= handle.binding->root->alignment_nodes.size()
+            || handle.binding->root->alignment_nodes[
+                   registration.node_index].scan_node_id
+                != handle.scan_node_id) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq alignment node binding registry is invalid")));
+        }
+        handle.node_index = registration.node_index;
+        return;
+    }
     if (handle.binding->nested_alignment_invoked != nullptr
         && !*handle.binding->nested_alignment_invoked) {
         if (handle.binding->root->nested_alignment_executor_count
@@ -193,6 +216,11 @@ inline void ensure_alignment_node_registered(
     handle.binding->root->alignment_nodes.push_back(AlignmentNodeStats{
         .scan_node_id = handle.scan_node_id,
     });
+    handle.binding->node_registrations.push_back(
+        AlignmentCollectorBinding::NodeRegistration{
+            .scan_node_id = handle.scan_node_id,
+            .node_index = handle.node_index,
+        });
 }
 
 /// Borrow the statement-root ledger through the same non-owning binding used
