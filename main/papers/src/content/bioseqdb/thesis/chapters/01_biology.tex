@@ -6,8 +6,9 @@
 %   main/bioseq/backend/sequences/sequences.cppm
 %   main/bioseq/io/{fasta,fastq,pipeline,public_api}.cppm
 %   main/bioseq/sql/bioseq--1.0.sql
-% Scholarly references are given as full footnotes in this chapter because the
-% assigned task explicitly excludes edits to the shared bibliography.
+% Scholarly references are given as full footnotes so this chapter remains
+% readable independently. Primary sources are also registered in the thesis
+% bibliography where they are reused by later chapters.
 
 \section{Biological sequences as information-bearing observations}
 \label{sec:biology-sequences}
@@ -57,12 +58,15 @@ sequence-abstraction chapter explains how those symbols are packed and viewed.
 RNA uses adenine, cytosine, guanine and uracil, so a basic RNA alphabet replaces
 \(\mathtt{T}\) with \(\mathtt{U}\). Many RNA molecules are transcribed from
 DNA. Protein-coding transcripts can then be translated in groups of three
-nucleotides, called codons, into amino acids. This flow is often summarized as
-DNA to RNA to protein, although it is not a claim that all RNA is translated.
-Ribosomal, transfer, regulatory and many other RNAs are functional without
-becoming proteins.\footnote{F. Crick, ``Central dogma of molecular biology'',
+nucleotides, called codons, into amino acids. For protein-coding genes,
+transcription followed by translation yields the familiar DNA-to-RNA-to-protein
+flow. Crick's central dogma is the narrower restriction that residue-by-residue
+sequence information cannot flow from protein back to protein or nucleic
+acid.\footnote{F. Crick, ``Central dogma of molecular biology'',
 \emph{Nature} 227 (1970), pp.~561--563,
-\url{https://doi.org/10.1038/227561a0}.}
+\url{https://doi.org/10.1038/227561a0}.} It is not a claim that all RNA is
+translated. Ribosomal, transfer, regulatory and many other RNAs are functional
+without becoming proteins.
 
 A protein sequence is written over the twenty common amino-acid symbols.
 Protein comparison differs from nucleotide comparison in two ways that matter

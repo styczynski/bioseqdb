@@ -7,8 +7,9 @@
 %   main/bioseq/backend/sequences/chaining/chaining_scalar.cppm
 %   main/bioseq/backend/alignment_hwy/ksw2.cppm
 %   main/bioseq/backend/alignment_hwy/block_aligner.cppm
-% The shared bibliography is outside this assigned edit. Full scholarly
-% references are therefore supplied as footnotes in this draft.
+% Full scholarly references are supplied as footnotes so this chapter remains
+% readable independently. Reused primary sources are also registered in the
+% thesis bibliography.
 
 \section{Alignment as a model of biological correspondence}
 \label{sec:alignment-model}
@@ -35,10 +36,11 @@ alphabet \(\Sigma\). A pairwise alignment is a sequence of columns
 such that deleting gaps from \(a_1\ldots a_L\) recovers \(X\), and deleting
 gaps from \(b_1\ldots b_L\) recovers \(Y\). A column containing two symbols is
 a match or substitution. A symbol aligned to a gap represents an insertion or
-deletion relative to the other sequence. The alignment is therefore not
-merely a visual formatting of two strings. It is a hypothesis about which
-symbols descend from corresponding positions and which differences are best
-explained as substitutions or gaps.
+deletion relative to the other sequence. An alignment is therefore an explicit
+correspondence under a scoring and boundary model, not merely a visual
+formatting of two strings. When evolutionary homology is the scientific
+question, an alignment can contribute evidence to a homology hypothesis, but
+an alignment score alone does not establish common ancestry.
 
 A scoring model turns that hypothesis into an optimization problem. Let
 \(s(a,b)\) denote a substitution score and let \(g(\ell)\) be the cost of a
@@ -49,10 +51,10 @@ gap run of length \(\ell\). The score of an alignment can be written as
   -\sum_{\text{gap runs }r}g(|r|).
 \]
 This chapter uses the affine convention
-\[
+\begin{equation}
   g(\ell)=q+\ell e,\qquad \ell\geq 1,
   \label{eq:affine-gap-convention}
-\]
+\end{equation}
 where \(q\) is a gap-open cost and \(e\) is a per-symbol extension cost.
 Some literature and software instead writes \(q+(\ell-1)e\). Neither notation
 is intrinsically preferable, but parameter values cannot be transferred
@@ -147,10 +149,18 @@ traceback to start or stop there without paying for the omitted flank.
 
 This observation prevents a common conceptual error in mapper descriptions.
 Minimap2 and BioSeqDB do not solve one unconstrained local alignment over an
-entire chromosome. Anchors determine candidate regions. Gaps between anchors
-are mandatory global fills, while the two outer portions are extension
-problems with stopping rules such as Z-drop or X-drop. The final record is
-assembled from several related dynamic-programming problems.
+entire chromosome. Anchors determine candidate regions. Inter-anchor segments
+are posed as global fills, while the two outer portions are extension
+problems. Minimap2 can terminate a nominally global inter-anchor fill with
+Z-drop when the accumulated score deteriorates too quickly.\footnote{H. Li,
+``Minimap2: pairwise alignment for nucleotide sequences'',
+\emph{Bioinformatics} 34 (2018), pp.~3094--3100, Section~2.2.3,
+\url{https://doi.org/10.1093/bioinformatics/bty191}.} BioSeqDB's KSW2 route
+normally uses configured band and Z-drop limits. Its edit-distance accounting
+route disables both limits for a gap fill. The Block Aligner route uses global
+mode for inter-anchor fills and X-drop for outer extension. The final record is
+therefore assembled from several related dynamic-programming problems whose
+stopping policies must be reported with the chosen backend.
 
 \section{Exact dynamic programming}
 \label{sec:exact-dp}
@@ -159,7 +169,7 @@ assembled from several related dynamic-programming problems.
 
 For a linear gap cost \(d\), let \(H_{i,j}\) be the best score for prefixes
 \(X[1..i]\) and \(Y[1..j]\). A global recurrence is
-\[
+\begin{equation}
  H_{i,j}=\max
  \begin{cases}
    H_{i-1,j-1}+s(x_i,y_j),\\
@@ -167,7 +177,7 @@ For a linear gap cost \(d\), let \(H_{i,j}\) be the best score for prefixes
    H_{i,j-1}-d.
  \end{cases}
  \label{eq:nw-recurrence}
-\]
+\end{equation}
 With \(H_{0,0}=0\), \(H_{i,0}=-id\), and \(H_{0,j}=-jd\), this computes a
 global score. Adding \(0\) as a fourth candidate and initializing the borders
 to zero yields the local Smith--Waterman score. Free-end objectives alter the
@@ -177,8 +187,9 @@ Each cell represents a state \((i,j)\), meaning that \(i\) symbols of \(X\)
 and \(j\) symbols of \(Y\) have been consumed. A diagonal transition consumes
 one symbol from each sequence. Vertical and horizontal transitions consume
 one symbol from only one sequence. A traceback from the chosen terminal cell
-therefore spells an edit path and can be run-length encoded as a CIGAR string.
-For example, \(10\mathtt{M}1\mathtt{I}4\mathtt{M}\) denotes ten aligned
+therefore spells an edit path and can be run-length encoded as a compact
+idiosyncratic gapped alignment report (CIGAR) string. For example,
+\(10\mathtt{M}1\mathtt{I}4\mathtt{M}\) denotes ten aligned
 symbol pairs, one insertion, then four more aligned pairs. Whether
 \(\mathtt{M}\) is later refined to exact-match \(\mathtt{=}\) and mismatch
 \(\mathtt{X}\) is an output convention.
@@ -190,7 +201,7 @@ different from the cost of opening one. Let \(M_{i,j}\) end with a
 symbol--symbol column, \(I_{i,j}\) end with a gap in \(X\), and \(D_{i,j}\)
 end with a gap in \(Y\). Under the convention in
 Equation~\ref{eq:affine-gap-convention},
-\[
+\begin{equation}
 \begin{aligned}
  M_{i,j} &=
    \max\{M_{i-1,j-1},I_{i-1,j-1},D_{i-1,j-1}\}
@@ -200,18 +211,18 @@ Equation~\ref{eq:affine-gap-convention},
  H_{i,j} &= \max\{M_{i,j},I_{i,j},D_{i,j}\}.
 \end{aligned}
 \label{eq:gotoh-recurrence}
-\]
+\end{equation}
 Appropriate sentinel values prevent impossible boundary transitions. Local
 alignment additionally permits a restart at zero. Traceback stores or
 reconstructs which candidate produced each state.
 
 A single affine function is not equally realistic for short and very long
 gaps. Minimap2 therefore uses a two-piece affine cost
-\[
+\begin{equation}
   g_2(\ell)=
   \min(q_1+\ell e_1,\ q_2+\ell e_2).
   \label{eq:two-piece-affine}
-\]
+\end{equation}
 The first component can model short insertions and deletions, while the second
 has a larger open cost and smaller extension cost for long events. The DP
 adds a second insertion state and a second deletion state. BioSeqDB's Highway
@@ -264,8 +275,10 @@ an extension when its current score has fallen sufficiently far behind the
 best score observed. They are endpoint heuristics for extension, not
 substitutes for the affine recurrence.
 
-SIMD changes how cells are evaluated. It does not change the optimization
-objective. The Suzuki--Kasahara difference formulation stores bounded
+Single-instruction, multiple-data (SIMD) execution does not change the
+optimization objective when it evaluates the same cells with the same
+precision, boundary conditions, stopping policy, and tie policy. The
+Suzuki--Kasahara difference formulation stores bounded
 differences between neighboring scores, which makes narrow integer lanes
 practical and is the basis of KSW2.\footnote{H. Suzuki and M. Kasahara,
 ``Introducing difference recurrence relations for faster semi-global
@@ -275,21 +288,26 @@ formulation to Google Highway so one source can dispatch to SSE, AVX, NEON,
 SVE, WebAssembly SIMD, and other supported targets. The Block Aligner backend
 uses a different geometric optimization. It maintains a square block around
 the promising part of the matrix and slides, grows, or shrinks that block
-instead of visiting the full rectangle. Its current implementation supports
-global gap fills and native two-confirmation X-drop extension. The details and
-measured trade-offs are developed in the final-alignment chapter.
+instead of visiting the full rectangle. The adaptive greedy band can return a
+suboptimal score, particularly when large gaps lead the block away from the
+optimal path.\footnote{D. Liu and M. Steinegger, ``Block Aligner: an adaptive
+SIMD-accelerated aligner for sequences and position-specific scoring
+matrices'', \emph{Bioinformatics} 39 (2023), btad487,
+\url{https://doi.org/10.1093/bioinformatics/btad487}.} BioSeqDB's current
+backend uses global mode for inter-anchor fills and native two-confirmation
+X-drop for outer extension. The details and measured trade-offs are developed
+in the final-alignment chapter.
 
 \section{Seed--chain--extend}
 \label{sec:seed-chain-extend}
 
 \subsection{Why candidate generation is necessary}
 
-Suppose a query of length \(m\) is aligned independently against every
-length-\(m\) interval of a reference of length \(N\). Even ignoring indels,
-this involves \(O(N)\) candidate intervals, each with an \(O(m^2)\) dynamic
-program. Most intervals are clearly unrelated. A mapper therefore seeks a
-cheap signal that is unlikely to occur repeatedly by chance in a true
-alignment. Exact or hashed short substrings provide that signal.
+Unbanded local dynamic programming between a query of length \(m\) and a
+reference of length \(N\) requires \(O(Nm)\) cell evaluations. Most reference
+positions cannot belong to a useful alignment. A mapper therefore seeks a
+cheap signal that is likely to survive a true alignment but is infrequent in
+unrelated intervals. Exact or hashed short substrings provide that signal.
 
 The seed--chain--extend pattern separates the problem into three abstractions:
 
@@ -299,17 +317,19 @@ The seed--chain--extend pattern separates the problem into three abstractions:
   \item \emph{Chaining} selects a collinear subset of those matches and turns
   isolated hits into candidate regions.
   \item \emph{Extension} performs base-level dynamic programming between and
-  around the anchors, then emits coordinates, a score and optionally a CIGAR.
+  around the anchors, then emits coordinates, a score, optionally a CIGAR, and
+  a mapping quality (MAPQ).
 \end{enumerate}
 
-This is a heuristic search wrapped around an exact scoring kernel. Missing all
-seeds for a true locus causes a false negative before alignment begins.
-Repetitive seeds cause excess candidates and extra work. Chaining may also
-discard a useful set of anchors. Once a particular mandatory gap is passed to
-an exact DP backend with a sufficient band, however, its computed score is
-exact for that stated subproblem. Sensitivity must therefore be discussed
-stage by stage rather than by calling the whole mapper either exact or
-approximate.
+This is a heuristic search wrapped around a dynamic-programming recurrence.
+Missing all seeds for a true locus causes a false negative before alignment
+begins. Repetitive seeds cause excess candidates and extra work. Chaining may
+also discard a useful set of anchors. The recurrence is exact for the cells and
+boundaries that are actually evaluated. A route-level result can still be
+approximate because a static band, an adaptive block, Z-drop, or X-drop may
+exclude part of the unconstrained state space. Sensitivity and optimality must
+therefore be discussed stage by stage rather than by calling the whole mapper
+either exact or approximate.
 
 \begin{figure}[ht]
   \centering
@@ -385,13 +405,13 @@ Chaining is therefore a sparse path problem in this two-dimensional plane.
 
 In minimap2 notation, an anchor has span \(w_i\). After sorting anchors by
 reference and query order, a chaining score can be written
-\[
+\begin{equation}
  f(i)=\max\left(
      w_i,\ 
      \max_{j<i}\{f(j)+\alpha(j,i)-\beta(j,i)\}
    \right),
  \label{eq:minimap2-chain}
-\]
+\end{equation}
 where \(\alpha\) rewards newly covered matching bases and \(\beta\) penalizes
 large gaps and diagonal changes. A representative minimap2 reward is
 \[
@@ -424,12 +444,14 @@ BioSeqDB preserves this distinction in its current API. The
 \path{main/bioseq/backend/pipeline/minimap_port.cppm} exposes scalar minimap2,
 SIMD minimap2, RMQ and Vulkan tiled-DP routes. The shared
 \texttt{compute\_chaining\_score} function in
-\path{main/bioseq/backend/sequences/chaining/chaining_utils.cppm} computes
-64-bit reference and query differences, rejects invalid geometry, rewards
-new coverage, then applies linear and logarithmic penalties. The current
-\texttt{Anchor} is a flat 24-byte object with 64-bit coordinates. This is an
-important difference from early April design notes, which discussed older
-packed layouts and must not be read as the present implementation.
+\path{main/bioseq/backend/sequences/chaining/chaining_utils.cppm} rejects
+invalid geometry, rewards new coverage, then applies linear and logarithmic
+penalties. The current \texttt{Anchor} is a flat 24-byte object with 64-bit
+stored coordinates. The scoring helper narrows predecessor reference and query
+distances to signed 32-bit values, consistent with its 32-bit distance
+parameters, before geometry checks and penalties. This is an important
+difference from early April design notes, which discussed older packed layouts
+and must not be read as the present implementation.
 
 \begin{algorithm}[ht]
   \caption{Conceptual bounded predecessor chaining}
@@ -466,7 +488,13 @@ gaps. Traceback concatenates the resulting operations with the anchored
 matches.
 
 Minimap2's base-level route calls KSW2 with a band, two-piece affine gaps and
-Z-drop. Its source-level sequence is visible in the local comparison copy:
+Z-drop. BioSeqDB's ordinary KSW2 gap fills likewise use configured band and
+Z-drop values. When exact edit-distance accounting is requested, its
+inter-anchor calls disable both limits. The Block Aligner alternative requests
+global mode for those fills and uses X-drop for the outer extensions. Its
+adaptive block geometry still means that global mode is not a proof of an
+unbanded optimum. Minimap2's source-level sequence is visible in the local
+comparison copy:
 \texttt{mm\_sketch} in \path{minimap2-master-clean/sketch.c},
 \texttt{mm\_collect\_matches} in
 \path{minimap2-master-clean/seed.c}, \texttt{mg\_lchain\_dp} in
@@ -506,9 +534,11 @@ alignment, mapping-quality calculation and result construction.
     SSE KSW2 two-piece-affine banded extension with Z-drop &
     Highway KSW2 single/dual-affine, batched KSW2 and adaptive Block Aligner
     selectors &
-    Candidate regions become scored base-level paths \\
+    Candidate regions become scored base-level refinement paths under the
+    selected band, block, and drop policies \\
     Output &
-    PAF or SAM records with primary/secondary semantics &
+    Pairwise mApping Format (PAF) or Sequence Alignment/Map (SAM) records with
+    primary/secondary semantics &
     \texttt{MatchResult} records with coordinates, strand, score, MAPQ,
     divergence and optional CIGAR &
     Search evidence becomes an interpretable mapping \\
@@ -523,7 +553,8 @@ alignment, mapping-quality calculation and result construction.
 
 The port is therefore best described as minimap2-derived rather than as a
 line-for-line copy. The recurrence, stage meanings and output concepts provide
-the semantic baseline. BioSeqDB changes storage types, widens coordinates,
+the semantic baseline. BioSeqDB changes storage types, uses wider stored
+coordinates,
 uses C++ modules and explicit algorithm selectors, employs Highway SIMD,
 supports arena-backed stage data, adds Vulkan paths and integrates the work
 with database-resident indexes. Later chapters evaluate whether particular
@@ -585,7 +616,10 @@ symbol--symbol transition advances both the query and graph path. A query
 insertion advances only the query. A deletion advances only the graph path.
 At a branch, the recurrence considers incoming or outgoing graph edges.
 
-If the graph is acyclic, nodes can be processed in topological order. Cycles
+If the graph is acyclic, nodes can be processed in topological order.\footnote{
+C. Lee, C. Grasso and M. F. Sharlow, ``Multiple sequence alignment using
+partial order graphs'', \emph{Bioinformatics} 18 (2002), pp.~452--464,
+\url{https://doi.org/10.1093/bioinformatics/18.3.452}.} Cycles
 from repeats or de Bruijn structure complicate this order and require
 additional restrictions, indexing, graph transformations or search
 algorithms. The state space scales with the represented graph, not with the
@@ -596,9 +630,10 @@ coverage gaps and errors. Decreasing \(k\) improves local connectivity while
 collapsing more repeats. The value of a graph is therefore coupled to its
 construction and indexing policy.
 
-Candidate generation remains essential. Graph mappers commonly find seeds in
-graph paths or a graph-derived index, cluster or chain the corresponding
-positions, then align against a local subgraph. The search space is richer
+At genome scale, candidate reduction remains practically essential. Graph
+mappers commonly find seeds in graph paths or a graph-derived index, cluster
+or chain the corresponding positions, then align against a local subgraph.
+The search space is richer
 than in a linear reference because one seed may correspond to many paths.
 Graph representation can reduce reference-allele bias, but it introduces path
 selection, index size, update and output-coordinate questions. A database
@@ -666,11 +701,16 @@ minimap2-derived pipeline.
 \label{sec:choosing-alignment-approach}
 
 No single method dominates for every task. Exhaustive dynamic programming is
-the clearest exact model for two moderate strings. Seed--chain--extend is the
-practical choice when searching long references or large collections, provided
-its sensitivity and repetitive-seed behavior are understood. Graph mapping is
-appropriate when representing alternatives is itself part of the problem, at
-the cost of a more complex reference, index and coordinate model.
+the clearest exact model for two moderate strings. Seed--chain--extend is a
+practical strategy when searching long references or large collections,
+provided its sensitivity and repetitive-seed behavior are understood. Graph
+mapping is appropriate when representing alternatives is itself part of the
+problem, at the cost of a more complex reference, index and coordinate model.
+These choices are not mutually exclusive. A target representation answers what
+sequences or paths exist, while a search strategy answers how candidate
+regions are found and refined. A graph mapper can therefore use
+seed--chain--extend, and a linear target can be searched by methods other than
+that strategy.
 
 \begin{table}[ht]
   \centering
@@ -678,26 +718,27 @@ the cost of a more complex reference, index and coordinate model.
   \setlength{\tabcolsep}{3pt}
   \begin{tabular}{p{0.17\linewidth}p{0.21\linewidth}p{0.20\linewidth}p{0.20\linewidth}p{0.14\linewidth}}
     \toprule
-    Approach & Search object & Candidate reduction & Principal strength &
+    Viewpoint & Search object & Candidate reduction & Principal strength &
     Principal limitation \\
     \midrule
     Exhaustive pairwise DP &
     Two explicit strings &
-    None, except banding or stopping rules &
+    None in the unbanded formulation &
     Precisely defined optimum for the selected scoring and boundary model &
     Quadratic state space in the unbanded case \\
     Seed--chain--extend &
-    Usually a linear reference or sequence collection &
+    Linear or graph-derived coordinate system &
     Sparse seeds, occurrence filtering and coordinate chaining &
-    Scales to long references while retaining exact base alignment in selected
+    Scales to long references while retaining base-level refinement in selected
     regions &
-    Search sensitivity depends on seeds, chaining and bands \\
+    Search sensitivity and route-level optimality depend on seeds, chaining,
+    bands, blocks, and stopping rules \\
     Variation-graph mapping &
     Named paths and alternatives in a sequence graph &
     Graph-aware seeds, clustering, chaining or local-subgraph extraction &
     Represents known alternatives and can reduce linear-reference bias &
     Larger and more ambiguous index, path-aware coordinates and DP \\
-    de Bruijn graph methods &
+    de Bruijn graph representation and assembly &
     Local \(k\)-mer adjacency graph &
     \(k\)-mer compaction, graph cleaning and path constraints &
     Natural representation of assembly evidence and local sequence language &
@@ -705,8 +746,10 @@ the cost of a more complex reference, index and coordinate model.
     \bottomrule
   \end{tabular}
   \caption{Comparison of the main algorithmic viewpoints introduced in this
-    chapter. Candidate reduction makes large-scale search feasible, but adds
-    assumptions that must be measured separately from the final DP kernel.}
+    chapter. The rows are not mutually exclusive because target representation
+    and search strategy are orthogonal. Candidate reduction makes large-scale
+    search feasible, but adds assumptions that must be measured separately
+    from the final DP kernel.}
   \label{tab:alignment-approach-comparison}
 \end{table}
 
