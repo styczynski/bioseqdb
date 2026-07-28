@@ -124,14 +124,20 @@ case "${1:-start}" in
     # Current AWS kernels can expose zram's hot-add interface without honoring
     # the legacy num_devices module option. Allocate the first device explicitly
     # when modprobe did not create it.
+    allocated_new_device=0
     if [[ ! -b $device ]]; then
       allocated_device=$(zramctl --find)
       [[ $allocated_device == "$device" ]] || {
         printf 'expected %s but zram allocated %s\n' "$device" "$allocated_device" >&2
         exit 1
       }
+      allocated_new_device=1
     fi
-    zramctl --reset "$device" 2>/dev/null || true
+    # util-linux removes dynamically hot-added zram devices when resetting
+    # them. Reset only a pre-existing stale device, never the one just added.
+    if [[ $allocated_new_device -eq 0 ]]; then
+      zramctl --reset "$device" 2>/dev/null || true
+    fi
     memory_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
     zram_bytes=$((memory_kib * 1024 * BIOSEQ_ZRAM_FRACTION_PERCENT / 100))
     algorithm=lz4
