@@ -132,6 +132,18 @@ case "${1:-start}" in
         exit 1
       }
       allocated_new_device=1
+      # On older M4 virtualization the hot-add syscall can return just before
+      # udev and sysfs expose the device together. Wait a bounded five seconds
+      # so the first service start is deterministic without relying on tracing
+      # or an external retry.
+      for _ in {1..50}; do
+        [[ -b $device && -r /sys/block/zram0/comp_algorithm ]] && break
+        sleep 0.1
+      done
+      [[ -b $device && -r /sys/block/zram0/comp_algorithm ]] || {
+        printf 'zram device %s did not become ready after hot-add\n' "$device" >&2
+        exit 1
+      }
     fi
     # util-linux removes dynamically hot-added zram devices when resetting
     # them. Reset only a pre-existing stale device, never the one just added.
