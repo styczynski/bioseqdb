@@ -409,28 +409,36 @@ subsequent row production.
   \caption{Current external-scan execution, simplified from
   \texttt{bioseq\_external\_scan\_next}.}
   \label{alg:external-scan}
-  \begin{algorithmic}[1]
-    \Require relation entity, SQL quals, provider set
-    \State lower supported quals to a normalized external query
-    \If{first tuple request}
-      \If{entity is sequence or sequence chunk, provider is NCBI, and accession exists}
-        \State start the NCBI producer and a bounded message channel
-      \Else
-        \State expand \texttt{ANY} predicates and run provider plans to completion
-        \State collect and de-duplicate owning messages
-      \EndIf
-    \EndIf
-    \If{streaming}
-      \Repeat
-        \State timed-pop one charged message lease
-        \State on timeout, call \texttt{CHECK\_FOR\_INTERRUPTS}
-      \Until{item or terminal state}
-      \State pack one payload into the PostgreSQL slot and release its charge
-    \Else
-      \State translate the next collected message/sub-row into the scan slot
-    \EndIf
-    \State let \texttt{ExecScan} apply residual quals and projection
-  \end{algorithmic}
+  \begin{description}
+    \item[Input:] relation entity, SQL quals, and provider set.
+  \end{description}
+  \begin{enumerate}
+    \item Lower supported quals to a normalized external query.
+    \item On the first tuple request:
+      \begin{enumerate}
+        \item If the entity is a sequence or sequence chunk, the provider is
+        NCBI, and an accession exists, start the NCBI producer and a bounded
+        message channel.
+        \item Otherwise:
+          \begin{enumerate}
+            \item expand \texttt{ANY} predicates and run provider plans to
+            completion.
+            \item collect and de-duplicate owning messages.
+          \end{enumerate}
+      \end{enumerate}
+    \item If the query is streaming:
+      \begin{enumerate}
+        \item Repeat until an item or terminal state is observed:
+          \begin{enumerate}
+            \item timed-pop one charged message lease.
+            \item on timeout, call \texttt{CHECK\_FOR\_INTERRUPTS}.
+          \end{enumerate}
+        \item Pack one payload into the PostgreSQL slot and release its charge.
+      \end{enumerate}
+    \item Otherwise, translate the next collected message or sub-row into the
+    scan slot.
+    \item Let \texttt{ExecScan} apply residual quals and projection.
+  \end{enumerate}
 \end{algorithm}
 
 \section{The NCBI streaming data plane}
