@@ -231,6 +231,25 @@ class LifecycleSafetyTests(unittest.TestCase):
         self.assertEqual(image["State"], "available")
         sleep.assert_called_once_with(15)
 
+    def test_ready_bootstrap_skips_stale_cloud_init_error(self) -> None:
+        builder = package_builder.Builder(
+            architecture="arm64",
+            instance_id="i-0aaabbbcccdddeee1",
+            instance_type="c7g.xlarge",
+            aws_architecture="arm64",
+            public_ip="203.0.113.1",
+            private_ip="10.0.0.1",
+            source_ami_id="ami-0123456789abcdef0",
+        )
+        ready = subprocess.CompletedProcess([], 0, "", "")
+        verified = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(package_builder, "wait_for_ssh"), mock.patch.object(
+            package_builder, "ssh_run", side_effect=[ready, verified]
+        ) as ssh:
+            package_builder.wait_for_bootstrap(builder, Path("/tmp/key"))
+        self.assertEqual(ssh.call_count, 2)
+        self.assertNotIn("cloud-init status", ssh.call_args_list[1].args[2])
+
     def test_external_interrupt_is_forwarded_to_active_child(self) -> None:
         child = mock.Mock()
         child.poll.return_value = None

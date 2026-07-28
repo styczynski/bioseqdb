@@ -1022,9 +1022,19 @@ def wait_for_ssh(builder: Builder, key_path: Path, timeout_seconds: int = 1200) 
 
 def wait_for_bootstrap(builder: Builder, key_path: Path) -> None:
     wait_for_ssh(builder, key_path)
-    # cloud-init reports a nonzero status when bootstrap failed, which keeps a
-    # partially initialized machine from ever entering the package matrix.
-    ssh_run(builder, key_path, "sudo cloud-init status --wait --long")
+    # A repaired, idempotently resumed bootstrap can be READY even though
+    # cloud-init retains the original first-boot error forever. Skip that stale
+    # status only when the stronger on-host READY marker is already present;
+    # otherwise cloud-init remains the strict first-boot gate.
+    ready_probe = ssh_run(
+        builder,
+        key_path,
+        "test \"$(cat /opt/bioseq-package-builder/PROVISION_STATUS 2>/dev/null)\" = READY",
+        capture=True,
+        check=False,
+    )
+    if ready_probe.returncode != 0:
+        ssh_run(builder, key_path, "sudo cloud-init status --wait --long")
     expected = shlex.quote(builder.architecture)
     verification = (
         "set -eu; "
