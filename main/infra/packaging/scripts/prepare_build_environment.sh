@@ -81,7 +81,7 @@ install_debian_dependencies() {
 
 install_fedora_dependencies() {
   dnf install -y --allowerasing \
-    autoconf automake bison binutils ca-certificates cpio curl findutils flex \
+    autoconf autoconf-archive automake bison binutils ca-certificates cpio curl findutils flex \
     gcc gcc-c++ gettext git gzip libcap libtool m4 make ninja-build openssl-devel \
     patch pkgconf-pkg-config python3 rpm-build rsync tar unzip util-linux wget \
     xz zip zlib-devel \
@@ -99,7 +99,7 @@ install_fedora_dependencies() {
 
 install_opensuse_dependencies() {
   zypper --non-interactive install -y --allow-vendor-change \
-    autoconf automake bison binutils ca-certificates cpio curl flex gcc gcc-c++ \
+    autoconf autoconf-archive automake bison binutils ca-certificates cpio curl flex gcc gcc-c++ \
     gettext-tools git gzip libcap-progs libopenssl-devel libtool m4 make ninja patch \
     pkg-config python3 rpm-build rsync tar unzip util-linux wget xz zip \
     libX11-devel libXext-devel libXrandr-devel libXrender-devel libXi-devel \
@@ -123,7 +123,7 @@ install_opensuse_dependencies() {
 
 install_arch_dependencies() {
   pacman -Syu --noconfirm --needed \
-    autoconf automake base-devel binutils bison ca-certificates cpio curl flex \
+    autoconf autoconf-archive automake base-devel binutils bison ca-certificates cpio curl flex \
     gettext git libcap libtool m4 ninja openssl patch pkgconf python rsync tar unzip \
     util-linux wget xz zip zlib libx11 libxext libxrandr libxrender libxi \
     libxfixes libxcursor libxinerama libxcb libxkbcommon wayland-protocols
