@@ -78,7 +78,7 @@ REMOTE_ROOT = "/opt/bioseq-package-builder/workspace/builds"
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 ACTIVE_CHILDREN: set[subprocess.Popen[str]] = set()
-ACTIVE_CHILDREN_LOCK = threading.Lock()
+ACTIVE_CHILDREN_LOCK = threading.RLock()
 
 
 class PackageBuilderError(RuntimeError):
@@ -153,6 +153,19 @@ def interrupt_active_children() -> None:
         if child.poll() is None:
             with contextlib.suppress(ProcessLookupError):
                 child.send_signal(signal.SIGINT)
+    deadline = time.monotonic() + 30
+    for child in children:
+        if child.poll() is not None:
+            continue
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            child.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            # SIGINT is OpenTofu's state-flushing interrupt. Escalate only to
+            # TERM (never KILL), then let exact state recovery decide whether
+            # it is safe to stop instances.
+            with contextlib.suppress(ProcessLookupError):
+                child.terminate()
 
 
 def require_executable(name: str) -> str:
@@ -1017,9 +1030,10 @@ def create_cached_ami(
     matrix: Matrix,
     key_path: Path,
 ) -> tuple[dict[str, Any], Builder]:
-    # Snapshot only a stopped, fully validated pre-source machine. This avoids
-    # the crash-consistency hazard of EC2's no-reboot option. The exact instance
-    # is restarted and revalidated before any source/signing material is staged.
+    # Snapshot only a stopped, fully validated pre-source machine. Explicit
+    # --no-reboot prevents CreateImage from attempting its default reboot after
+    # we have already established the filesystem-consistent stopped state. The
+    # exact instance is restarted and revalidated before source is staged.
     ssh_run(
         builder,
         key_path,
@@ -1038,6 +1052,7 @@ def create_cached_ami(
         name,
         "--description",
         f"BioSeq native package builder {architecture.name}, bootstrap schema {BOOTSTRAP_SCHEMA}",
+        "--no-reboot",
     )
     image_id = str(payload.get("ImageId", ""))
     if not AMI_ID_RE.match(image_id):

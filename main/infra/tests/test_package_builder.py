@@ -201,11 +201,11 @@ class LifecycleSafetyTests(unittest.TestCase):
             ):
                 package_builder.tofu_state_builders(self.matrix)
 
-    def test_cached_ami_uses_stopped_instance_not_no_reboot_snapshot(self) -> None:
+    def test_cached_ami_uses_stopped_instance_and_no_reboot_snapshot(self) -> None:
         source = inspect.getsource(package_builder.create_cached_ami)
         self.assertIn("stop_builders", source)
         self.assertIn("cloud-init clean", source)
-        self.assertNotIn("--no-reboot", source)
+        self.assertIn("--no-reboot", source)
 
     def test_large_cached_ami_has_explicit_long_polling(self) -> None:
         pending = {"Images": [{"ImageId": "ami-0123456789abcdef0", "State": "pending"}]}
