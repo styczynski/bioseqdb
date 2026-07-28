@@ -122,7 +122,8 @@ The current project reports demonstrate both sides of this boundary.  A
 resident multi-query GPU path can enter GPU seeding, chaining, and bounded
 CIGAR construction with no CPU or SIMD fallback.  The same reports state
 that the full gridded traceback design of the G3SA GPU-alignment
-framework~\cite{g3sa_paper} is not reproduced in every case and that
+framework~{\hypersetup{citecolor=black}\cite{g3sa_paper}} is not reproduced
+in every case and that
 minimap2 remained faster on a small bounded-CIGAR workload.
 Likewise, a one-query multi-gigabase workload is not valid evidence for a
 resident GPU batch when the batch branch is not admitted.\footnote{
@@ -345,7 +346,13 @@ accounting.  The July 15 diagnosis found both an
 storage generation called Format~5.
 It explicitly warned that its payload timer also included C++ routing and
 decode work, so it could not be interpreted as a pure PostgreSQL storage
-timer.\footnote{\path{main/DOCS/CURRENT/TECH_SPECS/0381_BIOSEQ_JUST_INDEX_COLD_LOAD_ACCELERATION_WITH_LINEAR_ACCOUNTING_DENSE_HEAP_READS_AND_TABLEAM_FALLBACK.md},
+timer.\footnote{%
+\texttt{main/DOCS/CURRENT/TECH\_SPECS/}\allowbreak%
+\texttt{0381\_BIOSEQ\_JUST\_INDEX\_}\allowbreak%
+\texttt{COLD\_LOAD\_ACCELERATION\_}\allowbreak%
+\texttt{WITH\_LINEAR\_ACCOUNTING\_}\allowbreak%
+\texttt{DENSE\_HEAP\_READS\_AND\_}\allowbreak%
+\texttt{TABLEAM\_FALLBACK.md},
 Sections~2 and~3, 2026-07-15.  The full path is given because three current
 documents share the numeric identifier DOC0381.}
 
@@ -437,9 +444,16 @@ Block Aligner, SIMD chaining, and two-stack ntHash
 (\texttt{ExactSimd}) minimizer extraction.  The extractor is selected
 independently of the MPF physical layout.  Their source is the local
 Darwin-on-Arm report
-\path{main/DOCS/CURRENT/REPORTS/0369_LOCAL_E2E_2_AND_4_GBP_SIMD_MINIMAP2_GPU_BENCHMARK_REPORT_2026_07_07.md}.
+\texttt{main/DOCS/CURRENT/REPORTS/}\allowbreak%
+\texttt{0369\_LOCAL\_E2E\_2\_AND\_4\_GBP\_}\allowbreak%
+\texttt{SIMD\_MINIMAP2\_GPU\_BENCHMARK\_}\allowbreak%
+\texttt{REPORT\_2026\_07\_07.md}.
 The third row comes from
-\path{main/DOCS/CURRENT/BENCHMARK_FRAMEWORK/0384_DOC0383_IMPLEMENTATION_HANDOFF_FRAGMENT_NATIVE_MPF_PIPELINE_AND_MAPPED_GENERATION_STORAGE.md}.
+\texttt{main/DOCS/CURRENT/}\allowbreak%
+\texttt{BENCHMARK\_FRAMEWORK/}\allowbreak%
+\texttt{0384\_DOC0383\_IMPLEMENTATION\_HANDOFF\_}\allowbreak%
+\texttt{FRAGMENT\_NATIVE\_MPF\_PIPELINE\_}\allowbreak%
+\texttt{AND\_MAPPED\_GENERATION\_STORAGE.md}.
 
 \begin{table}[ht]
   \centering
@@ -492,7 +506,12 @@ A later benchmark protocol review identified an asymmetry in which BioSeqDB
 query ingestion was outside its timer while minimap2 query ingestion was
 inside.  It prescribed equivalent timer boundaries beginning immediately
 before ingestion of the same query bytes.\footnote{
-\path{main/DOCS/CURRENT/TECH_SPECS/0381_BIOSEQ_JUST_INDEX_COLD_LOAD_ACCELERATION_WITH_LINEAR_ACCOUNTING_DENSE_HEAP_READS_AND_TABLEAM_FALLBACK.md},
+\texttt{main/DOCS/CURRENT/TECH\_SPECS/}\allowbreak%
+\texttt{0381\_BIOSEQ\_JUST\_INDEX\_}\allowbreak%
+\texttt{COLD\_LOAD\_ACCELERATION\_}\allowbreak%
+\texttt{WITH\_LINEAR\_ACCOUNTING\_}\allowbreak%
+\texttt{DENSE\_HEAP\_READS\_AND\_}\allowbreak%
+\texttt{TABLEAM\_FALLBACK.md},
 Sections~1 and~2.}  The historical pair can motivate investigation of
 delivery, reconstruction, checksum, tuple, and accounting work.  It cannot
 quantify the causal contribution of any one component.
@@ -544,54 +563,71 @@ Biosequences'', \emph{BioTech} 11, 31 (2022),
 \begin{table}[ht]
   \centering
   \small
-  \setlength{\tabcolsep}{3pt}
-  \begin{tabular}{p{0.18\linewidth}p{0.23\linewidth}p{0.25\linewidth}p{0.24\linewidth}}
+  \setlength{\tabcolsep}{5pt}
+  \renewcommand{\arraystretch}{1.08}
+  \begin{tabularx}{\linewidth}{
+      >{\raggedright\arraybackslash}p{0.20\linewidth}
+      >{\raggedright\arraybackslash}X}
     \toprule
-    Named system or mechanism & Documented scope & Fair comparison boundary &
-    Requirement derived for this thesis \\
+    Named system or mechanism & Documented comparison and thesis requirement \\
     \midrule
     minimap2 &
-    Nucleotide mapping with minimizer seeding, chaining, base-level
-    alignment, and reusable \texttt{.mmi} reference indexes &
-    Its cited process and index contract is the algorithmic baseline.
-    BioSeqDB studies a PostgreSQL planner, tuple, and lifetime boundary. &
-    Preserve a minimap2-derived baseline while adapting data and control
+    \textbf{Scope.} Nucleotide mapping with minimizer seeding, chaining,
+    base-level alignment, and reusable \texttt{.mmi} reference indexes.
+    \par\textbf{Boundary.} Its cited process and index contract is the
+    algorithmic baseline.  BioSeqDB studies a PostgreSQL planner, tuple, and
+    lifetime boundary.
+    \par\textbf{Requirement.} Preserve a minimap2-derived baseline while
+    adapting data and control
     flow to a custom scan. \\
+    \addlinespace
     BLAST+ &
-    Heuristic nucleotide and protein database search with modular data
-    sources and persistent BLAST databases &
-    Sequence-database search overlaps BioSeqDB's broad motivation, but it is
-    not the same workload as long-read mapping or a PostgreSQL scan node. &
-    Compare only like-for-like search tasks and make relational ownership an
-    explicit systems contribution. \\
+    \textbf{Scope.} Heuristic nucleotide and protein database search with
+    modular data sources and persistent BLAST databases.
+    \par\textbf{Boundary.} Sequence-database search overlaps BioSeqDB's broad
+    motivation, but it is not the same workload as long-read mapping or a
+    PostgreSQL scan node.
+    \par\textbf{Requirement.} Compare only like-for-like search tasks and
+    make relational ownership an explicit systems contribution. \\
+    \addlinespace
     MMseqs2 &
-    High-throughput protein search and clustering with staged candidate
-    reduction and alignment &
-    The cited paper's alphabet and workload differ from the nucleotide
-    mapping benchmark used here.  Cross-task speed ratios are not valid. &
-    Separate reusable architectural ideas from empirical mapper comparisons. \\
+    \textbf{Scope.} High-throughput protein search and clustering with staged
+    candidate reduction and alignment.
+    \par\textbf{Boundary.} The cited paper's alphabet and workload differ
+    from the nucleotide mapping benchmark used here.  Cross-task speed ratios
+    are not valid.
+    \par\textbf{Requirement.} Separate reusable architectural ideas from
+    empirical mapper comparisons. \\
+    \addlinespace
     R\"ohm--Blakeley and Bio-Strings &
-    Relational genomics through SQL and user-defined functions, plus
-    semantic biological string types and stored operations &
-    These works establish the value of database-resident sequence semantics.
-    Their cited focus is not an end-to-end minimap2-derived mapper. &
-    Combine typed relational storage with an auditable batch mapping path. \\
+    \textbf{Scope.} Relational genomics through SQL and user-defined
+    functions, plus semantic biological string types and stored operations.
+    \par\textbf{Boundary.} These works establish the value of
+    database-resident sequence semantics.  Their cited focus is not an
+    end-to-end minimap2-derived mapper.
+    \par\textbf{Requirement.} Combine typed relational storage with an
+    auditable batch mapping path. \\
+    \addlinespace
     PostgreSQL set-returning functions, \texttt{LATERAL}, and Custom Scan &
-    Standard multiplicity and correlation, plus an extension interface for
-    alternative relation scans &
-    These are substrate mechanisms.  BioSeqDB must still define alignment
-    batching, result substitution, memory ownership, and fail-closed routing. &
-    Use planner support and a batch-owning custom scan while acknowledging
-    that standard SQL can express one-to-many results. \\
+    \textbf{Scope.} Standard multiplicity and correlation, plus an extension
+    interface for alternative relation scans.
+    \par\textbf{Boundary.} These are substrate mechanisms.  BioSeqDB must
+    still define alignment batching, result substitution, memory ownership,
+    and fail-closed routing.
+    \par\textbf{Requirement.} Use planner support and a batch-owning custom
+    scan while acknowledging that standard SQL can express one-to-many
+    results. \\
+    \addlinespace
     BioSeqDB \texttt{mmsearch} target design &
-    One relational surface for storage, filtering, joining, and batched
-    alignment &
-    The typed direct function fails closed when no BioSeqDB custom executor
-    owns it, so supported query shapes must have an auditable custom path. &
-    Treat planner, lifecycle, compatibility, and resource obligations as
-    first-class contributions. \\
+    \textbf{Scope.} One relational surface for storage, filtering, joining,
+    and batched alignment.
+    \par\textbf{Boundary.} The typed direct function fails closed when no
+    BioSeqDB custom executor owns it, so supported query shapes must have an
+    auditable custom path.
+    \par\textbf{Requirement.} Treat planner, lifecycle, compatibility, and
+    resource obligations as first-class contributions. \\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
   \caption{Named systems and official PostgreSQL mechanisms compared by
     documented scope.  The table identifies a boundary addressed by this
     thesis without asserting that another system is defective.}
@@ -681,13 +717,13 @@ The thesis investigates four questions derived from the gap analysis.
   the selected path was both faster and biologically acceptable?
 \end{enumerate}
 
-The contributions claimed in this thesis are correspondingly
-systems-oriented and algorithm-aware.
+The thesis therefore claims systems contributions grounded in algorithmic
+behavior.
 
 \begin{enumerate}
-  \item A common compact sequence interface connects owning, bit-packed,
-  fragmented, PostgreSQL-backed, and lazy representations to the same
-  pipeline while keeping alphabet dispatch explicit.
+  \item A common compact sequence interface connects several representations
+  to the same pipeline: owning, bit-packed, fragmented, PostgreSQL-backed,
+  and lazy.  Alphabet dispatch remains explicit.
 
   \item A custom-scan execution model converts supported SQL expressions
   into batch alignment, supports one-to-many results, and substitutes
