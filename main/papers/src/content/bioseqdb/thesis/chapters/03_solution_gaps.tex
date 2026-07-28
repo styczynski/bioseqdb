@@ -347,10 +347,9 @@ storage generation called Format~5.
 It explicitly warned that its payload timer also included C++ routing and
 decode work, so it could not be interpreted as a pure PostgreSQL storage
 timer.\footnote{%
-\texttt{main/DOCS/CURRENT/TECH\_SPECS/}\allowbreak%
-\texttt{0381\_BIOSEQ\_JUST\_INDEX\_}\allowbreak%
-\texttt{COLD\_LOAD\_ACCELERATION\_}\allowbreak%
-\texttt{WITH\_LINEAR\_ACCOUNTING\_}\allowbreak%
+\texttt{main/DOCS/CURRENT/TECH\_SPECS/}\linebreak[4]%
+\texttt{0381\_BIOSEQ\_JUST\_INDEX\_COLD\_LOAD\_}\linebreak[4]%
+\texttt{ACCELERATION\_WITH\_LINEAR\_ACCOUNTING\_}\linebreak[4]%
 \texttt{DENSE\_HEAP\_READS\_AND\_}\allowbreak%
 \texttt{TABLEAM\_FALLBACK.md},
 Sections~2 and~3, 2026-07-15.  The full path is given because three current
@@ -443,17 +442,17 @@ fragment (MPF) names the persisted-index layout.  The BioSeqDB route uses
 Block Aligner, SIMD chaining, and two-stack ntHash
 (\texttt{ExactSimd}) minimizer extraction.  The extractor is selected
 independently of the MPF physical layout.  Their source is the local
-Darwin-on-Arm report
+Darwin-on-Arm report\linebreak[4]
 \texttt{main/DOCS/CURRENT/REPORTS/}\allowbreak%
-\texttt{0369\_LOCAL\_E2E\_2\_AND\_4\_GBP\_}\allowbreak%
-\texttt{SIMD\_MINIMAP2\_GPU\_BENCHMARK\_}\allowbreak%
-\texttt{REPORT\_2026\_07\_07.md}.
-The third row comes from
-\texttt{main/DOCS/CURRENT/}\allowbreak%
-\texttt{BENCHMARK\_FRAMEWORK/}\allowbreak%
+\texttt{0369\_LOCAL\_E2E\_2\_AND\_4\_GBP\_}\linebreak[4]%
+\texttt{SIMD\_MINIMAP2\_GPU\_BENCHMARK\_REPORT\_}\allowbreak%
+\texttt{2026\_07\_07.md}.
+The third row comes from\linebreak[4]
+\texttt{main/DOCS/CURRENT/BENCHMARK\_FRAMEWORK/}\linebreak[4]%
 \texttt{0384\_DOC0383\_IMPLEMENTATION\_HANDOFF\_}\allowbreak%
-\texttt{FRAGMENT\_NATIVE\_MPF\_PIPELINE\_}\allowbreak%
-\texttt{AND\_MAPPED\_GENERATION\_STORAGE.md}.
+\texttt{FRAGMENT\_NATIVE\_}\linebreak[4]%
+\texttt{MPF\_PIPELINE\_AND\_MAPPED\_GENERATION\_}\allowbreak%
+\texttt{STORAGE.md}.
 
 \begin{table}[ht]
   \centering
@@ -506,10 +505,9 @@ A later benchmark protocol review identified an asymmetry in which BioSeqDB
 query ingestion was outside its timer while minimap2 query ingestion was
 inside.  It prescribed equivalent timer boundaries beginning immediately
 before ingestion of the same query bytes.\footnote{
-\texttt{main/DOCS/CURRENT/TECH\_SPECS/}\allowbreak%
-\texttt{0381\_BIOSEQ\_JUST\_INDEX\_}\allowbreak%
-\texttt{COLD\_LOAD\_ACCELERATION\_}\allowbreak%
-\texttt{WITH\_LINEAR\_ACCOUNTING\_}\allowbreak%
+\texttt{main/DOCS/CURRENT/TECH\_SPECS/}\linebreak[4]%
+\texttt{0381\_BIOSEQ\_JUST\_INDEX\_COLD\_LOAD\_}\linebreak[4]%
+\texttt{ACCELERATION\_WITH\_LINEAR\_ACCOUNTING\_}\linebreak[4]%
 \texttt{DENSE\_HEAP\_READS\_AND\_}\allowbreak%
 \texttt{TABLEAM\_FALLBACK.md},
 Sections~1 and~2.}  The historical pair can motivate investigation of
