@@ -137,10 +137,10 @@ itself.  A user can request only the fields needed by the query:
 SELECT t.pk,
        bioseq.mapq(t.pk),
        bioseq.is_reverse(t.pk),
-       bioseq.edit_distance(t.pk)
+       bioseq.edit(t.pk)
 FROM targets AS t
 WHERE mmsearch(t.seq, $1::bioseq.seq('dna5', 64))
-  AND bioseq.edit_distance(t.pk) < 20;
+  AND bioseq.edit(t.pk) < 20;
 \end{lstlisting}
 
 The apparent argument \texttt{t.pk} is an ownership anchor.  It lets the
@@ -216,12 +216,13 @@ therefore uses a two-step rule:
   same restriction without owning it.
 \end{enumerate}
 
-The pruning is narrow.  It does not clear the relation's entire path list and
-does not declare every BioSeqDB path cheap.  It follows pointer identity and
-the exact restriction carried in base restrictions, parameterized path
-information, or join restrictions.  Ordinary paths unrelated to the claimed
-expression remain planner choices.  This is the essential difference between
-\emph{cost preference} and \emph{semantic ownership}.
+The implementation uses two scopes of pruning. When BioSeqDB custom scanning is
+enabled for a base relation, the relation hook removes non-\texttt{IndexPath}
+alternatives before adding its custom path while retaining index paths needed
+for supported indexed access. Restriction ownership is narrower. It follows
+pointer identity and the exact restriction carried in base restrictions,
+parameterized path information, or join restrictions. The resulting choice is
+therefore enforced by semantic ownership rather than by cost preference alone.
 
 \begin{figure}[htbp]
 \centering
@@ -1091,9 +1092,11 @@ availability.  They do not all have the same semantic status.
   \item \texttt{bioseq.enable\_column\_cache} changes a storage optimization,
   not alignment semantics.  The custom owner persists with the cache on or
   off.
-  \item \texttt{bioseq.enable\_bioseq\_index\_scan} changes index-use policy.
-  The owner may read a compatible index or recompute, but it remains a
-  \texttt{BioseqScan}.
+  \item \texttt{bioseq.enable\_bioseq\_index\_scan} controls whether
+  PostgreSQL index-scan paths participate in custom-scan planning.
+  \item \texttt{bioseq.read\_sequence\_index} controls whether the mapper reads
+  compatible stored per-sequence minimizers or recomputes them. Either policy
+  retains the \texttt{BioseqScan} owner.
   \item Per-call aligner options override a snapshot of the session mapper
   settings for one owned expression.  This snapshot prevents a batch from
   observing a half-changed configuration.
@@ -1103,7 +1106,7 @@ availability.  They do not all have the same semantic status.
   attempted execution reaches the fail-closed boundary.
 \end{itemize}
 
-The tests that keep \texttt{BioseqScan} selected across the first three
+The tests that keep \texttt{BioseqScan} selected across these optimization
 toggles are specifically a regression against the old cost-race design.
 Changing a cache or vectorization setting may legitimately change the honest
 cost estimate, but it must not resurrect an unowned executable copy of

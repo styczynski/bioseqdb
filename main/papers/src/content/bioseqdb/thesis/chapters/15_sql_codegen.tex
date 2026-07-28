@@ -365,11 +365,13 @@ trees and both profiles could coexist.
 The structural implementation is isolated in one module implementation unit
 whose global module fragment includes Clang and LLVM headers.  The exported
 model contains only standard-library and project value types.  Consequently a
-GCC-built generator interface does not serialize Clang implementation types,
-while the Clang structural pass still has the AST and token information needed
-for exact collection.  The current build supports the prescribed GCC and
-Clang host configurations, while SQL structural collection uses the
-configured, pinned Clang path.
+generator interface built under the prescribed GCC and libstdc++ configuration
+would not serialize Clang implementation types, while the Clang structural pass
+still has the AST and token information needed for exact collection.  The
+executed local qualification is narrower.  SQL structural collection uses the
+configured, pinned Clang path, and DOC0388 explicitly records no local GCC
+compilation proof.  GCC compatibility is therefore a design and sealed-toolchain
+requirement rather than a locally demonstrated build result.
 
 \section{Collection and normalized identities}
 \label{sec:sql-codegen-ir}
@@ -404,7 +406,7 @@ Every graph node receives a stable textual identity.  The current
 \path{main/codegen/sql/graph/index.cppm}.  Routine identities include the
 schema, name, and canonical SQL input types, for example
 \[
-  \texttt{sql:function:bioseq.mmsearch(bioseq.seq,bioseq.seq)}.
+  \texttt{sql:function:\$extension.mmsearch(bioseq.seq,bioseq.seq)}.
 \]
 The signature uses a dedicated
 \texttt{stable\_identity\_sql\_type} when a compatibility spelling differs

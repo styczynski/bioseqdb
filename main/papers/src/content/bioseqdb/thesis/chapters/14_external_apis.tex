@@ -424,13 +424,22 @@ For an ordinary nucleotide accession, the producer constructs an NCBI
 E-utilities FASTA request.  Before opening a socket,
 \texttt{validate\_candidate} in
 \path{main/bioseq/external/transport/locator.cppm} checks the HTTPS scheme,
-allowed host suffix, URL length, absence of user information and public address
-scope.  It resolves the host and requires every returned address to be
-permitted.  The numeric addresses are attached to an otherwise non-constructible
-\texttt{validated\_transfer\_request}; libcurl receives them through
+allowed host suffix, URL length, absence of user information and the currently
+implemented address-scope rules.  It resolves the host and requires every
+returned address to pass the classifier.  The numeric addresses are attached
+to an otherwise non-constructible
+\texttt{validated\_transfer\_request}, and libcurl receives them through
 \texttt{CURLOPT\_RESOLVE}.  Redirects, proxies and automatic decoding are
-disabled.  This closes the common gap in which a URL passes a textual allowlist
-but DNS rebinding or a redirect reaches a private service.
+disabled.  These controls prevent redirect-based allowlist bypasses and pin the
+approved DNS result for the lifetime of the transfer.
+
+The address classifier is an explicit deny list rather than a complete
+global-unicast test.  It rejects the implemented unspecified, loopback,
+private or unique-local, link-local, CGNAT and multicast ranges.  It does not
+yet exhaust every special-use range or comprehensively handle IPv4-mapped IPv6
+addresses.  The implementation therefore narrows the usual DNS-rebinding and
+private-service exposure, but the stronger claim that every non-public endpoint
+is excluded remains a security-hardening objective.
 
 \texttt{remote\_byte\_source} in
 \path{main/bioseq/external/transport/remote_source.cppm} satisfies the shared
@@ -461,13 +470,21 @@ NCBI assembly accessions beginning with \texttt{GCF\_} or \texttt{GCA\_} take a
 different route through
 \path{main/bioseq/external/io/datasets_stream.cppm}.  The Datasets API returns a
 ZIP package.  The current implementation downloads the compressed ZIP into a
-bounded in-memory vector with a 64~MiB default wire cap, then uses libarchive to
-enforce entry and total decoded limits, verify the manifest/MD5 data, and feed
-FASTA members to the same emitter.  It is therefore bounded, archive-safe and
-incremental after extraction begins, but it is not yet a fully streaming or
-spooled package transport.  A seekable temporary spool for packages above the
-in-memory cap and the dehydrated \texttt{fetch.txt} re-fetch strategy remain
-explicitly deferred.
+bounded in-memory vector with a 64~MiB default wire cap, then makes two
+libarchive passes.  The first pass reads bounded control members.  During the
+second pass, the extractor materializes one selected decoded member in a
+\texttt{std::string}, checks its MD5, and only then feeds the verified bytes to
+the shared FASTA emitter.  The configured path enforces a 512~MiB total decoded
+cap and an expansion-ratio cap, while its per-member decoded cap is zero.  A
+single selected member may therefore approach the total cap.  For the
+whole-record \texttt{sequences} target, an additional record-sized payload may
+coexist with the buffered member.
+
+This path is verify-before-emit and bounded by explicit caps, but neither the
+package transport nor selected-member extraction is incremental.  A seekable
+temporary spool for packages above the in-memory cap, a bounded member spool
+that preserves verify-before-emit, and the dehydrated \texttt{fetch.txt}
+re-fetch strategy remain explicitly deferred.
 
 \subsection{Backpressure and PostgreSQL cancellation}
 
@@ -499,9 +516,13 @@ Retries obey an \emph{emission barrier}.  The direct FASTA path retries
 transport errors, HTTP 408, 429 and selected 5xx statuses with bounded
 exponential backoff and jitter, but only while the emitter has published zero
 rows.  Once a chunk is visible to the executor, restarting the transfer could
-duplicate rows; a subsequent failure is terminal.  The archive path similarly
+duplicate rows.  A subsequent failure is terminal.  The archive path similarly
 retries the download before extraction, but never restarts after extraction has
-begun to emit.
+begun to emit.  The current backoff waits use
+\texttt{std::this\_thread::sleep\_for} rather than a stop-token-aware wait.
+Cancellation requested during a retry delay is observed only after the current
+interval completes, which can be about 1.8 seconds including jitter on the
+direct path and 1.6 seconds on the archive path.
 
 \section{From remote letters to a compact PostgreSQL sequence}
 \label{sec:external-packing}
@@ -563,9 +584,12 @@ The streaming transport has the stricter locator firewall described above.
 Its current DNS resolution uses the system \texttt{getaddrinfo} call before
 pinning the result.  The proposed cancellable c-ares/OpenSSL endpoint connector
 for the Oat++ control plane remains deferred because it would replace a proven
-TLS implementation.  Thus cancellation of a running libcurl stream is
-cooperative and bounded mainly by its poll/timeout settings, rather than by an
-immediate cross-thread socket close.
+TLS implementation.  Cancellation is therefore cooperative rather than
+immediate.  A blocking \texttt{getaddrinfo} call can defer stop observation
+according to the system resolver, and a retry backoff can defer it until the
+current interval finishes.  Once libcurl is actively driving the transfer, its
+poll and timeout settings bound the regular stop checks.  There is no immediate
+cross-thread socket close.
 
 \subsection{Rate limits and failure representation}
 
@@ -685,13 +709,15 @@ path changes the asymptotic memory behaviour of
 \texttt{sequence\_chunks}: the record length no longer determines the complete
 response buffer.  Compared with the full DOC0372 proposal, however, the
 implementation is intentionally smaller.  Metadata and non-NCBI sequence
-responses are still collected; NCBI Datasets ZIP bytes are held in a bounded
-vector; whole-record \texttt{sequences} rows still require one record-sized
-payload; the process-local GCRA is not wired or shared between backends; the
-provider policy spans are empty; the scan uses hard-coded channel capacity
-rather than the complete prepared-admission path; the push-based transfer
-service and direct packing parser are partial; and most structured failures
-still map to a generic SQLSTATE.
+responses are still collected.  NCBI Datasets ZIP bytes are held in a bounded
+vector, and one selected decoded member is retained until its MD5 has been
+verified.  A whole-record \texttt{sequences} payload can coexist with that
+member-sized buffer.  The address-scope classifier is an explicit deny list
+rather than an exhaustive global-unicast test.  The process-local GCRA is not
+wired or shared between backends.  The provider policy spans are empty.  The
+scan uses hard-coded channel capacity rather than the complete
+prepared-admission path.  The push-based transfer service and direct packing
+parser are partial.  Most structured failures still map to a generic SQLSTATE.
 
 These limits do not invalidate the delivered abstraction.  They identify the
 next engineering work without presenting an aspirational design as current

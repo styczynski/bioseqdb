@@ -105,7 +105,8 @@ rules. These changes were consolidated by the refactor described in
     Sequence extrema excluded from ordinary pruning; scalar and vector slots;
     lazy sequence scanner\\
     Execution & PostgreSQL TableAM and custom scan support &
-    Alignment-aware custom scans, vector aggregates, query-result cache provider\\
+    Alignment-aware custom scans, vector aggregates, and exact query-result
+    cache coalescing\\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -381,8 +382,11 @@ The production storage manager is instantiated as
 \texttt{sequence\_storage\_manager<uint64\_t,8,42>}. It generates 35 length
 buckets. The first contains bit widths up to~8. Bit widths 9 through 41 each
 receive one bucket. The final bucket covers the remaining widths through~64.
-The bucket is selected from the bit width of the requested size using a
-compile-time lookup table.
+For an insertion whose final size is known, the bucket is selected from the
+bit width of the requested size using a compile-time lookup table. The
+streaming writer cannot make that choice because the final length is not known
+when writing begins. It currently places every streamed sequence in the
+highest bucket.
 
 Length bucketing is not a biological classification. It is an operational
 device. Similar-sized payloads have similar fragment counts and access
@@ -449,10 +453,12 @@ assignment. This is a suitable use of advisory locking because the locked
 identity is an internal storage resource and the lock is held by the
 transaction that writes it.
 
-Before writing a sequence, the manager computes its projected payload size. If
+For a known-size insertion, the manager computes its projected payload size. If
 the active shard lacks enough remaining configured capacity, it selects a
-fresh shard first. A sequence is not split across shards. If the sequence
-itself exceeds the configured per-shard cap
+fresh shard first. The streaming writer does not perform this remaining-space
+pre-rollover. It keeps the sequence in its selected top-bucket shard and
+checks the per-sequence cap while data arrive. A sequence is not split across
+shards. If the sequence itself exceeds the configured per-shard cap
 \texttt{bioseq.storage.max\_seq\_sub\_table\_gbs}, insertion fails with a
 diagnostic rather than producing an ambiguous multi-shard locator. Byte deltas
 are accumulated in the per-execution cache and committed to the registry when
@@ -520,8 +526,8 @@ feature obscures both correctness and performance.
     Column decompression cache & One PostgreSQL backend & Relation, stripe,
     chunk group, column & Decompressed column value buffer\\
     \texttt{bioseq\_cache} & Shared across backends in one postmaster &
-    Exact execution identity or reusable coverage identity & Sealed columnar
-    query results and coverage fragments\\
+    Exact execution identity, or provider-defined reusable coverage identity &
+    Sealed columnar query results. Coverage fragments require a provider\\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -547,9 +553,10 @@ does not coordinate duplicate expensive SQL requests.
 
 \texttt{bioseq\_cache} addresses the latter problem. It is an independently
 buildable PostgreSQL extension and DSO under \path{main/bioseq_caching}. It
-does not require the BioSeq alphabet, minimizer, or alignment modules. Optional
-provider interfaces add BioSeq-specific reusable boundaries without making
-the two DSOs link to each other.
+does not require the BioSeq alphabet, minimizer, or alignment modules. Its
+provider interface is generic and keeps the two DSOs from linking to each
+other. The current tree does not ship a BioSeq-specific production provider.
+The only \texttt{ProviderV1} implementation is explicitly test-only.
 
 The user-visible optimization GUC has three modes:
 
@@ -559,10 +566,11 @@ The user-visible optimization GUC has three modes:
   \item[\texttt{same}] The first executor of one exact execution identity is
   the producer. Concurrent identical executors wait, and later identical
   executors replay the completed ordered multiset while it remains valid.
-  \item[\texttt{reuse}] Exact coalescing remains available, and compatible
-  coverage at an expensive operator boundary may be reused with residual
-  predicates and hidden lineage. If that proof cannot be made, execution
-  falls back to exact behavior.
+  \item[\texttt{reuse}] Exact coalescing remains available. If a provider is
+  installed, compatible coverage at an expensive operator boundary may be
+  reused with residual predicates and hidden lineage. If that proof cannot be
+  made, execution falls back to exact behavior. In the current source tree,
+  reusable BioSeq coverage has generic test proof but no production provider.
 \end{description}
 
 An exact key is stronger than normalized SQL text. It includes the analyzed
@@ -736,9 +744,34 @@ can support joins for alignment through other custom-scan machinery, but this
 particular vector-aggregate rewrite currently rejects a statement whose range
 table has more than one entry.
 
-The vectorized aggregate is therefore an optimization, not a second SQL
-semantics. Unsupported cases fall back to PostgreSQL's ordinary plan.
-Chunk-level min/max pruning remains independent: it can reduce the batch set
+The planner intends vector aggregation to be an optimization, but the current
+generated initial conditions do not yet preserve PostgreSQL semantics for
+every empty or all-NULL supported input. The implementation tests document the
+differences in Table~\ref{tab:vector-aggregate-empty-limit}. Consequently, the
+current VectorAgg route must not be described as semantically interchangeable
+with scalar aggregation until these initial states are corrected.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Known current VectorAgg results for empty or all-NULL supported
+  inputs, compared with PostgreSQL scalar aggregate semantics.}
+  \label{tab:vector-aggregate-empty-limit}
+  \begin{tabularx}{\linewidth}{p{0.34\linewidth}XX}
+    \toprule
+    Aggregate & Scalar result & Current vector result\\
+    \midrule
+    \texttt{sum(int2)} and \texttt{sum(int4)} & NULL & zero\\
+    Integer \texttt{min} and \texttt{max} & NULL & initial type extrema\\
+    \texttt{max(date)} & NULL & negative infinity\\
+    \texttt{min(date)} & NULL & positive infinity\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Unsupported plan shapes still fall back to PostgreSQL's ordinary plan, but
+that fallback does not repair the supported empty-input cases above.
+Chunk-level min/max pruning remains independent. It can reduce the batch set
 even when aggregation itself is scalar, and a vector aggregate can still
 process a chunk for which no useful extrema exist.
 
