@@ -20,7 +20,7 @@ module;
 export module bioseq.table.io:cache;
 
 import bioseq.pg_utils;
-import bioseq.config;                  // DOC0322 §9.3 — bioseq_enable_page_cache, bioseq_page_cache_size GUCs
+import bioseq.config;                  // DOC0322 §9.3 — bioseq::settings::enable_column_cache, bioseq::settings::column_cache_size GUCs
 import bioseq.storage.metadata;        // DOC0322 §9.2 — BioseqColumnReadState, BioseqColumnCacheStatistics (was types.h)
 
 
@@ -95,8 +95,8 @@ BioseqColumnCacheMemoryContext(void)
 		bioseqColumnCacheContext =
 			AllocSetContextCreate(TopMemoryContext,
 								  "Bioseq Decompression Cache",
-								  0, static_cast<uint64_t>(bioseq_page_cache_size * 1024 * 1024 * .1),
-								  bioseq_page_cache_size * 1024 * 1024);
+								  0, static_cast<uint64_t>(bioseq::settings::column_cache_size * 1024 * 1024 * .1),
+								  bioseq::settings::column_cache_size * 1024 * 1024);
 		memset(&statistics, 0, sizeof(BioseqColumnCacheStatistics));
 		head = NULL;
 	}
@@ -301,7 +301,7 @@ export void
 BioseqColumnAddCacheEntry(uint64_t relId, uint64_t stripeId, uint64_t chunkId, 
 					  uint32_t columnId, void *data)
 {
-	if (bioseq_enable_page_cache == false)
+	if (bioseq::settings::enable_column_cache == false)
 	{
 		return;
 	}
@@ -356,10 +356,10 @@ BioseqColumnAddCacheEntry(uint64_t relId, uint64_t stripeId, uint64_t chunkId,
 	}
 
 	/* If we are over our cache allocation, clear until we are at 90%. */
-	if (totalAllocationLength >= (bioseq_page_cache_size * 1024 * 1024))
+	if (totalAllocationLength >= (bioseq::settings::column_cache_size * 1024 * 1024))
 	{
-		EvictCache((bioseq_page_cache_size * 1024 * 1024 * .1) + 
-					(totalAllocationLength - (bioseq_page_cache_size * 1024 * 1024)));
+		EvictCache((bioseq::settings::column_cache_size * 1024 * 1024 * .1) +
+					(totalAllocationLength - (bioseq::settings::column_cache_size * 1024 * 1024)));
 	}
 
 	statistics.writes++;
@@ -375,7 +375,7 @@ BioseqColumnAddCacheEntry(uint64_t relId, uint64_t stripeId, uint64_t chunkId,
 export void*
 BioseqColumnRetrieveCache(uint64_t relId, uint64_t stripeId, uint64_t chunkId, uint32_t columnId)
 {
-	if (bioseq_enable_page_cache == false)
+	if (bioseq::settings::enable_column_cache == false)
 	{
 		return NULL;
 	}
@@ -427,23 +427,4 @@ BioseqColumnGetCacheStatistics(void)
 	statistics.entries = BioseqColumnCacheLength();
 
 	return &statistics;
-}
-
-
-/*
- * cache_evict is a debug SQL function that drops a single cache entry by
- * (relid, stripeId, chunkId, columnId). Only useful when called inside an
- * already-active transaction, or when automatic cache clearing has been
- * disabled.
- */
-POSTGRES_FN(cache_evict)
-{
-	uint64_t relId =PG_GETARG_INT64(0);
-	uint64_t stripeId = PG_GETARG_INT64(1);
-	uint64_t chunkId = PG_GETARG_INT64(2);
-	uint32_t columnId = PG_GETARG_UINT32(3);
-
-	bool result = BioseqColumnInvalidateCacheEntry(relId, stripeId, chunkId, columnId);
-
-	PG_RETURN_BOOL(result);
 }

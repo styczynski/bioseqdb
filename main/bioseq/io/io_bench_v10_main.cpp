@@ -3,12 +3,13 @@
  * @brief IO bench entry point on top of bench_framework (V10).
  *
  * Replaces the legacy Catch2-based harness in `io/io_bench_main.cpp` and
- * its surrounding `io/io_bench/` tree. Three benchmark blocks declared
+ * its surrounding `io/io_bench/` tree. Benchmark blocks declared
  * in `io_bench_v10_configuration.json`:
  *
  *   * bench_io_readers_plain — POSIX / mmap / async-pipeline readers + kseqpp + naive_ifstream
  *   * bench_io_readers_gz    — parallel-gzip + zlib paths on the .fastq.gz cell
  *   * bench_io_writers       — sync / parallel4 / parallel8 bioseq writers + naive_ofstream
+ *   * bench_io_lazy_sequence_expression — eager versus deferred slice/concat
  *
  * Each block sets `concurrency.bench_lock = true` and
  * `concurrency.concurrency = false` so cells run serially — IO paths
@@ -20,6 +21,7 @@
 #include <kseq++/seqio.hpp>
 #include <simdjson.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -27,8 +29,13 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
+#include <memory>
+#include <optional>
 #include <random>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -41,6 +48,9 @@
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
+import bioseq.storage.lazy;
+import bioseq.storage.size;
+import bioseq.parallelism.memory_admission;
 import bioseq.io.public_api;
 import bioseq.io.options;
 import bioseq.io.writer;
@@ -142,6 +152,340 @@ struct IdentifierBenchOutput {
     std::size_t parsed_field_bytes    = 0;
 };
 
+// DOC0377 §18 — one NO_POSTGRES benchmark-local expression backend. The
+// production SQL piece tree owns PostgreSQL MemoryContexts and source domains,
+// so bench-io exercises its representation-erased contract through the shared
+// canonical facade and the production admitted packed materializer.
+using LazyExpressionRange = compact_sequence_range<BenchAlphabet>;
+using LazyExpressionFacade =
+    bioseq::storage::basic_lazy_sequence_view<seq::dna4>;
+using LazyExpressionPacked =
+    bioseq::storage::admitted_packed_region<seq::dna4>;
+using LazyExpressionSize = bioseq::storage::sequence_size_t;
+
+inline constexpr std::uint64_t kLazyExpressionHashSeed =
+    0x0377d1a5e5e0c0deULL;
+inline constexpr std::uint8_t kLazyExpressionStorageWidth = 8u;
+
+struct LazyExpressionInput {
+    LazyExpressionRange source;
+    LazyExpressionSize source_bp = 0;
+    LazyExpressionSize expected_output_bp = 0;
+    std::uint64_t expected_hash = 0;
+};
+
+struct LazyExpressionAllocationStats {
+    std::uint64_t payload_materializations = 0;
+    std::uint64_t intermediate_payload_materializations = 0;
+    std::uint64_t boundary_materializations = 0;
+    std::uint64_t payload_bytes_materialized = 0;
+    std::uint64_t live_payload_bytes = 0;
+    std::uint64_t peak_live_payload_bytes = 0;
+    std::uint64_t admitted_bytes_total = 0;
+    std::uint64_t live_admitted_bytes = 0;
+    std::uint64_t peak_live_admitted_bytes = 0;
+};
+
+class LazyExpressionMaterialization {
+public:
+    LazyExpressionMaterialization(
+            LazyExpressionPacked&& packed,
+            LazyExpressionAllocationStats& stats,
+            bool final_boundary,
+            std::uint64_t payload_bytes,
+            std::uint64_t observed_admitted_bytes) noexcept
+        : packed_(std::move(packed)),
+          stats_(std::addressof(stats)),
+          payload_bytes_(payload_bytes),
+          admitted_bytes_(observed_admitted_bytes) {
+        ++stats.payload_materializations;
+        if (final_boundary) {
+            ++stats.boundary_materializations;
+        } else {
+            ++stats.intermediate_payload_materializations;
+        }
+        stats.payload_bytes_materialized += payload_bytes_;
+        stats.live_payload_bytes += payload_bytes_;
+        stats.peak_live_payload_bytes = std::max(
+            stats.peak_live_payload_bytes, stats.live_payload_bytes);
+        stats.admitted_bytes_total += admitted_bytes_;
+        stats.live_admitted_bytes += admitted_bytes_;
+        stats.peak_live_admitted_bytes = std::max(
+            stats.peak_live_admitted_bytes, stats.live_admitted_bytes);
+    }
+
+    LazyExpressionMaterialization(
+            LazyExpressionMaterialization&& other) noexcept
+        : packed_(std::move(other.packed_)),
+          stats_(std::exchange(other.stats_, nullptr)),
+          payload_bytes_(other.payload_bytes_),
+          admitted_bytes_(other.admitted_bytes_) {}
+
+    LazyExpressionMaterialization(
+        LazyExpressionMaterialization const&) = delete;
+    LazyExpressionMaterialization& operator=(
+        LazyExpressionMaterialization const&) = delete;
+    LazyExpressionMaterialization& operator=(
+        LazyExpressionMaterialization&&) = delete;
+
+    ~LazyExpressionMaterialization() { release_tracking(); }
+
+    [[nodiscard]] LazyExpressionFacade view() const noexcept {
+        return packed_.view();
+    }
+
+private:
+    void release_tracking() noexcept {
+        if (stats_ == nullptr) {
+            return;
+        }
+        DEBUG_ASSERT(
+            stats_->live_payload_bytes >= payload_bytes_,
+            "lazy-expression live payload accounting underflow");
+        DEBUG_ASSERT(
+            stats_->live_admitted_bytes >= admitted_bytes_,
+            "lazy-expression live admission accounting underflow");
+        stats_->live_payload_bytes -= payload_bytes_;
+        stats_->live_admitted_bytes -= admitted_bytes_;
+        stats_ = nullptr;
+    }
+
+    LazyExpressionPacked packed_;
+    LazyExpressionAllocationStats* stats_ = nullptr;
+    std::uint64_t payload_bytes_ = 0;
+    std::uint64_t admitted_bytes_ = 0;
+};
+
+struct LazyExpressionOutput {
+    LazyExpressionSize output_bp = 0;
+    std::uint64_t logical_hash = 0;
+    LazyExpressionAllocationStats allocations{};
+};
+
+enum class LazyExpressionNodeKind : std::uint8_t {
+    slice,
+    concat,
+};
+
+struct LazyExpressionNode {
+    LazyExpressionNodeKind kind;
+    LazyExpressionFacade left;
+    LazyExpressionFacade right;
+    LazyExpressionSize slice_from;
+    LazyExpressionSize logical_size;
+};
+
+[[nodiscard]] LazyExpressionNode make_lazy_expression_slice(
+        LazyExpressionFacade source,
+        LazyExpressionSize from,
+        LazyExpressionSize to) {
+    if (from > to || to > source.bp_size()) {
+        throw std::invalid_argument("invalid lazy-expression slice");
+    }
+    return LazyExpressionNode{
+        .kind = LazyExpressionNodeKind::slice,
+        .left = source,
+        .right = source,
+        .slice_from = from,
+        .logical_size = to - from,
+    };
+}
+
+[[nodiscard]] LazyExpressionNode make_lazy_expression_concat(
+        LazyExpressionFacade left,
+        LazyExpressionFacade right) {
+    constexpr LazyExpressionSize max_size =
+        (std::numeric_limits<LazyExpressionSize>::max)();
+    if (right.bp_size() > max_size - left.bp_size()) {
+        throw std::overflow_error("lazy-expression concat length overflow");
+    }
+    return LazyExpressionNode{
+        .kind = LazyExpressionNodeKind::concat,
+        .left = left,
+        .right = right,
+        .slice_from = 0,
+        .logical_size = left.bp_size() + right.bp_size(),
+    };
+}
+
+[[nodiscard]] LazyExpressionSize lazy_expression_node_bp_size(
+        void const* opaque) noexcept {
+    return static_cast<LazyExpressionNode const*>(opaque)->logical_size;
+}
+
+[[nodiscard]] bool lazy_expression_node_worker_shareable(
+        void const* opaque) noexcept {
+    const auto& node = *static_cast<LazyExpressionNode const*>(opaque);
+    return lazy_is_worker_shareable(node.left)
+        && lazy_is_worker_shareable(node.right);
+}
+
+[[nodiscard]] LazyExpressionFacade::resident_probe_result
+lazy_expression_node_resident_probe(
+        void const*, LazyExpressionSize, LazyExpressionSize,
+        std::uint8_t) noexcept {
+    return std::nullopt;
+}
+
+void lazy_expression_copy_child(
+        LazyExpressionFacade child,
+        LazyExpressionSize from,
+        std::span<std::uint8_t> output) {
+    constexpr auto max_size = (std::numeric_limits<std::size_t>::max)();
+    if (from > max_size || output.size() > max_size - from) {
+        throw std::overflow_error("lazy-expression coordinate overflow");
+    }
+    const std::size_t begin = static_cast<std::size_t>(from);
+    child.template to_encoded_into<false, false>(
+        output, begin, begin + output.size());
+}
+
+void lazy_expression_copy_forward(
+        LazyExpressionNode const& node,
+        LazyExpressionSize from,
+        std::span<std::uint8_t> output) {
+    const LazyExpressionSize count =
+        static_cast<LazyExpressionSize>(output.size());
+    if (from > node.logical_size || count > node.logical_size - from) {
+        throw std::invalid_argument("invalid lazy-expression read range");
+    }
+    if (output.empty()) {
+        return;
+    }
+    if (node.kind == LazyExpressionNodeKind::slice) {
+        lazy_expression_copy_child(
+            node.left, node.slice_from + from, output);
+        return;
+    }
+
+    const LazyExpressionSize left_size = node.left.bp_size();
+    if (from >= left_size) {
+        lazy_expression_copy_child(node.right, from - left_size, output);
+        return;
+    }
+    const std::size_t left_count = static_cast<std::size_t>(
+        std::min<LazyExpressionSize>(count, left_size - from));
+    lazy_expression_copy_child(node.left, from, output.first(left_count));
+    if (left_count != output.size()) {
+        lazy_expression_copy_child(
+            node.right, 0, output.subspan(left_count));
+    }
+}
+
+template <bool IsReversed, bool WriteReversed>
+[[nodiscard]] const std::uint8_t* lazy_expression_node_ptr_at(
+        void const* opaque,
+        LazyExpressionSize from,
+        std::size_t required_length,
+        std::span<std::uint8_t> scratch) {
+    const auto& node = *static_cast<LazyExpressionNode const*>(opaque);
+    const LazyExpressionSize count =
+        static_cast<LazyExpressionSize>(required_length);
+    if (required_length > scratch.size()
+        || from > node.logical_size
+        || count > node.logical_size - from) {
+        throw std::invalid_argument("invalid lazy-expression facade read");
+    }
+    LazyExpressionSize forward_from = from;
+    if constexpr (IsReversed) {
+        forward_from = node.logical_size - from - count;
+    }
+    std::span<std::uint8_t> output = scratch.first(required_length);
+    lazy_expression_copy_forward(node, forward_from, output);
+    if constexpr (IsReversed) {
+        for (std::uint8_t& rank : output) {
+            rank = LazyExpressionFacade::traits::letter_complement(rank);
+        }
+    }
+    if constexpr (IsReversed != WriteReversed) {
+        std::reverse(output.begin(), output.end());
+    }
+    return scratch.data();
+}
+
+const LazyExpressionFacade::backend_ops kLazyExpressionNodeOps{
+    .bp_size = &lazy_expression_node_bp_size,
+    .ptr_at = {
+        &lazy_expression_node_ptr_at<false, false>,
+        &lazy_expression_node_ptr_at<false, true>,
+        &lazy_expression_node_ptr_at<true, false>,
+        &lazy_expression_node_ptr_at<true, true>,
+    },
+    .try_resident_packed = &lazy_expression_node_resident_probe,
+    .copy_full_packed = nullptr,
+    .worker_shareable = &lazy_expression_node_worker_shareable,
+};
+
+[[nodiscard]] LazyExpressionFacade lazy_expression_view(
+        LazyExpressionNode const& node) noexcept {
+    return LazyExpressionFacade{
+        std::addressof(node), std::addressof(kLazyExpressionNodeOps)};
+}
+
+[[nodiscard]] LazyExpressionMaterialization materialize_lazy_expression_view(
+        LazyExpressionFacade view,
+        bool final_boundary,
+        LazyExpressionAllocationStats& stats) {
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t admitted_bytes =
+        bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+            view.bp_size(), kLazyExpressionStorageWidth);
+    const std::uint64_t reserved_before = admission.reserved_bytes();
+    auto permit = admission.try_reserve(admitted_bytes);
+    if (!permit.has_value()) {
+        throw std::runtime_error(
+            "memory admission rejected lazy-expression materialization");
+    }
+    LazyExpressionPacked packed = bioseq::storage::materialize_packed_region(
+        view, 0, view.bp_size(), kLazyExpressionStorageWidth,
+        std::move(*permit));
+    const std::uint64_t reserved_after = admission.reserved_bytes();
+    if (reserved_after < reserved_before
+        || reserved_after - reserved_before != admitted_bytes) {
+        throw std::runtime_error(
+            "lazy-expression observed admission delta mismatch");
+    }
+    const std::uint64_t observed_admitted_bytes =
+        reserved_after - reserved_before;
+    const auto& descriptor = packed.descriptor();
+    if (descriptor.unit_count
+            > (std::numeric_limits<std::uint64_t>::max)()
+                / kLazyExpressionStorageWidth) {
+        throw std::overflow_error("lazy-expression payload byte overflow");
+    }
+    const std::uint64_t payload_bytes =
+        static_cast<std::uint64_t>(descriptor.unit_count)
+        * kLazyExpressionStorageWidth;
+    return LazyExpressionMaterialization{
+        std::move(packed), stats, final_boundary, payload_bytes,
+        observed_admitted_bytes};
+}
+
+[[nodiscard]] LazyExpressionOutput finish_lazy_expression_run(
+        LazyExpressionMaterialization const& final_value) {
+    const LazyExpressionFacade final_view = final_value.view();
+    return LazyExpressionOutput{
+        .output_bp = final_view.bp_size(),
+        .logical_hash = bioseq::storage::sequence_logical_hash_v1(
+            final_view, kLazyExpressionHashSeed),
+    };
+}
+
+void validate_lazy_expression_run_released(
+        LazyExpressionAllocationStats const& stats,
+        std::uint64_t reserved_baseline) {
+    const std::uint64_t reserved_after =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .reserved_bytes();
+    if (stats.live_payload_bytes != 0u
+        || stats.live_admitted_bytes != 0u
+        || reserved_after != reserved_baseline) {
+        throw std::runtime_error(
+            "lazy-expression materialization ownership did not return to baseline");
+    }
+}
+
 struct bench_identifier_writer {
     std::size_t dest_n = 0;
     IdentifierBenchOutput* out = nullptr;
@@ -198,6 +542,309 @@ static_assert(bioseq::io::idparse::is_identifier_dest_writer<bench_identifier_wr
     }
     return value;
 }
+
+[[nodiscard]] std::vector<seq::dna4> make_lazy_expression_source(
+        std::size_t bp_size,
+        std::uint64_t seed) {
+    std::vector<seq::dna4> source(bp_size);
+    std::uint64_t state = seed;
+    for (seq::dna4& letter : source) {
+        state = state * 6364136223846793005ULL
+            + 1442695040888963407ULL;
+        letter.assign_rank(static_cast<seqan3::alphabet_rank_t<seq::dna4>>(
+            (state >> 33u) & 0x3u));
+    }
+    return source;
+}
+
+void append_lazy_expression_oracle_segment(
+        std::vector<std::uint8_t>& oracle,
+        std::span<const seq::dna4> source,
+        std::size_t from,
+        std::size_t to) {
+    if (from > to || to > source.size()) {
+        throw std::invalid_argument("invalid lazy-expression oracle segment");
+    }
+    for (const seq::dna4 letter : source.subspan(from, to - from)) {
+        oracle.push_back(static_cast<std::uint8_t>(letter.to_rank()));
+    }
+}
+
+[[nodiscard]] LazyExpressionInput build_lazy_expression_input(
+        std::string_view,
+        std::string_view,
+        simdjson::dom::element data,
+        const RunConstraints&) {
+    const std::int64_t configured_bp = read_int_field(
+        data, "bp_size", 8 * 1024 * 1024);
+    if (configured_bp <= 0
+        || configured_bp % 8 != 0
+        || static_cast<std::uint64_t>(configured_bp)
+            > (std::numeric_limits<std::size_t>::max)()) {
+        throw std::invalid_argument(
+            "lazy-expression bp_size must be a positive multiple of eight");
+    }
+    const std::size_t n = static_cast<std::size_t>(configured_bp);
+    const std::uint64_t seed = static_cast<std::uint64_t>(
+        read_int_field(data, "seed", 377));
+    std::vector<seq::dna4> source = make_lazy_expression_source(n, seed);
+
+    // Independent flattening of
+    //   concat(concat(source[3N/8:5N/8], source[N/2:3N/4]),
+    //          source[N/4:N/2]).
+    // This is algebraically equivalent to the benchmark expression, without
+    // using its slice/concat backend or materializer.
+    std::vector<std::uint8_t> oracle;
+    oracle.reserve(3u * n / 4u);
+    const std::span<const seq::dna4> source_span{source};
+    append_lazy_expression_oracle_segment(
+        oracle, source_span, 3u * n / 8u, 5u * n / 8u);
+    append_lazy_expression_oracle_segment(
+        oracle, source_span, n / 2u, 3u * n / 4u);
+    append_lazy_expression_oracle_segment(
+        oracle, source_span, n / 4u, n / 2u);
+    const std::uint64_t expected_hash =
+        bioseq::storage::sequence_logical_hash_bytes_v1(
+            oracle, static_cast<std::uint64_t>(oracle.size()),
+            kLazyExpressionHashSeed);
+
+    return LazyExpressionInput{
+        .source = LazyExpressionRange{source},
+        .source_bp = static_cast<LazyExpressionSize>(n),
+        .expected_output_bp = static_cast<LazyExpressionSize>(oracle.size()),
+        .expected_hash = expected_hash,
+    };
+}
+
+[[nodiscard]] RunConstraints estimate_lazy_expression_resources(
+        std::string_view,
+        std::string_view,
+        simdjson::dom::element data) noexcept {
+    const std::int64_t configured_bp = read_int_field(
+        data, "bp_size", 8 * 1024 * 1024);
+    if (configured_bp <= 0) {
+        return {};
+    }
+    const std::uint64_t bp = static_cast<std::uint64_t>(configured_bp);
+    constexpr std::uint64_t max_size =
+        (std::numeric_limits<std::size_t>::max)();
+    const std::uint64_t reserved = bp > max_size / 2u
+        ? max_size : bp * 2u;
+    return RunConstraints{
+        .base_memory = static_cast<std::size_t>(reserved),
+        .extra_memory = static_cast<std::size_t>(reserved),
+    };
+}
+
+[[nodiscard]] LazyExpressionOutput run_lazy_expression_eager(
+        const LazyExpressionInput& input) {
+    const LazyExpressionSize n = input.source_bp;
+    auto source_owner = bioseq::storage::make_lazy_in_memory(input.source);
+    const LazyExpressionFacade source =
+        bioseq::storage::as_lazy_sequence_view(source_owner);
+    LazyExpressionAllocationStats stats{};
+    const std::uint64_t reserved_baseline =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .reserved_bytes();
+    LazyExpressionOutput output{};
+    {
+        const LazyExpressionNode a_node = make_lazy_expression_slice(
+            source, n / 8u, 5u * n / 8u);
+        const LazyExpressionFacade a_expression = lazy_expression_view(a_node);
+        const LazyExpressionMaterialization a = materialize_lazy_expression_view(
+            a_expression, false, stats);
+
+        const LazyExpressionNode b_node = make_lazy_expression_slice(
+            source, n / 2u, 7u * n / 8u);
+        const LazyExpressionFacade b_expression = lazy_expression_view(b_node);
+        const LazyExpressionMaterialization b = materialize_lazy_expression_view(
+            b_expression, false, stats);
+
+        const LazyExpressionNode c_node = make_lazy_expression_concat(
+            a.view(), b.view());
+        const LazyExpressionFacade c_expression = lazy_expression_view(c_node);
+        const LazyExpressionMaterialization c = materialize_lazy_expression_view(
+            c_expression, false, stats);
+
+        const LazyExpressionNode d_node = make_lazy_expression_slice(
+            c.view(), n / 4u, 3u * n / 4u);
+        const LazyExpressionFacade d_expression = lazy_expression_view(d_node);
+        const LazyExpressionMaterialization d = materialize_lazy_expression_view(
+            d_expression, false, stats);
+
+        const LazyExpressionNode e_node = make_lazy_expression_slice(
+            a.view(), n / 8u, 3u * n / 8u);
+        const LazyExpressionFacade e_expression = lazy_expression_view(e_node);
+        const LazyExpressionMaterialization e = materialize_lazy_expression_view(
+            e_expression, false, stats);
+
+        const LazyExpressionNode result_node = make_lazy_expression_concat(
+            d.view(), e.view());
+        const LazyExpressionFacade result_expression =
+            lazy_expression_view(result_node);
+        const LazyExpressionMaterialization result =
+            materialize_lazy_expression_view(result_expression, true, stats);
+        output = finish_lazy_expression_run(result);
+    }
+    validate_lazy_expression_run_released(stats, reserved_baseline);
+    output.allocations = stats;
+    return output;
+}
+
+[[nodiscard]] LazyExpressionOutput run_lazy_expression_deferred(
+        const LazyExpressionInput& input) {
+    const LazyExpressionSize n = input.source_bp;
+    auto source_owner = bioseq::storage::make_lazy_in_memory(input.source);
+    const LazyExpressionFacade source =
+        bioseq::storage::as_lazy_sequence_view(source_owner);
+    LazyExpressionAllocationStats stats{};
+    const std::uint64_t reserved_baseline =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .reserved_bytes();
+    LazyExpressionOutput output{};
+    {
+        const LazyExpressionNode a_node = make_lazy_expression_slice(
+            source, n / 8u, 5u * n / 8u);
+        const LazyExpressionFacade a = lazy_expression_view(a_node);
+        const LazyExpressionNode b_node = make_lazy_expression_slice(
+            source, n / 2u, 7u * n / 8u);
+        const LazyExpressionFacade b = lazy_expression_view(b_node);
+        const LazyExpressionNode c_node = make_lazy_expression_concat(a, b);
+        const LazyExpressionFacade c = lazy_expression_view(c_node);
+        const LazyExpressionNode d_node = make_lazy_expression_slice(
+            c, n / 4u, 3u * n / 4u);
+        const LazyExpressionFacade d = lazy_expression_view(d_node);
+        const LazyExpressionNode e_node = make_lazy_expression_slice(
+            a, n / 8u, 3u * n / 8u);
+        const LazyExpressionFacade e = lazy_expression_view(e_node);
+        const LazyExpressionNode result_node =
+            make_lazy_expression_concat(d, e);
+        const LazyExpressionFacade result_expression =
+            lazy_expression_view(result_node);
+        const LazyExpressionMaterialization result =
+            materialize_lazy_expression_view(result_expression, true, stats);
+        output = finish_lazy_expression_run(result);
+    }
+    validate_lazy_expression_run_released(stats, reserved_baseline);
+    output.allocations = stats;
+    return output;
+}
+
+[[nodiscard]] LazyExpressionOutput run_lazy_expression(
+        std::string_view algorithm,
+        const ParamMap&,
+        const LazyExpressionInput& input) {
+    if (algorithm == "bioseq_lazy_expr_eager_each_step") {
+        return run_lazy_expression_eager(input);
+    }
+    if (algorithm == "bioseq_lazy_expr_deferred") {
+        return run_lazy_expression_deferred(input);
+    }
+    throw std::invalid_argument("unknown lazy-expression benchmark algorithm");
+}
+
+[[nodiscard]] constexpr std::uint64_t lazy_expression_payload_bytes(
+        LazyExpressionSize bp) noexcept {
+    constexpr std::uint64_t letters_per_unit = 32u;
+    const std::uint64_t units = bp / letters_per_unit
+        + static_cast<std::uint64_t>(bp % letters_per_unit != 0u);
+    return units * kLazyExpressionStorageWidth;
+}
+
+[[nodiscard]] std::uint64_t expected_lazy_expression_payload_bytes(
+        bool eager,
+        LazyExpressionSize n) noexcept {
+    if (!eager) {
+        return lazy_expression_payload_bytes(3u * n / 4u);
+    }
+    return lazy_expression_payload_bytes(n / 2u)
+        + lazy_expression_payload_bytes(3u * n / 8u)
+        + lazy_expression_payload_bytes(7u * n / 8u)
+        + lazy_expression_payload_bytes(n / 2u)
+        + lazy_expression_payload_bytes(n / 4u)
+        + lazy_expression_payload_bytes(3u * n / 4u);
+}
+
+[[nodiscard]] std::uint64_t expected_lazy_expression_admitted_bytes(
+        bool eager,
+        LazyExpressionSize n) {
+    const auto admitted = [](LazyExpressionSize bp) {
+        return bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+            bp, kLazyExpressionStorageWidth);
+    };
+    if (!eager) {
+        return admitted(3u * n / 4u);
+    }
+    return admitted(n / 2u)
+        + admitted(3u * n / 8u)
+        + admitted(7u * n / 8u)
+        + admitted(n / 2u)
+        + admitted(n / 4u)
+        + admitted(3u * n / 4u);
+}
+
+[[nodiscard]] std::map<std::string, double> evaluate_lazy_expression(
+        std::string_view algorithm,
+        const ParamMap&,
+        const LazyExpressionInput& input,
+        const LazyExpressionOutput& output) {
+    const bool eager = algorithm == "bioseq_lazy_expr_eager_each_step";
+    const std::uint64_t expected_materializations = eager ? 6u : 1u;
+    const std::uint64_t expected_intermediate = eager ? 5u : 0u;
+    const std::uint64_t expected_payload =
+        expected_lazy_expression_payload_bytes(eager, input.source_bp);
+    const std::uint64_t expected_admitted =
+        expected_lazy_expression_admitted_bytes(eager, input.source_bp);
+    const auto& allocations = output.allocations;
+    const bool correctness_ok =
+        output.output_bp == input.expected_output_bp
+        && output.logical_hash == input.expected_hash;
+    const bool allocation_ok =
+        allocations.payload_materializations == expected_materializations
+        && allocations.intermediate_payload_materializations
+            == expected_intermediate
+        && allocations.boundary_materializations == 1u
+        && allocations.payload_bytes_materialized == expected_payload
+        && allocations.live_payload_bytes == 0u
+        && allocations.peak_live_payload_bytes == expected_payload
+        && allocations.admitted_bytes_total == expected_admitted
+        && allocations.live_admitted_bytes == 0u
+        && allocations.peak_live_admitted_bytes == expected_admitted;
+    if (!correctness_ok || !allocation_ok) {
+        throw std::runtime_error(
+            "lazy-expression correctness/allocation contract failed");
+    }
+
+    std::map<std::string, double> metrics;
+    metrics.emplace("output_bp", static_cast<double>(output.output_bp));
+    metrics.emplace("logical_hash_hi32", static_cast<double>(
+        static_cast<std::uint32_t>(output.logical_hash >> 32u)));
+    metrics.emplace("logical_hash_lo32", static_cast<double>(
+        static_cast<std::uint32_t>(output.logical_hash)));
+    metrics.emplace("payload_materializations", static_cast<double>(
+        allocations.payload_materializations));
+    metrics.emplace("intermediate_payload_materializations", static_cast<double>(
+        allocations.intermediate_payload_materializations));
+    metrics.emplace("boundary_materializations", static_cast<double>(
+        allocations.boundary_materializations));
+    metrics.emplace("payload_bytes_materialized", static_cast<double>(
+        allocations.payload_bytes_materialized));
+    metrics.emplace("peak_live_payload_bytes", static_cast<double>(
+        allocations.peak_live_payload_bytes));
+    metrics.emplace("admitted_bytes_total", static_cast<double>(
+        allocations.admitted_bytes_total));
+    metrics.emplace("peak_live_admitted_bytes", static_cast<double>(
+        allocations.peak_live_admitted_bytes));
+    metrics.emplace("correctness_contract_ok", correctness_ok ? 1.0 : 0.0);
+    metrics.emplace("allocation_contract_ok", allocation_ok ? 1.0 : 0.0);
+    return metrics;
+}
+
+void cleanup_lazy_expression(
+        std::string_view,
+        std::string_view,
+        simdjson::dom::element,
+        const LazyExpressionInput&) noexcept {}
 
 /// Allocate a unique scratch path under the system temp directory.
 [[nodiscard]] std::string allocate_temp_path(std::string_view tag) {
@@ -1325,6 +1972,18 @@ int main(int argc, char** argv) {
         std::string_view, std::string_view, simdjson::dom::element,
         const IdentifierBenchInput&)>;
 
+    using LazyExpressionBuild = std::function<LazyExpressionInput(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const RunConstraints&)>;
+    using LazyExpressionRun = std::function<LazyExpressionOutput(
+        std::string_view, const ParamMap&, const LazyExpressionInput&)>;
+    using LazyExpressionEval = std::function<std::map<std::string, double>(
+        std::string_view, const ParamMap&,
+        const LazyExpressionInput&, const LazyExpressionOutput&)>;
+    using LazyExpressionCleanup = std::function<void(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const LazyExpressionInput&)>;
+
     return bioseq::bench_framework::run(
         argc, argv, report_dir, data_dir,
         create_benchmark<ReaderInput, IoOutput>(
@@ -1374,5 +2033,13 @@ int main(int argc, char** argv) {
             IdentifierBuild{build_identifier_input},
             IdentifierRun{run_identifier_bench},
             IdentifierEval{evaluate_identifier_bench},
-            IdentifierCleanup{cleanup_identifier_bench}));
+            IdentifierCleanup{cleanup_identifier_bench}),
+        create_benchmark<LazyExpressionInput, LazyExpressionOutput>(
+            "Lazy sequence expression — eager versus deferred materialization",
+            "bench_io_lazy_sequence_expression", config_path,
+            Estimate{estimate_lazy_expression_resources},
+            LazyExpressionBuild{build_lazy_expression_input},
+            LazyExpressionRun{run_lazy_expression},
+            LazyExpressionEval{evaluate_lazy_expression},
+            LazyExpressionCleanup{cleanup_lazy_expression}));
 }

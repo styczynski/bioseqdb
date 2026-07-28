@@ -28,44 +28,44 @@ namespace {
 
 constexpr std::string_view kTable = "test_seq_basic_t";
 
-}  // namespace
+} // namespace
 
 TEST_CASE("bioseq.seq round-trips ASCII payloads on heap tables",
           "[seq][basic]") {
-    auto ctx = fresh_context({kTable});
-    create_seq_table(
-        ctx,
-        seq_table_spec{
-            .name = std::string(kTable),
-            .typmod = {.alphabet = "dna4", .width = 64},
-            .seq_columns = 1,
-            .using_bioseq = false,
-        },
-        {
-            seq_row{.pk = 23,  .sequences = {"ACTAGGCACAT"}},
-            seq_row{.pk = 101, .sequences = {"GGGGTTTTACTAGGCACATACTAGGCACATACT"}},
-            seq_row{.pk = 69,
-                    .sequences = {"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"}},
-            seq_row{.pk = 42,  .sequences = {"TTTTTT"}},
-        });
+  auto ctx = fresh_context({kTable});
+  create_seq_table(
+      ctx,
+      seq_table_spec{
+          .name = std::string(kTable),
+          .typmod = {.alphabet = "dna4", .width = 64},
+          .seq_columns = 1,
+          .using_bioseq = false,
+      },
+      {
+          seq_row{.pk = 23, .sequences = {"ACTAGGCACAT"}},
+          seq_row{.pk = 101,
+                  .sequences = {"GGGGTTTTACTAGGCACATACTAGGCACATACT"}},
+          seq_row{
+              .pk = 69,
+              .sequences = {"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"}},
+          seq_row{.pk = 42, .sequences = {"TTTTTT"}},
+      });
 
-    const auto rows = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk, seq0::text, bioseq.len(seq0), bioseq.unit_len(seq0) "
-            "FROM {} ORDER BY pk;",
-            kTable));
+  const auto rows = query_rows(
+      ctx, fmt::format(
+               "SELECT pk, seq0::text, bioseq.len(seq0), bioseq.unit_len(seq0) "
+               "FROM {} ORDER BY pk;",
+               kTable));
 
-    REQUIRE(rows.size() == 4);
-    REQUIRE(rows[0][1].value() == "ACTAGGCACAT");
-    REQUIRE(rows[0][2].value() == "11");
-    REQUIRE(rows[1][1].value() == "TTTTTT");
-    REQUIRE(rows[1][2].value() == "6");
-    REQUIRE(rows[2][1].value() ==
-            "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
-    REQUIRE(rows[2][2].value() == "44");
-    REQUIRE(rows[3][1].value() == "GGGGTTTTACTAGGCACATACTAGGCACATACT");
-    REQUIRE(rows[3][2].value() == "33");
+  REQUIRE(rows.size() == 4);
+  REQUIRE(rows[0][1].value() == "ACTAGGCACAT");
+  REQUIRE(rows[0][2].value() == "11");
+  REQUIRE(rows[1][1].value() == "TTTTTT");
+  REQUIRE(rows[1][2].value() == "6");
+  REQUIRE(rows[2][1].value() == "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+  REQUIRE(rows[2][2].value() == "44");
+  REQUIRE(rows[3][1].value() == "GGGGTTTTACTAGGCACATACTAGGCACATACT");
+  REQUIRE(rows[3][2].value() == "33");
 }
 
 // Heap-table ORDER BY drives the btree opclass at the planner level. We assert
@@ -73,59 +73,68 @@ TEST_CASE("bioseq.seq round-trips ASCII payloads on heap tables",
 // disagreement between opclass-cmp and operator `<` lights up immediately.
 TEST_CASE("ORDER BY bioseq.seq follows the documented lexicographic order",
           "[seq][basic][order_by]") {
-    auto ctx = fresh_context({kTable});
-    create_seq_table(
-        ctx,
-        seq_table_spec{
-            .name = std::string(kTable),
-            .typmod = {.alphabet = "dna4", .width = 64},
-            .seq_columns = 1,
-        },
-        {
-            seq_row{.pk = 1, .sequences = {"ACGT"}},
-            seq_row{.pk = 2, .sequences = {"ACTA"}},
-            seq_row{.pk = 3, .sequences = {"AC"}},     // shorter prefix sorts first
-            seq_row{.pk = 4, .sequences = {"GGGG"}},
-            seq_row{.pk = 5, .sequences = {"AAAA"}},
-        });
+  auto ctx = fresh_context({kTable});
+  create_seq_table(
+      ctx,
+      seq_table_spec{
+          .name = std::string(kTable),
+          .typmod = {.alphabet = "dna4", .width = 64},
+          .seq_columns = 1,
+      },
+      {
+          seq_row{.pk = 1, .sequences = {"ACGT"}},
+          seq_row{.pk = 2, .sequences = {"ACTA"}},
+          seq_row{.pk = 3, .sequences = {"AC"}}, // shorter prefix sorts first
+          seq_row{.pk = 4, .sequences = {"GGGG"}},
+          seq_row{.pk = 5, .sequences = {"AAAA"}},
+      });
 
-    const auto pks = query_int_column(
-        ctx, fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable));
-    // Expected lexicographic order: AAAA, AC, ACGT, ACTA, GGGG -> pk 5,3,1,2,4.
-    REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
+  const auto pks = query_int_column(
+      ctx, fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable));
+  // Expected lexicographic order: AAAA, AC, ACGT, ACTA, GGGG -> pk 5,3,1,2,4.
+  REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
 }
 
-TEST_CASE("BioseqBatchSortScan uses stdc_compare when Vulkan sorting is disabled",
-          "[seq][basic][order_by][sort_scan]") {
-    auto ctx = fresh_context({kTable});
-    create_seq_table(
-        ctx,
-        seq_table_spec{
-            .name = std::string(kTable),
-            .typmod = {.alphabet = "dna4", .width = 64},
-            .seq_columns = 1,
-        },
-        {
-            seq_row{.pk = 1, .sequences = {"ACGT"}},
-            seq_row{.pk = 2, .sequences = {"ACTA"}},
-            seq_row{.pk = 3, .sequences = {"AC"}},
-            seq_row{.pk = 4, .sequences = {"GGGG"}},
-            seq_row{.pk = 5, .sequences = {"AAAA"}},
-        });
+TEST_CASE("expanded sequence transfer and copy survive input-context reset",
+          "[seq][basic][expanded][ownership]") {
+  auto ctx = fresh_context();
+  REQUIRE(query_scalar(
+              ctx, "SELECT bioseq_internal.expanded_ownership_self_test();") ==
+          "t");
+}
 
-    exec_sql(ctx, "SET bioseq.enable_sequence_sort_scan = on;");
-    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
+TEST_CASE(
+    "BioseqBatchSortScan uses stdc_compare when Vulkan sorting is disabled",
+    "[seq][basic][order_by][sort_scan]") {
+  auto ctx = fresh_context({kTable});
+  create_seq_table(ctx,
+                   seq_table_spec{
+                       .name = std::string(kTable),
+                       .typmod = {.alphabet = "dna4", .width = 64},
+                       .seq_columns = 1,
+                   },
+                   {
+                       seq_row{.pk = 1, .sequences = {"ACGT"}},
+                       seq_row{.pk = 2, .sequences = {"ACTA"}},
+                       seq_row{.pk = 3, .sequences = {"AC"}},
+                       seq_row{.pk = 4, .sequences = {"GGGG"}},
+                       seq_row{.pk = 5, .sequences = {"AAAA"}},
+                   });
 
-    const std::string sql = fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable);
-    const auto pks = query_int_column(ctx, sql);
-    REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
+  exec_sql(ctx, "SET bioseq.enable_sequence_sort_scan = on;");
+  exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
 
-    const auto plan = explain_text<true>(ctx, sql);
-    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchSortScan)"));
-    REQUIRE(plan_contains(plan, "Bioseq Sort Accelerator: stdc_compare"));
-    REQUIRE(plan_contains(plan, "Bioseq GPU Sort Dispatches: 0"));
-    REQUIRE(plan_contains(plan, "Bioseq GPU Global Compare Dispatches: 0"));
-    REQUIRE(plan_contains(plan, "Bioseq GPU Dense Scatter Dispatches: 0"));
+  const std::string sql =
+      fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable);
+  const auto pks = query_int_column(ctx, sql);
+  REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
+
+  const auto plan = explain_text<true>(ctx, sql);
+  REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchSortScan)"));
+  REQUIRE(plan_contains(plan, "Bioseq Sort Accelerator: stdc_compare"));
+  REQUIRE(plan_contains(plan, "Bioseq GPU Sort Dispatches: 0"));
+  REQUIRE(plan_contains(plan, "Bioseq GPU Global Compare Dispatches: 0"));
+  REQUIRE(plan_contains(plan, "Bioseq GPU Dense Scatter Dispatches: 0"));
 }
 
 TEMPLATE_TEST_CASE_SIG(
@@ -197,7 +206,9 @@ TEST_CASE("bioseq.seq comparison operators yield lexicographic ordering",
     auto ctx = fresh_context();
     const auto row =
         query_one(ctx,
-                  "SELECT (a < b) AS lt, (a = b) AS eq, (a > b) AS gt, "
+                  "SELECT (a OPERATOR(bioseq.<) b) AS lt, "
+                  "       (a OPERATOR(bioseq.=) b) AS eq, "
+                  "       (a OPERATOR(bioseq.>) b) AS gt, "
                   "       bioseq.seq_cmp(a, b) AS cmp "
                   "FROM (SELECT 'ACGT'::bioseq.seq('dna4', 8) AS a, "
                   "             'ACTA'::bioseq.seq('dna4', 8) AS b) t;");
@@ -208,14 +219,51 @@ TEST_CASE("bioseq.seq comparison operators yield lexicographic ordering",
     REQUIRE(cmp < 0);
 }
 
+TEST_CASE("bioseq.seq operators do not fall back through assignment-only text casts",
+          "[seq][basic][cmp][search_path][cast]") {
+    auto ctx = fresh_context();
+    exec_sql(ctx, "SET search_path TO pg_catalog, public;");
+    const auto absent_operator = sql_error(
+        ctx,
+        "SELECT 'AC'::bioseq.seq('dna4',64) "
+        "       = 'AC'::bioseq.seq('dna4',64);");
+    REQUIRE(absent_operator.sqlstate == "42883");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT 'AC'::bioseq.seq('dna4',64) "
+        "       OPERATOR(bioseq.=) "
+        "       'AC'::bioseq.seq('dna4',64);") == "t");
+}
+
+TEST_CASE("bioseq.seq base hash folds the mandated seed-zero extended hash",
+          "[seq][basic][hash][fold]") {
+    auto ctx = fresh_context();
+    const auto row = query_one(
+        ctx,
+        "WITH v(s) AS (VALUES "
+        " ('ACGT'::bioseq.seq('dna4',64)),"
+        " (''::bioseq.seq('dna4',64)),"
+        " ('ACGT'::bioseq.seq)) "
+        ", hashes AS (SELECT s, bioseq.seq_hash_extended(s,0) AS h "
+        "             FROM v) "
+        "SELECT bool_and("
+        " (bioseq.seq_hash(s)::bigint & 4294967295) = "
+        " ((h # (h >> 32)) & 4294967295)) "
+        "FROM hashes;");
+    REQUIRE(row[0] == "t");
+}
+
 TEST_CASE("bioseq.seq prefix ordering: shorter prefix sorts before its extension",
           "[seq][basic][cmp]") {
     auto ctx = fresh_context();
     const auto row = query_one(
         ctx,
-        "SELECT ('A'::bioseq.seq('dna4', 8)    < 'AC'::bioseq.seq('dna4', 8)),"
-        "       ('AC'::bioseq.seq('dna4', 8)   = 'AC'::bioseq.seq('dna4', 8)),"
-        "       ('ACGT'::bioseq.seq('dna4', 8) > 'ACG'::bioseq.seq('dna4', 8));");
+        "SELECT ('A'::bioseq.seq('dna4', 8) "
+        "        OPERATOR(bioseq.<) 'AC'::bioseq.seq('dna4', 8)),"
+        "       ('AC'::bioseq.seq('dna4', 8) "
+        "        OPERATOR(bioseq.=) 'AC'::bioseq.seq('dna4', 8)),"
+        "       ('ACGT'::bioseq.seq('dna4', 8) "
+        "        OPERATOR(bioseq.>) 'ACG'::bioseq.seq('dna4', 8));");
     REQUIRE(row[0].value() == "t");
     REQUIRE(row[1].value() == "t");
     REQUIRE(row[2].value() == "t");
@@ -262,7 +310,8 @@ TEST_CASE("bioseq.seq supports equality and range filters on heap tables",
         REQUIRE(query_int_column(
                     ctx, fmt::format(
                              "SELECT pk FROM {} "
-                             "WHERE seq0 = 'TTTTTT'::bioseq.seq('dna4', 64) "
+                             "WHERE seq0 OPERATOR(bioseq.=) "
+                             "      'TTTTTT'::bioseq.seq('dna4', 64) "
                              "ORDER BY pk;",
                              kTable)) ==
                 std::vector<long long>{42});
@@ -271,7 +320,8 @@ TEST_CASE("bioseq.seq supports equality and range filters on heap tables",
         REQUIRE(query_int_column(
                     ctx, fmt::format(
                              "SELECT pk FROM {} "
-                             "WHERE seq0 < 'C'::bioseq.seq('dna4', 64) "
+                             "WHERE seq0 OPERATOR(bioseq.<) "
+                             "      'C'::bioseq.seq('dna4', 64) "
                              "ORDER BY pk;",
                              kTable)) ==
                 std::vector<long long>{23, 69});
@@ -280,8 +330,10 @@ TEST_CASE("bioseq.seq supports equality and range filters on heap tables",
         REQUIRE(query_int_column(
                     ctx, fmt::format(
                              "SELECT pk FROM {} "
-                             "WHERE seq0 BETWEEN 'A'::bioseq.seq('dna4', 64) "
-                             "                AND 'G'::bioseq.seq('dna4', 64) "
+                             "WHERE seq0 OPERATOR(bioseq.>=) "
+                             "      'A'::bioseq.seq('dna4', 64) "
+                             "  AND seq0 OPERATOR(bioseq.<=) "
+                             "      'G'::bioseq.seq('dna4', 64) "
                              "ORDER BY pk;",
                              kTable)) ==
                 std::vector<long long>{23, 69});
@@ -291,9 +343,23 @@ TEST_CASE("bioseq.seq supports equality and range filters on heap tables",
 TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
           "[seq][basic][cast]") {
     auto ctx = fresh_context();
-    REQUIRE(query_scalar(
-        ctx,
-        "SELECT 'ACGTN'::bioseq.seq('dna4', 16)::text;") == "ACGTA");
+    const auto invalid_dna4 = sql_error(
+        ctx, "SELECT 'ACGTN'::bioseq.seq('dna4', 16)::text;");
+    REQUIRE(invalid_dna4.sqlstate == "22P02");
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    /* The iteration profile registers only dna4.  PostgreSQL first constructs
+     * the parser-safe unbound value, so N is rejected at that lexical boundary
+     * before the destination typmod can bind it. */
+    REQUIRE(invalid_dna4.contains(
+        "invalid symbol at byte 4 in unbound bioseq.seq"));
+    REQUIRE(invalid_dna4.contains("DETAIL: byte value=78"));
+#else
+    /* Richer profiles admit N in an unbound value through dna5, but binding
+     * that value to dna4 must still reject it instead of recoding N to A. */
+    REQUIRE(invalid_dna4.contains(
+        "invalid symbol 'N' for bioseq alphabet dna4"));
+    REQUIRE(invalid_dna4.contains("DETAIL: symbol offset=4"));
+#endif
 #if BIOSEQ_OPTTIMIZATION_LEVEL == 0
     const auto unsupported_alphabet = sql_error(
         ctx, "SELECT 'ACGTN'::bioseq.seq('dna5', 16)::text;");

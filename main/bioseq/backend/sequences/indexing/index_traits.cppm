@@ -12,9 +12,9 @@ module;
 export module bioseq.indexing.traits;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
-import bioseq.storage.lazy;     // lazy_compact_sequence<R,Scanner>
+import bioseq.sequences;
+import bioseq.storage.lazy;     // canonical basic_lazy_sequence_view
 import bioseq.storage.size;     // sequence_size_t
-import bioseq.storage.scanner;  // is_valid_sequence_scanner<Scanner>
 import bioseq.sequences.kmers;  // DOC0345 Patch H — MinimizerSketchBackend
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
@@ -44,29 +44,30 @@ concept index_for_any =
 
 /// Parametrised build/rebuild checks (used by supported_indexes' methods, and by
 /// the pg-side static_asserts which CAN name a concrete range/scanner).
-template <class T, class R, class Scanner>
+template <class T, class Alphabet>
 concept index_provides_build_fragmented =
-    bioseq::storage::is_valid_sequence_scanner<Scanner> &&
-    requires (
-    typename T::storage_type& s, bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+    sequence_alphabet<Alphabet> && requires (
+    typename T::storage_type& s,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
     { T::build(s, seq) }   -> std::same_as<void>;
     { T::rebuild(s, seq) } -> std::same_as<void>;
 };
 // DOC0345 Patch H — stronger optional check: the index exposes the explicit
 // 3-arg backend build/rebuild. The registry uses the scalar (2-arg) overload for
 // conformance and the explicit backend overload for PG-selected builds.
-template <class T, class R, class Scanner>
+template <class T, class Alphabet>
 concept index_provides_backend_build_fragmented =
-    bioseq::storage::is_valid_sequence_scanner<Scanner> &&
-    requires (
+    sequence_alphabet<Alphabet> && requires (
         typename T::storage_type& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
         { T::build(storage, seq, backend) } -> std::same_as<void>;
         { T::rebuild(storage, seq, backend) } -> std::same_as<void>;
     };
-template <class T, class R, class Scanner>
-concept index_provides_build_inline = index_provides_build_fragmented<T, R, Scanner>;  // same shape
+template <class T, class Alphabet>
+concept index_provides_build_inline =
+    sequence_alphabet<Alphabet>
+    && index_provides_build_fragmented<T, Alphabet>;  // same shape
 template <class T>
 concept index_provides_build_table = requires (typename T::storage_type& s) {
     { T::build(s) }   -> std::same_as<void>;

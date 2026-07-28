@@ -7,9 +7,11 @@ module;
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <locale>
 #include <map>
 #include <optional>
 #include <ranges>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -418,9 +420,11 @@ void validate_metadata_keys(
             "integration parameter value");
     case parameter_kind::number: {
         double value{};
-        const auto parsed = std::from_chars(
-            spelling.data(), spelling.data() + spelling.size(), value);
-        if (parsed.ec != std::errc{} || parsed.ptr != spelling.data() + spelling.size()
+        std::istringstream parser{spelling};
+        parser.imbue(std::locale::classic());
+        parser.unsetf(std::ios::skipws);
+        parser >> value;
+        if (spelling.starts_with('+') || !parser || !parser.eof()
             || !std::isfinite(value)) {
             throw std::runtime_error("integration number value is invalid");
         }

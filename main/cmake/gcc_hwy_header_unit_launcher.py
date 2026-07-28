@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import shlex
@@ -84,6 +85,186 @@ SOURCE_SUFFIXES = {
     ".cxxm",
     ".ccm",
 }
+
+IDENTITY_ARGUMENTS = {
+    "--bioseq-expected-compiler-sha256",
+    "--bioseq-gcc-root",
+    "--bioseq-gcc-module-inventory",
+    "--bioseq-expected-module-inventory-sha256",
+    "--bioseq-expected-module-source-closure-sha256",
+}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def require_sha256(value: str, label: str) -> None:
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise RuntimeError(f"{label} is not a lowercase SHA-256 digest")
+
+
+def canonical_file_within(path: Path, root: Path, label: str) -> Path:
+    if not path.is_file():
+        raise RuntimeError(f"{label} is not a regular file: {path}")
+    canonical = path.resolve(strict=True)
+    try:
+        canonical.relative_to(root)
+    except ValueError as error:
+        raise RuntimeError(
+            f"{label} is outside authenticated GCC root {root}: {canonical}"
+        ) from error
+    return canonical
+
+
+def module_inventory_identity(
+    inventory_path: Path,
+    compiler_root: Path,
+) -> tuple[str, str]:
+    canonical_inventory = canonical_file_within(
+        inventory_path,
+        compiler_root,
+        "libstdc++ module inventory",
+    )
+    if canonical_inventory.name != "libstdc++.modules.json":
+        raise RuntimeError(
+            "authenticated GCC inventory is not libstdc++.modules.json"
+        )
+    inventory_bytes = canonical_inventory.read_bytes()
+    metadata_sha256 = hashlib.sha256(inventory_bytes).hexdigest()
+    try:
+        inventory = json.loads(inventory_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"invalid libstdc++ module inventory: {error}"
+        ) from error
+    if not isinstance(inventory, dict) or inventory.get("version") != 1:
+        raise RuntimeError(
+            "libstdc++ module inventory has an incompatible version"
+        )
+    modules = inventory.get("modules")
+    if not isinstance(modules, list) or len(modules) < 2:
+        raise RuntimeError("libstdc++ module inventory has no module closure")
+
+    rows: list[str] = []
+    logical_names: set[str] = set()
+    for module in modules:
+        if not isinstance(module, dict):
+            raise RuntimeError("libstdc++ module record is malformed")
+        logical_name = module.get("logical-name")
+        source_path = module.get("source-path")
+        if (
+            not isinstance(logical_name, str)
+            or not logical_name
+            or logical_name in logical_names
+            or not isinstance(source_path, str)
+            or not source_path
+            or module.get("is-std-library") is not True
+        ):
+            raise RuntimeError(
+                "libstdc++ module record has invalid or duplicate identity"
+            )
+        logical_names.add(logical_name)
+        source = Path(source_path)
+        if not source.is_absolute():
+            source = canonical_inventory.parent / source
+        canonical_source = canonical_file_within(
+            source,
+            compiler_root,
+            f"libstdc++ module source {logical_name}",
+        )
+        rows.append(
+            f"{logical_name}\t{canonical_source.as_posix()}\t"
+            f"{sha256_file(canonical_source)}"
+        )
+    if not {"std", "std.compat"}.issubset(logical_names):
+        raise RuntimeError(
+            "libstdc++ module inventory lacks std or std.compat"
+        )
+    material = (
+        "bioseq_gcc_module_source_closure/v1\n"
+        f"{metadata_sha256}\n"
+        + "".join(f"{row}\n" for row in sorted(rows))
+    )
+    return metadata_sha256, hashlib.sha256(material.encode()).hexdigest()
+
+
+def parse_identity_arguments(
+    args: list[str],
+) -> tuple[dict[str, str], list[str]]:
+    identity: dict[str, str] = {}
+    remaining = list(args)
+    while remaining:
+        argument = remaining[0]
+        option, separator, value = argument.partition("=")
+        if option not in IDENTITY_ARGUMENTS:
+            break
+        if not separator or not value or option in identity:
+            raise RuntimeError(
+                f"invalid or duplicate GCC launcher identity argument: "
+                f"{argument}"
+            )
+        identity[option] = value
+        remaining.pop(0)
+    if identity and set(identity) != IDENTITY_ARGUMENTS:
+        missing = sorted(IDENTITY_ARGUMENTS - set(identity))
+        raise RuntimeError(
+            "incomplete GCC launcher identity arguments: "
+            + ", ".join(missing)
+        )
+    return identity, remaining
+
+
+def verify_compiler_identity(
+    compiler: str,
+    identity: dict[str, str],
+) -> None:
+    if not identity:
+        return
+    compiler_root = Path(identity["--bioseq-gcc-root"]).resolve(strict=True)
+    compiler_path = canonical_file_within(
+        Path(compiler),
+        compiler_root,
+        "GCC compiler",
+    )
+    expected_compiler_sha256 = identity[
+        "--bioseq-expected-compiler-sha256"
+    ]
+    expected_inventory_sha256 = identity[
+        "--bioseq-expected-module-inventory-sha256"
+    ]
+    expected_closure_sha256 = identity[
+        "--bioseq-expected-module-source-closure-sha256"
+    ]
+    require_sha256(expected_compiler_sha256, "expected GCC compiler identity")
+    require_sha256(
+        expected_inventory_sha256,
+        "expected libstdc++ inventory identity",
+    )
+    require_sha256(
+        expected_closure_sha256,
+        "expected libstdc++ module-source closure",
+    )
+    if sha256_file(compiler_path) != expected_compiler_sha256:
+        raise RuntimeError("authenticated GCC compiler SHA-256 changed")
+    inventory_sha256, closure_sha256 = module_inventory_identity(
+        Path(identity["--bioseq-gcc-module-inventory"]),
+        compiler_root,
+    )
+    if inventory_sha256 != expected_inventory_sha256:
+        raise RuntimeError(
+            "authenticated libstdc++ module inventory SHA-256 changed"
+        )
+    if closure_sha256 != expected_closure_sha256:
+        raise RuntimeError(
+            "authenticated libstdc++ module-source closure SHA-256 changed"
+        )
 
 
 def expand_response_args(args: list[str], cwd: Path) -> list[str]:
@@ -453,8 +634,16 @@ def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(1)
 
-    compiler = sys.argv[1]
-    original_args = sys.argv[2:]
+    try:
+        identity, launcher_args = parse_identity_arguments(sys.argv[1:])
+        if not launcher_args:
+            raise RuntimeError("GCC compiler launcher received no compiler")
+        compiler = launcher_args[0]
+        original_args = launcher_args[1:]
+        verify_compiler_identity(compiler, identity)
+    except (OSError, RuntimeError, ValueError) as error:
+        sys.stderr.write(f"bioseq GCC identity check failed: {error}\n")
+        sys.exit(1)
     cwd = Path.cwd()
     parsed_args = expand_response_args(original_args, cwd)
 

@@ -56,6 +56,7 @@ struct OwnedBatch {
     using alphabet_t = typename R::alphabet_type;
     using unit_t = typename compact_sequence_range<R>::traits::storage_unit;
     using lazy_t = lazy_compact_sequence<R, sequence_scanner_none<unit_t>>;
+    using view_t = bioseq::storage::basic_lazy_sequence_view<alphabet_t>;
 
     std::deque<std::vector<alphabet_t>> symbols;   // stable addresses
     std::deque<compact_sequence_range<R>> ranges;  // stable addresses
@@ -73,7 +74,14 @@ struct OwnedBatch {
         lazies.push_back(make_lazy_in_memory(ranges.back()));
     }
 
-    [[nodiscard]] std::span<lazy_t> span() { return {lazies.data(), lazies.size()}; }
+    [[nodiscard]] std::vector<view_t> views() const {
+        std::vector<view_t> result;
+        result.reserve(lazies.size());
+        for (const lazy_t& lazy : lazies) {
+            result.push_back(bioseq::storage::as_lazy_sequence_view(lazy));
+        }
+        return result;
+    }
     [[nodiscard]] std::size_t size() const { return lazies.size(); }
     [[nodiscard]] const lazy_t& operator[](std::size_t i) const { return lazies[i]; }
 };
@@ -170,15 +178,17 @@ template <class R>
 void run_case(const char* label, std::size_t count, std::uint64_t seed,
               std::uint32_t alphabet_size) {
     using traits = typename compact_sequence_range<R>::traits;
-    using scanner_t = sequence_scanner_none<typename traits::storage_unit>;
-    using processor = lazy_compact_sequence_batch_processor<R, scanner_t>;
+    using alphabet_t = typename R::alphabet_type;
+    using view_t = bioseq::storage::basic_lazy_sequence_view<alphabet_t>;
+    using processor = lazy_compact_sequence_batch_processor<alphabet_t>;
 
     std::mt19937_64 rng(seed);
     auto shapes = make_shapes(rng, count, alphabet_size, traits::letters_per_unit);
 
     OwnedBatch<R> ob;
     for (auto& s : shapes) ob.push(s);
-    auto batch = ob.span();
+    const std::vector<view_t> views = ob.views();
+    const std::span<const view_t> batch(views.data(), views.size());
 
     auto& rt = vk::Runtime::instance();
     const bool gpu_present = vk::hardware_device_available(rt);
@@ -213,8 +223,9 @@ void run_case(const char* label, std::size_t count, std::uint64_t seed,
 template <class R>
 void run_oversized_equal_key_case(const char* label) {
     using traits = typename compact_sequence_range<R>::traits;
-    using scanner_t = sequence_scanner_none<typename traits::storage_unit>;
-    using processor = lazy_compact_sequence_batch_processor<R, scanner_t>;
+    using alphabet_t = typename R::alphabet_type;
+    using view_t = bioseq::storage::basic_lazy_sequence_view<alphabet_t>;
+    using processor = lazy_compact_sequence_batch_processor<alphabet_t>;
 
     constexpr std::size_t count = 300;  // > seq-sort LOCAL_SIZE_X (256)
     constexpr std::size_t suffix_digits = 6;  // 4^6 leaves plenty of unique suffixes
@@ -230,7 +241,8 @@ void run_oversized_equal_key_case(const char* label) {
         }
         ob.push(ranks);
     }
-    auto batch = ob.span();
+    const std::vector<view_t> views = ob.views();
+    const std::span<const view_t> batch(views.data(), views.size());
 
     auto& rt = vk::Runtime::instance();
     const bool gpu_present = vk::hardware_device_available(rt);

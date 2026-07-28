@@ -13,4 +13,4 @@ import :core;
 export using ::InitBioseqColumnOptions;
 export using ::SetBioseqColumnOptions;
 export using ::DeleteBioseqColumnTableOptions;
-export using ::FormDataBioseqOptions;   // DOC0329: read via FormDataBioseqOptions::read_options
+export using ::read_bioseq_column_options;

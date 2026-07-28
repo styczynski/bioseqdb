@@ -353,13 +353,14 @@ export struct )cpp" << api.declared_type << R"cpp( {
                         }
                     }});
         }
-        std::vector<std::expected<response, client_error>> result;
-        result.reserve(requests.size());
-        for (auto& slot : slots) {
+        std::vector<std::expected<response, client_error>> result(
+            requests.size());
+        for (std::size_t index = 0; index < requests.size(); ++index) {
+            auto& slot = slots[index];
             if (slot) {
-                result.emplace_back(materialize(std::move(*slot)));
+                result[index] = materialize(std::move(*slot));
             } else {
-                result.emplace_back(std::unexpected(std::move(slot.error())));
+                result[index] = std::unexpected(std::move(slot.error()));
             }
         }
         return result;

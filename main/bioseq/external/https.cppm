@@ -6,6 +6,7 @@ module;
 #include <chrono>
 #include <climits>
 #include <cstdint>
+#include <exception>
 #include <expected>
 #include <memory>
 #include <stdexcept>

@@ -56,6 +56,7 @@ module;
 export module bioseq.sequences.minimap_port;
 
 import bioseq.common.mlogging;
+import bioseq.sql_guc_settings;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
@@ -1662,7 +1663,7 @@ void classify_primary_secondary(
 // Phase 7: Base-level alignment — dual-affine gap DP (KSW2 equivalent)
 // ============================================================================
 
-// generate_score_matrix is now ScoringMatrix<R>::generate in alignment_hwy_utils.
+// generate_score_matrix is now ScoringMatrix<Alphabet>::generate.
 
 // ============================================================================
 // KSW2 alignment wrapper
@@ -1728,6 +1729,11 @@ struct ScalarPipelineExecutionProof {
     ScalarMinimizerExecutionProof target_minimizers{};
     std::uint64_t seed_lookup_calls = 0;
     std::uint64_t seed_query_minimizers = 0;
+    // A stage-level receipt written only after the selected scalar chaining
+    // kernel returns successfully.  It is distinct from score/backtrack work:
+    // a valid negative call can complete with zero anchors and execute neither.
+    std::uint64_t chain_stage_completion_calls = 0;
+    std::uint64_t chain_stage_completed_anchor_inputs = 0;
     std::uint64_t chain_score_calls = 0;
     std::uint64_t chain_backtrack_calls = 0;
     std::uint64_t chain_anchor_inputs = 0;
@@ -1758,6 +1764,12 @@ struct ScalarPipelineExecutionProof {
         add(chain_score_calls, 1u, saturated);
         add(chain_backtrack_calls, 1u, saturated);
         add(chain_anchor_inputs, anchor_count, saturated);
+    }
+
+    constexpr void record_scalar_chain_stage_completion(
+            const std::uint64_t anchor_count) noexcept {
+        add(chain_stage_completion_calls, 1u, saturated);
+        add(chain_stage_completed_anchor_inputs, anchor_count, saturated);
     }
 
     constexpr void record_ksw2_call(
@@ -1797,6 +1809,10 @@ struct ScalarPipelineExecutionProof {
             || target_minimizers.saturated;
         add(seed_lookup_calls, other.seed_lookup_calls, overflow);
         add(seed_query_minimizers, other.seed_query_minimizers, overflow);
+        add(chain_stage_completion_calls,
+            other.chain_stage_completion_calls, overflow);
+        add(chain_stage_completed_anchor_inputs,
+            other.chain_stage_completed_anchor_inputs, overflow);
         add(chain_score_calls, other.chain_score_calls, overflow);
         add(chain_backtrack_calls, other.chain_backtrack_calls, overflow);
         add(chain_anchor_inputs, other.chain_anchor_inputs, overflow);
@@ -1820,14 +1836,24 @@ struct ScalarPipelineExecutionProof {
                  || ksw2_gap_calls != 0
                  || ksw2_right_calls != 0)
                 && ksw2_input_cell_area > 0);
+        const bool empty_chain_completed =
+            chain_stage_completed_anchor_inputs == 0
+            && chain_anchor_inputs == 0
+            && chain_score_calls == 0
+            && chain_backtrack_calls == 0;
+        const bool nonempty_chain_completed =
+            chain_stage_completed_anchor_inputs > 0
+            && chain_anchor_inputs == chain_stage_completed_anchor_inputs
+            && chain_score_calls > 0
+            && chain_score_calls == chain_backtrack_calls
+            && chain_score_calls <= chain_stage_completion_calls;
         return !saturated
             && query_minimizers.accepted()
             && target_valid
             && seed_lookup_calls > 0
             && seed_query_minimizers > 0
-            && chain_score_calls > 0
-            && chain_backtrack_calls > 0
-            && chain_anchor_inputs > 0
+            && chain_stage_completion_calls > 0
+            && (empty_chain_completed || nonempty_chain_completed)
             && alignment_valid;
     }
 
@@ -2002,18 +2028,15 @@ static_assert([] {
 
 template<
     bool is_reversed,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+    sequence_alphabet Alphabet>
 [[nodiscard]] KswAlignResult ksw2_align_pair(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const ScoringMatrix<QueryRange>& scoring_matrix,
+    const ScoringMatrix<Alphabet>& scoring_matrix,
     const Minimap2Params& params,
     int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags,
     BlockAlignerExecutionProof* forbidden_block_proof = nullptr,
@@ -2081,18 +2104,15 @@ template<
 template<
     bool is_reversed,
     bool enable_diagonal_certificate = true,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+    sequence_alphabet Alphabet>
 [[nodiscard]] KswAlignResult block_aligner_align_pair(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const ScoringMatrix<QueryRange>& scoring_matrix,
+    const ScoringMatrix<Alphabet>& scoring_matrix,
     const Minimap2Params& params,
     BlockAlignerPhase phase,
     BlockAlignerExecutionProof* execution_proof)
@@ -2237,13 +2257,10 @@ template <class Callback>
  * deliberately projects both Eq and X to M at its public CIGAR boundary.
  */
 template <bool strand_reversed,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet>
 [[nodiscard]] sequence_size_t exact_edit_distance_from_packed_cigar(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     std::size_t query_start,
     std::size_t query_end,
     std::size_t target_start,
@@ -2323,13 +2340,10 @@ template <bool strand_reversed,
  * must compare this span explicitly.
  */
 template <bool strand_reversed,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet>
 [[nodiscard]] sequence_size_t exact_edit_distance_for_implicit_seed(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     std::size_t query_start,
     std::size_t query_end,
     std::size_t target_start,
@@ -2448,15 +2462,12 @@ inline void append_implicit_seed_cigar(
 }
 
 template <BaseAlignmentAlgorithmType base_alignment_algorithm,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>,
+          sequence_alphabet Alphabet,
           bool enable_diagonal_certificate = true>
 struct AlignOnePhase {
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>&  query_seq;
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq;
-    const ScoringMatrix<QueryRange>&           scoring_matrix;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq;
+    const ScoringMatrix<Alphabet>&              scoring_matrix;
     const Minimap2Params&                      params;
     int32_t                                    align_bandwidth;
 
@@ -2642,7 +2653,8 @@ struct AlignOnePhase {
                                 params)) {
                             if (!packed_gap_plan_ready) {
                                 packed_gap_plan =
-                                    HwyBlockAligner::prepare_global_gap_certificate(
+                                    HwyBlockAligner::
+                                        prepare_global_gap_certificate<Alphabet>(
                                         scoring_matrix,
                                         project_block_aligner_params(
                                             params,
@@ -2853,16 +2865,13 @@ struct AlignOnePhase {
 template<
     BaseAlignmentAlgorithmType base_alignment_algorithm,
     bool enable_diagonal_certificate = true,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    class Scanner = bioseq::storage::sequence_scanner_none<
-        typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+    sequence_alphabet Alphabet>
 void align_regions(
     std::span<AlignRegion> regions,
     std::span<const Anchor> anchors,
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
-    const ScoringMatrix<QueryRange>& scoring_matrix,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    const ScoringMatrix<Alphabet>& scoring_matrix,
     const Minimap2Params& params,
     BlockAlignerExecutionProof* block_execution_proof = nullptr,
     ScalarPipelineExecutionProof* scalar_execution_proof = nullptr)
@@ -2883,7 +2892,7 @@ void align_regions(
     // batch with the kernel-invariant references; the per-region call
     // surface is `aligner.template run<is_reversed>(...)`.
     const AlignOnePhase<
-        base_alignment_algorithm, QueryRange, TargetRange, Scanner,
+        base_alignment_algorithm, Alphabet,
         enable_diagonal_certificate> aligner{
         query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
@@ -3031,7 +3040,7 @@ void align_regions(
         // Per-region diagnostic logs were previously emitted on every region
         // boundary (left-extension skipped, gap-fill skipped, right-extension
         // skipped, "determine actions" entry). Each fmtlog enqueue + format
-        // is ~1-5us, and the bench harness installs `enable_logging = true`
+        // is ~1-5us, and the bench harness installs `bioseq::settings::logging = true`
         // via `log_configure(true)` so they fire during measurement runs.
         // For very-long pairs with many regions this stacks up to ~ms of
         // overhead per timed sample. Removed — the same information can be
@@ -3090,8 +3099,8 @@ void align_regions(
         bioseq::parallelism::task_parallel(pool.mode())
         && pool.max_concurrency() > 1
         && base_alignment_algorithm != BaseAlignmentAlgorithmType::KSW2_BATCHED
-        && bioseq::storage::lazy_is_worker_shareable(query_seq)
-        && bioseq::storage::lazy_is_worker_shareable(target_seq)
+        && lazy_is_worker_shareable(query_seq)
+        && lazy_is_worker_shareable(target_seq)
         && regions.size() >= bioseq::parallelism::TaskParallelMinTriggers::MIN_REGIONS_COUNT;
     std::size_t total_seed_count = 0;
     if (task_parallel_candidate) {
@@ -3121,13 +3130,13 @@ void align_regions(
         // multi-Mbp seed span) can dominate wall-clock; the per-phase milestones
         // alone would show a long silence with no sign of progress. Emit (and flush)
         // a heartbeat at most ~once/second so `tail -f` of the log shows which
-        // region index is in flight and the live footprint. Gated on enable_logging
+        // region index is in flight and the live footprint. Gated on bioseq::settings::logging
         // so production pays only the loop counter.
-        std::int64_t hb_last_ns = enable_logging ? bioseq::instr::clock::now_ns() : 0;
+        std::int64_t hb_last_ns = bioseq::settings::logging ? bioseq::instr::clock::now_ns() : 0;
         std::size_t hb_region_idx = 0;
         for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
             ++hb_region_idx;
-            if (enable_logging) {
+            if (bioseq::settings::logging) {
                 const std::int64_t hb_now_ns = bioseq::instr::clock::now_ns();
                 if (hb_now_ns - hb_last_ns > 1'000'000'000LL) {
                     hb_last_ns = hb_now_ns;
@@ -4681,6 +4690,8 @@ struct MatchResultCollection {
             && scalar.seed_lookup_calls > 0u
             && (!require_nonempty_vector_work
                 || scalar.seed_query_minimizers > 0u)
+            && scalar.chain_stage_completion_calls == 0u
+            && scalar.chain_stage_completed_anchor_inputs == 0u
             && scalar.chain_score_calls == 0u
             && scalar.chain_backtrack_calls == 0u
             && scalar.chain_anchor_inputs == 0u

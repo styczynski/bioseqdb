@@ -72,9 +72,38 @@ export namespace bioseq::gpu::vulkan {
 
 class Runtime;
 
+#ifdef BIOSEQ_TEST_INDEXES
+/** Test-build-only latch around the real phase-C upload/submit/fence path.
+ * Normal builds do not contain this API or its branches. */
+enum class VulkanSubmissionTestFault : std::uint8_t {
+  none,
+  cancellation_after_submit,
+  upload_failure_after_submit,
+};
+
+struct VulkanSubmissionTestSnapshot {
+  VulkanSubmissionTestFault fault{VulkanSubmissionTestFault::none};
+  std::uint64_t upload_latches = 0u;
+  std::uint64_t submissions = 0u;
+  std::uint64_t fence_drains = 0u;
+  std::uint64_t delivered_faults = 0u;
+  bool waiting_after_submit = false;
+  bool waiting_after_drain = false;
+  bool cancellation_requested = false;
+  bool upload_failure_latched = false;
+};
+
+void arm_vulkan_submission_test_seam(VulkanSubmissionTestFault fault) noexcept;
+void release_vulkan_submission_test_fence() noexcept;
+void release_vulkan_submission_test_delivery() noexcept;
+void reset_vulkan_submission_test_seam() noexcept;
+[[nodiscard]] VulkanSubmissionTestSnapshot
+vulkan_submission_test_snapshot() noexcept;
+#endif
+
 struct AlignmentCigarBatchResult {
-    std::vector<GpuAlignmentCigarResultWire> results{};
-    std::vector<std::uint32_t> packed_cigar{};
+  std::vector<GpuAlignmentCigarResultWire> results{};
+  std::vector<std::uint32_t> packed_cigar{};
 };
 
 /// Capabilities probed once at init. `available == false` means there is no
@@ -5479,7 +5508,7 @@ inline void require_hardware_device(const Runtime& runtime, const char* operatio
     return total;
 }
 
-}  // namespace bioseq::gpu::vulkan
+} // namespace bioseq::gpu::vulkan
 
 // ============================================================================
 // Implementation
@@ -5489,14 +5518,114 @@ namespace bioseq::gpu::vulkan {
 
 namespace {
 
+#ifdef BIOSEQ_TEST_INDEXES
+struct VulkanSubmissionTestState {
+  std::atomic<std::uint8_t> fault{
+      static_cast<std::uint8_t>(VulkanSubmissionTestFault::none)};
+  std::atomic<std::uint8_t> release_gate{1u};
+  std::atomic<std::uint8_t> delivery_gate{1u};
+  std::atomic<std::uint8_t> waiting_after_submit{0u};
+  std::atomic<std::uint8_t> waiting_after_drain{0u};
+  std::atomic<std::uint8_t> cancellation_requested{0u};
+  std::atomic<std::uint8_t> upload_failure_latched{0u};
+  std::atomic<std::uint64_t> upload_latches{0u};
+  std::atomic<std::uint64_t> submissions{0u};
+  std::atomic<std::uint64_t> fence_drains{0u};
+  std::atomic<std::uint64_t> delivered_faults{0u};
+};
+
+VulkanSubmissionTestState g_vulkan_submission_test_state{};
+
+[[nodiscard]] VulkanSubmissionTestFault
+active_vulkan_submission_test_fault() noexcept {
+  return static_cast<VulkanSubmissionTestFault>(
+      g_vulkan_submission_test_state.fault.load(std::memory_order_acquire));
+}
+
+void note_vulkan_submission_test_upload() noexcept {
+  const auto fault = active_vulkan_submission_test_fault();
+  if (fault == VulkanSubmissionTestFault::none) {
+    return;
+  }
+  g_vulkan_submission_test_state.upload_latches.fetch_add(
+      1u, std::memory_order_relaxed);
+  if (fault == VulkanSubmissionTestFault::upload_failure_after_submit) {
+    g_vulkan_submission_test_state.upload_failure_latched.store(
+        1u, std::memory_order_release);
+  }
+}
+
+[[nodiscard]] VulkanSubmissionTestFault
+delay_vulkan_submission_test_after_submit() noexcept {
+  const auto fault = active_vulkan_submission_test_fault();
+  if (fault == VulkanSubmissionTestFault::none) {
+    return fault;
+  }
+  g_vulkan_submission_test_state.submissions.fetch_add(
+      1u, std::memory_order_relaxed);
+  g_vulkan_submission_test_state.waiting_after_submit.store(
+      1u, std::memory_order_release);
+  std::uint8_t released = g_vulkan_submission_test_state.release_gate.load(
+      std::memory_order_acquire);
+  while (released == 0u) {
+    g_vulkan_submission_test_state.release_gate.wait(0u,
+                                                     std::memory_order_acquire);
+    released = g_vulkan_submission_test_state.release_gate.load(
+        std::memory_order_acquire);
+  }
+  g_vulkan_submission_test_state.waiting_after_submit.store(
+      0u, std::memory_order_release);
+  return fault;
+}
+
+void delay_vulkan_submission_test_after_drain(
+    VulkanSubmissionTestFault fault) noexcept {
+  if (fault == VulkanSubmissionTestFault::none) {
+    return;
+  }
+  auto &state = g_vulkan_submission_test_state;
+  state.fence_drains.fetch_add(1u, std::memory_order_release);
+  state.waiting_after_drain.store(1u, std::memory_order_release);
+  std::uint8_t released =
+      state.delivery_gate.load(std::memory_order_acquire);
+  while (released == 0u) {
+    state.delivery_gate.wait(0u, std::memory_order_acquire);
+    released = state.delivery_gate.load(std::memory_order_acquire);
+  }
+  state.waiting_after_drain.store(0u, std::memory_order_release);
+}
+
+void deliver_vulkan_submission_test_fault_after_drain(
+    VulkanSubmissionTestFault fault) {
+  if (fault == VulkanSubmissionTestFault::none) {
+    return;
+  }
+  g_vulkan_submission_test_state.delivered_faults.fetch_add(
+      1u, std::memory_order_release);
+  g_vulkan_submission_test_state.fault.store(
+      static_cast<std::uint8_t>(VulkanSubmissionTestFault::none),
+      std::memory_order_release);
+  if (fault == VulkanSubmissionTestFault::cancellation_after_submit) {
+    throw VulkanRuntimeError("injected Vulkan cancellation after fence drain");
+  }
+  if (g_vulkan_submission_test_state.upload_failure_latched.load(
+          std::memory_order_acquire) != 0u) {
+    throw VulkanRuntimeError(
+        "injected Vulkan upload failure after fence drain");
+  }
+  throw VulkanRuntimeError(
+      "injected Vulkan upload failure was not latched before submit");
+}
+#endif
+
 /// Throw `VulkanRuntimeError` on any non-success VkResult. A free function
 /// rather than a capture-all lambda so it leaves no per-call closure in the hot
 /// path and is trivially inlinable.
-inline void check_vk(VkResult result, const char* what) {
-    if (result != VK_SUCCESS) {
-        throw VulkanRuntimeError(
-            fmt::format("{}: VkResult {}", what, static_cast<int>(result)));
-    }
+inline void check_vk(VkResult result, const char *what) {
+  if (result != VK_SUCCESS) {
+    throw VulkanRuntimeError(
+        fmt::format("{}: VkResult {}", what, static_cast<int>(result)));
+  }
 }
 
 #define BIOSEQ_VULKAN_RUNTIME_FUNCTIONS(X) \
@@ -5645,35 +5774,108 @@ runtime_metal_archive_configuration_snapshot() {
     return slot.configuration;
 }
 
-}  // namespace
+} // namespace
+
+#ifdef BIOSEQ_TEST_INDEXES
+void arm_vulkan_submission_test_seam(VulkanSubmissionTestFault fault) noexcept {
+  auto &state = g_vulkan_submission_test_state;
+  state.release_gate.store(0u, std::memory_order_relaxed);
+  state.delivery_gate.store(0u, std::memory_order_relaxed);
+  state.waiting_after_submit.store(0u, std::memory_order_relaxed);
+  state.waiting_after_drain.store(0u, std::memory_order_relaxed);
+  state.cancellation_requested.store(0u, std::memory_order_relaxed);
+  state.upload_failure_latched.store(0u, std::memory_order_relaxed);
+  state.upload_latches.store(0u, std::memory_order_relaxed);
+  state.submissions.store(0u, std::memory_order_relaxed);
+  state.fence_drains.store(0u, std::memory_order_relaxed);
+  state.delivered_faults.store(0u, std::memory_order_relaxed);
+  state.fault.store(static_cast<std::uint8_t>(fault),
+                    std::memory_order_release);
+}
+
+void release_vulkan_submission_test_fence() noexcept {
+  auto &state = g_vulkan_submission_test_state;
+  if (active_vulkan_submission_test_fault() ==
+      VulkanSubmissionTestFault::cancellation_after_submit) {
+    state.cancellation_requested.store(1u, std::memory_order_release);
+  }
+  state.release_gate.store(1u, std::memory_order_release);
+  state.release_gate.notify_all();
+}
+
+void release_vulkan_submission_test_delivery() noexcept {
+  auto &state = g_vulkan_submission_test_state;
+  state.delivery_gate.store(1u, std::memory_order_release);
+  state.delivery_gate.notify_all();
+}
+
+void reset_vulkan_submission_test_seam() noexcept {
+  auto &state = g_vulkan_submission_test_state;
+  state.fault.store(static_cast<std::uint8_t>(VulkanSubmissionTestFault::none),
+                    std::memory_order_release);
+  state.release_gate.store(1u, std::memory_order_release);
+  state.release_gate.notify_all();
+  state.delivery_gate.store(1u, std::memory_order_release);
+  state.delivery_gate.notify_all();
+  state.waiting_after_submit.store(0u, std::memory_order_relaxed);
+  state.waiting_after_drain.store(0u, std::memory_order_relaxed);
+  state.cancellation_requested.store(0u, std::memory_order_relaxed);
+  state.upload_failure_latched.store(0u, std::memory_order_relaxed);
+  state.upload_latches.store(0u, std::memory_order_relaxed);
+  state.submissions.store(0u, std::memory_order_relaxed);
+  state.fence_drains.store(0u, std::memory_order_relaxed);
+  state.delivered_faults.store(0u, std::memory_order_relaxed);
+}
+
+[[nodiscard]] VulkanSubmissionTestSnapshot
+vulkan_submission_test_snapshot() noexcept {
+  auto &state = g_vulkan_submission_test_state;
+  return {
+      .fault = active_vulkan_submission_test_fault(),
+      .upload_latches = state.upload_latches.load(std::memory_order_acquire),
+      .submissions = state.submissions.load(std::memory_order_acquire),
+      .fence_drains = state.fence_drains.load(std::memory_order_acquire),
+      .delivered_faults =
+          state.delivered_faults.load(std::memory_order_acquire),
+      .waiting_after_submit =
+          state.waiting_after_submit.load(std::memory_order_acquire) != 0u,
+      .waiting_after_drain =
+          state.waiting_after_drain.load(std::memory_order_acquire) != 0u,
+      .cancellation_requested =
+          state.cancellation_requested.load(std::memory_order_acquire) != 0u,
+      .upload_failure_latched =
+          state.upload_failure_latched.load(std::memory_order_acquire) != 0u,
+  };
+}
+#endif
 
 void Runtime::OwnedPipelineHandles::reset() noexcept {
-    if (device != VK_NULL_HANDLE) {
-        if (pipeline != VK_NULL_HANDLE && vkDestroyPipeline != nullptr) {
-            vkDestroyPipeline(device, pipeline, nullptr);
-        }
-        if (module != VK_NULL_HANDLE && vkDestroyShaderModule != nullptr) {
-            vkDestroyShaderModule(device, module, nullptr);
-        }
-        if (descriptor_pool != VK_NULL_HANDLE
-            && vkDestroyDescriptorPool != nullptr) {
-            vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
-        }
-        if (pipeline_layout != VK_NULL_HANDLE
-            && vkDestroyPipelineLayout != nullptr) {
-            vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
-        }
-        if (set_layout != VK_NULL_HANDLE
-            && vkDestroyDescriptorSetLayout != nullptr) {
-            vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
-        }
+  if (device != VK_NULL_HANDLE) {
+    if (pipeline != VK_NULL_HANDLE && vkDestroyPipeline != nullptr) {
+      vkDestroyPipeline(device, pipeline, nullptr);
     }
-    device = VK_NULL_HANDLE;
-    set_layout = VK_NULL_HANDLE;
-    pipeline_layout = VK_NULL_HANDLE;
-    descriptor_pool = VK_NULL_HANDLE;
-    module = VK_NULL_HANDLE;
-    pipeline = VK_NULL_HANDLE;
+    if (module != VK_NULL_HANDLE && vkDestroyShaderModule != nullptr) {
+      vkDestroyShaderModule(device, module, nullptr);
+    }
+    if (descriptor_pool != VK_NULL_HANDLE &&
+        vkDestroyDescriptorPool != nullptr) {
+      vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
+    }
+    if (pipeline_layout != VK_NULL_HANDLE &&
+        vkDestroyPipelineLayout != nullptr) {
+      vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
+    }
+    if (set_layout != VK_NULL_HANDLE &&
+        vkDestroyDescriptorSetLayout != nullptr) {
+      vkDestroyDescriptorSetLayout(device, set_layout, nullptr);
+    }
+  }
+  device = VK_NULL_HANDLE;
+  set_layout = VK_NULL_HANDLE;
+  pipeline_layout = VK_NULL_HANDLE;
+  descriptor_pool = VK_NULL_HANDLE;
+  module = VK_NULL_HANDLE;
+  pipeline = VK_NULL_HANDLE;
 }
 
 std::expected<std::shared_ptr<const RuntimeMetalArchiveConfigurationImage>,
@@ -9885,22 +10087,28 @@ Runtime::ChainingPipeline Runtime::create_pipeline_locked(
 // Upload / download helpers (called under mu_, command buffer already open)
 // ---------------------------------------------------------------------------
 
-void Runtime::upload_locked(
-    Buffer& transfer_scratch, Buffer& dst, std::span<const std::byte> bytes,
-    VkAccessFlags dst_access) {
-    (void)transfer_scratch;  // unified-memory path has no bounce allocation
-    (void)dst_access;  // host-coherent + queue submit makes host writes visible
-    if (bytes.empty()) return;
-    if (dst.mapped == nullptr) {
-        // Phase A requires host-visible device buffers (unified memory). The
-        // scratch parameter is retained in the ABI for a future discrete-GPU
-        // bounce path; an invalid/default buffer is intentional today.
-        throw VulkanRuntimeError("device buffer is not host-visible (Phase A needs unified memory)");
-    }
-    DEBUG_ASSERT(bytes.size() <= dst.bytes, "upload exceeds destination buffer size");
-    if (bytes.data() != static_cast<const std::byte*>(dst.mapped)) {
-        std::memcpy(dst.mapped, bytes.data(), bytes.size());
-    }
+void Runtime::upload_locked(Buffer &transfer_scratch, Buffer &dst,
+                            std::span<const std::byte> bytes,
+                            VkAccessFlags dst_access) {
+  (void)transfer_scratch; // unified-memory path has no bounce allocation
+  (void)dst_access; // host-coherent + queue submit makes host writes visible
+  if (bytes.empty())
+    return;
+  if (dst.mapped == nullptr) {
+    // Phase A requires host-visible device buffers (unified memory). The
+    // scratch parameter is retained in the ABI for a future discrete-GPU
+    // bounce path; an invalid/default buffer is intentional today.
+    throw VulkanRuntimeError(
+        "device buffer is not host-visible (Phase A needs unified memory)");
+  }
+#ifdef BIOSEQ_TEST_INDEXES
+  note_vulkan_submission_test_upload();
+#endif
+  DEBUG_ASSERT(bytes.size() <= dst.bytes,
+               "upload exceeds destination buffer size");
+  if (bytes.data() != static_cast<const std::byte *>(dst.mapped)) {
+    std::memcpy(dst.mapped, bytes.data(), bytes.size());
+  }
 }
 
 void Runtime::download_locked(
@@ -12236,39 +12444,49 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     const GpuArenaSlice query_gate_s = query_gate_bytes == 0u
         ? GpuArenaSlice{}
         : arena.allocate_device(query_gate_bytes, 16u);
-    if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid() || !counts_s.valid()
-        || !offsets_s.valid() || !blocks_s.valid() || !counters_s.valid()
-        || !pairvals_s.valid() || (query_gate_bytes != 0u && !query_gate_s.valid())) {
-        arena.rewind(mark);
-        throw VulkanRuntimeError(fmt::format(
-            "phase_c sketch arena oversub (bp={} arena_bytes={} num_tiles={})",
-            bp,
-            arena_bytes,
-            num_tiles));
+    if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid() ||
+        !counts_s.valid() || !offsets_s.valid() || !blocks_s.valid() ||
+        !counters_s.valid() || !pairvals_s.valid() ||
+        (query_gate_bytes != 0u && !query_gate_s.valid())) {
+      arena.rewind(mark);
+      throw VulkanRuntimeError(fmt::format(
+          "phase_c sketch arena oversub (bp={} arena_bytes={} num_tiles={})",
+          bp, arena_bytes, num_tiles));
     }
 
-    auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
-    if (!packed_sequence.empty()) std::memcpy(base + seq_s.offset, packed_sequence.data(), packed_sequence.size());
+    auto *base = static_cast<std::byte *>(arena.device_buffer().mapped);
+    if (!packed_sequence.empty()) {
+#ifdef BIOSEQ_TEST_INDEXES
+      note_vulkan_submission_test_upload();
+#endif
+      std::memcpy(base + seq_s.offset, packed_sequence.data(),
+                  packed_sequence.size());
+    }
     std::memcpy(base + lut_s.offset, &rank_lut, sizeof(rank_lut));
-    std::memcpy(base + tiles_s.offset, tiles.data(), tiles.size() * sizeof(TileC));
-    std::memset(base + counts_s.offset, 0, static_cast<std::size_t>(counts_s.size));
+    std::memcpy(base + tiles_s.offset, tiles.data(),
+                tiles.size() * sizeof(TileC));
+    std::memset(base + counts_s.offset, 0,
+                static_cast<std::size_t>(counts_s.size));
     std::memset(base + counters_s.offset, 0, 8);
     if (query_gate_bytes != 0u) {
-        std::memcpy(base + query_gate_s.offset, query_gate_words.data(),
-                    static_cast<std::size_t>(query_gate_bytes));
+      std::memcpy(base + query_gate_s.offset, query_gate_words.data(),
+                  static_cast<std::size_t>(query_gate_bytes));
     }
 
-    if (params.minimizer_word_kind == 0u) std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
+    if (params.minimizer_word_kind == 0u)
+      std::memset(out_words.mapped, 0,
+                  static_cast<std::size_t>(out_words.bytes));
 
     const PhaseBPipeline sketch_pipe = get_phase_b_pipeline_locked(
-        ShaderKind::phase_c_sketch_tile,
-        kPhaseCSketchLocal,
+        ShaderKind::phase_c_sketch_tile, kPhaseCSketchLocal,
         std::max<std::uint32_t>(w, 1u));
-    const PhaseBPipeline scan_block_pipe = get_phase_b_pipeline_locked(ShaderKind::phase_c_prefix_scan_block, 1u, 1u);
-    const PhaseBPipeline scan_add_pipe = get_phase_b_pipeline_locked(ShaderKind::phase_c_prefix_scan_add, 128u, 1u);
+    const PhaseBPipeline scan_block_pipe = get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_prefix_scan_block, 1u, 1u);
+    const PhaseBPipeline scan_add_pipe = get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_prefix_scan_add, 128u, 1u);
     reset_phase_c_pool_locked();
 
-    const GpuArenaSlice& gate_binding_s =
+    const GpuArenaSlice &gate_binding_s =
         query_gate_bytes == 0u ? counters_s : query_gate_s;
     const std::array<VkDescriptorBufferInfo, 9> sketch_infos{{
         {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
@@ -12279,7 +12497,8 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
         {offsets_s.buffer->buffer, offsets_s.offset, offsets_s.size},
         {pairvals_s.buffer->buffer, pairvals_s.offset, pairvals_s.size},
-        {gate_binding_s.buffer->buffer, gate_binding_s.offset, gate_binding_s.size},
+        {gate_binding_s.buffer->buffer, gate_binding_s.offset,
+         gate_binding_s.size},
     }};
     const std::array<VkDescriptorBufferInfo, 3> scan_infos{{
         {counts_s.buffer->buffer, counts_s.offset, counts_s.size},
@@ -12287,46 +12506,82 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         {blocks_s.buffer->buffer, blocks_s.offset, blocks_s.size},
     }};
 
-    SketchPushC push{
-        0u, w, k, params.hash_bits, params.hash_shift, params.pos_bits,
-        params.minimizer_word_kind, params.minimizer_words32, k, params.alphabet_kind,
-        params.unit_bits, params.bits_per_char, params.letters_per_unit, params.char_mask,
-        num_tiles, 0u, query_gate_mask, query_gate_word_count};
+    SketchPushC push{0u,
+                     w,
+                     k,
+                     params.hash_bits,
+                     params.hash_shift,
+                     params.pos_bits,
+                     params.minimizer_word_kind,
+                     params.minimizer_words32,
+                     k,
+                     params.alphabet_kind,
+                     params.unit_bits,
+                     params.bits_per_char,
+                     params.letters_per_unit,
+                     params.char_mask,
+                     num_tiles,
+                     0u,
+                     query_gate_mask,
+                     query_gate_word_count};
     ScanPushC scan0{num_tiles, kPhaseCScanBlock, num_blocks, 0u};
     ScanPushC scan1{num_tiles, kPhaseCScanBlock, num_blocks, 1u};
 
-    static const auto* _qsketch_d = bioseq::instr::register_region_static("phase_c_query_sketch");
+    static const auto *_qsketch_d =
+        bioseq::instr::register_region_static("phase_c_query_sketch");
     auto _qsketch_s = bioseq::instr::region(_qsketch_d);
-    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(pc_sketch)");
+    check_vk(vkResetCommandBuffer(command_buffer_, 0),
+             "vkResetCommandBuffer(pc_sketch)");
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer(pc_sketch)");
+    check_vk(vkBeginCommandBuffer(command_buffer_, &begin),
+             "vkBeginCommandBuffer(pc_sketch)");
     record_host_to_shader(command_buffer_);
-    record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
+    record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, sketch_infos,
+                                   &push, sizeof(push), sketch_groups);
     record_compute_barrier(command_buffer_);
-    record_phase_c_dispatch_locked(command_buffer_, scan_block_pipe, scan_infos, &scan0, sizeof(scan0), num_blocks);
+    record_phase_c_dispatch_locked(command_buffer_, scan_block_pipe, scan_infos,
+                                   &scan0, sizeof(scan0), num_blocks);
     record_compute_barrier(command_buffer_);
-    record_phase_c_dispatch_locked(command_buffer_, scan_add_pipe, scan_infos, &scan0, sizeof(scan0), 1u);
+    record_phase_c_dispatch_locked(command_buffer_, scan_add_pipe, scan_infos,
+                                   &scan0, sizeof(scan0), 1u);
     record_compute_barrier(command_buffer_);
-    record_phase_c_dispatch_locked(command_buffer_, scan_add_pipe, scan_infos, &scan1, sizeof(scan1), ceil_div_u32(num_tiles, 128u));
+    record_phase_c_dispatch_locked(command_buffer_, scan_add_pipe, scan_infos,
+                                   &scan1, sizeof(scan1),
+                                   ceil_div_u32(num_tiles, 128u));
     record_compute_barrier(command_buffer_);
     push.emit_mode = 1u;
-    record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, sketch_infos, &push, sizeof(push), sketch_groups);
+    record_phase_c_dispatch_locked(command_buffer_, sketch_pipe, sketch_infos,
+                                   &push, sizeof(push), sketch_groups);
     record_shader_to_host(command_buffer_);
-    check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(pc_sketch)");
+    check_vk(vkEndCommandBuffer(command_buffer_),
+             "vkEndCommandBuffer(pc_sketch)");
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_buffer_;
-    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(pc_sketch)");
-    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(pc_sketch)");
-    require_immutable_metal_policy_live("sketch operation completion");
+    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_),
+             "vkQueueSubmit(pc_sketch)");
+#ifdef BIOSEQ_TEST_INDEXES
+    const VulkanSubmissionTestFault submission_test_fault =
+        delay_vulkan_submission_test_after_submit();
+#endif
+    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
+             "vkWaitForFences(pc_sketch)");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch)");
+    require_immutable_metal_policy_live("sketch operation completion");
+#ifdef BIOSEQ_TEST_INDEXES
+    delay_vulkan_submission_test_after_drain(submission_test_fault);
+    deliver_vulkan_submission_test_fault_after_drain(submission_test_fault);
+#endif
 
     std::uint32_t last_off = 0, last_cnt = 0;
-    std::memcpy(&last_off, base + offsets_s.offset + std::uint64_t{num_tiles - 1u} * 4u, 4);
-    std::memcpy(&last_cnt, base + counts_s.offset + std::uint64_t{num_tiles - 1u} * 4u, 4);
+    std::memcpy(&last_off,
+                base + offsets_s.offset + std::uint64_t{num_tiles - 1u} * 4u,
+                4);
+    std::memcpy(&last_cnt,
+                base + counts_s.offset + std::uint64_t{num_tiles - 1u} * 4u, 4);
     const std::uint64_t total = static_cast<std::uint64_t>(last_off) + last_cnt;
 
     if (total > max_minimizers) {
@@ -19300,4 +19555,4 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
     return result;
 }
 
-}  // namespace bioseq::gpu::vulkan
+} // namespace bioseq::gpu::vulkan

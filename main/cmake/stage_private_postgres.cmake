@@ -1,6 +1,7 @@
 # Relocatable private PostgreSQL extension stage (§13.2).
 #
-# Run with: cmake -DPG_CONFIG=... -DSTAGE_ROOT=... -DCONTROL_FILE=... \
+# Run with: cmake -DPG_CONFIG=... -DSTAGE_ROOT=... -DSTAGE_PARENT=... \
+#                 -DCONTROL_FILE=... \
 #                 -DINSTALL_SQL=... -DLIBRARY_FILE=... -DEXTENSION_VERSION=... \
 #                 -DMANIFEST_OUT=... -DHASH_OUT=... -P stage_private_postgres.cmake
 #
@@ -13,8 +14,8 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-foreach(_required PG_CONFIG STAGE_ROOT CONTROL_FILE INSTALL_SQL LIBRARY_FILE
-                  EXTENSION_VERSION MANIFEST_OUT HASH_OUT)
+foreach(_required PG_CONFIG STAGE_ROOT STAGE_PARENT CONTROL_FILE INSTALL_SQL
+                  LIBRARY_FILE EXTENSION_VERSION MANIFEST_OUT HASH_OUT)
   if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
     message(FATAL_ERROR "stage_private_postgres: -D${_required} is required")
   endif()
@@ -58,7 +59,56 @@ _staged_path("${PG_BINDIR}" STAGED_BINDIR)
 _staged_path("${PG_SHAREDIR}" STAGED_SHAREDIR)
 _staged_path("${PG_PKGLIBDIR}" STAGED_PKGLIBDIR)
 
+# These are the server/client programs consumed by the private-cluster runner.
+# Keep this list shared by runtime-closure discovery and the validation below so
+# a newly required tool cannot be validated without also having its private
+# runtime dependencies staged.
+set(_tools postgres initdb pg_ctl createdb dropdb psql)
+
 # Fresh stage on every run — the prefix is an incremental build artifact.
+# This guard is intentionally adjacent to the destructive operation. The
+# Python lifecycle prevalidates the same parent, but this script also fails
+# closed when invoked directly or when a path is replaced between layers.
+cmake_path(
+  ABSOLUTE_PATH STAGE_PARENT
+  NORMALIZE
+  OUTPUT_VARIABLE _stage_parent_normal)
+cmake_path(
+  ABSOLUTE_PATH STAGE_ROOT
+  NORMALIZE
+  OUTPUT_VARIABLE _stage_root_normal)
+get_filename_component(_stage_root_parent "${_stage_root_normal}" DIRECTORY)
+if(NOT "${_stage_root_parent}" STREQUAL "${_stage_parent_normal}")
+  message(FATAL_ERROR
+    "stage_private_postgres: STAGE_ROOT must be a direct child of "
+    "STAGE_PARENT: ${_stage_root_normal}")
+endif()
+if(NOT IS_DIRECTORY "${_stage_parent_normal}"
+   OR IS_SYMLINK "${_stage_parent_normal}")
+  message(FATAL_ERROR
+    "stage_private_postgres: STAGE_PARENT must be a real directory: "
+    "${_stage_parent_normal}")
+endif()
+file(REAL_PATH "${_stage_parent_normal}" _stage_parent_real)
+if(NOT "${_stage_parent_real}" STREQUAL "${_stage_parent_normal}")
+  message(FATAL_ERROR
+    "stage_private_postgres: STAGE_PARENT contains a symbolic-link "
+    "component: ${_stage_parent_normal}")
+endif()
+if(EXISTS "${_stage_root_normal}" OR IS_SYMLINK "${_stage_root_normal}")
+  if(NOT IS_DIRECTORY "${_stage_root_normal}"
+     OR IS_SYMLINK "${_stage_root_normal}")
+    message(FATAL_ERROR
+      "stage_private_postgres: STAGE_ROOT must be a real directory when "
+      "it exists: ${_stage_root_normal}")
+  endif()
+  file(REAL_PATH "${_stage_root_normal}" _stage_root_real)
+  if(NOT "${_stage_root_real}" STREQUAL "${_stage_root_normal}")
+    message(FATAL_ERROR
+      "stage_private_postgres: STAGE_ROOT contains a symbolic-link "
+      "component: ${_stage_root_normal}")
+  endif()
+endif()
 file(REMOVE_RECURSE "${STAGE_ROOT}")
 
 # Copy the built-in program/share/library trees so bundled languages and
@@ -66,6 +116,120 @@ file(REMOVE_RECURSE "${STAGE_ROOT}")
 file(COPY "${PG_BINDIR}/" DESTINATION "${STAGED_BINDIR}" USE_SOURCE_PERMISSIONS)
 file(COPY "${PG_SHAREDIR}/" DESTINATION "${STAGED_SHAREDIR}" USE_SOURCE_PERMISSIONS)
 file(COPY "${PG_PKGLIBDIR}/" DESTINATION "${STAGED_PKGLIBDIR}" USE_SOURCE_PERMISSIONS)
+
+# A PostgreSQL distribution may keep support libraries one level above
+# pkglibdir.  Postgres.app is one concrete example: postgres lives in bin/ and
+# loads lib/libzstd.1.dylib via @loader_path/../lib, while pg_config reports
+# lib/postgresql as pkglibdir.  Copying only pkglibdir therefore leaves the
+# otherwise-relocatable staged server unable to start.
+#
+# Discover the exact transitive dependency closure of the tools (and of the
+# current extension DSO), then copy only dependencies owned by a plausible
+# sibling PostgreSQL runtime directory.  Never copy a complete sibling lib
+# tree: it may contain unrelated or globally installed Bioseq artifacts.
+set(_runtime_executables "")
+foreach(_tool ${_tools})
+  list(APPEND _runtime_executables "${PG_BINDIR}/${_tool}")
+endforeach()
+
+set(_runtime_roots "${PG_PKGLIBDIR}")
+get_filename_component(_bindir_parent "${PG_BINDIR}" DIRECTORY)
+foreach(_libdir_name lib lib64)
+  if(IS_DIRECTORY "${_bindir_parent}/${_libdir_name}")
+    list(APPEND _runtime_roots "${_bindir_parent}/${_libdir_name}")
+  endif()
+endforeach()
+get_filename_component(_pkglib_name "${PG_PKGLIBDIR}" NAME)
+if(_pkglib_name MATCHES "^postgresql(@.*)?$")
+  get_filename_component(_pkglib_parent "${PG_PKGLIBDIR}" DIRECTORY)
+  if(IS_DIRECTORY "${_pkglib_parent}")
+    list(APPEND _runtime_roots "${_pkglib_parent}")
+  endif()
+endif()
+list(REMOVE_DUPLICATES _runtime_roots)
+
+file(GET_RUNTIME_DEPENDENCIES
+  RESOLVED_DEPENDENCIES_VAR _runtime_dependencies
+  UNRESOLVED_DEPENDENCIES_VAR _unresolved_runtime_dependencies
+  EXECUTABLES ${_runtime_executables}
+  MODULES "${LIBRARY_FILE}")
+if(_unresolved_runtime_dependencies)
+  list(JOIN _unresolved_runtime_dependencies ", " _unresolved_text)
+  message(FATAL_ERROR
+    "stage_private_postgres: unresolved runtime dependencies: ${_unresolved_text}")
+endif()
+
+# Return a dependency's relative path within a lexical or symlink-resolved
+# source root.  The lexical root is retained for the staged destination so an
+# @loader_path/$ORIGIN reference sees the same relative layout after copying.
+function(_runtime_relative_path _dependency _root _out)
+  set(_relative "")
+  file(REAL_PATH "${_dependency}" _dependency_real)
+  file(REAL_PATH "${_root}" _root_real)
+  foreach(_candidate_path "${_dependency}" "${_dependency_real}")
+    foreach(_candidate_root "${_root}" "${_root_real}")
+      file(RELATIVE_PATH _try_relative "${_candidate_root}" "${_candidate_path}")
+      if(NOT _try_relative STREQUAL ".."
+          AND NOT _try_relative MATCHES "^[.][.]/"
+          AND NOT IS_ABSOLUTE "${_try_relative}")
+        set(_relative "${_try_relative}")
+        break()
+      endif()
+    endforeach()
+    if(NOT _relative STREQUAL "")
+      break()
+    endif()
+  endforeach()
+
+  # file(GET_RUNTIME_DEPENDENCIES) may canonicalise a symlink into a package
+  # manager's cellar.  Match the same file through a direct sibling-lib alias
+  # so it is still staged at the loader-relative path.
+  if(_relative STREQUAL "")
+    get_filename_component(_dependency_name "${_dependency}" NAME)
+    set(_alias "${_root}/${_dependency_name}")
+    if(EXISTS "${_alias}")
+      file(REAL_PATH "${_alias}" _alias_real)
+      if("${_alias_real}" STREQUAL "${_dependency_real}")
+        set(_relative "${_dependency_name}")
+      endif()
+    endif()
+  endif()
+  set(${_out} "${_relative}" PARENT_SCOPE)
+endfunction()
+
+list(SORT _runtime_dependencies)
+foreach(_dependency ${_runtime_dependencies})
+  set(_runtime_relative "")
+  set(_runtime_root "")
+  foreach(_candidate_root ${_runtime_roots})
+    _runtime_relative_path(
+      "${_dependency}" "${_candidate_root}" _candidate_relative)
+    if(NOT _candidate_relative STREQUAL "")
+      set(_runtime_relative "${_candidate_relative}")
+      set(_runtime_root "${_candidate_root}")
+      break()
+    endif()
+  endforeach()
+  if(_runtime_relative STREQUAL "")
+    continue()
+  endif()
+
+  get_filename_component(_dependency_name "${_dependency}" NAME)
+  if(_dependency_name MATCHES "^bioseq")
+    message(FATAL_ERROR
+      "stage_private_postgres: refusing globally installed Bioseq runtime dependency: ${_dependency}")
+  endif()
+  _staged_path("${_runtime_root}" _staged_runtime_root)
+  set(_staged_dependency "${_staged_runtime_root}/${_runtime_relative}")
+  if(EXISTS "${_staged_dependency}")
+    continue()
+  endif()
+  get_filename_component(_staged_dependency_dir "${_staged_dependency}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_staged_dependency_dir}")
+  file(COPY "${_dependency}"
+       DESTINATION "${_staged_dependency_dir}"
+       USE_SOURCE_PERMISSIONS FOLLOW_SYMLINK_CHAIN)
+endforeach()
 
 # Exclude every globally installed Bioseq file: sharedir/extension/bioseq*,
 # pkglibdir/bioseq*, and the exact library filename (§13.2 step 3).
@@ -101,7 +265,6 @@ file(COPY "${LIBRARY_FILE}" DESTINATION "${STAGED_PKGLIBDIR}")
 # staged-vs-global resolution proof is the integration probe that starts the
 # copied server and runs CREATE EXTENSION; here we assert the tools exist and
 # report their versions so a partial/mismatched copy fails the stage.
-set(_tools postgres initdb pg_ctl createdb dropdb psql)
 set(_tool_signatures "")
 foreach(_tool ${_tools})
   set(_staged_tool "${STAGED_BINDIR}/${_tool}")

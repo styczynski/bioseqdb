@@ -34,6 +34,7 @@ module;
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -207,5 +208,90 @@ concept supports_lazy_compact_sequence = requires {
     typename V::iterator_impl;
     requires is_valid_sequence_scanner<typename V::scanner_type>;
 };
+
+// DOC0377 §9.2 — behavioral view contracts. The legacy structural concept
+// above intentionally remains source-compatible; migrated algorithms constrain
+// on these operations instead of representation-specific nested types.
+struct lazy_compact_sequence_slice_tag {};
+
+enum class sequence_access_requirement : std::uint8_t {
+    sequential_symbols,
+    bounded_random_window,
+    contiguous_resident,
+};
+
+template <typename V, bool IsReversed, bool WriteReversed>
+concept supports_lazy_orientation =
+    requires(V const& value,
+             std::span<std::uint8_t> output,
+             std::size_t from,
+             std::size_t to) {
+        { value.template to_encoded_into<IsReversed, WriteReversed>(
+              output, from, to) } -> std::same_as<void>;
+        {
+            value.template encoded_iter<IsReversed, WriteReversed,
+                                        std::uint8_t, 2>()
+                 .ptr_at(sequence_size_t{from}, to - from, output)
+        } -> std::same_as<std::uint8_t const*>;
+    };
+
+template <typename I>
+concept supports_bp_iterator = requires(I cursor, I other) {
+    { *cursor } -> std::convertible_to<std::uint8_t>;
+    { ++cursor } -> std::same_as<I&>;
+    { cursor == other } -> std::convertible_to<bool>;
+};
+
+template <typename R>
+concept supports_bp_range = requires(R const& range) {
+    { range.begin() };
+    { range.end() } -> std::same_as<decltype(range.begin())>;
+    // Existing compact ranges return iterator endpoints by const reference.
+    // Validate the usable value type, not the accessor's reference qualifier.
+    requires supports_bp_iterator<
+        std::remove_cvref_t<decltype(range.begin())>>;
+};
+
+template <typename V>
+concept supports_lazy_sequence_view =
+    requires(V const& value) {
+        typename V::traits;
+        typename V::traits::alphabet_type;
+        { value.bp_size() } -> std::convertible_to<sequence_size_t>;
+        { value.begin() };
+        { value.end() };
+        { value.template iter<BP>(value.begin()) };
+        { value.template iterable<BP>() };
+        { lazy_is_worker_shareable(value) } -> std::convertible_to<bool>;
+        requires supports_bp_iterator<std::remove_cvref_t<
+            decltype(value.template iter<BP>(value.begin()))>>;
+        requires supports_bp_range<std::remove_cvref_t<
+            decltype(value.template iterable<BP>())>>;
+    }
+    && supports_lazy_orientation<V, false, false>
+    && supports_lazy_orientation<V, false, true>
+    && supports_lazy_orientation<V, true, false>
+    && supports_lazy_orientation<V, true, true>;
+
+template <typename V>
+concept supports_resident_packed_probe =
+    supports_lazy_sequence_view<V>
+    && requires(V const& value,
+                sequence_size_t from,
+                sequence_size_t to,
+                std::uint8_t width) {
+        { value.try_resident_packed(from, to, width) }
+            -> std::same_as<
+                std::optional<typename V::resident_packed_region>>;
+    };
+
+template <typename V>
+concept supports_lazy_compact_sequence_slice =
+    supports_lazy_sequence_view<V>
+    && requires {
+        typename V::lazy_slice_tag;
+        requires std::same_as<typename V::lazy_slice_tag,
+                              lazy_compact_sequence_slice_tag>;
+    };
 
 }  // namespace bioseq::storage

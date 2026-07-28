@@ -1,0 +1,244 @@
+{
+  "params": {
+    "qualification_reference": {"_": {"type": "integer", "default": 0, "description": "Zero-valued calibration reference."}},
+    "from_array_arity_2": {"_": {"type": "integer", "default": 0, "description": "Generated two-argument from_array calibration."}},
+    "from_array_arity_3": {"_": {"type": "integer", "default": 0, "description": "Generated three-argument from_array calibration."}},
+    "typed_wrapper_generated_vs_handwritten": {"_": {"type": "integer", "default": 0, "description": "Implementation-equivalent generated and handwritten vemptycount boundaries."}},
+    "mmsearch_arity_2": {"_": {"type": "integer", "default": 0, "description": "Two-argument mmsearch calibration."}},
+    "mmsearch_arity_3": {"_": {"type": "integer", "default": 0, "description": "Three-argument mmsearch calibration."}},
+    "row_codec_generated_vs_handwritten": {"_": {"type": "integer", "default": 0, "description": "Generated and handwritten scalar aligner-options plus by-reference bytea row-mask codecs."}}
+  },
+  "test_cases": {
+    "SQL_CODEGEN_BOUNDARY_SMALL": {
+      "concurrency": 1,
+      "data": {},
+      "description": "Pinned calibration inputs; live measurement attestation remains mandatory while reviewed qualification remains visibly absent."
+    }
+  },
+  "bench_sql_codegen_guardrail": {
+    "tags": ["e2e", "sql-codegen", "boundary", "row-codec", "calibration"],
+    "description": "DOC0388 non-qualifying calibration. Every performance/correctness/attestation rule is blocking; build qualification and baseline kind must remain exactly zero.",
+    "fast": true,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "iteration_order": {"mode": "interleaved_seeded", "seed": 388},
+    "matrix": {
+      "for": {"SQL_CODEGEN_BOUNDARY_SMALL": 15},
+      "over": {
+        "qualification_reference": {},
+        "from_array_arity_2": {},
+        "from_array_arity_3": {},
+        "typed_wrapper_generated_vs_handwritten": {},
+        "mmsearch_arity_2": {},
+        "mmsearch_arity_3": {},
+        "row_codec_generated_vs_handwritten": {}
+      },
+      "acceptance": {
+        "exact_algorithm_rows": [
+          "qualification_reference",
+          "from_array_arity_2",
+          "from_array_arity_3",
+          "typed_wrapper_generated_vs_handwritten",
+          "mmsearch_arity_2",
+          "mmsearch_arity_3",
+          "row_codec_generated_vs_handwritten"
+        ],
+        "exact_test_case_iterations": {"SQL_CODEGEN_BOUNDARY_SMALL": 15},
+        "require_named_region_iteration_coverage": false,
+        "exact_named_region_sample_multiplicities": []
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            ["cal_from_array_2_wall", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_from_array_3_wall", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_typed_wall", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_2_wall", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_3_wall", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_wall", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "query_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_from_array_2_query", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_from_array_3_query", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_typed_query", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_2_query", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_3_query", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_query", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_query_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_from_array_2_generated", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_from_array_3_generated", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_typed_generated", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_2_generated", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_3_generated", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_generated", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "handwritten_query_ns": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_typed_handwritten", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_handwritten", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_to_handwritten_ratio": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_typed_ratio", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_ratio", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "correctness_passed": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_from_array_2_correct", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_from_array_3_correct", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_typed_correct", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_2_correct", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_3_correct", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_correct", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "arity": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_row_codec_arity_is_zero", {"key": "row_codec_generated_vs_handwritten"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}],
+            ["cal_typed_arity_is_one", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_from_array_arity_2_is_two", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "typed_wrapper_generated_vs_handwritten"}],
+            ["cal_from_array_arity_3_is_three", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "from_array_arity_2"}],
+            ["cal_mmsearch_arity_2_matches_two", {"key": "mmsearch_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "from_array_arity_2"}],
+            ["cal_mmsearch_arity_3_matches_three", {"key": "mmsearch_arity_3"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "from_array_arity_3"}]
+          ]
+        },
+        "generated_typed_wrapper": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_from_array_2_wrapper", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_from_array_3_wrapper", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_typed_wrapper", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "direct_fmgr_wrapper_path": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_from_array_2_fmgr", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_from_array_3_fmgr", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_typed_fmgr", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "planner_custom_scan_path": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_mmsearch_2_custom_scan", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_3_custom_scan", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generated_row_codec_fields": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_mmsearch_3_codec", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_fields", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "performance_gate_passed": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_from_array_2_gate", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_from_array_3_gate", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_typed_gate", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_2_gate", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_3_gate", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_gate", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "build_qualification_passed": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_build_must_remain_nonqualifying", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "qualification_baseline_kind": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_baseline_kind_must_remain_zero", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "live_measurement_attested": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_from_array_2_attested", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_from_array_3_attested", {"key": "from_array_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_typed_attested", {"key": "typed_wrapper_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_2_attested", {"key": "mmsearch_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_mmsearch_3_attested", {"key": "mmsearch_arity_3"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}],
+            ["cal_row_codec_attested", {"key": "row_codec_generated_vs_handwritten"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "run_nonce": {
+          "type": "evaluation",
+          "rules": [
+            ["cal_run_nonce_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]
+          ]
+        },
+        "generator_cold_ns": {
+          "type": "evaluation",
+          "rules": [["cal_cold_is_nonqualifying_zero", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]]
+        },
+        "generator_noop_ns": {
+          "type": "evaluation",
+          "rules": [["cal_noop_is_nonqualifying_zero", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]]
+        },
+        "generator_peak_rss_bytes": {
+          "type": "evaluation",
+          "rules": [["cal_rss_is_nonqualifying_zero", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]]
+        },
+        "compile_postgresql_bioseq_ns": {
+          "type": "evaluation",
+          "rules": [["cal_extension_compile_is_nonqualifying_zero", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]]
+        },
+        "compile_bioseq_bench_e2e_ns": {
+          "type": "evaluation",
+          "rules": [["cal_bench_compile_is_nonqualifying_zero", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]]
+        },
+        "compile_postgresql_bioseq_delta_percent": {
+          "type": "evaluation",
+          "rules": [["cal_extension_delta_is_zero", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]]
+        },
+        "compile_bioseq_bench_e2e_delta_percent": {
+          "type": "evaluation",
+          "rules": [["cal_bench_delta_is_zero", {"key": "from_array_arity_2"}, {"compare": "=", "tolerance%": 0, "aggregate": "min", "pairing": "by_iteration_exact"}, {"key": "qualification_reference"}]]
+        },
+        "generated_sql_bytes": {
+          "type": "evaluation",
+          "rules": [["cal_sql_bytes_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]]
+        },
+        "generated_sql_files": {
+          "type": "evaluation",
+          "rules": [["cal_sql_files_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]]
+        },
+        "generated_json_bytes": {
+          "type": "evaluation",
+          "rules": [["cal_json_bytes_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]]
+        },
+        "generated_json_files": {
+          "type": "evaluation",
+          "rules": [["cal_json_files_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]]
+        },
+        "generated_cpp_bytes": {
+          "type": "evaluation",
+          "rules": [["cal_cpp_bytes_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]]
+        },
+        "generated_cpp_files": {
+          "type": "evaluation",
+          "rules": [["cal_cpp_files_present", {"key": "from_array_arity_2"}, {"compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "min"}, {"key": "qualification_reference"}]]
+        }
+      }
+    }
+  }
+}

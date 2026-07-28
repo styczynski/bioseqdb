@@ -28,11 +28,13 @@ module;
 #include <utility>
 #include <vector>
 export module bioseq.indexing.minimizer_sequence;
+import bioseq.common.sequan_compat;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;            // MinimizerHashmapFragmentIndex, build_from_pairs, wire_for_each_*
+import bioseq.sequences;
 import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
 import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch E — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
 import bioseq.gpu.vulkan.phase_b_abi;                // VulkanRankLut
@@ -46,6 +48,7 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 import bioseq.common.hashing;                        // sha256_hasher / sha256_digest (§6 shared digest)
+import bioseq.sql_guc_settings;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 extern "C" void bioseq_sort_pair_run_u128_keys(
@@ -516,33 +519,27 @@ inline void serialize_v2_blob(char* out, sequence_size_t target_len_val,
     if (!poss.empty()) std::memcpy(out + HDR + REC * bkts.size(), poss.data(), sizeof(std::uint64_t) * poss.size());
 }
 
-enum class PairRunSortImpl : std::uint8_t {
-    std_sort = 0,
-    simd_u128_vqsort = 1,
-    simd_u128_vec_stream_1 = 2,
-    simd_u128_vec_stream_2 = 3,
-    simd_u128_vec_stream_4 = 4,
-};
+using PairRunSortImpl = bioseq::PairRunSortImpl;
 
-inline int bioseq_pair_run_sort_impl = static_cast<int>(PairRunSortImpl::std_sort);
+inline std::optional<PairRunSortImpl> pair_run_sort_override{};
 
 [[nodiscard]] inline PairRunSortImpl pair_run_sort_impl() noexcept {
-    switch (bioseq_pair_run_sort_impl) {
-    case static_cast<int>(PairRunSortImpl::simd_u128_vqsort):
-        return PairRunSortImpl::simd_u128_vqsort;
-    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_1):
-        return PairRunSortImpl::simd_u128_vec_stream_1;
-    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_2):
-        return PairRunSortImpl::simd_u128_vec_stream_2;
-    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_4):
-        return PairRunSortImpl::simd_u128_vec_stream_4;
-    default:
-        return PairRunSortImpl::std_sort;
-    }
+    return pair_run_sort_override.value_or(
+        bioseq::settings::mps_pair_sort_impl.value());
+}
+
+[[nodiscard]] inline std::optional<PairRunSortImpl>
+current_pair_run_sort_override() noexcept {
+    return pair_run_sort_override;
 }
 
 inline void set_pair_run_sort_impl(PairRunSortImpl impl) noexcept {
-    bioseq_pair_run_sort_impl = static_cast<int>(impl);
+    pair_run_sort_override = impl;
+}
+
+inline void restore_pair_run_sort_override(
+        std::optional<PairRunSortImpl> impl) noexcept {
+    pair_run_sort_override = impl;
 }
 
 [[nodiscard]] inline const char* pair_run_sort_impl_name() noexcept {
@@ -684,36 +681,6 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
         std::min({scalar_fragments_per_block, by_pos_field, by_dispatch}));
 }
 
-template <class Traits, std::size_t WindowSize, std::size_t KmerSize>
-[[nodiscard]] inline std::uint64_t vulkan_segment_pair_collect_peak_bytes(
-    std::uint64_t upload_bp) noexcept
-{
-    using storage_unit = typename Traits::storage_unit;
-    constexpr std::uint64_t lpu =
-        Traits::letters_per_unit == 0u ? 1u : Traits::letters_per_unit;
-    const std::uint64_t unit_count = upload_bp / lpu + (upload_bp % lpu != 0u ? 1u : 0u);
-    const std::uint64_t sequence_bytes_unaligned =
-        bioseq::parallelism::saturating_mul(
-            unit_count,
-            static_cast<std::uint64_t>(sizeof(storage_unit)));
-    const std::uint64_t sequence_bytes =
-        bioseq::gpu::vulkan::phase_c_align_up(sequence_bytes_unaligned, 4u);
-    const std::uint64_t max_minimizers = std::max<std::uint64_t>(64u, upload_bp);
-    const bioseq::gpu::vulkan::PhaseCSketchMemoryPlan plan =
-        bioseq::gpu::vulkan::phase_c_sketch_memory_plan(
-            upload_bp,
-            sequence_bytes,
-            sizeof(bioseq::gpu::vulkan::VulkanRankLut),
-            max_minimizers,
-            0u,
-            bioseq::gpu::vulkan::PhaseCSketchUse::sorted_pairs,
-            static_cast<std::uint32_t>(KmerSize),
-            static_cast<std::uint32_t>(WindowSize),
-            static_cast<std::uint32_t>(lpu));
-    return plan.valid
-        ? plan.admission_bytes
-        : (std::numeric_limits<std::uint64_t>::max)();
-}
 }  // namespace detail
 
 struct MpsSegmentMergeProbe {
@@ -1976,24 +1943,17 @@ struct MinimizerSequenceMergedIndex {
         }
     };
 
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     [[nodiscard]] static std::expected<
         SegmentUnitRange,
         MinimizerGenerationWireError>
     make_generation_collection_range(
-            lazy_compact_sequence<R, Scanner>& sequence,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             std::uint64_t core_lo,
             std::uint64_t core_hi,
             std::uint64_t halo_bp = 10u + 15u - 2u) noexcept {
-        using traits = typename lazy_compact_sequence<R, Scanner>::traits;
-        constexpr std::uint64_t lpu = traits::letters_per_unit;
-        static_assert(
-            sizeof(typename traits::storage_unit)
-                <= (std::numeric_limits<std::uint32_t>::max)());
-        static_assert(
-            lpu <= (std::numeric_limits<std::uint32_t>::max)());
         const std::uint64_t target_length = sequence.bp_size();
-        if (core_lo > core_hi || core_hi > target_length || lpu == 0) {
+        if (core_lo > core_hi || core_hi > target_length) {
             return std::unexpected(MinimizerGenerationWireError::bp_range);
         }
         const std::uint64_t collection_lo = core_lo >= halo_bp
@@ -2001,28 +1961,25 @@ struct MinimizerSequenceMergedIndex {
         const std::uint64_t collection_hi = core_hi
                 > target_length - std::min(target_length, halo_bp)
             ? target_length : core_hi + halo_bp;
-        const std::uint64_t cs_u = collection_lo / lpu;
-        const std::uint64_t ce_u = collection_hi / lpu
-            + (collection_hi % lpu != 0 ? 1u : 0u);
-        if (cs_u > (std::numeric_limits<sequence_size_t>::max)()
-            || ce_u > (std::numeric_limits<sequence_size_t>::max)()) {
+        if (collection_lo > (std::numeric_limits<sequence_size_t>::max)()
+            || collection_hi > (std::numeric_limits<sequence_size_t>::max)()) {
             return std::unexpected(
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
         return SegmentUnitRange{
-            .cs_u = static_cast<sequence_size_t>(cs_u),
-            .ce_u = static_cast<sequence_size_t>(ce_u),
+            .cs_u = static_cast<sequence_size_t>(collection_lo),
+            .ce_u = static_cast<sequence_size_t>(collection_hi),
             .core_lo_bp = static_cast<sequence_size_t>(core_lo),
             .core_hi_bp = static_cast<sequence_size_t>(core_hi),
         };
     }
 
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     [[nodiscard]] static std::expected<
         ExactSimdIndexExecutionProof,
         MinimizerGenerationWireError>
     collect_generation_core_run(
-            lazy_compact_sequence<R, Scanner>& sequence,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             MinimizerSketchBackend backend,
             SegmentUnitRange range,
             sketch_collector& collector,
@@ -2030,26 +1987,17 @@ struct MinimizerSequenceMergedIndex {
             MpsGenerationExecutionEvidence* execution_evidence = nullptr,
             bool allow_packed_paper = false,
             ScalarMpsBuildExecutionProof* scalar_build_proof = nullptr) {
-        using traits = typename lazy_compact_sequence<R, Scanner>::traits;
-        constexpr std::uint64_t lpu = traits::letters_per_unit;
         const std::uint64_t target_length = sequence.bp_size();
-        const std::uint64_t size_units = target_length / lpu
-            + (target_length % lpu != 0 ? 1u : 0u);
         if (range.core_lo_bp > range.core_hi_bp
             || range.core_hi_bp > target_length
-            || range.cs_u > range.ce_u || range.ce_u > size_units) {
+            || range.cs_u > range.ce_u || range.ce_u > target_length) {
             return std::unexpected(MinimizerGenerationWireError::bp_range);
         }
         if (range.core_lo_bp == range.core_hi_bp
             || range.cs_u == range.ce_u) {
             return ExactSimdIndexExecutionProof{};
         }
-        if (range.cs_u
-                > (std::numeric_limits<std::uint64_t>::max)() / lpu) {
-            return std::unexpected(
-                MinimizerGenerationWireError::arithmetic_overflow);
-        }
-        const std::uint64_t emit_base = range.cs_u * lpu;
+        const std::uint64_t emit_base = range.cs_u;
         constexpr std::uint64_t halo_bp = 10u + 15u - 2u;
         const std::uint64_t collection_hi = range.core_hi_bp
                 > target_length - std::min(target_length, halo_bp)
@@ -2074,27 +2022,26 @@ struct MinimizerSequenceMergedIndex {
         if (backend == MinimizerSketchBackend::VulkanSegment) {
             add_route(&MpsGenerationExecutionEvidence::vulkan_core_runs);
             bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof core_proof{};
-            auto pairs =
-                bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+            auto pairs = bioseq::gpu::vulkan::
+                collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
                     sequence,
-                    static_cast<std::size_t>(range.cs_u),
-                    static_cast<std::size_t>(range.ce_u),
-                    emit_base,
+                    range.cs_u,
+                    range.ce_u,
+                    static_cast<sequence_size_t>(emit_base),
                     range.core_lo_bp,
                     range.core_hi_bp,
-                    10,
-                    15,
+                    10u,
+                    15u,
                     execution_evidence != nullptr ? &core_proof : nullptr);
             if (execution_evidence != nullptr) {
                 execution_evidence->vulkan_proof.combine(core_proof);
-                execution_evidence->saturated =
-                    execution_evidence->saturated
+                execution_evidence->saturated = execution_evidence->saturated
                     || execution_evidence->vulkan_proof.saturated;
             }
             output.insert(
                 output.end(),
-                std::make_move_iterator(pairs.begin()),
-                std::make_move_iterator(pairs.end()));
+                std::make_move_iterator(pairs.pairs.begin()),
+                std::make_move_iterator(pairs.pairs.end()));
             return ExactSimdIndexExecutionProof{};
         }
         if (backend != MinimizerSketchBackend::Scalar
@@ -2109,20 +2056,19 @@ struct MinimizerSequenceMergedIndex {
         if (backend == MinimizerSketchBackend::ExactSimd) {
             add_route(&MpsGenerationExecutionEvidence::exact_simd_core_runs);
             exact_simd_proof = collect_exact_simd_index_range_or_throw(
-                    collector,
-                    sequence,
-                    static_cast<std::size_t>(range.cs_u),
-                    static_cast<std::size_t>(range.ce_u),
-                    10,
-                    15,
-                    0,
-                    "minimizers_per_sequence build");
+                collector,
+                sequence,
+                range.cs_u,
+                range.ce_u,
+                10u,
+                15u,
+                0u,
+                "minimizers_per_sequence build");
             if (execution_evidence != nullptr) {
                 execution_evidence->exact_simd_proof.combine(
                     exact_simd_proof);
                 execution_evidence->exact_simd_proof_present = true;
-                execution_evidence->saturated =
-                    execution_evidence->saturated
+                execution_evidence->saturated = execution_evidence->saturated
                     || execution_evidence->exact_simd_proof.saturated;
             }
         } else if (backend == MinimizerSketchBackend::PaperNtHashSimd) {
@@ -2131,15 +2077,15 @@ struct MinimizerSequenceMergedIndex {
                     MinimizerGenerationWireError::compatibility_mismatch);
             }
             add_route(&MpsGenerationExecutionEvidence::paper_nthash_core_runs);
-            std::uint64_t materialized_window_bp = 0;
+            std::uint64_t materialized_window_bp = 0u;
             const auto paper_result =
                 collect_bounded_packed_paper_nthash_index_lazy(
                     sequence,
                     range.cs_u,
                     range.ce_u,
                     local_bp_size,
-                    10,
-                    15,
+                    10u,
+                    15u,
                     collector,
                     &materialized_window_bp);
             if (execution_evidence != nullptr) {
@@ -2151,39 +2097,25 @@ struct MinimizerSequenceMergedIndex {
                 execution_evidence->packed_paper_proof.combine(
                     paper_result.proof);
                 execution_evidence->packed_paper_proof_present = true;
-                execution_evidence->saturated =
-                    execution_evidence->saturated
+                execution_evidence->saturated = execution_evidence->saturated
                     || execution_evidence->packed_paper_proof.saturated;
             }
             if (paper_result.status != PackedPaperNthashIndexStatus::ok) {
-                return std::unexpected(
-                    MinimizerGenerationWireError::compatibility_mismatch);
+                throw PackedPaperNthashIndexRuntimeError{
+                    paper_result.status,
+                    "minimizers_per_sequence build"};
             }
         } else {
             add_route(&MpsGenerationExecutionEvidence::scalar_core_runs);
-            auto begin = sequence.cbegin();
-            begin += range.cs_u;
-            auto end = sequence.cbegin();
-            end += range.ce_u;
-            collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
-                collector, sequence, begin, end, 10, 15);
+            bioseq::simd::HWY_NAMESPACE::collect_minimizers_segment_scalar<
+                MinimapSketchData>(
+                    collector, sequence, range.cs_u, range.ce_u, 10u, 15u);
             if (scalar_build_proof != nullptr) {
-                constexpr std::uint64_t maximum =
-                    (std::numeric_limits<std::uint64_t>::max)();
-                const std::uint64_t nominal_end = range.ce_u > maximum / lpu
-                    ? maximum
-                    : static_cast<std::uint64_t>(range.ce_u) * lpu;
-                const std::uint64_t actual_begin =
-                    std::min(target_length, emit_base);
-                const std::uint64_t actual_end =
-                    std::min(target_length, nominal_end);
                 scalar_build_proof->record_scalar_collection(
-                    actual_end >= actual_begin
-                        ? actual_end - actual_begin : 0u,
-                    static_cast<std::uint64_t>(range.ce_u - range.cs_u),
-                    static_cast<std::uint32_t>(
-                        sizeof(typename traits::storage_unit)),
-                    static_cast<std::uint32_t>(lpu));
+                    range.ce_u - range.cs_u,
+                    range.ce_u - range.cs_u,
+                    1u,
+                    1u);
             }
         }
         for (const MinimapSketchData& minimizer
@@ -2205,26 +2137,21 @@ struct MinimizerSequenceMergedIndex {
     /// Bounded serial preparation seam for rev3 POC/tests. Each source core is
     /// collected and spilled before the next is allocated; the returned MPS
     /// producer reopens these same external runs for both encoder passes.
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     [[nodiscard]] static std::expected<
         GenerationSpillResult,
         MinimizerGenerationWireError>
     spill_generation_replay_runs_serial(
             S& storage,
-            lazy_compact_sequence<R, Scanner>& sequence,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             MinimizerSketchBackend backend,
             std::uint64_t core_span_bp = 0,
             std::uint64_t position_segment_span_bp =
                 kMinimizerPreferredSegmentSpanBp,
             MpsGenerationExecutionEvidence* execution_evidence_out = nullptr) {
         static_assert(MpsSegmentQualifiedSpillStorage<S>);
-        using traits = typename lazy_compact_sequence<R, Scanner>::traits;
-        constexpr std::uint64_t lpu = traits::letters_per_unit;
-        static_assert(lpu > 0);
-        static_assert(Scanner::fragment_storage_units
-            <= (std::numeric_limits<std::uint64_t>::max)() / lpu);
-        constexpr std::uint64_t default_core_span =
-            static_cast<std::uint64_t>(Scanner::fragment_storage_units) * lpu;
+        constexpr std::uint64_t default_core_span = 32'768u;
+        constexpr std::uint64_t lpu = 1u;
         const std::uint64_t target_length = sequence.bp_size();
         struct EvidenceOutputGuard {
             MpsGenerationExecutionEvidence* output = nullptr;
@@ -2719,17 +2646,15 @@ struct MinimizerSequenceMergedIndex {
         return encoded;
     }
 
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     static void build(
         S& storage,
-        lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend,
         ScalarMpsBuildExecutionProof* scalar_build_proof_out = nullptr) {
-        using traits = typename lazy_compact_sequence<R, Scanner>::traits;
         constexpr std::size_t w = 10, k = 15;
-        constexpr std::size_t lpu        = traits::letters_per_unit;
-        constexpr std::size_t frag_units = Scanner::fragment_storage_units;
-        constexpr std::size_t frag_bp    = frag_units * lpu;
+        constexpr std::size_t lpu = 1u;
+        constexpr std::size_t frag_bp    = 32'768u;
         constexpr std::size_t W          = w + k - 2u;
         static_assert(frag_bp < (std::size_t{1} << 28), "fragment core positions fit 28-bit field");
         using detail::HDR; using detail::REC; using detail::BucketRecord;
@@ -2744,15 +2669,12 @@ struct MinimizerSequenceMergedIndex {
         if (capture_scalar_build_proof) {
             scalar_build_proof.bind_backend(
                 backend,
-                static_cast<std::uint32_t>(
-                    sizeof(typename traits::storage_unit)),
-                static_cast<std::uint32_t>(lpu));
+                1u,
+                1u);
         }
 
         const sequence_size_t total_bp = seq.bp_size();
         const std::size_t nfrag = (std::size_t)((total_bp + frag_bp - 1) / frag_bp);
-        if ((std::size_t)seq.size() != (std::size_t)((total_bp + lpu - 1) / lpu))
-            index_corruption_panic("minimizers_per_sequence build: scanner unit-span != ceil(total_bp/lpu)");
 
         // ---- Pass 0: collect globalised (kmer, encoded) pairs, spill sorted runs.
         const std::size_t run_buffer_bytes = storage.run_buffer_bytes();
@@ -2813,7 +2735,7 @@ struct MinimizerSequenceMergedIndex {
                     collector,
                     out,
                     nullptr,
-                    false,
+                    true,
                     scalar_proof)) {
                 index_corruption_panic(
                     "minimizers_per_sequence build: collection/core geometry failed");
@@ -2825,19 +2747,33 @@ struct MinimizerSequenceMergedIndex {
                 const std::uint64_t bp =
                     static_cast<std::uint64_t>(
                         range.core_hi_bp - range.core_lo_bp);
+                constexpr std::uint64_t maximum_paper_records_per_candidate =
+                    w + 1u;
+                const std::uint64_t maximum_output_pairs =
+                    backend == MinimizerSketchBackend::PaperNtHashSimd
+                        ? bioseq::parallelism::saturating_mul(
+                            bp, maximum_paper_records_per_candidate)
+                        : bp;
                 const std::uint64_t pair_preallocation_bytes =
-                    detail::admitted_vector_preallocation_bytes<pair_t>(bp);
+                    detail::admitted_vector_preallocation_bytes<pair_t>(
+                        maximum_output_pairs);
                 // The strict Vulkan segment leaf returns an owned pair run
                 // carrying its single scratch/result permit. Do not reserve
                 // that same GPU transaction again in this caller.
                 const std::uint64_t backend_scratch_bytes = 0u;
+                const std::uint64_t maximum_collection_candidates =
+                    bioseq::parallelism::saturating_mul(
+                        static_cast<std::uint64_t>(
+                            range.ce_u - range.cs_u),
+                        static_cast<std::uint64_t>(lpu));
                 const std::uint64_t maximum_collector_sketches =
                     backend == MinimizerSketchBackend::VulkanSegment
                         ? 0u
-                        : bioseq::parallelism::saturating_mul(
-                            static_cast<std::uint64_t>(
-                                range.ce_u - range.cs_u),
-                            static_cast<std::uint64_t>(lpu));
+                        : (backend == MinimizerSketchBackend::PaperNtHashSimd
+                            ? bioseq::parallelism::saturating_mul(
+                                maximum_collection_candidates,
+                                maximum_paper_records_per_candidate)
+                            : maximum_collection_candidates);
                 const std::uint64_t collector_headroom_bytes =
                     detail::admitted_vector_preallocation_bytes<
                         MinimapSketchData>(maximum_collector_sketches);
@@ -2889,7 +2825,7 @@ struct MinimizerSequenceMergedIndex {
                 scratch.permit = std::move(*permit);
                 if (!detail::reserve_admitted_vector_run_capacity(
                         scratch,
-                        bp,
+                        maximum_output_pairs,
                         bioseq::parallelism::saturating_add(
                             collector_headroom_bytes,
                             backend_scratch_bytes))) {
@@ -2976,6 +2912,10 @@ struct MinimizerSequenceMergedIndex {
                         // it to index_corruption_panic would abort the backend
                         // and hide the original unsupported shape/status.
                         throw;
+                    } catch (const PackedPaperNthashIndexRuntimeError&) {
+                        // Capability and memory-pressure rejection is an
+                        // operation failure, never persisted-index corruption.
+                        throw;
                     } catch (const std::exception& e) {
                         const std::string message =
                             "bioseq minimizers_per_sequence worker failed for core=["
@@ -3029,16 +2969,31 @@ struct MinimizerSequenceMergedIndex {
                     const std::uint64_t bp =
                         static_cast<std::uint64_t>(
                             range.core_hi_bp - range.core_lo_bp);
+                    constexpr std::uint64_t
+                        maximum_paper_records_per_candidate = w + 1u;
+                    const std::uint64_t maximum_output_pairs =
+                        backend == MinimizerSketchBackend::PaperNtHashSimd
+                            ? bioseq::parallelism::saturating_mul(
+                                bp, maximum_paper_records_per_candidate)
+                            : bp;
                     const std::uint64_t pair_preallocation_bytes =
-                        detail::admitted_vector_preallocation_bytes<pair_t>(bp);
+                        detail::admitted_vector_preallocation_bytes<pair_t>(
+                            maximum_output_pairs);
                     const std::uint64_t backend_scratch_bytes = 0u;
+                    const std::uint64_t maximum_collection_candidates =
+                        bioseq::parallelism::saturating_mul(
+                            static_cast<std::uint64_t>(
+                                range.ce_u - range.cs_u),
+                            static_cast<std::uint64_t>(lpu));
                     const std::uint64_t maximum_collector_sketches =
                         backend == MinimizerSketchBackend::VulkanSegment
                             ? 0u
-                            : bioseq::parallelism::saturating_mul(
-                                static_cast<std::uint64_t>(
-                                    range.ce_u - range.cs_u),
-                                static_cast<std::uint64_t>(lpu));
+                            : (backend
+                                    == MinimizerSketchBackend::PaperNtHashSimd
+                                ? bioseq::parallelism::saturating_mul(
+                                    maximum_collection_candidates,
+                                    maximum_paper_records_per_candidate)
+                                : maximum_collection_candidates);
                     const std::uint64_t collector_headroom_bytes =
                         detail::admitted_vector_preallocation_bytes<
                             MinimapSketchData>(maximum_collector_sketches);
@@ -3087,7 +3042,7 @@ struct MinimizerSequenceMergedIndex {
                     run.permit = std::move(*permit);
                     if (!detail::reserve_admitted_vector_run_capacity(
                             run,
-                            bp,
+                            maximum_output_pairs,
                             bioseq::parallelism::saturating_add(
                                 collector_headroom_bytes,
                                 backend_scratch_bytes))) {
@@ -3260,7 +3215,7 @@ struct MinimizerSequenceMergedIndex {
             backend != MinimizerSketchBackend::VulkanSegment
             && bioseq::parallelism::task_parallel(pool.mode())
             && pool.max_concurrency() > 1
-            && bioseq::storage::lazy_is_worker_shareable(seq)
+            && lazy_is_worker_shareable(seq)
             && nfrag >= bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT;
 
         if (!may_parallel_collect) {
@@ -3412,8 +3367,7 @@ struct MinimizerSequenceMergedIndex {
                 MpsV2BucketDirectory h;
                 h.magic = MpsV2BucketDirectory::kDirMagic; h.version = MpsV2BucketDirectory::kDirVersion;
                 h.flags = backend == MinimizerSketchBackend::VulkanSegment
-                    && bioseq::gpu::vulkan::alphabet_kernel_kind_of_traits<traits>()
-                        != bioseq::gpu::vulkan::AlphabetKernelKind::dna4_nt4
+                    && !std::same_as<Alphabet, ::seq::dna4>
                     ? MpsV2BucketDirectory::kBuiltFromPhaseC
                     : 0u;
                 h.num_buckets = dir.size(); h.total_distinct_kmers = total_distinct; h.total_positions = total_positions;
@@ -3435,23 +3389,27 @@ struct MinimizerSequenceMergedIndex {
     }
 
     // DOC0345 Patch E — scalar-default overload delegates to the explicit backend.
-    template <class R, class Scanner>
-    static void build(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
+    template <sequence_alphabet Alphabet>
+    static void build(
+            S& storage,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         build(storage, seq, MinimizerSketchBackend::Scalar);
     }
 
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     static void rebuild(
         S& storage,
-        lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend)
     {
         storage.clear_entity();
         build(storage, seq, backend);
     }
 
-    template <class R, class Scanner>
-    static void rebuild(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
+    template <sequence_alphabet Alphabet>
+    static void rebuild(
+            S& storage,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         rebuild(storage, seq, MinimizerSketchBackend::Scalar);
     }
 

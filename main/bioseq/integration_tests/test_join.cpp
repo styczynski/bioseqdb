@@ -23,7 +23,10 @@
 #include "common_tests_integration.h"
 #include "headers/pg_build_config.h"
 
+#include <chrono>
+#include <libpq-fe.h>
 #include <set>
+#include <thread>
 
 import bioseq.integration_tests.common;
 
@@ -34,6 +37,142 @@ namespace {
 constexpr std::string_view kHoeJoin = "hoe_join";
 constexpr std::string_view kHoeJoinLeft = "hoe_join_left";
 constexpr std::string_view kHoeJoinRight = "hoe_join_right";
+constexpr std::string_view kDoc0377PlannerTarget =
+    "doc0377_planner_target";
+constexpr std::string_view kDoc0377PlannerQueries =
+    "doc0377_planner_queries";
+
+void configure_doc0377_transformed_join(connection_test_context& ctx) {
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather = 0;"
+        "SET bioseq.read_sequence_index = off;"
+        "SET bioseq.aligner.vulkan_enabled = off;"
+        "SET bioseq.aligner.minimizer_algorithm = 'scalar';"
+        "SET bioseq.aligner.chaining_algorithm = 'scalar_mm2';"
+        "SET bioseq.aligner.base_alignment_algorithm = 'ksw2';"
+        "SET bioseq.aligner.min_chain_score = 20;");
+}
+
+void seed_doc0377_planner_fixture(connection_test_context& ctx) {
+    seed_hoe_fixture(ctx, kDoc0377PlannerTarget);
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE {} ("
+        "id int PRIMARY KEY, target_pk int NOT NULL, "
+        "seq bioseq.seq('dna4',32));"
+        "INSERT INTO {} VALUES "
+        "(1, 1, {}), "
+        "(2, 1, NULL::bioseq.seq('dna4',32)), "
+        "(3, 1, {});",
+        kDoc0377PlannerQueries, kDoc0377PlannerQueries,
+        hoe_probe_literal(), hoe_probe_literal()));
+    configure_doc0377_transformed_join(ctx);
+}
+
+[[nodiscard]] bool doc0377_plan_has_executable_mmsearch(
+        const std::vector<std::string>& plan) {
+    constexpr std::array<std::string_view, 5u> executable_prefixes{
+        "Filter: mmsearch", "Join Filter: mmsearch",
+        "One-Time Filter: mmsearch", "Index Cond: mmsearch",
+        "Recheck Cond: mmsearch"};
+    for (const auto& line : plan) {
+        for (const auto prefix : executable_prefixes) {
+            if (line.find(prefix) != std::string::npos) return true;
+        }
+    }
+    return false;
+}
+
+void require_doc0377_owned_qual_audit(
+        const std::vector<std::string>& plan) {
+    constexpr std::array<std::string_view, 5u> properties{
+        "Bioseq Owned RestrictInfo Path Copies",
+        "Bioseq Executable Mmsearch Qual Copies",
+        "Bioseq Vector Mmsearch Qual Copies",
+        "Bioseq Storage Mmsearch Qual Copies",
+        "Bioseq Descendant Mmsearch Owner Copies"};
+    for (const auto property : properties) {
+        const auto value = find_explain_property(plan, property);
+        INFO(property);
+        REQUIRE(value.has_value());
+        REQUIRE(*value == "0");
+    }
+    REQUIRE(plan_contains(
+        plan, "Bioseq Residual Mmsearch Qual: absent"));
+    REQUIRE_FALSE(doc0377_plan_has_executable_mmsearch(plan));
+}
+
+struct Doc0377AsyncUpdateOutcome {
+    bool sent = false;
+    bool lock_wait_observed = false;
+    bool consume_ok = true;
+    bool got_command = false;
+    bool got_tuple_result = false;
+    bool result_ok = true;
+    std::size_t returned_rows = 0u;
+    std::string error;
+};
+
+[[nodiscard]] Doc0377AsyncUpdateOutcome run_doc0377_locked_update(
+        connection_test_context& blocker,
+        connection_test_context& worker,
+        connection_test_context& observer,
+        const std::string& blocker_update,
+        const std::string& worker_update) {
+    Doc0377AsyncUpdateOutcome outcome{};
+    exec_sql(blocker, "BEGIN;");
+    exec_sql(blocker, blocker_update);
+    const long long worker_pid = query_scalar_int(
+        worker, "SELECT pg_backend_pid();");
+    outcome.sent = PQsendQuery(worker.raw(), worker_update.c_str()) == 1;
+    if (outcome.sent) {
+        for (unsigned attempt = 0; attempt < 1000; ++attempt) {
+            const long long waiting = query_scalar_int(observer, fmt::format(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE pid={} AND wait_event_type='Lock';",
+                worker_pid));
+            if (waiting == 1) {
+                outcome.lock_wait_observed = true;
+                break;
+            }
+            if (PQconsumeInput(worker.raw()) == 0) {
+                outcome.consume_ok = false;
+                break;
+            }
+            if (PQisBusy(worker.raw()) == 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
+    /* Never leave the worker blocked if a precondition fails.  Commit before
+     * inspecting libpq results so the EvalPlanQual recheck can complete. */
+    exec_sql(blocker, "COMMIT;");
+    if (!outcome.sent) return outcome;
+    for (unsigned attempt = 0;
+         attempt < 1000 && PQisBusy(worker.raw()) != 0; ++attempt) {
+        if (PQconsumeInput(worker.raw()) == 0) {
+            outcome.consume_ok = false;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (PQisBusy(worker.raw()) != 0) return outcome;
+    while (PGresult* result = PQgetResult(worker.raw())) {
+        const ExecStatusType status = PQresultStatus(result);
+        if (status == PGRES_COMMAND_OK) {
+            outcome.got_command = true;
+        } else if (status == PGRES_TUPLES_OK) {
+            outcome.got_tuple_result = true;
+            outcome.returned_rows += static_cast<std::size_t>(
+                PQntuples(result));
+        } else {
+            outcome.result_ok = false;
+            const char* message = PQresultErrorMessage(result);
+            if (message != nullptr) outcome.error += message;
+        }
+        PQclear(result);
+    }
+    return outcome;
+}
 
 }  // namespace
 
@@ -532,8 +671,11 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
 	REQUIRE(bad_typmod.contains("Valid alphabets: 'dna4'"));
 #else
 	REQUIRE(bad_typmod.sqlstate == "42804");
-	REQUIRE(bad_typmod.contains(
-		"bioseq mmsearch Param payload typmod is incompatible"));
+	REQUIRE((
+		bad_typmod.contains(
+			"bioseq mmsearch requires operands with the same bound alphabet")
+		|| bad_typmod.contains(
+			"cannot cast bound bioseq.seq across alphabets")));
 #endif
 	/* A generic PREPARE Param loses its declared typmod in the plan, so the
 	 * pgseq payload is checked at runtime when dna5 is enabled. The level-0
@@ -591,33 +733,37 @@ TEST_CASE("JOIN under update_index_on_insert=off and read_sequence_index=off "
     REQUIRE(saw_valid_cigar);
 }
 
-TEST_CASE("Mismatched typmod JOIN raises a clear error and the session survives",
-          "[join][typmod_mismatch][error][lifecycle]") {
-    // Cross-typmod mmsearch is undefined; the failure mode must
-    // remain at SQL/parse-error or ereport level, not SIGSEGV /
-    // connection drop. The post-failure session-reuse half
-    // exercises the MemoryContext reset callback's mid-scan-error
-    // path.
+TEST_CASE("Same-alphabet cross-width JOIN matches the identical-width oracle",
+          "[join][typmod_coalesce][rewidth][regression]") {
     auto ctx = fresh_context({kHoeJoin});
     seed_hoe_fixture(ctx, kHoeJoin);
-    exec_sql(ctx,
-             "DROP TABLE IF EXISTS hoe_64 CASCADE; "
-             "CREATE TABLE hoe_64 (pk INT PRIMARY KEY, seq0 bioseq.seq('dna4', 64)) USING bioseq; "
-             "SET bioseq.update_index_on_insert = on;");
+    exec_sql(
+        ctx,
+        fmt::format(
+            "DROP TABLE IF EXISTS hoe_64 CASCADE; "
+            "CREATE TABLE hoe_64 ("
+            "pk INT PRIMARY KEY, seq0 bioseq.seq('dna4', 64)) USING bioseq; "
+            "INSERT INTO hoe_64 SELECT pk, seq0 FROM {};",
+            kHoeJoin));
 
-    const std::string mismatch_sql = fmt::format(
-        "SELECT t1.pk FROM {} t1 JOIN hoe_64 t2 ON mmsearch(t1.seq0, t2.seq0);",
-        kHoeJoin);
-    // mismatch_sql either raises (preferred) or returns 0 rows with
-    // mmsearch acting as a tautology; what we MUST avoid is a
-    // backend crash. We accept either outcome via sql_fails (which
-    // intentionally swallows server errors) and then verify the
-    // session is still usable.
-    (void)sql_fails(ctx, mismatch_sql);
+    const auto same_width = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
+            "FROM {} t1 JOIN {} t2 ON mmsearch(t1.seq0, t2.seq0) "
+            "ORDER BY t1.pk, t2.pk;",
+            kHoeJoin,
+            kHoeJoin));
+    const auto cross_width = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
+            "FROM {} t1 JOIN hoe_64 t2 ON mmsearch(t1.seq0, t2.seq0) "
+            "ORDER BY t1.pk, t2.pk;",
+            kHoeJoin));
 
-    // Session must remain usable (no transaction abort, no
-    // connection drop) after the (potentially-failing) statement.
-    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+    REQUIRE_FALSE(same_width.empty());
+    REQUIRE(cross_width == same_width);
     exec_sql(ctx, "DROP TABLE IF EXISTS hoe_64 CASCADE;");
 }
 
@@ -744,21 +890,721 @@ TEST_CASE("PARAM_EXEC rescan clears NULL and restores the next primary query",
     REQUIRE(restored_matches == first_matches);
 }
 
-TEST_CASE("Many-to-many mmsearch as join filter pins documented NULL-projection behaviour",
-          "[join][documented_limitation][many_to_many]") {
-    // Pinning the documented limitation from REPORT §6: fully
-    // many-to-many produces NULL projections and no crash. If a
-    // future fix lifts this limitation the test will fail
-    // INTENTIONALLY and we update it. If the limitation accidentally
-    // changes from "NULL projections" to "garbage projections" or
-    // "crash" we catch it immediately.
+TEST_CASE("DOC0377 transformed LATERAL owner survives PARAM_EXEC rescans",
+          "[doc0377][mmsearch][slice][lateral][param][rescan]") {
+    auto ctx = fresh_context({kDoc0377PlannerTarget});
+    seed_doc0377_planner_fixture(ctx);
+
+    constexpr std::array<std::string_view, 2u> option_suffixes{
+        "", ", NULL::bioseq_aligner_options"};
+    for (const auto option_suffix : option_suffixes) {
+        DYNAMIC_SECTION((option_suffix.empty()
+                ? "two-argument mmsearch"
+                : "three-argument mmsearch with default options")) {
+            /* OFFSET 0 is the pull-up fence.  q.id=d.ord makes the child join
+             * genuinely parameterized; the same BioseqBatchJoin is rescanned
+             * over present -> NULL -> present sequence payloads. */
+            const std::string sql = fmt::format(
+                "SELECT d.ord, matched.pk "
+                "FROM (VALUES (1), (2), (3)) AS d(ord) "
+                "LEFT JOIN LATERAL ("
+                "  SELECT t.pk FROM {} AS t INNER JOIN {} AS q "
+                "    ON t.pk=q.target_pk AND t.pk>0 AND q.target_pk>0 "
+                "   AND mmsearch(t.seq0[0:], q.seq[0:]{} ) "
+                "  WHERE q.id=d.ord "
+                "  ORDER BY t.pk LIMIT 1 OFFSET 0"
+                ") AS matched ON true "
+                "ORDER BY d.ord, matched.pk;",
+                kDoc0377PlannerTarget, kDoc0377PlannerQueries,
+                option_suffix);
+            const auto plan = explain_text<false>(ctx, sql);
+            REQUIRE(plan_contains(plan, "Nested Loop"));
+            REQUIRE(plan_contains(
+                plan, "Custom Scan (BioseqBatchJoin)"));
+            REQUIRE(plan_contains(
+                plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+            REQUIRE(plan_contains(
+                plan, "Custom Scan (BioseqSliceProject)"));
+            require_doc0377_owned_qual_audit(plan);
+
+            const auto rows = query_rows(ctx, sql);
+            REQUIRE(rows.size() == 3u);
+            REQUIRE((rows[0] == row_t{
+                std::optional<std::string>{"1"},
+                std::optional<std::string>{"1"}}));
+            REQUIRE((rows[1] == row_t{
+                std::optional<std::string>{"2"}, std::nullopt}));
+            REQUIRE((rows[2] == row_t{
+                std::optional<std::string>{"3"},
+                std::optional<std::string>{"1"}}));
+        }
+    }
+}
+
+TEST_CASE("DOC0377 transformed owner remains inside CTE and subquery fences",
+          "[doc0377][mmsearch][slice][cte][subquery][ownership]") {
+    auto ctx = fresh_context({kDoc0377PlannerTarget});
+    seed_doc0377_planner_fixture(ctx);
+
+    constexpr std::array<std::string_view, 2u> option_suffixes{
+        "", ", NULL::bioseq_aligner_options"};
+    for (const auto option_suffix : option_suffixes) {
+        const std::string owned_body = fmt::format(
+            "SELECT t.pk, q.id, bioseq.cigar(t.pk) AS cigar "
+            "FROM {} AS t INNER JOIN {} AS q "
+            "ON q.id=1 AND t.pk=q.target_pk "
+            "AND mmsearch(t.seq0[0:], q.seq[0:]{} )",
+            kDoc0377PlannerTarget, kDoc0377PlannerQueries,
+            option_suffix);
+        const std::string flat_sql = owned_body +
+            " ORDER BY 1, 2, 3;";
+        const std::string cte_sql = fmt::format(
+            "WITH owned AS MATERIALIZED ({}) "
+            "SELECT pk, id, cigar FROM owned ORDER BY 1, 2, 3;",
+            owned_body);
+        const std::string subquery_sql = fmt::format(
+            "SELECT pk, id, cigar FROM ({} OFFSET 0) AS owned "
+            "ORDER BY 1, 2, 3;",
+            owned_body);
+
+        const auto expected = query_rows(ctx, flat_sql);
+        REQUIRE_FALSE(expected.empty());
+        for (const auto& sql : {cte_sql, subquery_sql}) {
+            const auto plan = explain_text<false>(ctx, sql);
+            REQUIRE(plan_contains(
+                plan, "Custom Scan (BioseqBatchJoin)"));
+            REQUIRE(plan_contains(
+                plan, "Custom Scan (BioseqSliceProject)"));
+            require_doc0377_owned_qual_audit(plan);
+            REQUIRE(query_rows(ctx, sql) == expected);
+        }
+        const auto cte_plan = explain_text<false>(ctx, cte_sql);
+        REQUIRE(plan_contains(cte_plan, "CTE Scan"));
+    }
+}
+
+TEST_CASE("DOC0377 partition child reparameterization retains one owner",
+          "[doc0377][mmsearch][slice][partition][lateral][rescan]") {
+    auto ctx = fresh_context({kDoc0377PlannerTarget});
+    seed_hoe_fixture(ctx, kDoc0377PlannerTarget);
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE doc0377_partition_queries ("
+        "id int, bucket int, target_pk int NOT NULL, "
+        "seq bioseq.seq('dna4',32)) PARTITION BY RANGE(bucket);"
+        "CREATE TEMP TABLE doc0377_partition_queries_lo "
+        "PARTITION OF doc0377_partition_queries "
+        "FOR VALUES FROM (0) TO (10);"
+        "CREATE TEMP TABLE doc0377_partition_queries_hi "
+        "PARTITION OF doc0377_partition_queries "
+        "FOR VALUES FROM (10) TO (20);"
+        "INSERT INTO doc0377_partition_queries VALUES "
+        "(1, 5, 1, {}), "
+        "(2, 15, 1, NULL::bioseq.seq('dna4',32)), "
+        "(3, 5, 1, {});",
+        hoe_probe_literal(), hoe_probe_literal()));
+    configure_doc0377_transformed_join(ctx);
+    exec_sql(ctx,
+        "SET enable_partition_pruning = off;"
+        "SET enable_hashjoin = off;"
+        "SET enable_mergejoin = off;"
+        "SET enable_nestloop = on;");
+
+    const std::string sql = fmt::format(
+        "SELECT d.ord, matched.pk "
+        "FROM (VALUES (1,5), (2,15), (3,5)) AS d(ord,bucket) "
+        "LEFT JOIN LATERAL ("
+        "  SELECT t.pk FROM {} AS t "
+        "  INNER JOIN doc0377_partition_queries AS q "
+        "    ON t.pk=q.target_pk "
+        "   AND mmsearch(t.seq0[0:], q.seq[0:]) "
+        "  WHERE q.id=d.ord AND q.bucket=d.bucket "
+        "  ORDER BY t.pk LIMIT 1 OFFSET 0"
+        ") AS matched ON true ORDER BY d.ord;",
+        kDoc0377PlannerTarget);
+    const auto plan = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Append"));
+    REQUIRE(plan_contains(plan, "doc0377_partition_queries_lo"));
+    REQUIRE(plan_contains(plan, "doc0377_partition_queries_hi"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    require_doc0377_owned_qual_audit(plan);
+
+    const auto rows = query_rows(ctx, sql);
+    REQUIRE(rows.size() == 3u);
+    REQUIRE(rows[0][0] == "1");
+    REQUIRE(rows[0][1] == "1");
+    REQUIRE(rows[1][0] == "2");
+    REQUIRE_FALSE(rows[1][1].has_value());
+    REQUIRE(rows[2][0] == "3");
+    REQUIRE(rows[2][1] == "1");
+}
+
+TEST_CASE("DOC0377 dominating SliceProject spans Append branches across rescans",
+          "[doc0377][mmsearch][slice][partition][append][lateral][rescan][owner-dominance]") {
+    auto ctx = fresh_context({kDoc0377PlannerTarget});
+    seed_hoe_fixture(ctx, kDoc0377PlannerTarget);
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE doc0377_owner_append_queries ("
+        "id int, driver int, bucket int, target_pk int NOT NULL, "
+        "seq bioseq.seq('dna4',32)) PARTITION BY RANGE(bucket);"
+        "CREATE TEMP TABLE doc0377_owner_append_queries_lo "
+        "PARTITION OF doc0377_owner_append_queries "
+        "FOR VALUES FROM (0) TO (10);"
+        "CREATE TEMP TABLE doc0377_owner_append_queries_hi "
+        "PARTITION OF doc0377_owner_append_queries "
+        "FOR VALUES FROM (10) TO (20);"
+        "INSERT INTO doc0377_owner_append_queries "
+        "SELECT d.driver * 100 + branch.row_delta, d.driver, "
+        "       branch.bucket, 1, {} "
+        "FROM (VALUES (1), (2), (3)) AS d(driver) "
+        "CROSS JOIN (VALUES (1,5), (2,5), (3,15), (4,15)) "
+        "AS branch(row_delta,bucket);",
+        hoe_probe_literal()));
+    configure_doc0377_transformed_join(ctx);
+    exec_sql(ctx,
+        "SET enable_partition_pruning = off;"
+        "SET enable_hashjoin = off;"
+        "SET enable_mergejoin = off;"
+        "SET enable_nestloop = on;"
+        "SET enable_memoize = off;");
+
+    const std::string sql = fmt::format(
+        "SELECT d.pass_no, d.driver, matched.ids, matched.hit_count "
+        "FROM (VALUES (1,1), (2,2), (3,3), "
+        "             (4,1), (5,2), (6,3)) AS d(pass_no,driver) "
+        "CROSS JOIN LATERAL ("
+        "  SELECT string_agg(hit.id::text, ',' ORDER BY hit.id) AS ids, "
+        "         count(*)::bigint AS hit_count "
+        "  FROM ("
+        "    SELECT DISTINCT q.id, t.pk "
+        "    FROM {} AS t "
+        "    INNER JOIN doc0377_owner_append_queries AS q "
+        "      ON t.pk=q.target_pk "
+        "     AND mmsearch("
+        "       t.seq0[0:16] OPERATOR(bioseq.||) t.seq0[16:], "
+        "       q.seq[0:]) "
+        "    WHERE q.driver=d.driver "
+        "    OFFSET 0"
+        "  ) AS hit"
+        ") AS matched "
+        "ORDER BY d.pass_no;",
+        kDoc0377PlannerTarget);
+    const auto plan = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Nested Loop"));
+    REQUIRE(plan_contains(plan, "Values Scan"));
+    REQUIRE(plan_contains(plan, "Append"));
+    REQUIRE(plan_contains(plan, "doc0377_owner_append_queries_lo"));
+    REQUIRE(plan_contains(plan, "doc0377_owner_append_queries_hi"));
+    REQUIRE(plan_contains(plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+    require_doc0377_owned_qual_audit(plan);
+
+    std::size_t batch_join_count = 0u;
+    std::size_t slice_project_count = 0u;
+    std::optional<std::size_t> batch_join_line;
+    std::optional<std::size_t> slice_project_line;
+    std::optional<std::size_t> append_line;
+    for (std::size_t index = 0u; index < plan.size(); ++index) {
+        if (plan[index].find("Custom Scan (BioseqBatchJoin)")
+                != std::string::npos) {
+            ++batch_join_count;
+            if (!batch_join_line.has_value()) batch_join_line = index;
+        }
+        if (plan[index].find("Custom Scan (BioseqSliceProject)")
+                != std::string::npos) {
+            ++slice_project_count;
+            if (!slice_project_line.has_value()) slice_project_line = index;
+        }
+        if (!append_line.has_value()
+            && plan[index].find("Append") != std::string::npos) {
+            append_line = index;
+        }
+    }
+    REQUIRE(batch_join_count == 1u);
+    REQUIRE(slice_project_count == 1u);
+    REQUIRE(batch_join_line.has_value());
+    REQUIRE(slice_project_line.has_value());
+    REQUIRE(append_line.has_value());
+    REQUIRE(*batch_join_line < *slice_project_line);
+    REQUIRE(*slice_project_line < *append_line);
+
+    const auto batch_capacity = find_explain_property(
+        plan, "Bioseq Batch Capacity");
+    REQUIRE(batch_capacity.has_value());
+    const long long capacity = std::stoll(*batch_capacity);
+    REQUIRE(capacity == 8192);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT max(branch_rows) FROM ("
+        " SELECT count(*) AS branch_rows "
+        " FROM doc0377_owner_append_queries_lo "
+        " UNION ALL "
+        " SELECT count(*) AS branch_rows "
+        " FROM doc0377_owner_append_queries_hi"
+        ") AS branch_counts;") < capacity);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT max(driver_rows) FROM ("
+        " SELECT driver, count(*) AS driver_rows "
+        " FROM doc0377_owner_append_queries "
+        " GROUP BY driver"
+        ") AS driver_counts;") == 4);
+
+#ifdef BIOSEQ_TEST_INDEXES
+    exec_sql(ctx,
+        "SELECT bioseq_internal.reset_sequence_source_counters();");
+#endif
+    const rowset_t rows = query_rows(ctx, sql);
+    const rowset_t expected{
+        {"1", "1", "101,102,103,104", "4"},
+        {"2", "2", "201,202,203,204", "4"},
+        {"3", "3", "301,302,303,304", "4"},
+        {"4", "1", "101,102,103,104", "4"},
+        {"5", "2", "201,202,203,204", "4"},
+        {"6", "3", "301,302,303,304", "4"},
+    };
+    REQUIRE(rows == expected);
+
+#ifdef BIOSEQ_TEST_INDEXES
+    const auto source_counter = [&ctx](const std::string_view name) {
+        return query_scalar_int(ctx, fmt::format(
+            "SELECT (bioseq_internal.sequence_source_counters()"
+            "        ->>'{}')::bigint;", name));
+    };
+    REQUIRE(source_counter("registries_created") == 1);
+    REQUIRE(source_counter("domains_created") == 1);
+    REQUIRE(source_counter("domains_reused") >= 5);
+    REQUIRE(source_counter("registries_created")
+            == source_counter("registries_destroyed"));
+    REQUIRE(source_counter("domains_created")
+            == source_counter("domains_destroyed"));
+    REQUIRE(source_counter("leases_acquired")
+            == source_counter("leases_released"));
+    REQUIRE(source_counter("live_registries") == 0);
+    REQUIRE(source_counter("live_domains") == 0);
+    REQUIRE(source_counter("live_leases") == 0);
+#endif
+}
+
+TEST_CASE("DOC0377 generic and custom plans retain transformed ownership",
+          "[doc0377][mmsearch][slice][prepared][generic][custom][limit]") {
+    auto ctx = fresh_context({kDoc0377PlannerTarget});
+    seed_doc0377_planner_fixture(ctx);
+
+    constexpr std::array<std::string_view, 2u> plan_modes{
+        "force_generic_plan", "force_custom_plan"};
+    constexpr std::array<std::string_view, 2u> option_suffixes{
+        "", ", NULL::bioseq_aligner_options"};
+    for (std::size_t mode_index = 0u; mode_index < plan_modes.size();
+         ++mode_index) {
+        exec_sql(ctx, fmt::format(
+            "SET plan_cache_mode='{}';", plan_modes[mode_index]));
+        for (std::size_t oid_index = 0u;
+             oid_index < option_suffixes.size(); ++oid_index) {
+            const std::string statement = fmt::format(
+                "doc0377_owned_{}_{}", mode_index, oid_index);
+            exec_sql(ctx, fmt::format(
+                "PREPARE {}(int) AS "
+                "SELECT t.pk, q.id FROM {} AS t INNER JOIN {} AS q "
+                "ON t.pk=q.target_pk AND t.pk>0 AND q.target_pk>0 "
+                "AND q.id=$1 AND mmsearch(t.seq0[0:], q.seq[0:]{} ) "
+                "ORDER BY t.pk LIMIT 1;",
+                statement, kDoc0377PlannerTarget,
+                kDoc0377PlannerQueries, option_suffixes[oid_index]));
+            const auto plan = explain_text<false>(ctx, fmt::format(
+                "EXECUTE {}(1);", statement));
+            REQUIRE(plan_contains(
+                plan, "Custom Scan (BioseqBatchJoin)"));
+            REQUIRE(plan_contains(
+                plan, "Custom Scan (BioseqSliceProject)"));
+            require_doc0377_owned_qual_audit(plan);
+
+            const auto first = query_rows(
+                ctx, fmt::format("EXECUTE {}(1);", statement));
+            const auto null_query = query_rows(
+                ctx, fmt::format("EXECUTE {}(2);", statement));
+            const auto restored = query_rows(
+                ctx, fmt::format("EXECUTE {}(3);", statement));
+            const auto repeated = query_rows(
+                ctx, fmt::format("EXECUTE {}(1);", statement));
+            const auto null_param = query_rows(
+                ctx, fmt::format("EXECUTE {}(NULL);", statement));
+            REQUIRE(first.size() == 1u);
+            REQUIRE((first.front() == row_t{
+                std::optional<std::string>{"1"},
+                std::optional<std::string>{"1"}}));
+            REQUIRE(restored.size() == 1u);
+            REQUIRE((restored.front() == row_t{
+                std::optional<std::string>{"1"},
+                std::optional<std::string>{"3"}}));
+            REQUIRE(repeated == first);
+            REQUIRE(null_query.empty());
+            REQUIRE(null_param.empty());
+            exec_sql(ctx, fmt::format("DEALLOCATE {};", statement));
+        }
+    }
+}
+
+TEST_CASE("DOC0377 final target query options order is exact across rescans",
+          "[doc0377][mmsearch][slice][effects][order][rescan]") {
+    auto ctx = fresh_context({kDoc0377PlannerTarget});
+    seed_doc0377_planner_fixture(ctx);
+    exec_sql(ctx,
+        "CREATE TEMP TABLE doc0377_effect_log ("
+        "ordinal bigserial PRIMARY KEY, label text UNIQUE NOT NULL);"
+        "CREATE FUNCTION pg_temp.doc0377_mark_once(label text, value text) "
+        "RETURNS text LANGUAGE plpgsql VOLATILE AS $$"
+        "BEGIN "
+        "  INSERT INTO doc0377_effect_log(label) VALUES(label); "
+        "  RETURN value; "
+        "END$$;");
+
+    const std::string sql = fmt::format(
+        "SELECT d.ord, "
+        "CASE WHEN matched.pk IS NULL THEN NULL ELSE "
+        " pg_temp.doc0377_mark_once('target-'||d.ord, "
+        " matched.target_value) END, "
+        "CASE WHEN matched.pk IS NULL THEN NULL ELSE "
+        " pg_temp.doc0377_mark_once('query-'||d.ord, "
+        " matched.query_value) END, "
+        "CASE WHEN matched.pk IS NULL THEN NULL ELSE "
+        " pg_temp.doc0377_mark_once('options-'||d.ord, 'default') END "
+        "FROM (VALUES (1), (2), (3)) AS d(ord) "
+        "LEFT JOIN LATERAL ("
+        "  SELECT t.pk, t.seq0[0:]::text AS target_value, "
+        "         q.seq[0:]::text AS query_value "
+        "  FROM {} AS t INNER JOIN {} AS q "
+        "    ON t.pk=q.target_pk "
+        "   AND mmsearch(t.seq0[0:], q.seq[0:], "
+        "       NULL::bioseq_aligner_options) "
+        "  WHERE q.id=d.ord ORDER BY t.pk LIMIT 1 OFFSET 0"
+        ") AS matched ON true ORDER BY d.ord;",
+        kDoc0377PlannerTarget, kDoc0377PlannerQueries);
+    const auto plan = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    require_doc0377_owned_qual_audit(plan);
+    REQUIRE(query_scalar_int(
+        ctx, "SELECT count(*) FROM doc0377_effect_log;") == 0);
+
+    constexpr std::string_view expected_order =
+        "target-1,query-1,options-1,target-3,query-3,options-3";
+    for (unsigned execution = 0; execution < 2u; ++execution) {
+        exec_sql(ctx, "TRUNCATE doc0377_effect_log RESTART IDENTITY;");
+        const auto rows = query_rows(ctx, sql);
+        REQUIRE(rows.size() == 3u);
+        REQUIRE(rows[0][1].has_value());
+        REQUIRE(rows[0][2].has_value());
+        REQUIRE(rows[0][3] == "default");
+        REQUIRE_FALSE(rows[1][1].has_value());
+        REQUIRE_FALSE(rows[1][2].has_value());
+        REQUIRE_FALSE(rows[1][3].has_value());
+        REQUIRE(rows[2][1].has_value());
+        REQUIRE(rows[2][2].has_value());
+        REQUIRE(rows[2][3] == "default");
+        REQUIRE(query_scalar(ctx,
+            "SELECT string_agg(label,',' ORDER BY ordinal) "
+            "FROM doc0377_effect_log;") == expected_order);
+    }
+}
+
+TEST_CASE("DOC0377 ineligible mmsearch arguments keep target query options order",
+          "[doc0377][mmsearch][effects][order][fail-closed][prepared]") {
+    connection_test_context ctx;
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE doc0377_argument_effect_targets ("
+        "id int PRIMARY KEY, seq bioseq.seq('dna4',32));"
+        "CREATE TEMP TABLE doc0377_argument_effect_queries ("
+        "id int PRIMARY KEY, seq bioseq.seq('dna4',32));"
+        "INSERT INTO doc0377_argument_effect_targets VALUES (1,{});"
+        "INSERT INTO doc0377_argument_effect_queries VALUES (1,{});"
+        "CREATE TEMP SEQUENCE doc0377_argument_effect_sequence;"
+        "CREATE FUNCTION pg_temp.doc0377_effect_target("
+        "value bioseq.seq) RETURNS bioseq.seq LANGUAGE plpgsql VOLATILE "
+        "AS $$DECLARE observed bigint; BEGIN "
+        "observed := nextval('pg_temp.doc0377_argument_effect_sequence'); "
+        "IF observed <> 1 THEN RAISE EXCEPTION "
+        "'target order/duplication: %', observed; END IF; "
+        "RETURN value; END$$;"
+        "CREATE FUNCTION pg_temp.doc0377_effect_query("
+        "value bioseq.seq) RETURNS bioseq.seq LANGUAGE plpgsql VOLATILE "
+        "AS $$DECLARE observed bigint; BEGIN "
+        "observed := nextval('pg_temp.doc0377_argument_effect_sequence'); "
+        "IF observed <> 2 THEN RAISE EXCEPTION "
+        "'query order/duplication: %', observed; END IF; "
+        "RETURN value; END$$;"
+        "CREATE FUNCTION pg_temp.doc0377_effect_options("
+        "value bioseq_aligner_options) RETURNS bioseq_aligner_options "
+        "LANGUAGE plpgsql VOLATILE AS $$DECLARE observed bigint; BEGIN "
+        "observed := nextval('pg_temp.doc0377_argument_effect_sequence'); "
+        "IF observed <> 3 THEN RAISE EXCEPTION "
+        "'options order/duplication: %', observed; END IF; "
+        "RETURN value; END$$;",
+        hoe_probe_literal(), hoe_probe_literal()));
+
+    constexpr std::array<std::string_view, 2u> plan_modes{
+        "force_generic_plan", "force_custom_plan"};
+    for (std::size_t index = 0u; index < plan_modes.size(); ++index) {
+        exec_sql(ctx, fmt::format(
+            "SET plan_cache_mode='{}';", plan_modes[index]));
+        const std::string statement = fmt::format(
+            "doc0377_argument_effects_{}", index);
+        exec_sql(ctx, fmt::format(
+            "PREPARE {}(int) AS "
+            "SELECT t.id FROM doc0377_argument_effect_targets AS t "
+            "INNER JOIN doc0377_argument_effect_queries AS q "
+            "ON t.id=q.id AND q.id=$1 "
+            "AND mmsearch("
+            "pg_temp.doc0377_effect_target(t.seq[0:]), "
+            "pg_temp.doc0377_effect_query(q.seq[0:]), "
+            "pg_temp.doc0377_effect_options("
+            "NULL::bioseq_aligner_options));",
+            statement));
+
+        /* EXPLAIN/PREPARE must not evaluate any volatile argument.  The
+         * functions intentionally make the candidate ineligible; eligible
+         * options remain raw/folded Consts by contract and are covered in
+         * test_mmsearch.cpp. */
+        exec_sql(ctx,
+            "SELECT setval('pg_temp.doc0377_argument_effect_sequence',"
+            "1,false);");
+        const auto plan = explain_text<false>(ctx, fmt::format(
+            "EXECUTE {}(1);", statement));
+        REQUIRE_FALSE(plan.empty());
+        REQUIRE(query_scalar(ctx,
+            "SELECT is_called::text FROM "
+            "pg_temp.doc0377_argument_effect_sequence;") == "false");
+
+        for (unsigned execution = 0; execution < 2u; ++execution) {
+            exec_sql(ctx,
+                "SELECT setval("
+                "'pg_temp.doc0377_argument_effect_sequence',1,false);");
+            const auto error = sql_error(ctx, fmt::format(
+                "EXECUTE {}(1);", statement));
+            REQUIRE(error.sqlstate == "0A000");
+            REQUIRE((error.contains("not owned")
+                     || error.contains("no Bioseq executor owner")));
+            REQUIRE(query_scalar_int(ctx,
+                "SELECT last_value FROM "
+                "pg_temp.doc0377_argument_effect_sequence;") == 3);
+            REQUIRE(query_scalar(ctx,
+                "SELECT is_called::text FROM "
+                "pg_temp.doc0377_argument_effect_sequence;") == "true");
+        }
+        exec_sql(ctx, fmt::format("DEALLOCATE {};", statement));
+    }
+}
+
+TEST_CASE("DOC0377 projection-only EPQ evaluates volatile final once",
+          "[doc0377][slice][epq][volatile][exactly-once]") {
+    constexpr std::string_view table = "doc0377_projection_epq";
+    constexpr std::string_view source = "doc0377_projection_epq_source";
+    constexpr std::string_view log = "doc0377_projection_epq_log";
+    auto setup = fresh_context({log, source, table});
+    exec_sql(setup,
+        "DROP FUNCTION IF EXISTS public.doc0377_projection_epq_once("
+        "text,text);"
+        "CREATE TABLE doc0377_projection_epq ("
+        "id int PRIMARY KEY, source_id int NOT NULL, use_suffix boolean "
+        "NOT NULL, touch int, sliced text);"
+        "CREATE TABLE doc0377_projection_epq_source ("
+        "id int PRIMARY KEY, seq bioseq.seq('dna4',32)) "
+        "USING bioseq;"
+        "CREATE TABLE doc0377_projection_epq_log ("
+        "ordinal bigserial PRIMARY KEY, label text UNIQUE NOT NULL, "
+        "observed text);"
+        "INSERT INTO doc0377_projection_epq VALUES (1,1,false,0,NULL);"
+        "INSERT INTO doc0377_projection_epq_source VALUES "
+        "(1,'AAAACCCC'::bioseq.seq('dna4',32));"
+        "CREATE FUNCTION public.doc0377_projection_epq_once("
+        "label text, value text) RETURNS text LANGUAGE plpgsql VOLATILE "
+        "AS $$BEGIN "
+        "INSERT INTO public.doc0377_projection_epq_log(label,observed) "
+        "VALUES(label,value); RETURN value; END$$;");
+
+    const std::string update_sql =
+        "UPDATE public.doc0377_projection_epq AS h "
+        "SET touch=h.touch+1, sliced=CASE WHEN h.use_suffix "
+        "THEN s.suffix ELSE s.prefix END "
+        "FROM (SELECT id, seq[0:4]::text AS prefix, "
+        "seq[4:]::text AS suffix "
+        "FROM public.doc0377_projection_epq_source OFFSET 0) AS s "
+        "WHERE h.id=1 AND h.source_id=s.id "
+        "RETURNING public.doc0377_projection_epq_once("
+        "'projection-final',h.sliced);";
+    const auto plan = explain_text<false>(setup, update_sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_contains(plan, "Subquery Scan on s"));
+    REQUIRE(query_scalar_int(setup,
+        "SELECT count(*) FROM doc0377_projection_epq_log;") == 0);
+
+    connection_test_context blocker;
+    connection_test_context worker;
+    connection_test_context observer;
+    exec_sql(worker, "SET statement_timeout='15s';");
+    const auto outcome = run_doc0377_locked_update(
+        blocker, worker, observer,
+        "UPDATE public.doc0377_projection_epq "
+        "SET use_suffix=true,touch=touch+1 WHERE id=1;",
+        update_sql);
+    INFO(outcome.error);
+    REQUIRE(outcome.sent);
+    REQUIRE(outcome.lock_wait_observed);
+    REQUIRE(outcome.consume_ok);
+    REQUIRE(outcome.result_ok);
+    REQUIRE(outcome.got_tuple_result);
+    REQUIRE(outcome.returned_rows == 1u);
+    REQUIRE(query_scalar(setup,
+        "SELECT string_agg(label,',' ORDER BY ordinal) "
+        "FROM doc0377_projection_epq_log;") == "projection-final");
+    REQUIRE(query_scalar(setup,
+        "SELECT observed FROM doc0377_projection_epq_log;") == "CCCC");
+    REQUIRE(query_scalar_int(setup,
+        "SELECT touch FROM doc0377_projection_epq WHERE id=1;") == 2);
+    REQUIRE(query_scalar_int(setup,
+        "SELECT source_id FROM doc0377_projection_epq WHERE id=1;") == 1);
+    REQUIRE(query_scalar_int(setup,
+        "SELECT use_suffix::int FROM doc0377_projection_epq WHERE id=1;")
+        == 1);
+    REQUIRE(query_scalar(setup,
+        "SELECT sliced FROM doc0377_projection_epq WHERE id=1;")
+        == "CCCC");
+    exec_sql(setup,
+        "DROP FUNCTION public.doc0377_projection_epq_once(text,text);");
+}
+
+TEST_CASE("DOC0377 BatchJoin EPQ preserves final effect order exactly once",
+          "[doc0377][mmsearch][slice][batchjoin][epq][effects]") {
+    constexpr std::string_view target = "doc0377_batchjoin_epq_target";
+    constexpr std::string_view queries = "doc0377_batchjoin_epq_queries";
+    constexpr std::string_view slice_source =
+        "doc0377_batchjoin_epq_slice_source";
+    constexpr std::string_view result = "doc0377_batchjoin_epq_result";
+    constexpr std::string_view log = "doc0377_batchjoin_epq_log";
+    auto setup = fresh_context({log, result, slice_source, queries, target});
+    create_seq_table(
+        setup,
+        seq_table_spec{
+            .name = std::string{target},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{
+            .pk = 1,
+            .sequences = {hoe_seed_rows().front().sequences.front()},
+        }});
+    exec_sql(setup, fmt::format(
+        "DROP FUNCTION IF EXISTS public.doc0377_batchjoin_epq_once("
+        "text,text);"
+        "CREATE TABLE {} (id int PRIMARY KEY, target_pk int NOT NULL, "
+        "seq bioseq.seq('dna4',32));"
+        "INSERT INTO {} SELECT id,1,{} "
+        "FROM generate_series(1,16) AS ids(id);"
+        "CREATE TABLE {} (id int PRIMARY KEY, "
+        "seq bioseq.seq('dna4',32)) USING bioseq;"
+        "INSERT INTO {} VALUES (1,{});"
+        "CREATE TABLE {} (id int PRIMARY KEY, target_pk int NOT NULL, "
+        "query_id int NOT NULL, use_suffix boolean NOT NULL, touch int, "
+        "matched_query text);"
+        "INSERT INTO {} VALUES (1,1,1,false,0,NULL);"
+        "CREATE TABLE {} (ordinal bigserial PRIMARY KEY, "
+        "label text UNIQUE NOT NULL, observed text);"
+        "CREATE FUNCTION public.doc0377_batchjoin_epq_once("
+        "label text, value text) RETURNS text LANGUAGE plpgsql VOLATILE "
+        "AS $$BEGIN INSERT INTO public.{}(label,observed) "
+        "VALUES(label,value); "
+        "RETURN value; END$$;",
+        queries, queries, hoe_probe_literal(),
+        slice_source, slice_source, hoe_probe_literal(),
+        result, result, log, log));
+    configure_doc0377_transformed_join(setup);
+
+    const std::string update_sql = fmt::format(
+        "UPDATE public.{} AS h "
+        "SET touch=h.touch+1, "
+        "matched_query=CASE WHEN h.use_suffix "
+        "THEN sliced.query_suffix ELSE sliced.query_prefix END "
+        "FROM (SELECT t.pk AS target_pk, q.id AS query_id "
+        "FROM public.{} AS t INNER JOIN public.{} AS q "
+        "ON mmsearch(t.seq0, q.seq, "
+        "aligner_options(index_read_requirement => 1)) "
+        "OFFSET 0) AS matched "
+        "INNER JOIN (SELECT q.id AS query_id, "
+        "q.seq[0:1]::text AS query_prefix, "
+        "q.seq[1:]::text AS query_suffix "
+        "FROM public.{} AS q OFFSET 0) AS sliced "
+        "ON sliced.query_id=matched.query_id "
+        "WHERE h.id=1 AND h.target_pk=matched.target_pk "
+        "AND h.query_id=matched.query_id "
+        "RETURNING "
+        "public.doc0377_batchjoin_epq_once("
+        "'target',matched.target_pk::text), "
+        "public.doc0377_batchjoin_epq_once('query',h.matched_query), "
+        "public.doc0377_batchjoin_epq_once("
+        "'options',CASE WHEN h.use_suffix "
+        "THEN 'suffix' ELSE 'prefix' END);",
+        result, target, queries, slice_source);
+    const auto plan = explain_text<false>(setup, update_sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_contains(plan, "Subquery Scan on matched"));
+    REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
+    REQUIRE(plan_contains(
+        plan, "Bioseq Residual Mmsearch Qual: absent"));
+    REQUIRE_FALSE(plan_contains(
+        plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+    REQUIRE_FALSE(doc0377_plan_has_executable_mmsearch(plan));
+    REQUIRE(query_scalar_int(setup, fmt::format(
+        "SELECT count(*) FROM {};", log)) == 0);
+
+    connection_test_context blocker;
+    connection_test_context worker;
+    connection_test_context observer;
+    configure_doc0377_transformed_join(worker);
+    exec_sql(worker, "SET statement_timeout='15s';");
+    const auto outcome = run_doc0377_locked_update(
+        blocker, worker, observer,
+        fmt::format(
+            "UPDATE public.{} SET use_suffix=true,touch=touch+1 "
+            "WHERE id=1;", result),
+        update_sql);
+    INFO(outcome.error);
+    REQUIRE(outcome.sent);
+    REQUIRE(outcome.lock_wait_observed);
+    REQUIRE(outcome.consume_ok);
+    REQUIRE(outcome.result_ok);
+    REQUIRE(outcome.got_tuple_result);
+    REQUIRE(outcome.returned_rows == 1u);
+    REQUIRE(query_scalar_int(worker,
+        "SELECT scan_node_count FROM "
+        "bioseq.last_alignment_execution_stats() LIMIT 1;") == 1);
+    REQUIRE(query_scalar_int(worker,
+        "SELECT nested_alignment_executor_count FROM "
+        "bioseq.last_alignment_execution_stats() LIMIT 1;") == 0);
+    REQUIRE(query_scalar(setup, fmt::format(
+        "SELECT string_agg(label,',' ORDER BY ordinal) FROM {};", log))
+        == "target,query,options");
+    REQUIRE(query_scalar(setup, fmt::format(
+        "SELECT observed FROM {} WHERE label='query';", log))
+        == std::string{kHoeProbeSequence.substr(1)});
+    REQUIRE(query_scalar(setup, fmt::format(
+        "SELECT observed FROM {} WHERE label='options';", log))
+        == "suffix");
+    REQUIRE(query_scalar_int(setup, fmt::format(
+        "SELECT touch FROM {} WHERE id=1;", result)) == 2);
+    REQUIRE(query_scalar_int(setup, fmt::format(
+        "SELECT use_suffix::int FROM {} WHERE id=1;", result)) == 1);
+    REQUIRE(query_scalar(setup, fmt::format(
+        "SELECT matched_query FROM {} WHERE id=1;", result))
+        == std::string{kHoeProbeSequence.substr(1)});
+    exec_sql(setup,
+        "DROP FUNCTION public.doc0377_batchjoin_epq_once(text,text);");
+}
+
+TEST_CASE("Many-to-many mmsearch join owns the predicate and projections",
+          "[join][many_to_many][ownership]") {
     auto ctx = fresh_context({kHoeJoinLeft, kHoeJoinRight});
     seed_hoe_fixture(ctx, kHoeJoinLeft);
     seed_hoe_fixture(ctx, kHoeJoinRight);
 
-    // Comma-join + WHERE rather than INNER JOIN ... ON to suppress
-    // the planner's parameterised inner-side rewrite — this hits
-    // the join-filter shape the report describes.
     const auto rows = query_rows(
         ctx,
         fmt::format(
@@ -767,15 +1613,12 @@ TEST_CASE("Many-to-many mmsearch as join filter pins documented NULL-projection 
             " WHERE mmsearch(t1.seq0, t2.seq1) "
             " ORDER BY t1.pk, t2.pk;",
             kHoeJoinLeft, kHoeJoinRight));
-    // Server did not crash — that's already a non-trivial
-    // assertion. Now verify the documented projection NULLs.
+    REQUIRE_FALSE(rows.empty());
     for (const auto& row : rows) {
         REQUIRE(row.size() == 3);
-        if (row[2].has_value()) {
-            // Documented behaviour: when no parameterised path
-            // applies, projections are either NULL or empty.
-            REQUIRE(row[2].value().empty());
-        }
+        REQUIRE(row[2].has_value());
+        REQUIRE_FALSE(row[2]->empty());
+        REQUIRE(is_valid_cigar(*row[2]));
     }
     // Session must still be usable.
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
@@ -904,9 +1747,8 @@ TEST_CASE("Cross-table mmsearch (mmsearch as join filter) returns rows only "
     // Post-fix:
     //   1. ExtractPushdownClause accepts mmsearch FuncExprs so the
     //      planner generates a parameterised inner-side path.
-    //   2. AddBioseqColumnScanPath counts mmsearch in scan quals as
-    //      an additional wehavemagic unit so the parameterised
-    //      path's cost beats the unparameterised competitor.
+    //   2. AddBioseqColumnScanPath claims the exact RestrictInfo and
+    //      structurally removes paths that would execute the SQL stub.
     //   3. run_batch_and_build_cursors filters out matches whose
     //      cigar would come back empty (when do_cigar=true), since
     //      those are the aligner's "found a chain but the base
@@ -949,76 +1791,18 @@ TEST_CASE("Cross-table mmsearch (mmsearch as join filter) returns rows only "
     }
 }
 
-TEST_CASE("Multiple Const mmsearch quals AND-filter the same column",
-          "[mmsearch][multi_qual][regression]") {
-    // Tests the new multi-mmsearch-per-scan support. Two
-    // mmsearch quals on the same column with different literal
-    // queries should AND together: a row is returned iff BOTH
-    // queries align against its sequence. The first mmsearch
-    // drives projections; the second is a pure filter.
-    //
-    // For the test to discriminate "AND is honoured" vs "second
-    // qual is a silent no-op via the C stub", the two probes
-    // must match DIFFERENT subsets of rows. We pick:
-    //   probe_1 = canonical probe (matches a known set)
-    //   probe_2 = a probe rooted in a different region of the
-    //             seeded sequences, hence matching a different
-    //             set. The intersection should be a strict
-    //             subset of the union — and the AND result must
-    //             equal the per-row intersection.
+TEST_CASE("Multiple Const mmsearch quals fail closed",
+          "[mmsearch][multi_qual][error]") {
     auto ctx = fresh_context({kHoeJoin});
     seed_hoe_fixture(ctx, kHoeJoin);
-
-    // Probe 2 matches a different subset than the canonical probe
-    // (overlapping but not identical), so the AND result is a
-    // strict intersection. If the test runner ignored the second
-    // qual it would observe `set_a` (canonical's matches) instead
-    // of the intersection — and the equality assertion below would
-    // fail.
     constexpr std::string_view second_probe = "TTCATCATCATCATCTACTCCT";
-
-    const auto rows_a = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            "ORDER BY pk;",
-            kHoeJoin, kHoeProbeSequence));
-    const auto rows_b = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            "ORDER BY pk;",
-            kHoeJoin, second_probe));
-    REQUIRE_FALSE(rows_a.empty());
-    REQUIRE_FALSE(rows_b.empty());
-
-    // Build the expected intersection (set semantics over pk).
-    std::set<std::string> set_a, set_b, expected_intersection;
-    for (const auto& r : rows_a) if (r[0].has_value()) set_a.insert(*r[0]);
-    for (const auto& r : rows_b) if (r[0].has_value()) set_b.insert(*r[0]);
-    for (const auto& key : set_a) {
-        if (set_b.count(key) > 0) expected_intersection.insert(key);
-    }
-
-    const auto and_rows = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk FROM {} "
-            " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            "   AND mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            " ORDER BY pk;",
-            kHoeJoin, kHoeProbeSequence, second_probe));
-    std::set<std::string> set_and;
-    for (const auto& r : and_rows) if (r[0].has_value()) set_and.insert(*r[0]);
-
-    // The AND result MUST be exactly the intersection of A and B.
-    // If the second qual were silently a no-op (C-stub TRUE), the
-    // AND result would equal A — possibly a strict superset of
-    // A∩B. Asserting equality with the intersection is what makes
-    // this test discriminating.
-    REQUIRE(set_and == expected_intersection);
-    REQUIRE(set_and.size() <= set_a.size());
-    REQUIRE(set_and.size() <= set_b.size());
+    const auto error = sql_error(ctx, fmt::format(
+        "SELECT pk FROM {} WHERE "
+        "mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) AND "
+        "mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
+        kHoeJoin, kHoeProbeSequence, second_probe));
+    REQUIRE(error.sqlstate == "0A000");
+    REQUIRE(error.contains("stacked mmsearch"));
 }
 
 TEST_CASE("Aggregate over bioseq.cigar projection (MAX) returns the "
@@ -1072,7 +1856,15 @@ TEST_CASE("COUNT(*) over an mmsearch-filtered bioseq table compiles and runs",
         "  FROM {} "
         " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
         kHoeJoin, kHoeProbeSequence);
-    const auto count_row = query_one(ctx, count_sql);
+    const auto count_plan = explain_text<false>(ctx, count_sql);
+    REQUIRE(plan_contains(count_plan, "Aggregate"));
+    REQUIRE(plan_contains(count_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(
+        count_plan, "Custom Scan (VectorAggNode)"));
+    const auto count_rows = expect_invariant_under_guc_toggle(
+        ctx, count_sql, "bioseq.enable_vectorization");
+    REQUIRE(count_rows.size() == 1);
+    const auto& count_row = count_rows.front();
     REQUIRE(count_row.size() == 1);
     REQUIRE(count_row[0].has_value());
     const long long hits = std::stoll(count_row[0].value());
@@ -1103,99 +1895,19 @@ TEST_CASE("GROUP BY pk with bioseq aggregate returns one row per matching pk",
     }
 }
 
-TEST_CASE("Param-driven primary + Const-extra mmsearch AND-stack works",
-          "[mmsearch][multi_qual][param_plus_const]") {
-    // Param + Const-extra: the primary mmsearch is a parametrized
-    // inner-side qual (Param-rebind path) AND there is an
-    // additional Const-driven mmsearch on the same column. The
-    // expected behaviour is logical AND: rows must match BOTH the
-    // per-outer-row Param query AND the literal extra.
-    //
-    // This was historically rejected with NOTICE ("Const+Const
-    // stacking only"). §9.7 of REPORT_POSTGRES_QUERY_BUGFIXING_1.md
-    // documents the relaxation: the extras (Const) live in
-    // `extra_query_varlenas` independently of the primary's
-    // rebind-on-rescan, so the AND-filter still works correctly
-    // each time the Param resolves.
+TEST_CASE("Param-driven primary plus Const mmsearch fails closed",
+          "[mmsearch][multi_qual][param_plus_const][error]") {
     auto ctx = fresh_context({kHoeJoinLeft, kHoeJoinRight});
     seed_hoe_fixture(ctx, kHoeJoinLeft);
     seed_hoe_fixture(ctx, kHoeJoinRight);
-
-    // First, baseline: Param-only — find the matches per outer
-    // row. We use mmsearch(t2.seq0, t1.seq1) — t1 is outer, t2 is
-    // inner with Param-rebind.
-    const auto rows_param_only = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT t1.pk, t2.pk "
-            "  FROM {} t1 INNER JOIN {} t2 ON mmsearch(t2.seq0, t1.seq1) "
-            " ORDER BY t1.pk, t2.pk;",
-            kHoeJoinLeft, kHoeJoinRight));
-    REQUIRE_FALSE(rows_param_only.empty());
-
-    // What rows does the Const-extra probe match in isolation?
-    // We use a probe rooted in a different region of seq0 so the
-    // intersection with the Param-only set is provably STRICT —
-    // the goal is to catch a regression where the Const-extra is
-    // silently dropped (we'd see rows_param_plus_const equal to
-    // rows_param_only, which is a SUBSET of itself, so a plain
-    // subset-check is a tautology). The probe below matches a
-    // proper subset of pk values; combined with the Param qual,
-    // the AND must produce strictly fewer rows than Param-only.
-    constexpr std::string_view kStrictSubsetProbe =
-        "TCATCATCATCATCTACTCCTATCTATCATCATCATCATCTACTCCT";  // matches t2.pk=4 only
-    const auto rows_const_only = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            "ORDER BY pk;",
-            kHoeJoinRight, kStrictSubsetProbe));
-    REQUIRE_FALSE(rows_const_only.empty());
-    std::set<std::string> const_only_t2_pks;
-    for (const auto& row : rows_const_only) {
-        if (row[0].has_value()) const_only_t2_pks.insert(*row[0]);
-    }
-    // Sanity: const-only matches FEWER rows of t2 than the universe;
-    // otherwise our AND test below collapses to "param only".
-    REQUIRE(const_only_t2_pks.size() < 5);
-
-    const auto rows_param_plus_const = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT t1.pk, t2.pk "
-            "  FROM {} t1 INNER JOIN {} t2 "
-            "    ON mmsearch(t2.seq0, t1.seq1) "
-            " WHERE mmsearch(t2.seq0, '{}'::bioseq.seq('dna4', 32)) "
-            " ORDER BY t1.pk, t2.pk;",
-            kHoeJoinLeft, kHoeJoinRight, kStrictSubsetProbe));
-
-    std::set<std::pair<std::string, std::string>> param_only_set;
-    for (const auto& row : rows_param_only) {
-        if (row.size() == 2 && row[0].has_value() && row[1].has_value()) {
-            param_only_set.emplace(*row[0], *row[1]);
-        }
-    }
-    // The AND-stack result MUST be a subset of the Param-only
-    // result AND every emitted t2.pk must be in the const-only
-    // matching set. If §9.4's Const-extra was silently dropped,
-    // we'd see entries with t2.pk NOT in const_only_t2_pks —
-    // catching the regression directly.
-    for (const auto& row : rows_param_plus_const) {
-        REQUIRE(row.size() == 2);
-        REQUIRE(row[0].has_value());
-        REQUIRE(row[1].has_value());
-        const auto key = std::make_pair(*row[0], *row[1]);
-        REQUIRE(param_only_set.count(key) > 0);
-        // Load-bearing assertion: t2.pk MUST also be in the
-        // const-only matching set. A regression that silently
-        // drops the Const extra would fail here.
-        REQUIRE(const_only_t2_pks.count(*row[1]) > 0);
-    }
-    // Strict-subset property: the AND result must be SMALLER than
-    // the Param-only result (the const probe matches strictly
-    // fewer rows). If they're equal, the Const extra was a
-    // no-op — the bug we're guarding against.
-    REQUIRE(rows_param_plus_const.size() < rows_param_only.size());
+	const auto stacked_error = sql_error(ctx, fmt::format(
+		"SELECT t1.pk, t2.pk FROM {} t1 INNER JOIN {} t2 "
+		"ON mmsearch(t2.seq0, t1.seq1) "
+		"WHERE mmsearch(t2.seq0, '{}'::bioseq.seq('dna4', 32));",
+		kHoeJoinLeft, kHoeJoinRight,
+		"TCATCATCATCATCTACTCCTATCTATCATCATCATCATCTACTCCT"));
+	REQUIRE(stacked_error.sqlstate == "0A000");
+	REQUIRE(stacked_error.contains("stacked mmsearch"));
 }
 
 TEST_CASE("Cross-table mmsearch via INNER JOIN with bioseq.cigar projection",

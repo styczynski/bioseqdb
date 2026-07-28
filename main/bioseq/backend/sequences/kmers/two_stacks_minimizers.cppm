@@ -35,6 +35,8 @@ import bioseq.simd.utils;            // for_each_index<W>
 import bioseq.simd.vector_stream;    // vec_stream<D, ST, W> + lifted ops
 import bioseq.common.circular_append_buffer;
 import bioseq.instr;
+import bioseq.storage.lazy;
+import bioseq.storage.size;
 
 export {
 
@@ -80,6 +82,47 @@ enum class ExactSimdKernelKind : std::uint8_t {
     generic_u64 = 0,
     k15_w10_b8_u32_hash,
 };
+
+namespace resident_descriptor_detail {
+
+struct borrowed_packed_header {
+    const void* data = nullptr;
+    bioseq::storage::sequence_size_t bp_size = 0;
+    std::uint8_t storage_unit_byte_width = 0;
+    std::uint16_t padding_letters = 0;
+};
+
+template <sequence_alphabet Alphabet, class StorageUnit>
+struct borrowed_packed_instance {
+    using alphabet_type = Alphabet;
+    using storage_unit = StorageUnit;
+    using compact_sequence_stdc_type = borrowed_packed_header;
+
+    static constexpr std::size_t letter_bit_width =
+        bioseq::storage::basic_lazy_sequence_view<Alphabet>::traits::
+            logical_bits_per_symbol;
+    static constexpr std::size_t byte_width = sizeof(StorageUnit);
+    static constexpr bool is_valid_compact_sequence_stdc_instance = true;
+};
+
+template <sequence_alphabet Alphabet, class StorageUnit, class Fn>
+decltype(auto) with_borrowed_compact_range(
+        const typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+            resident_packed_region& descriptor,
+        Fn&& fn) {
+    using instance = borrowed_packed_instance<Alphabet, StorageUnit>;
+    using range_type = compact_sequence_range<instance>;
+    borrowed_packed_header header{
+        .data = descriptor.units,
+        .bp_size = descriptor.bp_length,
+        .storage_unit_byte_width = descriptor.storage_unit_byte_width,
+        .padding_letters = descriptor.trailing_padding_letters,
+    };
+    range_type range{header};
+    return std::forward<Fn>(fn)(range);
+}
+
+}  // namespace resident_descriptor_detail
 
 [[nodiscard]] constexpr std::string_view two_stack_status_name(
     TwoStackContinuationStatus status) noexcept
@@ -1661,6 +1704,37 @@ collect_minimizers_two_stack_nthash_resident_or_throw(
 }
 
 template<
+    class MinimizerT,
+    sequence_alphabet Alphabet,
+    class Collector = sketch_collector_t<MinimizerT>>
+requires (
+    exact_simd_minimizer_representation<MinimizerT>
+    && std::same_as<Alphabet, seq::dna4>)
+[[nodiscard]] inline TwoStackExecutionProof
+collect_minimizers_two_stack_nthash_resident_descriptor_or_throw(
+    Collector& collector,
+    const typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+        resident_packed_region& descriptor,
+    std::size_t w,
+    std::size_t k)
+{
+    if (descriptor.storage_unit_byte_width != sizeof(std::uint32_t)
+        || descriptor.bits_per_symbol != 2u
+        || descriptor.leading_symbol_offset != 0u) {
+        throw ExactSimdRuntimeError(
+            TwoStackContinuationStatus::non_contiguous_range,
+            "resident vector_stream minimizer descriptor");
+    }
+    return resident_descriptor_detail::with_borrowed_compact_range<
+        Alphabet, std::uint32_t>(
+            descriptor,
+            [&collector, w, k]<class Range>(Range& range) {
+                return collect_minimizers_two_stack_nthash_resident_or_throw<
+                    MinimizerT>(collector, range, w, k);
+            });
+}
+
+template<
     std::size_t W,
     std::size_t K,
     class MinimizerT,
@@ -2489,6 +2563,7 @@ namespace packed_paper_nthash_internal {
  * selected [begin,end) interval, so iterator offset zero maps to local
  * position zero and every emitted position is segment-local.
  */
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN bounded_u32_dna4_view
 struct bounded_u32_dna4_view {
     using output_sequence = sequence_custom_alphabet<
         seq::dna4, std::uint32_t, 2>;
@@ -2532,6 +2607,7 @@ struct bounded_u32_dna4_view {
         return static_cast<std::size_t>(last - first);
     }
 };
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END bounded_u32_dna4_view
 
 template<class D, std::size_t NumStreams>
 [[nodiscard]] HWY_INLINE auto lookup_table_stream(
@@ -3065,6 +3141,7 @@ template<
     class Collector,
     supports_compact_sequence_bitcast_view View,
     class Iterator>
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN run_packed_kernel
 [[gnu::always_inline]] [[gnu::flatten]] inline void run_packed_kernel(
     Collector& collector,
     const View& view,
@@ -3220,6 +3297,7 @@ template<
     proof.scalar_collector_appends =
         state.evidence.scalar_collector_appends;
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END run_packed_kernel
 
 } // namespace packed_paper_nthash_internal
 
@@ -3237,6 +3315,7 @@ template<
     class Iterator = decltype(compact_sequence_range<R>().begin()),
     class Collector = sketch_collector_t<MinimizerT>>
 [[nodiscard]] inline PackedPaperNthashResult
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_minimizers_packed_paper_nthash_simd_checked
 collect_minimizers_packed_paper_nthash_simd_checked(
     Collector& collector,
     compact_sequence_range<R>& sequence,
@@ -3367,6 +3446,7 @@ collect_minimizers_packed_paper_nthash_simd_checked(
 #endif
     }
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_minimizers_packed_paper_nthash_simd_checked
 
 /** Whole-resident convenience overload; still performs the checked gate. */
 template<
@@ -3383,6 +3463,38 @@ collect_minimizers_packed_paper_nthash_simd(
     return collect_minimizers_packed_paper_nthash_simd_checked<
         K, W, MinimizerT>(
             collector, sequence, sequence.begin(), sequence.end());
+}
+
+template<
+    std::size_t K = 15,
+    std::size_t W = 10,
+    class MinimizerT = MinimapSketchData,
+    sequence_alphabet Alphabet,
+    class Collector = sketch_collector_t<MinimizerT>>
+[[nodiscard]] inline PackedPaperNthashResult
+collect_minimizers_packed_paper_nthash_resident_descriptor_checked(
+    Collector& collector,
+    const typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+        resident_packed_region& descriptor)
+{
+    if (descriptor.storage_unit_byte_width != sizeof(std::uint32_t)
+        || descriptor.leading_symbol_offset != 0u
+        || descriptor.bits_per_symbol
+            != bioseq::storage::basic_lazy_sequence_view<Alphabet>::traits::
+                logical_bits_per_symbol) {
+        PackedPaperNthashResult result;
+        result.status = PackedPaperNthashStatus::unsupported_storage;
+        result.proof.fail_closed_rejections = 1u;
+        return result;
+    }
+    return resident_descriptor_detail::with_borrowed_compact_range<
+        Alphabet, std::uint32_t>(
+            descriptor,
+            [&collector]<class Range>(Range& range) {
+                return collect_minimizers_packed_paper_nthash_simd_checked<
+                    K, W, MinimizerT>(
+                        collector, range, range.begin(), range.end());
+            });
 }
 
 
@@ -5778,6 +5890,7 @@ template<
     supports_compact_sequence_range R,
     class Collector>
 [[nodiscard]] inline TwoStackContinuationStatus
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN consume_two_stack_nthash_fragment
 consume_two_stack_nthash_fragment(
     TwoStackContinuationState<
         W, K, typename compact_sequence_range<R>::traits>& state,
@@ -5803,6 +5916,7 @@ consume_two_stack_nthash_fragment(
         consume_begin_bp,
         consume_end_bp);
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END consume_two_stack_nthash_fragment
 
 
 template<std::size_t W, std::size_t K, class AlphabetTraits, class Collector>
@@ -5919,7 +6033,8 @@ template<
     class Sequence,
     class Collector>
 [[nodiscard]] inline TwoStackFinalizeResult
-collect_minimizers_two_stack_nthash_exact_range_checked(
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
+collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
     Collector& collector,
     Sequence& sequence,
     std::size_t lo_unit,
@@ -6011,78 +6126,15 @@ collect_minimizers_two_stack_nthash_exact_range_checked(
                     consume_end_bp);
         };
 
-        TwoStackContinuationStatus consume_status =
-            TwoStackContinuationStatus::ok;
-        if constexpr (requires { typename sequence_type::scanner_type; }) {
-            using scanner_type = typename sequence_type::scanner_type;
-            if constexpr (!scanner_type::supports_fragments()) {
-                consume_status = consume_resident(sequence.underlying());
-            } else {
-                constexpr std::size_t fragment_units =
-                    scanner_type::fragment_storage_units;
-                static_assert(fragment_units > 0);
-                static_assert(fragment_units
-                    <= (std::numeric_limits<std::size_t>::max)() / lpu);
-                constexpr std::size_t fragment_bp_capacity =
-                    fragment_units * lpu;
-                const std::size_t first_fragment = lo_unit / fragment_units;
-                const std::size_t fragment_end = hi_unit == 0
-                    ? 0
-                    : 1 + (hi_unit - 1) / fragment_units;
-                if (fragment_end > sequence.number_of_fragments()) {
-                    return rejected(TwoStackContinuationStatus::invalid_range);
-                }
-                const auto& scanner = sequence.scanner();
-                for (std::size_t fragment_no = first_fragment;
-                     fragment_no < fragment_end;
-                     ++fragment_no) {
-                    auto packed_source = scanner.read_fragment(fragment_no);
-                    const std::size_t fragment_begin_bp =
-                        fragment_no * fragment_bp_capacity;
-                    const std::size_t packed_bp_capacity =
-                        packed_source.size() >
-                                (std::numeric_limits<std::size_t>::max)() / lpu
-                            ? (std::numeric_limits<std::size_t>::max)()
-                            : packed_source.size() * lpu;
-                    const std::size_t fragment_bp_size = std::min(
-                        packed_bp_capacity,
-                        total_bp - std::min(total_bp, fragment_begin_bp));
-                    const std::size_t fragment_consume_begin = std::max(
-                        consume_begin_bp, fragment_begin_bp);
-                    const std::size_t fragment_consume_end = std::min(
-                        consume_end_bp, fragment_begin_bp + fragment_bp_size);
-                    try {
-                        consume_status =
-                            consume_two_stack_nthash_packed_fragment<
-                                W, K, MinimizerT>(
-                                    state,
-                                    collector,
-                                    std::span<const storage_unit>{
-                                        packed_source.data(),
-                                        packed_source.size()},
-                                    fragment_bp_size,
-                                    fragment_begin_bp,
-                                    fragment_consume_begin,
-                                    fragment_consume_end);
-                    } catch (...) {
-                        scanner.release_fragment(fragment_no);
-                        throw;
-                    }
-                    scanner.release_fragment(fragment_no);
-                    if (consume_status != TwoStackContinuationStatus::ok) {
-                        break;
-                    }
-                }
-            }
-        } else {
-            consume_status = consume_resident(sequence);
-        }
+        const TwoStackContinuationStatus consume_status =
+            consume_resident(sequence);
         if (consume_status != TwoStackContinuationStatus::ok) {
             return {.status = consume_status, .proof = state.proof};
         }
         return finalize_two_stack_nthash(state, collector);
     }
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
 
 template<
     std::size_t W,
@@ -6091,7 +6143,7 @@ template<
     class Sequence,
     class Collector>
 [[nodiscard]] inline TwoStackExecutionProof
-collect_minimizers_two_stack_nthash_exact_range_or_throw(
+collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw(
     Collector& collector,
     Sequence& sequence,
     std::size_t lo_unit,
@@ -6108,7 +6160,7 @@ collect_minimizers_two_stack_nthash_exact_range_or_throw(
     TwoStackFinalizeResult result;
     if constexpr (W == 0 && K == 0) {
         if (runtime_w == 10 && runtime_k == 15) [[likely]] {
-            result = collect_minimizers_two_stack_nthash_exact_range_checked<
+            result = collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
                 10, 15, MinimizerT>(
                     collector,
                     sequence,
@@ -6118,7 +6170,7 @@ collect_minimizers_two_stack_nthash_exact_range_or_throw(
                     runtime_k,
                     emitted_position_base);
         } else {
-            result = collect_minimizers_two_stack_nthash_exact_range_checked<
+            result = collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
                 0, 0, MinimizerT>(
                     collector,
                     sequence,
@@ -6129,7 +6181,7 @@ collect_minimizers_two_stack_nthash_exact_range_or_throw(
                     emitted_position_base);
         }
     } else {
-        result = collect_minimizers_two_stack_nthash_exact_range_checked<
+        result = collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
             W, K, MinimizerT>(
                 collector,
                 sequence,
@@ -6138,6 +6190,152 @@ collect_minimizers_two_stack_nthash_exact_range_or_throw(
                 runtime_w,
                 runtime_k,
                 emitted_position_base);
+    }
+    if (!result.ok()) {
+        throw ExactSimdRuntimeError{result.status, operation};
+    }
+    return result.proof;
+}
+
+/**
+ * Canonical ExactSimd owner. Coordinates are biological positions in the
+ * facade, never packed-unit offsets. A compatible resident is consumed
+ * directly. Nonresident input fails closed: the caller must retain an
+ * admitted_packed_region through this synchronous kernel invocation.
+ */
+template<
+    std::size_t W,
+    std::size_t K,
+    class MinimizerT,
+    sequence_alphabet Alphabet,
+    class Collector>
+[[nodiscard]] inline TwoStackFinalizeResult
+collect_minimizers_two_stack_nthash_exact_range_checked(
+    Collector& collector,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    std::size_t lo_bp,
+    std::size_t hi_bp,
+    std::size_t runtime_w,
+    std::size_t runtime_k,
+    std::size_t emitted_position_base = 0)
+{
+    using packed_instance = sequence_custom_alphabet<
+        Alphabet, std::uint32_t>;
+    using packed_range = compact_sequence_range<packed_instance>;
+    using traits = typename packed_range::traits;
+    using storage_unit = typename traits::storage_unit;
+
+    auto rejected = [](TwoStackContinuationStatus status) {
+        TwoStackExecutionProof proof{};
+        proof.fail_closed_rejections = 1;
+        return TwoStackFinalizeResult{.status = status, .proof = proof};
+    };
+
+    if constexpr (!exact_simd_minimizer_representation<MinimizerT>) {
+        return rejected(
+            TwoStackContinuationStatus::unsupported_representation);
+    } else if constexpr (!seqan3::nucleotide_alphabet<Alphabet>) {
+        return rejected(TwoStackContinuationStatus::unsupported_alphabet);
+    } else {
+        const bioseq::storage::sequence_size_t total_bp_64 =
+            sequence.bp_size();
+        if (total_bp_64
+                > static_cast<bioseq::storage::sequence_size_t>(
+                    (std::numeric_limits<std::size_t>::max)())
+            || lo_bp > hi_bp
+            || hi_bp > static_cast<std::size_t>(total_bp_64)) {
+            return rejected(TwoStackContinuationStatus::invalid_range);
+        }
+
+        static const auto* exact_simd_region_desc =
+            bioseq::instr::register_region_static("mm_sketch_simd");
+        auto exact_simd_region_scope =
+            bioseq::instr::region(exact_simd_region_desc);
+
+        TwoStackContinuationState<W, K, traits> state;
+        const auto reset_status = reset_two_stack_nthash(
+            state, runtime_w, runtime_k, emitted_position_base);
+        if (reset_status != TwoStackContinuationStatus::ok) {
+            return {.status = reset_status, .proof = state.proof};
+        }
+        if constexpr (W == 10 && K == 15) {
+            state.kernel_kind =
+                two_stack_internal::select_exact_simd_kernel_kind<
+                    MinimizerT, traits>(hi_bp - lo_bp);
+            if (state.kernel_kind
+                    == ExactSimdKernelKind::k15_w10_b8_u32_hash) {
+                state.proof.generic_u64_kernel_calls = 0;
+                state.proof.k15_w10_b8_u32_hash_kernel_calls = 1;
+            }
+        }
+
+        TwoStackContinuationStatus consume_status =
+            TwoStackContinuationStatus::ok;
+        if (auto resident = sequence.try_resident_packed(
+                static_cast<bioseq::storage::sequence_size_t>(lo_bp),
+                static_cast<bioseq::storage::sequence_size_t>(hi_bp),
+                static_cast<std::uint8_t>(sizeof(storage_unit)));
+            resident.has_value()) {
+            const std::size_t leading =
+                resident->leading_symbol_offset;
+            const std::size_t logical_length = hi_bp - lo_bp;
+            consume_status = consume_two_stack_nthash_packed_fragment<
+                W, K, MinimizerT>(
+                    state,
+                    collector,
+                    std::span<const storage_unit>{
+                        static_cast<const storage_unit*>(resident->units),
+                        resident->unit_count},
+                    leading + logical_length,
+                    0u,
+                    leading,
+                    leading + logical_length);
+        } else {
+            return rejected(
+                TwoStackContinuationStatus::non_contiguous_range);
+        }
+        if (consume_status != TwoStackContinuationStatus::ok) {
+            return {.status = consume_status, .proof = state.proof};
+        }
+        return finalize_two_stack_nthash(state, collector);
+    }
+}
+
+template<
+    std::size_t W,
+    std::size_t K,
+    class MinimizerT,
+    sequence_alphabet Alphabet,
+    class Collector>
+[[nodiscard]] inline TwoStackExecutionProof
+collect_minimizers_two_stack_nthash_exact_range_or_throw(
+    Collector& collector,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    std::size_t lo_bp,
+    std::size_t hi_bp,
+    std::size_t runtime_w,
+    std::size_t runtime_k,
+    std::size_t emitted_position_base = 0,
+    std::string_view operation = "minimizer sketch")
+{
+    TwoStackFinalizeResult result;
+    if constexpr (W == 0 && K == 0) {
+        if (runtime_w == 10u && runtime_k == 15u) [[likely]] {
+            result = collect_minimizers_two_stack_nthash_exact_range_checked<
+                10, 15, MinimizerT>(
+                    collector, sequence, lo_bp, hi_bp,
+                    runtime_w, runtime_k, emitted_position_base);
+        } else {
+            result = collect_minimizers_two_stack_nthash_exact_range_checked<
+                0, 0, MinimizerT>(
+                    collector, sequence, lo_bp, hi_bp,
+                    runtime_w, runtime_k, emitted_position_base);
+        }
+    } else {
+        result = collect_minimizers_two_stack_nthash_exact_range_checked<
+            W, K, MinimizerT>(
+                collector, sequence, lo_bp, hi_bp,
+                runtime_w, runtime_k, emitted_position_base);
     }
     if (!result.ok()) {
         throw ExactSimdRuntimeError{result.status, operation};

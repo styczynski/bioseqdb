@@ -394,13 +394,21 @@ TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restr
     exact_storage.run_buffer_bytes_ = 4096;
     {
         lazy_compact_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
-        bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::build(storage, lazy);
+        const auto sequence_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            FakeFragmentStorage<>>::build(storage, sequence_view);
     }
     {
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
-        bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::build(
-            exact_storage, lazy, MinimizerSketchBackend::ExactSimd);
+        const auto exact_sequence_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            FakeFragmentStorage<>>::build(
+                exact_storage,
+                exact_sequence_view,
+                MinimizerSketchBackend::ExactSimd);
     }
     REQUIRE(storage.runs_.empty());   // build() calls release_runs() at the end
     REQUIRE(exact_storage.runs_.empty());
@@ -522,11 +530,13 @@ TEST_CASE("scalar MPS build proof aggregates deterministically across workers",
         FakeFragmentStorage<> storage;
         storage.run_buffer_bytes_ = 4096;
         auto lazy = bioseq::storage::make_lazy_in_memory(*range_pointer);
+        const auto sequence_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         bioseq::indexing::ScalarMpsBuildExecutionProof proof{};
         bioseq::indexing::MinimizerSequenceMergedIndex<
             FakeFragmentStorage<>>::build(
                 storage,
-                lazy,
+                sequence_view,
                 MinimizerSketchBackend::Scalar,
                 &proof);
         return proof;
@@ -543,9 +553,11 @@ TEST_CASE("scalar MPS build proof aggregates deterministically across workers",
     CHECK(serial.scalar_collection_calls > 1);
     CHECK(serial.input_symbols >= range.bp_size());
     CHECK(serial.input_bytes
-        == serial.input_storage_units * sizeof(std::uint64_t));
+        == serial.input_storage_units
+            * serial.source_storage_unit_bytes);
     CHECK(serial.input_symbols
-        <= serial.input_storage_units * range_t::traits::letters_per_unit);
+        <= serial.input_storage_units
+            * serial.letters_per_storage_unit);
 }
 
 TEST_CASE("ExactSimd MPS collection accepts fragmented DNA5 with N resets",
@@ -567,10 +579,11 @@ TEST_CASE("ExactSimd MPS collection accepts fragmented DNA5 with N resets",
     dna5_range range(data);
     lazy_compact_sequence<dna5_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto sequence_view = bioseq::storage::as_lazy_sequence_view(lazy);
     FakeFragmentStorage<> storage;
 
     REQUIRE_NOTHROW(MpsIndex::build(
-        storage, lazy, MinimizerSketchBackend::ExactSimd));
+        storage, sequence_view, MinimizerSketchBackend::ExactSimd));
     REQUIRE(storage.runs_.empty());
 }
 
@@ -594,7 +607,10 @@ TEST_CASE("DOC0279 §10.5 — assemble_for_query drops an over-frequent kmer und
     storage.run_buffer_bytes_ = 4096;
     {
         lazy_compact_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
-        bioseq::indexing::MinimizerSequenceMergedIndex<FakeFragmentStorage<>>::build(storage, lazy);
+        const auto sequence_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            FakeFragmentStorage<>>::build(storage, sequence_view);
     }
 
     auto query = whole_sequence_minimizers(range, 10, 15);
@@ -637,12 +653,17 @@ TEST_CASE("persisted minimizer indexes built with Vulkan cover scalar lookups",
             storage_unit,
             bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
     using lazy_t = lazy_compact_sequence<config_t, scanner_t>;
-    constexpr std::size_t frag_bp =
-        scanner_t::fragment_storage_units * cfg_range_t::traits::letters_per_unit;
+    // Persisted MPF owns canonical 32 KiBP logical fragments; scanner chunk
+    // width is an input-access detail and must not drive assembly geometry.
+    constexpr std::size_t frag_bp = 32'768u;
 
     cfg_range_t target = make_deterministic_test_range<config_t>(8u << 20);
     lazy_t lazy_scalar{scanner_t::from_range(target)};
     lazy_t lazy_gpu{scanner_t::from_range(target)};
+    const auto scalar_sequence_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_scalar);
+    const auto gpu_sequence_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_gpu);
 
     TestFragmentStorage scalar_mpf;
     TestFragmentStorage gpu_mpf;
@@ -650,14 +671,14 @@ TEST_CASE("persisted minimizer indexes built with Vulkan cover scalar lookups",
     TestFragmentStorage gpu_mps;
 
     bioseq::indexing::MinimizersPerFragmentIndex<TestFragmentStorage>::build(
-        scalar_mpf, lazy_scalar, backend_t::Scalar);
+        scalar_mpf, scalar_sequence_view, backend_t::Scalar);
     bioseq::indexing::MinimizersPerFragmentIndex<TestFragmentStorage>::build(
-        gpu_mpf, lazy_gpu, backend_t::VulkanSegment);
+        gpu_mpf, gpu_sequence_view, backend_t::VulkanSegment);
 
     bioseq::indexing::MinimizerSequenceMergedIndex<TestFragmentStorage>::build(
-        scalar_mps, lazy_scalar, backend_t::Scalar);
+        scalar_mps, scalar_sequence_view, backend_t::Scalar);
     bioseq::indexing::MinimizerSequenceMergedIndex<TestFragmentStorage>::build(
-        gpu_mps, lazy_gpu, backend_t::VulkanSegment);
+        gpu_mps, gpu_sequence_view, backend_t::VulkanSegment);
 
     bioseq::indexing::MinimizerAssemblyScratch scratch_scalar;
     bioseq::indexing::MinimizerAssemblyScratch scratch_gpu;

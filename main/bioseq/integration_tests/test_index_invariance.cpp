@@ -230,7 +230,7 @@ TEST_CASE("EXPLAIN ANALYZE survives every index combination without "
 }
 
 TEST_CASE("Result rows are invariant under bioseq.enable_bioseq_index_scan toggle",
-          "[mmsearch][index_invariance][guc][bioseq_index_scan]") {
+          "[mmsearch][index_invariance][guc][enable_bioseq_index_scan]") {
     // The bioseq.enable_bioseq_index_scan GUC rewrites vanilla
     // IndexScan plan nodes into BioseqIndexScan custom nodes so
     // the columnar reader is reused. The user wants the result

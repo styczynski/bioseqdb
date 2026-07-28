@@ -16,9 +16,11 @@ module;
 extern "C" {
 #include "access/relation.h"
 #include "access/table.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_attribute.h"
+#include "catalog/pg_type.h"
 #include "utils/inval.h"
 #include "utils/syscache.h"
-#include "catalog/pg_attribute.h"
 }
 
 #include <cstdint>
@@ -55,8 +57,16 @@ void bioseq_am_cache_invalidate(Datum arg, Oid relid);
 namespace bioseq::storage {
 
 [[nodiscard]] static Oid resolve_bioseq_seq_type_oid() {
-    return DatumGetObjectId(DirectFunctionCall1(
-        regtypein, CStringGetDatum("bioseq.seq")));
+    const Oid namespace_oid =
+        get_namespace_oid("bioseq", /* missing_ok = */ true);
+    if (!OidIsValid(namespace_oid)) {
+        return InvalidOid;
+    }
+    return GetSysCacheOid2(
+        TYPENAMENSP,
+        Anum_pg_type_oid,
+        PointerGetDatum("seq"),
+        ObjectIdGetDatum(namespace_oid));
 }
 
 [[nodiscard]] static Oid current_bioseq_seq_type_oid() {

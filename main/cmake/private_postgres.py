@@ -20,11 +20,14 @@ import contextlib
 import dataclasses
 import datetime as dt
 import getpass
+import importlib.util
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,8 +35,81 @@ import uuid
 from typing import Sequence
 
 
+def _load_sibling_sanitizer_runtime():
+    """Load the exact sibling helper under direct and file-spec imports."""
+    helper_path = Path(__file__).resolve().with_name("sanitizer_runtime.py")
+    try:
+        helper_path = helper_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ImportError(
+            f"sanitizer runtime helper is missing: {helper_path}") from exc
+
+    module_name = "sanitizer_runtime"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        existing_file = getattr(existing, "__file__", None)
+        try:
+            existing_path = Path(existing_file).resolve(strict=True)
+        except (OSError, RuntimeError, TypeError) as exc:
+            raise ImportError(
+                "loaded sanitizer_runtime has no valid source path") from exc
+        if existing_path != helper_path:
+            raise ImportError(
+                "refusing non-sibling sanitizer_runtime module: "
+                f"{existing_path}")
+        return existing
+
+    spec = importlib.util.spec_from_file_location(module_name, helper_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(
+            f"cannot load sanitizer runtime helper: {helper_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        if sys.modules.get(module_name) is module:
+            sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+_sanitizer_runtime = _load_sibling_sanitizer_runtime()
+SANITIZER_RUNTIME_ENV = _sanitizer_runtime.SANITIZER_RUNTIME_ENV
+postgres_sanitizer_environment = (
+    _sanitizer_runtime.postgres_sanitizer_environment)
+sanitizer_descendant_environment = (
+    _sanitizer_runtime.sanitizer_descendant_environment)
+
+
 class ClusterCommandError(RuntimeError):
     """A cluster lifecycle command failed, timed out, or was misconfigured."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _CommandResult:
+    returncode: int
+    stdout: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _ServerProbe:
+    state: str
+    detail: str
+    stop_is_safe: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class _PostmasterProcess:
+    pid: int | None
+    is_live: bool
+    ownership_proven: bool
+    detail: str
+
+
+_SERVER_RUNNING = "running"
+_SERVER_STOPPED = "stopped"
+_SERVER_UNKNOWN = "unknown"
 
 
 # Connection environment that must never leak into a child: any of these would
@@ -49,6 +125,11 @@ _ALLOWED_ENV_EXACT = frozenset({
     "LOGNAME", "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH",
     "ASAN_OPTIONS", "UBSAN_OPTIONS", "TSAN_OPTIONS", "MSAN_OPTIONS",
     "ASAN_SYMBOLIZER_PATH", "PYTHONUNBUFFERED",
+    # A private-cluster runner may own the long-lived bioseq-build MCP server.
+    # Preserve only its bounded preset selectors; the child still receives no
+    # ambient connection state and cannot redirect libpq away from this node.
+    "BIOSEQ_TEST_BUILD_PRESET", "BIOSEQ_TEST_BUILD_PRESET_DEBUG",
+    SANITIZER_RUNTIME_ENV,
 })
 _ALLOWED_ENV_PREFIXES = ("LC_",)
 
@@ -112,14 +193,14 @@ def _terminate_group(process: subprocess.Popen) -> None:
         process.wait(timeout=2)
 
 
-def _run_checked(
+def _run_bounded(
     command: Sequence[str],
     *,
     timeout: int,
     env: dict[str, str] | None = None,
     output_path: Path | None = None,
     preexec_fn=None,
-) -> str:
+) -> _CommandResult:
     """Run a lifecycle command in its own process group with a hard deadline."""
     process = subprocess.Popen(
         list(command),
@@ -144,11 +225,33 @@ def _run_checked(
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(stdout or "", encoding="utf-8")
-    if process.returncode != 0:
+    return _CommandResult(
+        returncode=int(process.returncode),
+        stdout=stdout or "",
+    )
+
+
+def _run_checked(
+    command: Sequence[str],
+    *,
+    timeout: int,
+    env: dict[str, str] | None = None,
+    output_path: Path | None = None,
+    preexec_fn=None,
+) -> str:
+    """Run a bounded lifecycle command and require a zero exit status."""
+    result = _run_bounded(
+        command,
+        timeout=timeout,
+        env=env,
+        output_path=output_path,
+        preexec_fn=preexec_fn,
+    )
+    if result.returncode != 0:
         raise ClusterCommandError(
-            f"command failed with exit code {process.returncode}: "
-            f"{' '.join(command)}\n{stdout}")
-    return stdout or ""
+            f"command failed with exit code {result.returncode}: "
+            f"{' '.join(command)}\n{result.stdout}")
+    return result.stdout
 
 
 def _address_space_preexec(limit_mib: int | None):
@@ -217,6 +320,11 @@ class UniquePrivateCluster:
         self.database_user = getpass.getuser()
         self._started = False
         self._database_created = False
+        # This is the teardown authority. It becomes false before pg_ctl start
+        # is launched, because a timeout or nonzero exit can occur after the
+        # postmaster detached from pg_ctl. Only a bounded process-state probe
+        # may make it true again.
+        self._shutdown_proven = True
 
     def _program(self, name: str) -> Path:
         program = self.inputs.bindir / name
@@ -256,10 +364,25 @@ class UniquePrivateCluster:
 
     def start(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            self._start()
+        except BaseException as start_error:
+            try:
+                self.stop()
+            except BaseException as stop_error:
+                raise ClusterCommandError(
+                    "private PostgreSQL startup failed and cleanup could not "
+                    f"prove shutdown: startup={start_error}; "
+                    f"shutdown={stop_error}"
+                ) from start_error
+            raise
+
+    def _start(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         init_timeout = _validated_timeout(
             self.inputs.init_command_timeout, "init-command-timeout")
         self._append_lifecycle(f"initializing data directory {self.data_dir}")
+        lifecycle_env = sanitizer_descendant_environment(os.environ)
         _run_checked(
             [
                 str(self._program("initdb")),
@@ -272,10 +395,15 @@ class UniquePrivateCluster:
                 "--no-sync",
             ],
             timeout=init_timeout,
+            env=lifecycle_env,
             output_path=self.run_dir / "initdb.log",
         )
         self._write_configuration()
         self._append_lifecycle(f"starting private node on port {self.port}")
+        # pg_ctl may return or time out after the postmaster has detached.
+        # Conservatively require stop() to prove the server absent from this
+        # point onward, regardless of the pg_ctl start result.
+        self._shutdown_proven = False
         _run_checked(
             [
                 str(self._program("pg_ctl")),
@@ -284,6 +412,7 @@ class UniquePrivateCluster:
                 "--wait", "start",
             ],
             timeout=_validated_timeout(self.inputs.startup_timeout, "startup-timeout"),
+            env=postgres_sanitizer_environment(lifecycle_env),
             output_path=self.run_dir / "pg_ctl_start.log",
             preexec_fn=_address_space_preexec(self.inputs.address_space_limit_mib),
         )
@@ -297,6 +426,7 @@ class UniquePrivateCluster:
                 self.database,
             ],
             timeout=init_timeout,
+            env=lifecycle_env,
             output_path=self.run_dir / "createdb.log",
         )
         self._database_created = True
@@ -306,9 +436,11 @@ class UniquePrivateCluster:
                 if index < len(self.inputs.bootstrap_labels)
                 else f"bootstrap_{index}"
             )
-            self._bootstrap(bootstrap, label)
+            self._bootstrap(bootstrap, label, lifecycle_env)
 
-    def _bootstrap(self, bootstrap: Path, label: str) -> None:
+    def _bootstrap(
+        self, bootstrap: Path, label: str, lifecycle_env: dict[str, str]
+    ) -> None:
         self._append_lifecycle(f"executing {label} {bootstrap}")
         _run_checked(
             [
@@ -321,6 +453,7 @@ class UniquePrivateCluster:
                 "--file", str(bootstrap),
             ],
             timeout=_validated_timeout(self.inputs.bootstrap_timeout, "bootstrap-timeout"),
+            env=lifecycle_env,
             output_path=self.run_dir / f"{label}.log",
         )
 
@@ -339,6 +472,14 @@ class UniquePrivateCluster:
             "PGPORT": str(self.port),
             "PGDATABASE": self.database,
             "PGUSER": self.database_user,
+            # The core integration executable predates the generic private-PG
+            # spelling below. Publish both exact ABIs from the same owned
+            # values so an MCP server can run unit+integration inside this
+            # cluster without a shell adapter or ambient connection fallback.
+            "BIOSEQ_TEST_PGHOST": str(self.socket_dir),
+            "BIOSEQ_TEST_PGPORT": str(self.port),
+            "BIOSEQ_TEST_PGDATABASE": self.database,
+            "BIOSEQ_TEST_PGUSER": self.database_user,
             "BIOSEQ_TEST_PG_HOST": str(self.socket_dir),
             "BIOSEQ_TEST_PG_PORT": str(self.port),
             "BIOSEQ_TEST_PG_DATABASE": self.database,
@@ -346,7 +487,7 @@ class UniquePrivateCluster:
             "BIOSEQ_TEST_PG_RUN_DIR": str(self.run_dir),
             "BIOSEQ_TEST_PG_DATA_DIR": str(self.data_dir),
         })
-        return env
+        return sanitizer_descendant_environment(env)
 
     def run_child(self, command: Sequence[str]) -> int:
         """Launch exactly one child in a new process group, forwarding signals."""
@@ -382,52 +523,404 @@ class UniquePrivateCluster:
                 if log_file.is_file():
                     shutil.copy2(log_file, destination / log_file.name)
 
+    def _postmaster_process_state(
+        self,
+        *,
+        timeout: int,
+        env: dict[str, str],
+        output_path: Path,
+    ) -> _PostmasterProcess:
+        """Prove a live PID is this cluster's canonical staged postmaster."""
+        pid_file = self.data_dir / "postmaster.pid"
+        try:
+            metadata = pid_file.lstat()
+        except FileNotFoundError:
+            return _PostmasterProcess(
+                pid=None,
+                is_live=False,
+                ownership_proven=False,
+                detail="no postmaster PID file",
+            )
+        except OSError as error:
+            raise ClusterCommandError(
+                f"cannot inspect postmaster PID file {pid_file}: {error}"
+            ) from error
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ClusterCommandError(
+                f"postmaster PID file is not a regular non-symlink file: "
+                f"{pid_file}"
+            )
+        try:
+            lines = pid_file.read_text(
+                encoding="utf-8",
+                errors="strict",
+            ).splitlines()
+            pid = int(lines[0])
+        except (OSError, UnicodeError, IndexError, ValueError) as error:
+            raise ClusterCommandError(
+                f"postmaster PID file is malformed: {pid_file}"
+            ) from error
+        if pid <= 1:
+            raise ClusterCommandError(
+                f"postmaster PID file has an invalid PID {pid}: {pid_file}"
+            )
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return _PostmasterProcess(
+                pid=pid,
+                is_live=False,
+                ownership_proven=False,
+                detail=f"postmaster PID {pid} is absent",
+            )
+        except PermissionError:
+            pass
+        except OSError as error:
+            raise ClusterCommandError(
+                f"cannot probe postmaster PID {pid}: {error}"
+            ) from error
+
+        try:
+            declared_data_dir = Path(lines[1])
+            expected_data_dir = self.data_dir.resolve(strict=True)
+            if (
+                not declared_data_dir.is_absolute()
+                or declared_data_dir.resolve(strict=True)
+                != expected_data_dir
+            ):
+                return _PostmasterProcess(
+                    pid=pid,
+                    is_live=True,
+                    ownership_proven=False,
+                    detail=(
+                        f"live PID {pid} declares foreign data directory "
+                        f"{declared_data_dir}"
+                    ),
+                )
+        except (OSError, IndexError, RuntimeError) as error:
+            return _PostmasterProcess(
+                pid=pid,
+                is_live=True,
+                ownership_proven=False,
+                detail=(
+                    f"cannot validate data directory for live PID {pid}: "
+                    f"{error}"
+                ),
+            )
+
+        ps = shutil.which("ps", path=env.get("PATH"))
+        if ps is None:
+            return _PostmasterProcess(
+                pid=pid,
+                is_live=True,
+                ownership_proven=False,
+                detail="cannot locate ps for postmaster ownership proof",
+            )
+        try:
+            result = _run_bounded(
+                [ps, "-p", str(pid), "-o", "command="],
+                timeout=min(timeout, 5),
+                env=env,
+                output_path=output_path,
+            )
+        except Exception as error:
+            return _PostmasterProcess(
+                pid=pid,
+                is_live=True,
+                ownership_proven=False,
+                detail=f"postmaster command probe failed: {error}",
+            )
+        if result.returncode != 0:
+            return _PostmasterProcess(
+                pid=pid,
+                is_live=True,
+                ownership_proven=False,
+                detail=(
+                    "postmaster command probe returned "
+                    f"{result.returncode}"
+                ),
+            )
+        try:
+            command = shlex.split(result.stdout.strip())
+        except ValueError as error:
+            return _PostmasterProcess(
+                pid=pid,
+                is_live=True,
+                ownership_proven=False,
+                detail=f"cannot parse postmaster command: {error}",
+            )
+        try:
+            expected_postgres = self._program("postgres").resolve(
+                strict=True)
+            actual_postgres = Path(command[0])
+            if (
+                not actual_postgres.is_absolute()
+                or actual_postgres.resolve(strict=True)
+                != expected_postgres
+            ):
+                return _PostmasterProcess(
+                    pid=pid,
+                    is_live=True,
+                    ownership_proven=False,
+                    detail=(
+                        f"live PID {pid} executable is not the staged "
+                        f"postgres: {actual_postgres}"
+                    ),
+                )
+        except (ClusterCommandError, IndexError, OSError) as error:
+            return _PostmasterProcess(
+                pid=pid,
+                is_live=True,
+                ownership_proven=False,
+                detail=f"cannot validate postmaster executable: {error}",
+            )
+
+        command_data_dirs: list[Path] = []
+        for index, argument in enumerate(command):
+            if argument == "-D" and index + 1 < len(command):
+                command_data_dirs.append(Path(command[index + 1]))
+            elif argument.startswith("-D") and len(argument) > 2:
+                command_data_dirs.append(Path(argument[2:]))
+        try:
+            owns_data_dir = any(
+                candidate.is_absolute()
+                and candidate.resolve(strict=True) == expected_data_dir
+                for candidate in command_data_dirs
+            )
+        except OSError:
+            owns_data_dir = False
+        if not owns_data_dir:
+            return _PostmasterProcess(
+                pid=pid,
+                is_live=True,
+                ownership_proven=False,
+                detail=(
+                    f"live PID {pid} command does not contain -D "
+                    f"{expected_data_dir}"
+                ),
+            )
+        return _PostmasterProcess(
+            pid=pid,
+            is_live=True,
+            ownership_proven=True,
+            detail=(
+                f"live PID {pid} is staged postgres with data directory "
+                f"{expected_data_dir}"
+            ),
+        )
+
+    def _probe_server_state(
+        self,
+        *,
+        timeout: int,
+        env: dict[str, str],
+        output_path: Path,
+    ) -> _ServerProbe:
+        """Cross-check pg_ctl status with the postmaster PID's live state."""
+        status_error: Exception | None = None
+        result: _CommandResult | None = None
+        try:
+            result = _run_bounded(
+                [
+                    str(self._program("pg_ctl")),
+                    "--pgdata", str(self.data_dir),
+                    "status",
+                ],
+                timeout=timeout,
+                env=env,
+                output_path=output_path,
+            )
+        except Exception as error:
+            status_error = error
+        try:
+            process = self._postmaster_process_state(
+                timeout=timeout,
+                env=env,
+                output_path=output_path.with_name(
+                    output_path.stem + "_process.log"),
+            )
+        except ClusterCommandError as error:
+            return _ServerProbe(_SERVER_UNKNOWN, str(error))
+
+        if status_error is not None:
+            return _ServerProbe(
+                _SERVER_UNKNOWN,
+                f"pg_ctl status probe failed: {status_error}; "
+                f"{process.detail}",
+                not process.is_live or process.ownership_proven,
+            )
+        assert result is not None
+        if (
+            result.returncode == 0
+            and process.is_live
+            and process.ownership_proven
+        ):
+            return _ServerProbe(
+                _SERVER_RUNNING,
+                f"pg_ctl reports running; {process.detail}",
+                True,
+            )
+        if result.returncode == 3 and not process.is_live:
+            return _ServerProbe(
+                _SERVER_STOPPED,
+                f"pg_ctl reports stopped; {process.detail}",
+                True,
+            )
+        return _ServerProbe(
+            _SERVER_UNKNOWN,
+            "inconsistent server probe: "
+            f"pg_ctl exit={result.returncode}; {process.detail}",
+            not process.is_live or process.ownership_proven,
+        )
+
+    def _attempt_stop(
+        self,
+        mode: str,
+        *,
+        timeout: int,
+        env: dict[str, str],
+        output_path: Path,
+    ) -> None:
+        _run_checked(
+            [
+                str(self._program("pg_ctl")),
+                "--pgdata", str(self.data_dir),
+                "--wait", f"--mode={mode}", "stop",
+            ],
+            timeout=timeout,
+            env=env,
+            output_path=output_path,
+        )
+
+    @staticmethod
+    def _remove_owned_directory(path: Path) -> None:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ClusterCommandError(
+                f"refusing to remove non-directory lifecycle path: {path}"
+            )
+        shutil.rmtree(path)
+
     def stop(self) -> None:
         shutdown_timeout = _validated_timeout(
             self.inputs.shutdown_timeout, "shutdown-timeout")
-        if self._started and self._database_created:
-            with contextlib.suppress(Exception):
-                _run_checked(
-                    [
-                        str(self._program("dropdb")),
-                        "--if-exists",
-                        "--host", str(self.socket_dir),
-                        "--port", str(self.port),
-                        "--username", self.database_user,
-                        self.database,
-                    ],
-                    timeout=shutdown_timeout,
-                    output_path=self.run_dir / "dropdb.log",
-                )
-        if self._started:
-            try:
-                _run_checked(
-                    [
-                        str(self._program("pg_ctl")),
-                        "--pgdata", str(self.data_dir),
-                        "--wait", "--mode=fast", "stop",
-                    ],
-                    timeout=shutdown_timeout,
-                    output_path=self.run_dir / "pg_ctl_stop.log",
-                )
-            except Exception:
-                with contextlib.suppress(Exception):
+        lifecycle_env = sanitizer_descendant_environment(os.environ)
+        shutdown_errors: list[str] = []
+        if not self._shutdown_proven or self._started:
+            before = self._probe_server_state(
+                timeout=shutdown_timeout,
+                env=lifecycle_env,
+                output_path=self.run_dir / "pg_ctl_status_before_stop.log",
+            )
+            self._append_lifecycle(
+                f"server probe before stop: {before.state}: {before.detail}")
+            if (
+                before.state == _SERVER_RUNNING
+                and self._database_created
+            ):
+                try:
                     _run_checked(
                         [
-                            str(self._program("pg_ctl")),
-                            "--pgdata", str(self.data_dir),
-                            "--wait", "--mode=immediate", "stop",
+                            str(self._program("dropdb")),
+                            "--if-exists",
+                            "--host", str(self.socket_dir),
+                            "--port", str(self.port),
+                            "--username", self.database_user,
+                            self.database,
                         ],
                         timeout=shutdown_timeout,
-                        output_path=self.run_dir / "pg_ctl_stop_immediate.log",
+                        env=lifecycle_env,
+                        output_path=self.run_dir / "dropdb.log",
                     )
-        self._copy_collector_logs()
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        shutil.rmtree(self.socket_dir, ignore_errors=True)
-        if self.run_dir.exists():
-            self._append_lifecycle("private data and socket directories removed")
+                except Exception as error:
+                    shutdown_errors.append(f"dropdb failed: {error}")
+
+            after_fast = before
+            if before.state != _SERVER_STOPPED:
+                if before.stop_is_safe:
+                    try:
+                        self._attempt_stop(
+                            "fast",
+                            timeout=shutdown_timeout,
+                            env=lifecycle_env,
+                            output_path=self.run_dir / "pg_ctl_stop.log",
+                        )
+                    except Exception as error:
+                        shutdown_errors.append(
+                            f"fast stop failed: {error}")
+                else:
+                    shutdown_errors.append(
+                        "fast stop refused because postmaster ownership is "
+                        f"unproven: {before.detail}")
+                after_fast = self._probe_server_state(
+                    timeout=shutdown_timeout,
+                    env=lifecycle_env,
+                    output_path=self.run_dir
+                    / "pg_ctl_status_after_fast_stop.log",
+                )
+                self._append_lifecycle(
+                    "server probe after fast stop: "
+                    f"{after_fast.state}: {after_fast.detail}")
+
+            final_probe = after_fast
+            if after_fast.state != _SERVER_STOPPED:
+                if after_fast.stop_is_safe:
+                    try:
+                        self._attempt_stop(
+                            "immediate",
+                            timeout=shutdown_timeout,
+                            env=lifecycle_env,
+                            output_path=self.run_dir
+                            / "pg_ctl_stop_immediate.log",
+                        )
+                    except Exception as error:
+                        shutdown_errors.append(
+                            f"immediate stop failed: {error}")
+                else:
+                    shutdown_errors.append(
+                        "immediate stop refused because postmaster "
+                        "ownership is unproven: "
+                        f"{after_fast.detail}")
+                final_probe = self._probe_server_state(
+                    timeout=shutdown_timeout,
+                    env=lifecycle_env,
+                    output_path=self.run_dir
+                    / "pg_ctl_status_after_immediate_stop.log",
+                )
+                self._append_lifecycle(
+                    "server probe after immediate stop: "
+                    f"{final_probe.state}: {final_probe.detail}")
+
+            if final_probe.state != _SERVER_STOPPED:
+                details = "; ".join(shutdown_errors)
+                if details:
+                    details = "; stop errors: " + details
+                self._append_lifecycle(
+                    "shutdown is unproven; retaining private data and socket "
+                    f"directories: {final_probe.detail}{details}")
+                raise ClusterCommandError(
+                    "private PostgreSQL shutdown is unproven; refusing "
+                    "directory cleanup: "
+                    f"{final_probe.detail}{details}"
+                )
+            self._shutdown_proven = True
+
         self._started = False
         self._database_created = False
+        if shutdown_errors:
+            self._append_lifecycle(
+                "shutdown was proven after recoverable errors: "
+                + "; ".join(shutdown_errors))
+        self._copy_collector_logs()
+        self._remove_owned_directory(self.data_dir)
+        self._remove_owned_directory(self.socket_dir)
+        if self.run_dir.exists():
+            self._append_lifecycle(
+                "private data and socket directories removed after "
+                "shutdown proof")
 
     def __enter__(self) -> "UniquePrivateCluster":
         self.start()

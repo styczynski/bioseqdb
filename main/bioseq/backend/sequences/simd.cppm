@@ -22,7 +22,9 @@ export module bioseq.sequences.simd;
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
+import bioseq.sequences.rank_pack_core;
 import bioseq.common.circular_append_buffer;
+import bioseq.storage.lazy;
 
 import bioseq.simd.utils;
 export import bioseq.simd.vector_stream;
@@ -403,27 +405,26 @@ inline void append_ranks(
     DEBUG_ASSERT(state.partial_letters < LettersPerUnit,
                  "encode_state::partial_letters must be < LettersPerUnit on entry");
     auto* output = state.output_storage;
-    storage_unit_t local_partial_word = state.partial_word;
-    std::size_t local_partial_letters = state.partial_letters;
-    std::size_t local_total_letters = state.total_letters;
+    auto write_unit = [output](storage_unit_t value) {
+        output->push_back(value);
+        return true;
+    };
     for (std::size_t rank_index = 0; rank_index < count; ++rank_index) {
         const std::uint8_t letter_rank = ranks[rank_index];
         if (letter_rank == 0xFF) continue;
         DEBUG_ASSERT(letter_rank < (1u << BitsPerChar),
                      "letter rank exceeds BitsPerChar range");
-        local_partial_word |= static_cast<storage_unit_t>(letter_rank)
-                              << (BitsPerChar * local_partial_letters);
-        local_partial_letters += 1;
-        local_total_letters += 1;
-        if (local_partial_letters == LettersPerUnit) {
-            output->push_back(local_partial_word);
-            local_partial_word = 0;
-            local_partial_letters = 0;
-        }
+        const bool appended =
+            bioseq::sequences::rank_pack_detail::append_valid_rank_lsb<
+                storage_unit_t, BitsPerChar, LettersPerUnit>(
+                    state.partial_word,
+                    state.partial_letters,
+                    state.total_letters,
+                    letter_rank,
+                    write_unit);
+        DEBUG_ASSERT(appended,
+                     "growing SIMD rank pack unexpectedly overflowed");
     }
-    state.partial_word = local_partial_word;
-    state.partial_letters = local_partial_letters;
-    state.total_letters = local_total_letters;
 }
 
 template <typename storage_unit_t,
@@ -448,16 +449,19 @@ finalize_encode_state(
     DEBUG_ASSERT(state.output_storage != nullptr,
                  "encode_state::output_storage must be configured before finalize");
     auto* output = state.output_storage;
-    std::size_t padding = 0;
-    if (state.partial_letters > 0) {
-        output->push_back(state.partial_word);
-        padding = LettersPerUnit - state.partial_letters;
-    }
+    auto write_unit = [output](storage_unit_t value) {
+        output->push_back(value);
+        return true;
+    };
+    const auto finished =
+        bioseq::sequences::rank_pack_detail::finish_lsb<
+            storage_unit_t, BitsPerChar, LettersPerUnit>(
+                state.partial_word, state.partial_letters, write_unit);
+    DEBUG_ASSERT(finished.capacity_ok,
+                 "growing SIMD rank pack unexpectedly overflowed");
     const std::size_t n_words = output->size() - state.record_start_offset;
-    state.partial_word = 0;
-    state.partial_letters = 0;
     state.total_letters = 0;
-    return {n_words, padding};
+    return {n_words, finished.padding_letters};
 }
 
 /// Convert `size` ASCII bytes to ranks via the alphabet's 256-entry
@@ -1312,19 +1316,22 @@ HWY_INLINE void merge_packed_chunk_into_partial(
     std::size_t& local_partial_letters,
     std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
     std::uint32_t packed_chunk) noexcept {
-    const std::size_t shift_amount = 2 * local_partial_letters;
-    local_partial_word |= static_cast<storage_unit_t>(packed_chunk) << shift_amount;
-    const std::size_t new_letters = local_partial_letters + 16;
-    if (new_letters >= 32) {
-        packed_words->push_back(local_partial_word);
-        local_partial_word =
-            (shift_amount > 32)
-                ? (static_cast<storage_unit_t>(packed_chunk) >> (64 - shift_amount))
-                : storage_unit_t{0};
-        local_partial_letters = new_letters - 32;
-    } else {
-        local_partial_letters = new_letters;
-    }
+    std::size_t appended_letters = 0u;
+    auto write_unit = [packed_words](storage_unit_t value) {
+        packed_words->push_back(value);
+        return true;
+    };
+    const bool appended =
+        bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
+            storage_unit_t, 2u, 32u>(
+                local_partial_word,
+                local_partial_letters,
+                appended_letters,
+                packed_chunk,
+                16u,
+                write_unit);
+    DEBUG_ASSERT(appended && appended_letters == 16u,
+                 "growing SIMD rank chunk pack unexpectedly failed");
 }
 
 /// Variable-count merge of a packed chunk into the partial-word
@@ -1338,27 +1345,22 @@ HWY_INLINE void merge_variable_chunk_into_partial(
     std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
     std::uint32_t packed_chunk,
     std::size_t count) noexcept {
-    if (count == 0) return;
-    const std::uint32_t valid_mask = (count >= 16)
-        ? std::uint32_t{0xFFFFFFFFu}
-        : static_cast<std::uint32_t>((std::uint64_t{1} << (2 * count)) - 1u);
-    const storage_unit_t valid_chunk =
-        static_cast<storage_unit_t>(packed_chunk & valid_mask);
-    const std::size_t shift_amount = 2 * local_partial_letters;
-    local_partial_word |= valid_chunk << shift_amount;
-    const std::size_t new_total = local_partial_letters + count;
-    if (new_total >= 32) {
-        packed_words->push_back(local_partial_word);
-        if (new_total > 32) {
-            local_partial_word = valid_chunk >> (64 - shift_amount);
-            local_partial_letters = new_total - 32;
-        } else {
-            local_partial_word = 0;
-            local_partial_letters = 0;
-        }
-    } else {
-        local_partial_letters = new_total;
-    }
+    std::size_t appended_letters = 0u;
+    auto write_unit = [packed_words](storage_unit_t value) {
+        packed_words->push_back(value);
+        return true;
+    };
+    const bool appended =
+        bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
+            storage_unit_t, 2u, 32u>(
+                local_partial_word,
+                local_partial_letters,
+                appended_letters,
+                packed_chunk,
+                count,
+                write_unit);
+    DEBUG_ASSERT(appended && appended_letters == count,
+                 "growing SIMD variable rank chunk pack unexpectedly failed");
 }
 
 // ============================================================================
@@ -2048,41 +2050,44 @@ requires (
     && stdc_allocator<Alloc, StdcT>
 )
 [[nodiscard]]
-inline StdcT* stdc_recode_to_type_params(
+inline StdcT* stdc_rewidth_to_type_params(
     const StdcT& src,
     compact_sequence_stdc_type_params target,
     Alloc&& alloc)
 {
-    if (target.alphabet_code == src.alphabet_code) {
-        // Same alphabet, width change. recast_storage_width copies the
-        // packed payload with a raw memcpy, which preserves the sequence
-        // ONLY when the alphabet's letters pack identically across storage
-        // widths — i.e. each byte holds a whole number of letters
-        // (8 % letter_bit_width == 0). dna4 (2 bits/letter) qualifies; dna5
-        // (3 bits/letter) does NOT — its letters straddle byte boundaries
-        // differently at each width, so a memcpy garbles the value
-        // (DOC0268 Appendix: 'ACGTN'::seq('dna5',32) decoded as "ACACG").
-        // For non-byte-aligned alphabets fall through to the
-        // alphabet-preserving ASCII round-trip below, which re-packs the
-        // letters correctly for the target width.
-        bool byte_aligned = false;
-        StdcT::supported_alphabets_type::dispatch_alphabet_by_code(
-            src.alphabet_code,
-            [&byte_aligned]<class A>() {
-                constexpr std::size_t lbw =
-                    seqan3::detail::ceil_log2(
-                        static_cast<std::size_t>(seqan3::alphabet_size<A>));
-                byte_aligned = (lbw != 0u) && (8u % lbw == 0u);
-            });
-        if (byte_aligned) {
-            return src.recast_storage_width(target.storage_unit_byte_width,
-                                            std::forward<Alloc>(alloc));
-        }
+    // DOC0377: width coalescing is never an alphabet conversion. Callers
+    // reject two differently bound alphabets with SQLSTATE 42804 before this
+    // helper; retain the guard here so no future caller can silently enter the
+    // generic target-alphabet recoder.
+    if (target.alphabet_code != src.alphabet_code) {
+        return nullptr;
+    }
+
+    // Same alphabet, width change. recast_storage_width copies the packed
+    // payload with a raw memcpy, which preserves the sequence ONLY when the
+    // alphabet's letters pack identically across storage widths — i.e. each
+    // byte holds a whole number of letters (8 % letter_bit_width == 0). dna4
+    // (2 bits/letter) qualifies; dna5 (3 bits/letter) does NOT — its letters
+    // straddle byte boundaries differently at each width. For non-byte-aligned
+    // alphabets use an alphabet-preserving ASCII round-trip below.
+    bool byte_aligned = false;
+    StdcT::supported_alphabets_type::dispatch_alphabet_by_code(
+        src.alphabet_code,
+        [&byte_aligned]<class A>() {
+            constexpr std::size_t lbw =
+                seqan3::detail::ceil_log2(
+                    static_cast<std::size_t>(seqan3::alphabet_size<A>));
+            byte_aligned = (lbw != 0u) && (8u % lbw == 0u);
+        });
+    if (byte_aligned) {
+        return src.recast_storage_width(target.storage_unit_byte_width,
+                                        std::forward<Alloc>(alloc));
     }
     StdcT* result = nullptr;
-    StdcT::supported_alphabets_type::dispatch_alphabet_by_code(target.alphabet_code,
-        [&]<class TargetA>() {
-            result = stdc_recode_to<StdcT, TargetA>(
+    StdcT::supported_alphabets_type::dispatch_alphabet_by_code(
+        src.alphabet_code,
+        [&result, &src, target, &alloc]<class SourceA>() {
+            result = stdc_recode_to<StdcT, SourceA>(
                 src, target.storage_unit_byte_width,
                 std::forward<Alloc>(alloc));
         });
@@ -2125,62 +2130,21 @@ inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
         b.convert_to([&result, &ra]<class Sb>(const compact_sequence_range<Sb>& rb) {
             using TraitsA = typename compact_sequence_range<Sa>::traits;
             using TraitsB = typename compact_sequence_range<Sb>::traits;
-            // The dispatch_instance fanout synthesises every (alphabet,
-            // storage_unit) pair at compile time, but at runtime the
-            // DEBUG_ASSERT above pins same alphabet and the typmod pins
-            // same storage_unit_byte_width. Compile-time guards filter
-            // out unreachable pairs so we never try to instantiate
-            // bit_cast_to_storage_unit / compare_sequences_scalar on
-            // mismatched types (e.g. dna5 has 3 bits/char which doesn't
-            // pack evenly into smaller storage units, so the
-            // bit_cast_to_storage_unit constraint fails on dna5).
             if constexpr (
                 !std::is_same_v<typename TraitsA::alphabet_type,
                                 typename TraitsB::alphabet_type>
             ) {
                 (void)ra;
                 (void)rb;
-            } else if constexpr (
-                std::is_same_v<typename TraitsA::storage_unit,
-                               typename TraitsB::storage_unit>
-            ) {
-                result = compare_sequences_scalar(ra, rb);
-            } else if constexpr (
-                is_sequence_bit_castable_to<Sa, typename TraitsB::storage_unit>
-                && sizeof(typename TraitsA::storage_unit) >=
-                   sizeof(typename TraitsB::storage_unit)
-            ) {
-                const auto va =
-                    ra.template bit_cast_to_storage_unit<typename TraitsB::storage_unit>();
-                result = compare_sequences_scalar(va, rb);
-            } else if constexpr (
-                is_sequence_bit_castable_to<Sb, typename TraitsA::storage_unit>
-            ) {
-                const auto vb =
-                    rb.template bit_cast_to_storage_unit<typename TraitsA::storage_unit>();
-                result = compare_sequences_scalar(ra, vb);
             } else {
-                // Unreachable at runtime: same alphabet + different
-                // storage widths that can't bit-cast (e.g. dna5 with
-                // 3-bit leftover). This is a caller-contract
-                // violation, so per DOC0260 R8 raise a load-bearing
-                // bioseq_log<ERR, PG>( …) — DEBUG_ASSERT would be silent in
-                // release builds and return std::strong_ordering::equal
-                // on a value mismatch. NO_POSTGRES build path keeps the
-                // historical DEBUG_ASSERT (aligner exec never hits
-                // cross-storage-width compares with dna5).
-                (void)ra;
-                (void)rb;
-#ifndef NO_POSTGRES
-                bioseq_log<ERR, PG>(
-                    "stdc_compare: cross-storage-width same-alphabet pair "
-                    "with non-bit-castable layout (alphabet does not satisfy "
-                    "is_sequence_custom_alphabet_bit_castable_to)");
-#else
-                DEBUG_ASSERT(false,
-                    "stdc_compare: cross-storage-width same-alphabet pair "
-                    "with non-bit-castable layout (dna5 + mismatched width?)");
-#endif
+                const auto lazy_a = bioseq::storage::make_lazy_in_memory(ra);
+                const auto lazy_b = bioseq::storage::make_lazy_in_memory(rb);
+                const int comparison = bioseq::storage::compare_sequence_views(
+                    bioseq::storage::as_lazy_sequence_view(lazy_a),
+                    bioseq::storage::as_lazy_sequence_view(lazy_b));
+                result = comparison < 0 ? std::strong_ordering::less
+                    : comparison > 0 ? std::strong_ordering::greater
+                                     : std::strong_ordering::equal;
             }
         });
     });
