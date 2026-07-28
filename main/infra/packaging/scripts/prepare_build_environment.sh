@@ -100,7 +100,7 @@ install_opensuse_dependencies() {
   zypper --non-interactive install -y --allow-vendor-change \
     autoconf automake bison binutils ca-certificates cpio curl flex gcc gcc-c++ \
     gettext-tools git gzip libcap-progs libopenssl-devel libtool m4 make ninja patch \
-    pkg-config python3 rpm-build rsync tar util-linux wget xz zip zlib-devel \
+    pkg-config python3 rpm-build rsync tar util-linux wget xz zip \
     libX11-devel libXext-devel libXrandr-devel libXrender-devel libXi-devel \
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
     libxkbcommon-devel wayland-devel wayland-protocols-devel
