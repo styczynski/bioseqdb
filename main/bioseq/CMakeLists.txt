@@ -9,6 +9,8 @@ option(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST
   "Run the maintainer PREPARE incremental Ninja contract during the build" ON)
 option(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST
   "Run the maintainer SQL negative/provenance fixture suite during the build" ON)
+option(BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK
+  "Run the Git-history-backed DOC0388 ledger maintainer check during the build" ON)
 
 set(BIOSEQ_PG_BUILD_CONFIG_HEADER
   "${CMAKE_CURRENT_LIST_DIR}/include2/headers/pg_build_config.h")
@@ -3320,7 +3322,8 @@ add_dependencies(
   bioseq_sql_external_feature_contract
   bioseq_sql_production_determinism_self_test)
 
-if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
+if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
+    AND BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK)
   set(BIOSEQ_DOC0388_LEDGER_SCRIPT
     "${CMAKE_CURRENT_LIST_DIR}/../cmake/doc0388_ledgers.py")
   set(BIOSEQ_DOC0388_LEDGER_FIXTURES
