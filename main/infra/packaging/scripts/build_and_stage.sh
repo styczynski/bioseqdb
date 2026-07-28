@@ -115,6 +115,7 @@ if [[ "${action}" == "build" ]]; then
     -DCMAKE_SKIP_RPATH=ON \
     -DPostgreSQL_CONFIG="${pg_config}" \
     -DBIOSEQ_PACKAGE_BUILD=ON \
+    -DBIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON="${libcxx_modules}" \
     -DBIOSEQ_PACKAGE_LIBCXX_ARCHIVE="${libcxx_archive}" \
     -DBIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE="${libcxxabi_archive}" \
     -DBIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE="${libunwind_archive}" \
