@@ -39,9 +39,10 @@ in-process block interval is 16--32 cells. The PostgreSQL configuration layer
 also selects Block Aligner, but its GUC defaults are still 32--256 and the
 custom scan copies those values into the parameter object. This distinction
 matters when interpreting the benchmark in
-Section~\ref{sec:final-alignment-results}. The 22\% CPU improvement attached to
-16--32 is not automatically obtained by an unmodified SQL installation using
-32--256.
+Section~\ref{sec:final-alignment-results}. The source annotation for the
+broader tuning grid reports about 22\% lower CPU time for 16--32. The displayed
+129\,ms and 172\,ms pair yields a 25.0\% reduction. Neither percentage is
+automatically obtained by an unmodified SQL installation using 32--256.
 
 The dedicated all-GPU route adds a third execution contract. Admission
 requires the configuration tuple to name Block Aligner, but no CPU Block
@@ -71,7 +72,7 @@ the convention used by minimap2 and BioSeqDB. The first gap symbol costs
 \(q+e\).
 
 With target positions on the horizontal axis and query positions on the
-vertical axis, a global Smith--Waterman--Gotoh recurrence is
+vertical axis, a global Needleman--Wunsch--Gotoh recurrence is
 \begin{align}
     I(i,j) &= \max\{H(i-1,j)-q-e,\ I(i-1,j)-e\}, \label{eq:affine-i}\\
     D(i,j) &= \max\{H(i,j-1)-q-e,\ D(i,j-1)-e\}, \label{eq:affine-d}\\
@@ -96,9 +97,9 @@ families define
 \[
     g(k)=\min\{4+2k,\ 24+k\}.
 \]
-The short family is cheaper through length 20, while the long family becomes
-cheaper beyond that crossover. Algebraically, KSW2 maintains two insertion
-states and two deletion states:
+The short family is strictly cheaper for \(k<20\), the two families tie at
+\(k=20\), and the long family is cheaper for \(k>20\). Algebraically, KSW2
+maintains two insertion states and two deletion states:
 \begin{align}
  I_r(i,j)&=\max\{H(i-1,j)-q_r-e_r,\ I_r(i-1,j)-e_r\},\\
  D_r(i,j)&=\max\{H(i,j-1)-q_r-e_r,\ D_r(i,j-1)-e_r\},
@@ -285,6 +286,13 @@ inversion-retry, or second-pass logic in its alignment modules. Consequently,
 ``minimap2-derived'' is more accurate than ``minimap2-equivalent'' for those
 special modes.
 
+The ordinary paths also differ at an anchor boundary. BioSeqDB derives the
+boundary from the stored \texttt{cur\_anchor.query\_position} and
+\texttt{cur\_anchor.ref\_position}, then adds one. Upstream minimap2 normally
+calls \texttt{mm\_adjust\_minier} before extension. Its short-read, non-HPC
+special path is an exception. BioSeqDB does not perform that adjustment here,
+so the DP windows can differ even when the chain anchors agree.
+
 There is also a subtle difference after a dropped phase. KSW2 suppresses the
 right extension if a prior phase Z-dropped. The Block path still admits a
 right extension because its gap fills are global and its two end extensions
@@ -412,9 +420,10 @@ Greedy direction selection can be fooled by a long gap or a low-similarity
 island. The defining contribution of Block Aligner is therefore adaptive
 geometry. When several steps fail to produce a new maximum, it restores a
 checkpoint and doubles \(B\). The larger block spans more competing paths. If
-a later maximum lies near the suffix of both outgoing borders, the block may
-halve and advance diagonally. This recovers the speed of a narrow block in
-easy regions while retaining a chance of crossing a difficult region.
+a later maximum lies near the suffix of either outgoing border, the block may
+halve and advance diagonally. The implementation tests the larger suffix
+maximum from the row and column borders. This recovers the speed of a narrow
+block in easy regions while retaining a chance of crossing a difficult region.
 
 The original paper reports global, local, and X-drop modes, nucleotide and
 protein matrices, and position-specific scoring matrices. Across its chosen
@@ -511,7 +520,7 @@ following concrete geometry:
 \begin{itemize}
     \item a fixed step \(S=8\);
     \item signed 16-bit lanes with saturating arithmetic and a bias of
-    \(2^{14}\), so local relative scores stay representable;
+    \(2^{14}\), together with a 32-bit step offset.
     \item a Highway capped tag of at most 16 lanes;
     \item admitted lane counts of exactly 8 or 16, corresponding to the
     proven reference geometries;
@@ -524,23 +533,31 @@ At 8 lanes, a shift step is one full vector. At 16 lanes, it is half a
 vector. Wider Highway targets are deliberately capped rather than allowed to
 change the algorithm's step semantics. An unsupported lane shape, penalty,
 coordinate range, matrix layout, or block geometry aborts the selected route.
-There is no scalar biological implementation hidden beneath this module.
+There is no scalar biological implementation hidden beneath this module. The
+16-bit representation is safe for the tuned and tested score and block
+geometries. The current runtime contract does not prove a
+substitution-score-to-block-size range invariant for every SQL-admitted
+configuration. Rejecting unsupported shapes therefore does not by itself prove
+that every admitted score and block pairing remains within the tested
+saturating-arithmetic range.
 
 The hot rectangle kernel loads a scoring-matrix row once per target column and
 reuses it for all query vectors in that column. It computes diagonal,
 column-gap, and row-gap candidates, using
 Equation~\ref{eq:block-prefix} for the row state. Border arrays are the only
 scores written back. Trace masks are compressed with Highway's
-\texttt{BitsFromMask}: two lane masks are interleaved into one two-bit
-decision word. This replaces repeated vector stores followed by scalar
-bit-shifting.
+\texttt{BitsFromMask}. Two masks are interleaved into a direction word, while
+two gap-open and continuation masks are interleaved into a second word. Each
+cell therefore contributes four trace bits across two words. This replaces
+repeated vector stores followed by scalar bit-shifting.
 
 The traceback itself is a lookup-table state machine over diagonal, row-gap,
 and column-gap states. It walks the recorded adaptive strips backward and
 accumulates run lengths directly into packed \(M/I/D\) operations. If exact
 edit accounting was requested, a diagonal step compares the already resident
-padded ranks, while an insertion or deletion contributes one edit. Score,
-CIGAR, and exact edit distance are thus produced from one trace walk.
+padded ranks, while an insertion or deletion contributes one edit. The forward
+DP commits the alignment score. The backward trace produces the CIGAR and, when
+requested, the exact edit count.
 
 \subsection{BioSeqDB-specific adaptations}
 
@@ -611,8 +628,9 @@ tie policy.
 For resident DNA4/u64 storage, the fast certificate reads packed two-bit
 symbols directly, reverses packed groups when required, XORs query and target,
 and collapses each two-bit mismatch group for a population count. It computes
-the score and edit count without byte expansion. The result is one \(nM\)
-CIGAR run. Its decision is three-valued:
+the score and, when requested, the edit count without byte expansion. When
+CIGAR output is requested, the caller emits one \(nM\) run. A score-only call
+does not materialise that run. Its decision is three-valued:
 
 \begin{enumerate}
     \item \emph{not eligible}: no packed scan ran, so the ordinary path,
@@ -620,9 +638,10 @@ CIGAR run. Its decision is three-valued:
     \item \emph{rejected}: exact packed content was scanned but
     Equation~\ref{eq:block-certificate} did not prove uniqueness, so Block DP
     runs with the byte certificate disabled to avoid scanning twice;
-    \item \emph{certified}: score, endpoint, edit count, and \(nM\) CIGAR are
-    committed without constructing padded buffers, scratch, trace, or even an
-    otherwise empty result CIGAR vector before the proof succeeds.
+    \item \emph{certified}: score and endpoint are committed. A requested edit
+    count and requested \(nM\) CIGAR are also committed without constructing
+    padded buffers, scratch, or trace. The result CIGAR vector is not allocated
+    before the proof succeeds.
 \end{enumerate}
 
 This is an exact fast path inside an otherwise heuristic adaptive algorithm.
@@ -679,6 +698,12 @@ There are three cases worth separating:
     \item A certified Block diagonal emits one \(nM\) run without allocating
     trace storage.
 \end{enumerate}
+
+The implicit interval in the single-seed case contributes its CIGAR and, when
+requested, its exact edit accounting. It does not contribute an implicit seed
+score to \texttt{dp\_score}. That field accumulates only actual left, fill, and
+right DP calls. The path fields can therefore cover the seeded interval even
+when the score field has no corresponding seed contribution.
 
 Block Aligner internally knows whether a diagonal step was an equality or a
 mismatch. The common minimap-style ABI deliberately projects \(M\), \(=\), and
@@ -921,7 +946,8 @@ Grid size & principal experimental setting 64 & fixed traceback tile length
 128 in the current ABI\\
 Stored boundary & compact row/column states used by the CUDA kernels & five
 two-piece-affine states on each bottom and right tile border\\
-Trace endpoint & global maximum for the described lightweight extension &
+Trace endpoint & exact global maximum for full extension, while lightweight
+extension greedily tracks an approximate maximum &
 bottom-right of the selected global coordinate window in the CIGAR shader\\
 Gap model & inspected gridded CUDA trace uses one affine family & two affine
 families with short and long gaps\\
@@ -964,7 +990,9 @@ the cited very-long baseline. Table~\ref{tab:block-sweep} reproduces the
 displayed Block timings. The final column is calculated directly from the two
 printed millisecond values as \(1-t_{\mathrm{Block}}/172\). It is not copied
 from the nearby rounded source annotations, which aggregate the broader grid
-and do not always equal the single displayed ratio.
+and do not always equal the single displayed ratio. In particular, the
+displayed 16--32 pair gives 25.0\%, while the broader-grid annotation reports
+about 22\%.
 
 \begin{table}[htbp]
 \centering
@@ -1006,31 +1034,37 @@ must therefore be reported separately.
 
 \subsection{Resident GPU evidence}
 
-The newest authoritative final-alignment evidence in DOC0356/DOC0357 is the
-final 2026-06-28 \texttt{report\_47.json} signoff. Earlier chronological
-sections in those documents say that general gridded traceback was incomplete.
-The final addenda explicitly supersede those statements, and the current
-shader contains the implemented boundary/recompute path.
+The newest authoritative final-alignment discussion in DOC0356/DOC0357 is the
+2026-06-28 signoff addendum over \texttt{report\_47.json}. The report artifact
+itself was created on 2026-06-10 at commit
+\texttt{6f69eebe1ed8cbfbb126be278c7f0ffc821fdb72}. Its metadata records
+\texttt{dirty=true} and \texttt{fast=false}. Each displayed tuple and case had
+one sample, so the timings are scoped signoff observations rather than
+variability estimates. The report recorded no rule violations or regressions
+and retained nonblocking report-level sanity warnings. Earlier chronological
+sections in the documents say that general gridded traceback was incomplete.
+The final addenda explicitly supersede those statements, and the current shader
+contains the implemented boundary/recompute path.
 
 \begin{table}[htbp]
 \centering
 \small
-\caption{Selected PostgreSQL E2E evidence from \texttt{report\_47.json}.
-``Correct'' is the report's case-specific acceptance measure. All three GPU
-rows recorded zero CPU fallbacks, zero SIMD fallbacks, and zero Vulkan
-declines.}
+\caption{Selected one-sample PostgreSQL E2E evidence from
+\texttt{report\_47.json}. ``Gate result'' is the report's case-specific
+acceptance measure. All three GPU rows recorded zero CPU fallbacks, zero SIMD
+fallbacks, and zero Vulkan declines.}
 \label{tab:gpu-alignment-evidence}
 \begin{tabular}{p{0.34\textwidth}rrrp{0.20\textwidth}}
 \toprule
 \textbf{Case} & \textbf{GPU (s)} & \textbf{SIMD (s)} &
-\textbf{Speedup} & \textbf{Correctness}\\
+\textbf{Speedup} & \textbf{Gate result}\\
 \midrule
 \texttt{E2E\_BATCH\_512\_MANY\_GAP\_CIGAR}
 & 1.241472 & 1.240568 & \(0.999\times\)
-& 512/512 matches and CIGARs\\
+& 512 correct matches and 512 fixture-accepted CIGARs\\
 \texttt{E2E\_BATCH\_4096\_MANY\_GAP\_CIGAR}
 & 1.809468 & 4.511529 & \(2.493\times\)
-& 4096/4096 matches and CIGARs\\
+& 4096 correct matches and 4096 fixture-accepted CIGARs\\
 \texttt{E2E\_BATCH\_16\_300M\_SEG\_COORD}
 & 10.585378 & 25.746413 & \(2.432\times\)
 & 16/16 expected queries found\\
@@ -1084,16 +1118,27 @@ Correctness for that coordinate case means at least one in-tolerance hit for
 each of 16 expected queries. It is not exact row-set parity. The GPU tuple
 emitted 233 match rows while the SIMD tuple emitted 16. This caveat is
 material for downstream SQL that expects one row per query. It does not affect
-the 4096-job CIGAR case's reported 4096/4096 CIGAR comparison, but it prevents
-using the coordinate benchmark as a blanket equivalence proof.
+the 4096-job CIGAR case's reported 4096-of-4096 fixture acceptance, but it
+prevents using the coordinate benchmark as a blanket equivalence proof.
+
+The CIGAR fixture gate did not compare the literal GPU CIGAR text, traceback
+path, or alignment score with the SIMD result. Its
+\texttt{correct\_cigar\_count} required one returned row per query, the expected
+strand, a target-coordinate offset below 15 bases, a syntactically valid CIGAR,
+and replay that consumed the reported query and target spans. Replay also
+validated explicit \(=\) and \(X\) operations. The many-gap fixtures imposed
+their own operation constraint, including at least 17 deletion operations.
+The table therefore reports fixture-accepted CIGARs, not CIGAR path identity.
 
 Other source-config proof rows in the same report covered 64- and 512-job
 long CIGARs, 512- and 4096-job bounded CIGARs, a 4096-job indel case, and an
 8192-job bounded case. They reported correct non-empty CIGARs and zero
 fallback/decline counters. The final unit and integration gate contained 196
 test cases, of which 195 passed and one was skipped, with 3071 of 3071
-assertions passing. These tests prove the checked-in acceptance matrix. They
-do not remove the length cap, scalar-per-job limitation, or row-set caveat.
+assertions passing. That contemporaneous gate provides stronger repeatable
+correctness coverage than the one-sample benchmark receipt. It proves the
+checked-in acceptance matrix, but does not remove the length cap,
+scalar-per-job limitation, or row-set caveat.
 
 \subsection{Why the paper and project numbers should not be merged}
 
@@ -1226,4 +1271,3 @@ route only for a complete, fail-closed GPU statement shape. CIGAR, edit
 distance, score, route identity, and benchmark scope remain separate pieces
 of evidence. That separation is what allows a database-resident mapper to
 evolve without hiding algorithmic changes behind one SQL function name.
-

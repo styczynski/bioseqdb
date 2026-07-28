@@ -88,13 +88,16 @@ Three additional rules close common correctness gaps:
     insertions and deletions.  The equal-length chip-maze or bit-mask
     approximation is not extrapolated to geometry for which the port has no
     proof.
-    \item Invalid, overflowing, or unsupported jobs return status
-    \texttt{unsupported\_conservative} and are accepted.  ``Fail open'' here
-    means preserving candidates, not ignoring an execution error.
-    \item If a Vulkan backend was explicitly selected and its runtime or
-    hardware execution fails, the query fails rather than silently changing to
-    CPU.  This is a route-integrity rule.  It is distinct from the
-    conservative-accept result returned for a representable unsupported job.
+    \item A dispatched job whose slice or shader geometry fails per-job
+    validation returns \texttt{unsupported\_conservative} and is accepted.
+    ``Fail open'' here means preserving the candidate.
+    \item Overflow while materialising a flat slice or aggregate offset omits
+    that job conservatively before dispatch.  No job or result record is
+    created, and the owning region receives no rejection evidence from it.
+    \item Allocation, mapping, device, or runtime failures throw.  If Vulkan
+    was selected, the query fails rather than silently changing to CPU.  This
+    route-integrity rule is distinct from conservative handling of a
+    representable per-job input.
 \end{enumerate}
 
 The common ABI makes these cases visible.  \texttt{PrefilterJob} is a 20-byte
@@ -323,12 +326,13 @@ after measurement:
 \end{itemize}
 
 The resolver is visible at \texttt{runtime.cppm}, lines 14939--14975.  Both
-modes have persistent recorded-command identities.  Descriptor bindings,
-push bytes, group count, and pipeline identity are part of the replay key, so
-reusing a command buffer cannot replay stale geometry.  Rank buffers,
-descriptor state, memory-admission accounting, fences, and result storage are
-shared with GateKeeper rather than duplicated.  A hardware support probe never
-turns software Vulkan such as llvmpipe into a claimed GPU result.
+modes have persistent recorded-command identities.  The replay key contains
+the shader kind, pipeline, pipeline layout, descriptor-set identity, every
+field of the push block, and the group count.  Buffer handles are tracked by a
+separate bound-buffer cache and are rebound before replay when their identity
+changes.  Rank storage, memory-admission accounting, fences, and result storage
+are shared with GateKeeper rather than duplicated.  A hardware support probe
+never turns software Vulkan such as llvmpipe into a claimed GPU result.
 
 \section{GateKeeper: shifted masks, amendment, and an exact guard}
 \label{sec:prefilter-gatekeeper}
@@ -410,67 +414,70 @@ popcount.
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize]
-  \node[anchor=east,font=\small\bfseries] at (1.5,5.45) {raw masks};
-  \node[anchor=west,draw=black!45,fill=blue!7,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (2,5.2)
-        {\texttt{H0:\ \ 1110010001100100}};
-  \node[anchor=west,draw=black!45,fill=blue!7,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (2,4.55)
-        {\texttt{H-1:\ 1100001000110010}};
-  \node[anchor=west,draw=black!45,fill=blue!7,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (2,3.90)
-        {\texttt{H+1:\ 0111000100001001}};
-  \node[anchor=west,draw=black!45,fill=blue!7,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (2,3.25)
-        {\texttt{H-2:\ 1000010011100100}};
-  \node[anchor=west,draw=black!45,fill=blue!7,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (2,2.60)
-        {\texttt{H+2:\ 0011100100010011}};
+\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize,>=Latex]
+  \node[draw=black!55,fill=blue!7,rounded corners=2pt,
+        minimum width=6.2cm,minimum height=0.72cm,align=center] (raw) at (6.9,6.1)
+        {\textbf{Raw shifted mismatch masks}\\
+         \(\{H_d\}_{d=-E}^{E}\), including the unshifted \(H_0\)};
 
-  \draw[->,very thick,color=orange!75!black] (6.3,3.9) -- (7.15,3.9);
-  \node[align=center,font=\scriptsize] at (6.72,4.45)
-        {amend short\\internal zero runs};
+  \node[draw=black!55,fill=green!9,rounded corners=2pt,
+        minimum width=2.4cm,minimum height=0.72cm,align=center] (fastaccept)
+        at (13.0,6.1) {\textbf{accept}\\no rejection proof};
+  \draw[->,thick] (raw.east) -- node[above,align=center]
+        {\(\mathrm{popcount}(H_0)\le E\)} (fastaccept.west);
 
-  \node[anchor=west,draw=black!45,fill=orange!8,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (7.3,5.2)
-        {\texttt{A0:\ \ 1111110001111100}};
-  \node[anchor=west,draw=black!45,fill=orange!8,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (7.3,4.55)
-        {\texttt{A-1:\ 1110001100111110}};
-  \node[anchor=west,draw=black!45,fill=orange!8,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (7.3,3.90)
-        {\texttt{A+1:\ 1111000110001111}};
-  \node[anchor=west,draw=black!45,fill=orange!8,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (7.3,3.25)
-        {\texttt{A-2:\ 1100011111101100}};
-  \node[anchor=west,draw=black!45,fill=orange!8,rounded corners=2pt,
-        minimum width=4.0cm,minimum height=0.48cm] at (7.3,2.60)
-        {\texttt{A+2:\ 1111100110010011}};
-  \node[anchor=west,font=\scriptsize,color=orange!65!black] at (7.3,2.15)
-        {vacant shifted boundary set after amendment};
+  \node[draw=black!55,fill=orange!8,rounded corners=2pt,
+        minimum width=7.3cm,minimum height=0.92cm,align=center] (amend) at (6.9,4.65)
+        {\(\widehat H_0=\mathrm{amend}(H_0)\)\\
+         \(\widehat H_d=\mathrm{compensate}_d(\mathrm{amend}(H_d))\)
+         for \(d\ne0\)};
+  \draw[->,thick] (raw.south) -- node[right] {otherwise} (amend.north);
 
-  \foreach \yy in {2.85,3.5,4.15,4.8,5.45}
-    \draw[black!45] (11.65,\yy) -- (12.05,1.35);
-  \node[draw=black!55,fill=green!8,rounded corners=2pt,
-        minimum width=4.4cm,minimum height=0.60cm] at (10.0,1.15)
-        {\(\bigwedge_{d=-E}^{E} A_d =
-        \texttt{0010000100000000}\)};
-  \node[font=\bfseries] at (7.3,1.15) {AND};
-  \draw[->,thick] (10.0,0.82) -- (10.0,0.25);
-  \node[draw=black!55,fill=green!8,rounded corners=2pt,
-        minimum width=5.4cm,minimum height=0.60cm] at (10.0,-0.05)
-        {\texttt{0010 | 0001 | 0000 | 0000}
-         \(\longrightarrow\) grouped cost};
-  \node[anchor=west,align=left] at (2,-0.05)
-        {\textbf{Fast path:} if \(\mathrm{popcount}(H_0)\le E\), accept.\\
-         \textbf{Candidate reject:} grouped cost \(>E\).};
+  \node[draw=black!55,fill=orange!8,rounded corners=2pt,
+        minimum width=5.0cm,minimum height=0.72cm,align=center] (intersect)
+        at (6.9,3.25)
+        {\textbf{Intersect amended masks}\\
+         \(A=\displaystyle\bigwedge_{d=-E}^{E}\widehat H_d\)};
+  \draw[->,thick] (amend.south) -- (intersect.north);
+
+  \node[draw=black!55,fill=orange!8,rounded corners=2pt,
+        minimum width=5.0cm,minimum height=0.72cm,align=center] (group)
+        at (6.9,1.95)
+        {\textbf{Partition \(A\) into four-bit groups}\\
+         compute the capped estimate \(\widehat e(A)\)};
+  \draw[->,thick] (intersect.south) -- (group.north);
+
+  \node[draw=black!55,fill=green!9,rounded corners=2pt,
+        minimum width=2.4cm,minimum height=0.72cm,align=center] (estimateaccept)
+        at (13.0,1.95) {\textbf{accept}\\mask estimate within \(E\)};
+  \draw[->,thick] (group.east) -- node[above]
+        {\(\widehat e(A)\le E\)} (estimateaccept.west);
+
+  \node[draw=black!55,fill=red!7,rounded corners=2pt,
+        minimum width=5.0cm,minimum height=0.72cm,align=center] (guard)
+        at (6.9,0.55)
+        {\textbf{Exact threshold guard}\\
+         evaluate whether \(D(Q,T)>E\)};
+  \draw[->,thick] (group.south) -- node[right]
+        {\(\widehat e(A)>E\)} (guard.north);
+
+  \node[draw=black!55,fill=green!9,rounded corners=2pt,
+        minimum width=2.4cm,minimum height=0.72cm,align=center] (guardaccept)
+        at (1.1,0.55) {\textbf{accept}\\mask candidate disproved};
+  \node[draw=black!55,fill=red!12,rounded corners=2pt,
+        minimum width=2.4cm,minimum height=0.72cm,align=center] (reject)
+        at (13.0,0.55) {\textbf{reject}\\exactly above \(E\)};
+  \draw[->,thick] (guard.west) -- node[above] {\(D(Q,T)\le E\)}
+        (guardaccept.east);
+  \draw[->,thick] (guard.east) -- node[above] {\(D(Q,T)>E\)}
+        (reject.west);
 \end{tikzpicture}
-\caption{Reconstructed GateKeeper mask flow for \(E=2\).  Shifted Hamming
-masks are amended independently, their vacant boundaries are compensated,
-and all \(2E+1\) masks are intersected.  Four-bit groups of the final mask
-produce a threshold estimate.  The strings are explanatory masks rather than
-a reproduced experimental pair.}
+\caption{Symbolic, implementation-faithful GateKeeper flow.  Shifted Hamming
+masks are amended independently, exposed shifted boundaries are compensated,
+and all \(2E+1\) masks are intersected.  The grouped mask can only propose a
+rejection.  BioSeqDB rejects a pair only after the exact threshold guard
+confirms \(D(Q,T)>E\).  For \(E=0\), a nonzero \(H_0\) is already an exact
+rejection and bypasses the remaining flow.}
 \label{fig:prefilter-gatekeeper}
 \end{figure}
 
@@ -551,9 +558,11 @@ chosen only for a homogeneous batch whose rank offsets are four-byte aligned.
 It loads the packed rank words once, derives Hamming and shifted masks in
 registers, retains only the raw diagonals needed by its pruned exact
 wavefront, and does not reread rank storage during the guard.  Any other direct
-GateKeeper batch uses the generic shader.  The production pipeline is even
-narrower: automatic GateKeeper selection requires every job to have length 32
-or 64 and threshold 2 or 4.
+GateKeeper batch uses the generic shader.  Automatic production selection
+requires each job independently to have equal query and target lengths, a
+length of 32 or 64, and threshold 2 or 4.  The batch may mix 32- and 64-symbol
+jobs.  A mixed eligible batch resolves to GateKeeper and uses the generic
+shader because it does not satisfy one fixed variant's homogeneous geometry.
 
 \begin{table}[htbp]
 \centering
@@ -588,7 +597,8 @@ GateKeeper-GPU implementation and the BioSeqDB port.}
 Algorithm choice and backend choice are related but not identical.  Scalar and
 Highway production always use SneakySnake.  A Vulkan batch is resolved as
 GateKeeper only when \emph{every} job belongs to the measured small-window
-domain; otherwise the whole batch uses SneakySnake.  The pure resolver at
+domain.  Those jobs need not share one length or threshold.  Otherwise the
+whole batch uses SneakySnake.  The pure resolver at
 \texttt{pipe.cppm}, lines 7912--7934, is equivalent to:
 
 \begin{verbatim}
@@ -658,10 +668,13 @@ retained two rows with edit counts zero and four under the strict bound five.
 The performance history matters because the final policy was not obvious from
 the papers.  A fast published filter can become slower after generic rank
 conversion, safe bounds checks, batching, runtime validation, and GPU
-synchronisation are included.  The project benchmark therefore measures
-\texttt{backend\_batch\_ns}: upload, dispatch, synchronisation, and result
-readback are inside the timed region.  Correctness preparation and the exact
-truth oracle are outside it.
+synchronisation are included.  The project benchmark records
+\texttt{backend\_batch\_ns} for upload, dispatch, synchronisation, and result
+readback.  The later hardware-route comparisons use that field.  It also
+records \texttt{wall\_clock\_ns} for the complete benchmark callback.
+Table~\ref{tab:sneaky-intermediate} transcribes complete-callback wall-clock
+P50 from report 127, not \texttt{backend\_batch\_ns}.  Correctness preparation
+and the exact truth oracle remain outside the measured callback.
 
 \subsection{The first SneakySnake port: correct but usually slower}
 
@@ -677,23 +690,24 @@ clean-tree run.  Each standalone cell used a
 deterministic 1,024-pair prefix from the bundled upstream corpus.  Decisions
 matched the original and false rejects were zero, but Table
 \ref{tab:sneaky-intermediate} shows that the initial BioSeqDB SIMD path was
-between \(2.39\times\) and \(2.85\times\) the original kernel time.
+between \(2.39\times\) and \(2.85\times\) the original complete-callback time.
 
 \begin{table}[htbp]
 \centering
 \small
 \begin{tabular}{lrrrr}
-\textbf{Fixture/threshold} & \textbf{Original} & \textbf{Scalar} &
-\textbf{Highway} & \textbf{Highway/original}\\
+\textbf{Fixture/threshold} & \textbf{Original wall} & \textbf{Scalar wall} &
+\textbf{Highway wall} & \textbf{Highway/original}\\
 \hline
 ERR, 100 bp, \(E=2\)   & 0.144 ms & 0.137 ms & 0.343 ms & 2.386\\
 SRR, 250 bp, \(E=8\)   & 0.919 ms & 1.255 ms & 2.375 ms & 2.585\\
 ERR, 100 bp, \(E=40\)  & 9.471 ms & 12.731 ms & 27.015 ms & 2.852\\
 SRR, 250 bp, \(E=100\) & 58.331 ms & 87.035 ms & 161.071 ms & 2.761\\
 \end{tabular}
-\caption{Intermediate SneakySnake standalone P50 results from report 127.
-All rows had identical decisions and zero false rejects.  The table explains
-why the first SIMD design was not accepted as the final kernel.}
+\caption{Intermediate SneakySnake standalone complete-callback
+\texttt{wall\_clock\_ns} P50 results from report 127.  All rows had identical
+decisions and zero false rejects.  The table explains why the first SIMD
+design was not accepted as the final kernel.}
 \label{tab:sneaky-intermediate}
 \end{table}
 
@@ -739,11 +753,11 @@ DOC0382 identifies report 138 as the final uncontended reproduction:
 \textbf{Interpretation}\\
 \hline
 production Highway, equal-weight mean over cells & 0.708 &
-29.2\% faster across the configured matrix\\
+29.2\% lower equal-weight mean time\\
 production Highway, summed P50 & 0.482 &
-51.8\% less summed kernel time\\
+summed P50 was 48.2\% of the original\\
 Vulkan, summed P50 & 0.175 &
-82.5\% less summed time; \(5.73\times\) throughput\\
+summed P50 was 17.5\% of the original\\
 \end{tabular}
 \end{center}
 
@@ -761,16 +775,24 @@ supplied the aggregate gain.  The report metadata records commit
 \texttt{71fe8366555f682571c87005c3469a8e207307ab}, creation time
 2026-07-17T00:54:28Z, and \texttt{dirty=true}.  The result is therefore useful
 as the documented optimisation decision but is not described here as a clean
-commit artefact.
+commit artefact.  The same report recorded one SneakySnake Vulkan wall-clock
+P50 regression for the SRR 250-base \(E=100\) fixture evaluated at \(E=2\),
+with 902,250\,ns versus the preceding 656,209\,ns.  It also carried eleven
+report-level constant-metric sanity warnings and zero rule violations.  The
+nonzero process result and those warnings bound the claim to the displayed
+aggregate decision.  They do not establish an all-cell or repository-wide
+performance win.
 
 \subsection{GateKeeper closes the small-window Vulkan gap}
 
-GateKeeper was accepted against two complete, unfiltered, clean hardware
-reports.  Report 148 placed all eight GateKeeper/SneakySnake ratios in
-\(0.540\ldots0.838\); report 151 independently placed them in
+GateKeeper was historically accepted on 2026-07-17 against two complete,
+unfiltered, clean hardware reports.  Report 148 placed all eight
+GateKeeper/SneakySnake ratios in
+\(0.540\ldots0.838\).  Report 151 independently placed them in
 \(0.492\ldots0.881\).  Table~\ref{tab:gatekeeper-report151} gives the second
-run.  Each cell contains five samples over 4,096 pairs; P50 includes the full
-synchronous backend batch.
+run.  Each cell contains five samples over 4,096 pairs.  P50 includes the full
+synchronous backend batch.  These reports justify the route's July-17
+acceptance, not a current-head performance guarantee.
 
 \begin{table}[htbp]
 \centering
@@ -788,9 +810,9 @@ synchronous backend batch.
 4 & ERR E40 & 32 & 317,750 ns & 537,750 ns & 0.591\\
 4 & ERR E40 & 64 & 316,958 ns & 577,167 ns & 0.549\\
 \end{tabular}
-\caption{GateKeeper versus SneakySnake Vulkan P50 in report 151.  Every cell
-used a real hardware backend, passed runtime/result validation, and recorded
-zero false rejects.}
+\caption{Historical GateKeeper versus SneakySnake Vulkan P50 in report 151.
+Every cell used a real hardware backend, passed runtime/result validation, and
+recorded zero false rejects.}
 \label{tab:gatekeeper-report151}
 \end{table}
 
@@ -806,20 +828,35 @@ and paper-ntHash rules failed; no violation or regression referenced
 global red status from erasing valid scoped evidence, while also avoiding a
 false claim that the repository-wide benchmark was green.
 
+Later evidence prevents treating the sixteen July-17 comparisons as a
+current-head guarantee.  Dirty, history-ineligible report 187 from 2026-07-23
+retained two blocking \(E=2\) small-seed rules.  At length 32, GateKeeper and
+SneakySnake recorded 439,458\,ns and 389,916\,ns.  At length 64, they recorded
+389,125\,ns and 408,625\,ns, so GateKeeper's reduction was only about 4.8\%
+instead of the required 10\%.  DOC0388 also records that reports 188--190 did
+not retain a stable small-seed identity across reruns.  Dirty,
+history-ineligible report 192 from 2026-07-27 passed the configured P50
+comparisons, but recorded a GateKeeper \(E=4\) wall-clock P99 regression of
+591,042\,ns versus 356,875\,ns.  These later observations do not remove the
+implemented route or invalidate its historical acceptance.  They do require
+fresh clean, same-head repetitions before claiming a current performance win.
+
 The resulting production choice is deliberately piecewise:
 
 \begin{itemize}
-    \item scalar or Highway: optimised SneakySnake;
-    \item Vulkan, homogeneous 32/64-symbol batch with \(E=2\) or \(E=4\):
-    specialised GateKeeper with exact guard;
-    \item other Vulkan geometry through \(E=31\): SneakySnake, using
-    independent invocations at low \(E\) and eight-lane teams at high \(E\);
-    \item unsupported geometry: conservative acceptance followed by ordinary
+    \item Scalar or Highway uses optimised SneakySnake.
+    \item Vulkan uses GateKeeper with the exact guard when every job
+    independently has equal query and target lengths, length 32 or 64, and
+    \(E=2\) or \(E=4\).  A homogeneous aligned batch can use a fixed variant.
+    A mixed eligible batch uses the generic GateKeeper shader.
+    \item Other Vulkan geometry through \(E=31\) uses SneakySnake, with
+    independent invocations at low \(E\) and eight-lane teams at high \(E\).
+    \item Unsupported geometry is accepted conservatively and proceeds to
     exact alignment.
 \end{itemize}
 
 This is the principal difference from choosing one paper as a universal
-winner.  BioSeqDB uses the algorithm whose measured end-to-end backend cost is
+winner.  BioSeqDB uses the algorithm whose measured backend cost is
 appropriate to the batch shape, and it keeps exact post-alignment semantics
 independent of that choice.
 
@@ -901,9 +938,14 @@ The intermediate measurements also explain the final design.  The first
 SneakySnake port preserved decisions but its SIMD kernel was slower than the
 bundled original.  Contiguous Highway scans, an exact candidate filter, hybrid
 Vulkan teams, and command replay reversed that aggregate result.  The remaining
-small-threshold GPU latency motivated GateKeeper specialisation, which beat
-SneakySnake by more than ten percent in all sixteen comparisons across two
-complete reports.  The final solution is therefore not ``prefilter
-everything'' and not ``always use the GPU''.  It is a conservative stage whose
-domain and algorithm are selected from measured batch geometry, and whose
-survivors are always judged by the exact alignment semantics requested in SQL.
+small-threshold GPU latency motivated GateKeeper specialisation.  On 2026-07-17,
+reports 148 and 151 placed GateKeeper more than ten percent below SneakySnake
+in all sixteen historical acceptance comparisons.  Later dirty,
+history-ineligible runs contained two P50 blockers.  The most recent dirty run
+passed P50 but carried a P99 regression, so the current-head performance claim
+remains open pending clean same-head repetitions.  The final solution is
+therefore not
+``prefilter everything'' and not ``always use the GPU''.  It is a conservative
+stage whose domain and algorithm are selected from measured batch geometry,
+and whose survivors are always judged by the exact alignment semantics
+requested in SQL.
