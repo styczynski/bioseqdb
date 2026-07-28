@@ -31,6 +31,8 @@ option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
   "Configure generated external API clients and their integration tests" OFF)
 option(BIOSEQ_BUILD_WEBSITE
   "Build versioned static documentation website" OFF)
+option(BIOSEQ_PACKAGE_BUILD
+  "Build relocatable native distribution packages with a static C++ runtime" OFF)
 set(BIOSEQ_WEBSITE_VERSION "" CACHE STRING
   "Website source version directory, for example v0.1")
 set(BIOSEQ_WEBSITE_BASE_PATH "" CACHE STRING
@@ -53,7 +55,8 @@ option(BIOSEQ_WEBSITE_BROWSER_TESTS
 # value; otherwise it selects the installed Linux toolchain on Linux and "H"
 # (the arm64 macOS "home" box) elsewhere. Presets can still select their own
 # toolchain explicitly. Supported: "W", "H",
-# "AWS_MACHINE_X64", "AWS_MACHINE_X64_GCC16".
+# "AWS_MACHINE_X64", "AWS_MACHINE_LINUX_CLANG22",
+# "AWS_MACHINE_X64_GCC16".
 if(DEFINED ENV{CMAKE_NAMED_ENV_TYPE})
   set(CMAKE_NAMED_ENV_TYPE "$ENV{CMAKE_NAMED_ENV_TYPE}")
 elseif(NOT DEFINED CMAKE_NAMED_ENV_TYPE)
@@ -90,13 +93,13 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "W")
   set(CMAKE_CXX_COMPILER /usr/local/opt/llvm/bin/clang++)
   set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
   set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/local/opt/llvm/lib/c++/libc++.modules.json)
-elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
-  # x86_64 Ubuntu reference box provisioned by main/infra (see
-  # main/infra/testing_infra + main/infra/provisioner.py). clang/libc++ 22 are
-  # installed by bootstrap.sh at version >= 22.1.6. apt.llvm.org normally uses
-  # /usr/lib/llvm-22; the official tarball fallback uses /opt/llvm-22, exported
-  # as BIOSEQ_LLVM_ROOT. CMake is pinned to 4.2.1, whose import-std experimental
-  # UUID is the same value the "H" box uses.
+elseif(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
+    OR CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_LINUX_CLANG22")
+  # Native Linux Clang/libc++ 22 environment. AWS_MACHINE_X64 remains the
+  # development preset; AWS_MACHINE_LINUX_CLANG22 is the architecture-neutral
+  # package mode used on both x86_64 and arm64 workers. BIOSEQ_LLVM_ROOT points
+  # at the pinned complete LLVM archive in package containers. CMake 4.2.1's
+  # import-std experimental UUID is the same value the "H" box uses.
   set(_BIOSEQ_REQUESTED_LLVM_ROOT "")
   if(DEFINED ENV{BIOSEQ_LLVM_ROOT})
     set(_BIOSEQ_REQUESTED_LLVM_ROOT "$ENV{BIOSEQ_LLVM_ROOT}")
@@ -149,6 +152,8 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
           OR EXISTS
             "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
           OR EXISTS
+            "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
+          OR EXISTS
             "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/c++/libc++.modules.json"
           OR EXISTS
             "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/libc++.modules.json")
@@ -189,6 +194,7 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
     # supported layout from the validated selected LLVM root.
     set(_BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES
       "${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+      "${BIOSEQ_LLVM_ROOT}/lib/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
       "${BIOSEQ_LLVM_ROOT}/lib/c++/libc++.modules.json"
       "${BIOSEQ_LLVM_ROOT}/lib/libc++.modules.json")
     foreach(_BIOSEQ_LIBCXX_MODULES_JSON
@@ -241,7 +247,9 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
   # swap from build-tree rpaths to install rpaths during `install(TARGETS ...)`.
   # Build directly with the install rpath instead; the preset is disposable and
   # always runs from the vcpkg-installed tree paths.
-  set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+  if(NOT BIOSEQ_PACKAGE_BUILD)
+    set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
+  endif()
 elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64_GCC16")
   # GCC-only C++26 build. Select one paired compiler prefix and authenticate
   # libstdc++'s std/std.compat module inventory before project() can cache a
@@ -326,6 +334,18 @@ else()
   message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
 endif()
 
+# Distribution packages must never retain a path into the disposable build
+# container. Force this globally before targets are created; target-level
+# properties below provide a second, auditable guard on the two shipped DSOs.
+if(BIOSEQ_PACKAGE_BUILD)
+  set(CMAKE_SKIP_RPATH ON CACHE BOOL
+    "Do not emit build/install RPATHs in distribution packages" FORCE)
+  set(CMAKE_SKIP_INSTALL_RPATH ON CACHE BOOL
+    "Do not emit install RPATHs in distribution packages" FORCE)
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF CACHE BOOL
+    "Package builds never use an install RPATH in the build tree" FORCE)
+endif()
+
 # Fallback defaults for the per-build-type flag variables. These run AFTER
 # CMake has imported cache values from CMakePresets.json, so they MUST be
 # guarded — an unconditional `set(CMAKE_CXX_FLAGS_DEBUG "-g")` silently
@@ -399,11 +419,91 @@ if(TARGET __cmake_cxx26)
 endif()
 
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
-    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "22.1.6")
-  message(FATAL_ERROR
-    "AWS_MACHINE_X64 requires clang++ >= 22.1.6; found "
-    "${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}. "
-    "Re-run main/infra/testing_infra/scripts/bootstrap.sh.")
+    OR CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_LINUX_CLANG22")
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+      OR CMAKE_CXX_COMPILER_VERSION VERSION_LESS "22.1.6")
+    message(FATAL_ERROR
+      "${CMAKE_NAMED_ENV_TYPE} requires clang++ >= 22.1.6; found "
+      "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} at "
+      "${CMAKE_CXX_COMPILER}.")
+  endif()
+endif()
+
+if(BIOSEQ_PACKAGE_BUILD)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "BIOSEQ_PACKAGE_BUILD supports native Linux only")
+  endif()
+  if(NOT CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_LINUX_CLANG22")
+    message(FATAL_ERROR
+      "BIOSEQ_PACKAGE_BUILD requires AWS_MACHINE_LINUX_CLANG22")
+  endif()
+  if(NOT DEFINED ENV{BIOSEQ_OPTTIMIZATION_LEVEL}
+      OR NOT "$ENV{BIOSEQ_OPTTIMIZATION_LEVEL}" STREQUAL "0"
+      OR NOT "${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}" STREQUAL "0")
+    message(FATAL_ERROR
+      "every package build must explicitly set BIOSEQ_OPTTIMIZATION_LEVEL=0 "
+      "and BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE=0")
+  endif()
+
+  set(BIOSEQ_PACKAGE_LIBCXX_ARCHIVE "" CACHE FILEPATH
+    "Pinned static libc++ archive used by package DSOs")
+  set(BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE "" CACHE FILEPATH
+    "Pinned static libc++abi archive used by package DSOs")
+  set(BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE "" CACHE FILEPATH
+    "Pinned static libunwind archive used by package DSOs")
+  foreach(_bioseq_runtime_pair IN ITEMS
+      "BIOSEQ_PACKAGE_LIBCXX_ARCHIVE;libc++.a"
+      "BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE;libc++abi.a"
+      "BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE;libunwind.a")
+    list(GET _bioseq_runtime_pair 0 _bioseq_runtime_variable)
+    list(GET _bioseq_runtime_pair 1 _bioseq_runtime_basename)
+    if(NOT IS_ABSOLUTE "${${_bioseq_runtime_variable}}"
+        OR NOT EXISTS "${${_bioseq_runtime_variable}}")
+      message(FATAL_ERROR
+        "${_bioseq_runtime_variable} must identify an existing absolute archive")
+    endif()
+    file(REAL_PATH "${${_bioseq_runtime_variable}}" _bioseq_runtime_real)
+    get_filename_component(_bioseq_runtime_name
+      "${_bioseq_runtime_real}" NAME)
+    if(NOT _bioseq_runtime_name STREQUAL _bioseq_runtime_basename)
+      message(FATAL_ERROR
+        "${_bioseq_runtime_variable} must name ${_bioseq_runtime_basename}")
+    endif()
+    file(REAL_PATH "${BIOSEQ_LLVM_ROOT}" _bioseq_package_llvm_root_real)
+    string(FIND "${_bioseq_runtime_real}/"
+      "${_bioseq_package_llvm_root_real}/" _bioseq_runtime_under_llvm)
+    if(NOT _bioseq_runtime_under_llvm EQUAL 0)
+      message(FATAL_ERROR
+        "${_bioseq_runtime_variable} must reside under pinned BIOSEQ_LLVM_ROOT")
+    endif()
+    set(${_bioseq_runtime_variable} "${_bioseq_runtime_real}" CACHE FILEPATH
+      "Pinned package compiler runtime archive" FORCE)
+  endforeach()
+  unset(_bioseq_runtime_pair)
+  unset(_bioseq_runtime_variable)
+  unset(_bioseq_runtime_basename)
+  unset(_bioseq_runtime_real)
+  unset(_bioseq_runtime_name)
+  unset(_bioseq_runtime_under_llvm)
+  unset(_bioseq_package_llvm_root_real)
+
+  # Suppress Clang's implicit shared C++ runtime and link the three pinned PIC
+  # archives after target objects/libraries. The rescan group handles the
+  # circular libc++ <-> libc++abi exception/runtime references. compiler-rt
+  # avoids reintroducing a dynamic libgcc_s dependency through the driver.
+  add_library(bioseq_package_static_cxx_runtime INTERFACE)
+  target_link_options(bioseq_package_static_cxx_runtime INTERFACE
+    -stdlib=libc++
+    -rtlib=compiler-rt
+    -unwindlib=none
+    -nostdlib++
+    "LINKER:--exclude-libs,libc++.a:libc++abi.a:libunwind.a")
+  target_link_libraries(bioseq_package_static_cxx_runtime INTERFACE
+    "-Wl,--start-group"
+    "${BIOSEQ_PACKAGE_LIBCXX_ARCHIVE}"
+    "${BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE}"
+    "${BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE}"
+    "-Wl,--end-group")
 endif()
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   file(REAL_PATH "${CMAKE_C_COMPILER}" _BIOSEQ_CONFIGURED_GCC_C_REAL)
@@ -593,6 +693,27 @@ if(BIOSEQ_BUILD_CORE)
   add_subdirectory(bioseq)
   include(BioseqExternalPostgresAcceptance)
   add_subdirectory(vendor)
+endif()
+
+if(BIOSEQ_PACKAGE_BUILD)
+  foreach(_bioseq_package_target IN ITEMS
+      postgresql_bioseq postgresql_bioseq_cache)
+    if(NOT TARGET ${_bioseq_package_target})
+      message(FATAL_ERROR
+        "package build did not create required target ${_bioseq_package_target}")
+    endif()
+    target_link_libraries(${_bioseq_package_target} PRIVATE
+      bioseq_package_static_cxx_runtime)
+    target_compile_definitions(${_bioseq_package_target} PRIVATE
+      BIOSEQ_PACKAGE_O0_PROFILE=1
+      BIOSEQ_PIPELINE_FORCE_INLINE=0)
+    set_target_properties(${_bioseq_package_target} PROPERTIES
+      BUILD_RPATH ""
+      INSTALL_RPATH ""
+      SKIP_BUILD_RPATH TRUE
+      BUILD_WITH_INSTALL_RPATH FALSE
+      INTERPROCEDURAL_OPTIMIZATION FALSE)
+  endforeach()
 endif()
 
 # The website pipeline consumes postgresql_bioseq's target properties and BMIs,

@@ -934,6 +934,11 @@ endif()
 # POSTGRESQL_VERSION_MAJOR define stays PUBLIC because both Domain N and
 # Domain P consumers care about the major-version-conditional code paths.
 target_compile_definitions(bioseq_modules_nopg PRIVATE NO_POSTGRES=1)
+if(BIOSEQ_PACKAGE_BUILD)
+  target_compile_definitions(bioseq_modules_nopg PRIVATE
+    BIOSEQ_PACKAGE_O0_PROFILE=1
+    BIOSEQ_PIPELINE_FORCE_INLINE=0)
+endif()
 target_compile_definitions(bioseq_modules_nopg PUBLIC
   POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 target_compile_options(bioseq_modules_nopg PRIVATE

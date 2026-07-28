@@ -441,8 +441,10 @@ function(bioseq_add_codegen)
     foreach(_clang_modules_json IN ITEMS
         "${_llvm_library_dir}/c++/libc++.modules.json"
         "${_llvm_library_dir}/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+        "${_llvm_library_dir}/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+        "${_llvm_prefix}/lib/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/libc++.modules.json")
       if(_clang_modules_json
           AND EXISTS "${_clang_modules_json}")
@@ -674,6 +676,28 @@ function(bioseq_add_codegen)
       "-DBIOSEQ_EXPECTED_GCC_MODULE_SOURCE_CLOSURE_SHA256:STRING=${_bioseq_codegen_authenticated_module_source_closure_sha256}")
   endif()
 
+  set(_bioseq_codegen_package_cmake_args)
+  if(BIOSEQ_PACKAGE_BUILD)
+    if(NOT CMAKE_C_COMPILER_LAUNCHER OR NOT CMAKE_CXX_COMPILER_LAUNCHER)
+      message(FATAL_ERROR
+        "BIOSEQ_PACKAGE_BUILD requires compiler priority launchers for the isolated code generator")
+    endif()
+    string(REPLACE ";" "|"
+      _bioseq_codegen_package_c_launcher_argument
+      "${CMAKE_C_COMPILER_LAUNCHER}")
+    string(REPLACE ";" "|"
+      _bioseq_codegen_package_cxx_launcher_argument
+      "${CMAKE_CXX_COMPILER_LAUNCHER}")
+    list(APPEND _bioseq_codegen_package_cmake_args
+      "-DCMAKE_C_COMPILER_LAUNCHER:STRING=${_bioseq_codegen_package_c_launcher_argument}"
+      "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING=${_bioseq_codegen_package_cxx_launcher_argument}"
+      "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON"
+      "-DCMAKE_C_FLAGS:STRING="
+      "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libc++"
+      "-DCMAKE_C_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer"
+      "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer")
+  endif()
+
   ExternalProject_Add(${ARG_PROJECT_TARGET}
     PREFIX "${ARG_BINARY_DIR}/generator-project"
     SOURCE_DIR "${_bioseq_repo_root}/main/codegen"
@@ -698,6 +722,7 @@ function(bioseq_add_codegen)
       "-DLIBCLANG_INCLUDE_DIR:PATH=${_llvm_include_dir}"
       "-DLIBCLANG_LIBRARY:FILEPATH=${_bioseq_codegen_libclang}"
       ${_bioseq_codegen_gcc_cmake_args}
+      ${_bioseq_codegen_package_cmake_args}
     BUILD_COMMAND
       "${CMAKE_COMMAND}" --build <BINARY_DIR> --target bioseq_codegen
     INSTALL_COMMAND ""
