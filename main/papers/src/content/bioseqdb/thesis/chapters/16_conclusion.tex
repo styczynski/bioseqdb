@@ -1,0 +1,269 @@
+\label{chap:conclusion}
+
+\section{What was built}
+
+This thesis began with a practical question.  Could sequence alignment become
+a database operation without reducing either side of the combination to a
+thin wrapper?  The resulting BioSeqDB system shows that the answer is
+qualified but affirmative.  PostgreSQL can own compact biological sequences,
+relational metadata, persistent sequence indexes, and the lifecycle of an
+alignment query.  The alignment engine can retain a recognisable
+seed--chain--extend structure while operating on database-backed and lazily
+composed sequence values.  The planner can replace a scalar-looking SQL
+predicate with a batch-oriented custom scan.  CPU vector units and Vulkan
+devices can be used where their data-shape and setup requirements are
+satisfied.
+
+The qualification matters.  BioSeqDB is not one algorithm and it is not one
+unconditionally faster execution path.  It is a collection of explicit
+contracts between representations, algorithms, storage, planning, and
+runtime selection.  A compact sequence range states its alphabet and packing
+geometry.  A minimizer representation states the widths and coordinates that
+remain recoverable.  A chaining implementation states which predecessor set
+and score semantics it evaluates.  A prefilter states the domain in which it
+may reject a candidate.  A GPU route states its admissible batch geometry and
+whether failure is allowed to fall back.  A generated SQL boundary states the
+source entity, dependency, public symbol, and ownership policy from which an
+installed object was derived.
+
+The system built around these contracts has five main layers:
+
+\begin{enumerate}
+  \item The sequence layer represents packed, fragmented,
+  PostgreSQL-backed, and lazy values through a common alphabet-aware access
+  model.  Slicing, concatenation, reversal, letter extraction, and explicit
+  materialisation are expressed without requiring every consumer to accept a
+  byte string.
+  \item The alignment layer implements a minimap2-derived pipeline.  It
+  extracts minimizers, finds seed hits, chains anchors, constructs regions,
+  optionally prefilters mandatory gaps, extends selected regions, reconstructs
+  CIGAR operations, and calculates final classifications and mapping
+  qualities.
+  \item The heterogeneous layer supplies Highway SIMD and Vulkan
+  implementations for selected sketching, chaining, filtering, and extension
+  work.  Admission, batching, resident state, and result proof are part of the
+  route rather than hidden behind the same name.
+  \item The database layer stores sequence fragments and index generations,
+  loads input through bounded streaming paths, exposes remote providers, and
+  turns alignment expressions into custom paths, plans, and scans.
+  \item The boundary-generation layer derives SQL installation objects,
+  fmgr entrypoints, row codecs, GUC bindings, catalog handles, and validation
+  ledgers from structurally analysed C++ sources.
+\end{enumerate}
+
+Together these layers are the principal contribution.  Any one kernel could
+be called from PostgreSQL with much less work.  The difficult part is
+preserving coordinate, lifetime, failure, and resource semantics across the
+complete query.
+
+\section{From the original pipeline to the final architecture}
+
+The starting point was minimap2's mature long-read mapper.  Its core is a
+highly tuned imperative C pipeline over ASCII query strings, packed minimizer
+records, an in-memory or \texttt{.mmi} reference index, scalar chaining, and
+KSW2 extension.  Work is distributed over CPU workers.  Allocators and option
+branches are organised around a standalone process.
+
+BioSeqDB retained the underlying algorithmic decomposition because it is a
+good decomposition.  It did not retain the assumption that all data starts as
+an ASCII buffer or that one process owns the whole reference index.  It also
+did not reproduce every minimap2 operating mode.  The implemented focus is
+the sequence-search path used by the extension, not a byte-identical clone of
+pairing, spliced alignment, rescue, and every command-line preset.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \begin{tabular}{p{0.20\linewidth}p{0.34\linewidth}p{0.36\linewidth}}
+    \toprule
+    Concern & Starting point & Final BioSeqDB approach \\
+    \midrule
+    Sequence input &
+    ASCII query strings and a mapper-owned reference &
+    Alphabet-typed packed ranges, including database fragments and lazy
+    compositions \\
+    Pipeline control &
+    Runtime option branches inside an imperative mapper &
+    Stage composition selected by bounded runtime-to-template dispatch \\
+    Minimizers &
+    Scalar circular-window sketching over encoded DNA &
+    Scalar parity path, Highway variants, rolling ntHash work, and bounded
+    Vulkan sketch routes with explicit tie and invalid-symbol semantics \\
+    Chaining &
+    Scalar dynamic programming and minimap2 RMQ variants &
+    Scalar reference path plus bounded SIMD, RMQ, and tiled Vulkan options,
+    each described with its actual predecessor and coordinate rules \\
+    Extension &
+    KSW2 in the CPU mapper &
+    Selectable KSW2, Block Aligner, batched CPU work, and Vulkan CIGAR or
+    gridded traceback routes for supported jobs \\
+    Candidate filtering &
+    Pipeline heuristics and alignment-stage rejection &
+    Optional SneakySnake and GateKeeper processing of mandatory global gaps,
+    followed by exact post-traceback predicate enforcement \\
+    Index ownership &
+    Mapper process and \texttt{.mmi} files &
+    Versioned PostgreSQL generations, fragment-native formats, metadata
+    compatibility checks, selective cold reads, and accelerator residency \\
+    Execution interface &
+    Command-line invocation and mapper output records &
+    Planner support, custom paths and scans, batched multi-row results, and
+    injected PostgreSQL result nodes \\
+    Boundary definition &
+    Handwritten C and SQL declarations &
+    Structural C++ annotations, generated SQL and fmgr modules, stable
+    identities, physical ledgers, and fail-closed completeness checks \\
+    \bottomrule
+  \end{tabular}
+  \caption{The transformation from the minimap2-derived starting point to the
+  final BioSeqDB architecture.  The right column describes implemented
+  system structure, not a claim that every route is selected for every query.}
+  \label{tab:conclusion-transformation}
+\end{table}
+
+Several intermediate designs were valuable precisely because they failed.
+Naive SIMD work exposed long dependency chains and data-rearrangement costs.
+Per-query GPU submissions lost to command, fence, and allocation overhead.
+GPU chaining without a resident upstream and downstream path moved too little
+work to amortise the boundary.  A gather-heavy SneakySnake port preserved the
+decision procedure but not its performance.  Loader overlap added queueing and
+copy costs to a workload with too little independent work.  Persisting every
+fragment independently increased first-query work and write pressure.
+Cross-product template dispatch produced thousands of pipeline bodies before
+the parameter space was collapsed around valid representation cells.
+
+The retained designs share a pattern.  They move decisions to a boundary
+where enough information is available.  Runtime configuration is converted
+to a fixed pipeline specialization before the hot stages.  Accelerator work
+is grouped by compatible batch geometry.  Target identity is used to reuse
+resident state.  Mandatory and optional alignment regions are distinguished
+before prefiltering.  Persistent index generations are accepted only after
+format and compatibility validation.  PostgreSQL expression replacement is
+performed during planning, while per-row values are installed during custom
+scan execution.  Generated SQL is accepted only when the dependency and
+physical ledgers are complete.
+
+\section{Answers to the research questions}
+
+\paragraph{Can the pipeline operate on a common compact sequence model?}
+Yes, for the implemented paths, but the answer requires more than a range
+concept at a public function boundary.  Iterators need precise symbol and bit
+geometry.  Fragments need stable ownership and cross-boundary context.
+Algorithms that require contiguous ranks need an access plan that says when a
+bounded materialisation is unavoidable.  PostgreSQL slices and concatenations
+need lifetimes that survive planner and executor transitions.  The final
+abstraction makes these choices visible instead of converting every value
+eagerly.
+
+\paragraph{Which work benefits from SIMD or GPU execution?}
+There is no stage-only answer.  Benefit depends on length, error profile,
+alphabet, intermediate representation, batch size, residency, submission
+count, and the amount of exact post-processing that remains on the host.
+SIMD is most effective when loads are contiguous and lane work is uniform.
+GPU speedups appear when many compatible jobs reuse resident inputs and keep
+intermediate state on the device.  Small jobs and cold first submissions can
+remain slower.  The final system therefore makes CPU, SIMD, and Vulkan routes
+policy choices whose execution is observable.
+
+\paragraph{Can a batch mapper retain an ordinary SQL surface?}
+Yes.  The ordinary function definition provides PostgreSQL types and a
+fail-closed fallback contract.  Its cost encourages planner support to choose
+a custom path.  The custom plan carries the information required by
+\texttt{BioseqScan}.  Execution batches input rows and may produce several
+alignment rows for one input.  Injected \texttt{Const} and \texttt{Var} nodes
+allow filters, projections, and joins to observe alignment fields without
+calling an expensive scalar function independently for each row.
+
+\paragraph{Can the surrounding system remain reliable and inspectable?}
+The implementation provides strong mechanisms, but the result is not
+uniformly complete.  Versioned storage, explicit memory admission, bounded
+PostgreSQL loading, transaction-aware persistence, custom-scan proof,
+hardware-only accelerator qualification, and generated physical ledgers make
+important failures visible.  The chapter audits also identify places where an
+option exists but is not wired, a footer is accumulated but not validated, a
+provider path is partial, or a benchmark is a one-hit correctness gate rather
+than exact row-set parity.  Inspectability requires reporting these facts,
+not smoothing them into a single success claim.
+
+\section{Limitations}
+
+The first limitation is scope.  BioSeqDB is not a replacement for every
+minimap2 command-line mode or every graph mapper.  Graph and de Bruijn
+approaches are included to explain alternative representations, not because
+the extension currently performs full variation-graph alignment.
+
+The second limitation is heterogeneous completeness.  Implemented Vulkan
+sketching, seed processing, chaining, filtering, and CIGAR work are real.
+The strictly attested persisted-format route in which no host biological
+planning remains is not complete for every storage and extension shape.
+Unsupported geometry must stay on a CPU-selected route or be accepted
+conservatively where the relevant algorithm permits it.
+
+The third limitation is evidence comparability.  Historical reports were
+produced on different code revisions and configurations.  Some reports are
+dirty snapshots.  Some GPU tests prove that every query has a correct hit but
+do not prove equality of all emitted rows.  First-dispatch latency and
+steady-state median latency are not interchangeable.  This thesis preserves
+those qualifications and treats the newest clean configuration-matched
+receipts as the strongest performance evidence.
+
+The fourth limitation is operational hardening.  The IO chapter identifies
+strict-alphabet configuration that is exposed but not connected to the active
+reader, gzip paths that do not yet compare every accumulated integrity value
+with the footer, and standalone output paths without atomic replacement and
+durability guarantees.  External providers have a useful PostgreSQL data
+plane, but generation, authentication, cancellation, and structured error
+coverage are not equally mature for every service.
+
+Finally, database integration increases the amount of correctness surface.
+PostgreSQL can abort through longjmp, the planner may rewrite expressions, a
+custom scan may duplicate rows, and cached or persisted state may outlive the
+statement that created it.  Generated fmgr and SQL ownership removes a major
+source of drift, but it does not remove the need for SQL, lifecycle, and
+failure-path testing.
+
+\section{Future work}
+
+The most valuable future work follows directly from the limitations:
+
+\begin{enumerate}
+  \item complete the authenticated persisted-format accelerator path so that
+  eligible queries can keep minimizers, occurrences, anchors, chaining,
+  windows, extension, and traceback on the device under one attested route;
+  \item strengthen algorithm parity tests for RMQ predecessor admissibility,
+  backtracking order, full emitted row sets, and all supported alphabet and
+  coordinate widths;
+  \item finish reader integrity and strict-alphabet enforcement, then measure
+  multi-record FASTQ and compressed workloads where bounded producer and
+  consumer overlap has genuine independent work;
+  \item harden standalone writer durability with an explicit temporary-file,
+  flush, synchronization, and atomic-publication protocol;
+  \item extend external providers with generated clients, cancellation-safe
+  streaming, bounded retries, credential handling, and uniform structured
+  SQL errors;
+  \item qualify the generated SQL and fmgr boundary across the intended
+  PostgreSQL, operating-system, and architecture matrix; and
+  \item maintain benchmark qualifications as versioned evidence whose
+  dataset, hardware, configuration, correctness predicate, and repository
+  state are recorded together.
+\end{enumerate}
+
+\section{Closing perspective}
+
+BioSeqDB's most important result is architectural rather than a single
+speedup.  A sequence database cannot obtain trustworthy high performance by
+placing an existing executable behind an SQL function.  It must understand
+the representations, execution granularity, persistent state, and failure
+semantics that make the executable fast and correct.  Conversely, an aligner
+embedded in a database cannot ignore planning, transactions, row
+multiplicity, memory contexts, and schema ownership.
+
+The final system brings these concerns into one inspectable pipeline.  It
+keeps the successful algorithmic structure of minimap2, replaces process-local
+assumptions with explicit sequence and index abstractions, adds measured SIMD
+and Vulkan routes, and gives PostgreSQL a planner-visible batch executor.  The
+same emphasis on explicit ownership extends to IO, external providers, cache
+coordination, and generated SQL boundaries.  The result is not the end of the
+engineering path.  It is a sufficiently complete platform and a sufficiently
+candid record of its intermediate results to support the next round of
+scientific and systems work.
