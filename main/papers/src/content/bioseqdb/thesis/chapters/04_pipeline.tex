@@ -40,7 +40,8 @@ composition and runtime-to-template dispatcher are in
 \path{main/bioseq/backend/pipeline/pipe.cppm}.  PostgreSQL batching and typed
 dispatch are in
 \path{main/bioseq/backend/pg/scheduler/dispatch_buffer.cppm} and
-\path{main/bioseq/backend/pg/scheduler/dispatch_processor_typed_impl.inc}.
+\path{main/bioseq/backend/pg/scheduler/}\allowbreak
+\path{dispatch_processor_typed_impl.inc}.
 Finally, memory admission and task scheduling are in
 \path{main/bioseq/backend/pipeline/parallelism}.  These files take precedence
 over older design documents where the project history and the current code
@@ -50,8 +51,8 @@ disagree.
   \centering
   \begin{tikzpicture}[
       x=1cm,y=1cm,>=Latex,
-      box/.style={draw,rounded corners=2pt,align=center,minimum height=0.72cm,
-                  text width=3.25cm,font=\small},
+      box/.style={draw,rounded corners=2pt,align=center,minimum height=0.78cm,
+                  inner sep=2.5pt,text width=3.45cm,font=\footnotesize},
       cpu/.style={box,fill=LightSteelBlue1},
       gpu/.style={box,fill=PaleGreen2},
       host/.style={box,fill=LightGoldenrod1},
@@ -59,41 +60,42 @@ disagree.
       every path/.style={thick}
     ]
     \node[host,text width=7.6cm] (sql) at (0,0)
-      {SQL \texttt{mmsearch} expression owned by a BioSeqDB custom scan};
-    \node[host,text width=7.6cm] (batch) at (0,-1.25)
-      {buffer rows, group compatible sequence layouts, choose index source,
-       split memory-admitted waves};
+      {SQL \texttt{mmsearch} expression\\owned by a BioSeqDB custom scan};
+    \node[host,text width=7.6cm] (batch) at (0,-1.35)
+      {buffer rows and group compatible sequence layouts\\
+       choose index source and split memory-admitted waves};
 
-    \node[cpu] (cpuprep) at (-2.4,-2.75)
-      {CPU/SIMD route\\lazy views or admitted hydration};
-    \node[gpu] (gpuprep) at (2.4,-2.75)
-      {Vulkan route\\resident query and target preparation};
+    \node[cpu] (cpuprep) at (-2.4,-2.85)
+      {CPU/SIMD route\\lazy views or admitted\\hydration};
+    \node[gpu] (gpuprep) at (2.4,-2.85)
+      {Vulkan route\\resident query and target\\preparation};
 
     \node[cpu] (cpusketch) at (-2.4,-4.15)
       {query sketch\\scalar or SIMD};
     \node[gpu] (gpushape) at (2.4,-4.15)
-      {batched query sketch\\device minimizer buffer};
+      {batched query sketch\\device minimizer\\buffer};
 
-    \node[cpu] (cpuseed) at (-2.4,-5.55)
+    \node[cpu] (cpuseed) at (-2.4,-5.45)
       {target-index lookup\\canonical anchors};
-    \node[gpu] (gpuseed) at (2.4,-5.55)
-      {resident index lookup\\count, emit and sort};
+    \node[gpu] (gpuseed) at (2.4,-5.45)
+      {resident index lookup\\count, emit, and sort};
 
-    \node[cpu] (cpuchain) at (-2.4,-6.95)
+    \node[cpu] (cpuchain) at (-2.4,-6.75)
       {scalar, SIMD or RMQ chaining};
-    \node[gpu] (gpuchain) at (2.4,-6.95)
-      {tiled-DP chaining\\and coordinate reduction};
+    \node[gpu] (gpuchain) at (2.4,-6.75)
+      {tiled-DP chaining\\coordinate reduction};
 
-    \node[cpu] (cpualign) at (-2.4,-8.35)
-      {regions, optional prefilter,\\KSW2 or Block Aligner};
-    \node[gpu] (gpualign) at (2.4,-8.35)
-      {coordinate projection or\\GPU DP and traceback};
+    \node[cpu] (cpualign) at (-2.4,-8.05)
+      {candidate regions\\optional prefilter\\KSW2 or Block Aligner};
+    \node[gpu] (gpualign) at (2.4,-8.05)
+      {coordinate projection\\or GPU DP with traceback};
 
-    \node[proof,text width=7.6cm] (attest) at (0,-9.85)
-      {validate requested backend, actual backend, index provenance,
-       per-stage engine coverage and zero forbidden fallback};
-    \node[host,text width=7.6cm] (out) at (0,-11.15)
-      {\texttt{MatchResultCollection} $\rightarrow$ scan cursors
+    \node[proof,text width=7.6cm] (attest) at (0,-9.55)
+      {validate requested and actual backends\\
+       check index provenance and per-stage engine coverage\\
+       require zero forbidden fallback};
+    \node[host,text width=7.6cm] (out) at (0,-10.95)
+      {\texttt{MatchResultCollection} $\rightarrow$ scan cursors\\
        $\rightarrow$ SQL projection};
 
     \draw[->] (sql) -- (batch);
@@ -197,7 +199,8 @@ uncontrolled Cartesian product can make the binary and build process
 impractical.  The intermediate implementation instantiated every global
 combination of sequence-length bucket \(L\), \(k\)-mer length \(K\), base
 aligner, chainer and minimizer implementation.  DOC0271 counted 5,292
-\texttt{pipeline\_run\_impl\_batch} bodies and 21 \((K,L)\) representation
+\texttt{pipeline\_\allowbreak{}run\_\allowbreak{}impl\_\allowbreak{}batch}
+bodies and 21 \((K,L)\) representation
 cells, although many length buckets were invalid for a given \(K\).
 
 The retained solution is a pinned dispatch chain.  It first selects \(K\),
@@ -253,10 +256,13 @@ meaning of a result labeled as GPU execution.
 
 July work separated three questions which earlier reports had treated
 together.  The 9 July 2026 report \emph{Bioseq Slowness Debugging Event Log}
-(\path{main/DOCS/CURRENT/REPORTS/0370_BIOSEQ_SLOWNESS_DEBUGGING_EVENT_LOG.md})
+(\path{main/DOCS/CURRENT/REPORTS/}\allowbreak
+\path{0370_BIOSEQ_SLOWNESS_DEBUGGING_EVENT_LOG.md})
 and the 9 July 2026 specification \emph{Cold Persisted Minimizer Index And
 Accelerator Attestation Optimization}
-(\path{main/DOCS/CURRENT/TECH_SPECS/0371_COLD_PERSISTED_MINIMIZER_INDEX_AND_ACCELERATOR_ATTESTATION_OPTIMIZATION.md})
+(\path{main/DOCS/CURRENT/TECH_SPECS/}\allowbreak
+\path{0371_COLD_PERSISTED_MINIMIZER_INDEX_AND_}\allowbreak
+\path{ACCELERATOR_ATTESTATION_OPTIMIZATION.md})
 hardened cold persisted-index identity, format compatibility and execution
 attestation.  The current direct persisted-index Shape-V5 coordinate route,
 where Shape-V5 denotes the resident partition representation consumed by the
@@ -268,12 +274,16 @@ or completing biological work on the CPU.
 
 The 17 July 2026 implementation handoff \emph{DOC0383 final implementation
 summary: fragment-native MPF pipeline and mapped generation storage}
-(\path{main/DOCS/CURRENT/BENCHMARK_FRAMEWORK/0384_DOC0383_IMPLEMENTATION_HANDOFF_FRAGMENT_NATIVE_MPF_PIPELINE_AND_MAPPED_GENERATION_STORAGE.md})
+(\path{main/DOCS/CURRENT/BENCHMARK_FRAMEWORK/}\allowbreak
+\path{0384_DOC0383_IMPLEMENTATION_HANDOFF_}\allowbreak
+\path{FRAGMENT_NATIVE_MPF_PIPELINE_AND_}\allowbreak
+\path{MAPPED_GENERATION_STORAGE.md})
 then established the later fragment-native CPU and SIMD route.  A mapped
 generation provider exposes persisted postings without first rebuilding the
 conventional process-local map.  Preparation can construct an owning
-\texttt{PreparedFragmentAnchorBatch}, and each
-\texttt{PreparedFragmentAnchorQueryIndex} exposes the already canonical
+\texttt{PreparedFragment\allowbreak{}Anchor\allowbreak{}Batch}, and each
+\texttt{PreparedFragment\allowbreak{}Anchor\allowbreak{}Query\allowbreak{}Index}
+exposes the already canonical
 anchors for one query.  This moves occurrence decoding, anchor construction
 and ordering out of the per-query seed stage.  It is the final path measured
 by the newest qualified \texttt{just\_index} receipts.
@@ -290,10 +300,14 @@ below.
 
 Executable chains are constructed in one function,
 \texttt{make\_minimap\_pipeline}, at \path{pipe.cppm:8573}.  Runtime execution
-can select \texttt{EntryPoint::FromSequence} together with the requested
+can select
+\texttt{EntryPoint::\allowbreak{}From\allowbreak{}Sequence}
+together with the requested
 minimizer trait, or begin from authenticated prebuilt minimizers.  The
 description path reuses the same composer for the common tail, but
-deliberately pins \texttt{EntryPoint::WithPrebuiltMinimizers} and the scalar
+deliberately pins
+\texttt{EntryPoint::\allowbreak{}With\allowbreak{}Prebuilt\allowbreak{}Minimizers}
+and the scalar
 minimizer trait.  Tail-stage order therefore cannot drift into a separate
 hand-maintained \texttt{EXPLAIN} pipeline.  The description does not claim to
 reproduce the runtime query-sketch head or its selected minimizer kernel.  The
@@ -301,8 +315,10 @@ exact executable order, including its optional stages, remains a runtime
 concern.
 
 The bracketed minimizer stage exists only for
-\texttt{EntryPoint::FromSequence}.  A caller with authenticated prebuilt
-query minimizers uses \texttt{EntryPoint::WithPrebuiltMinimizers} and begins
+\texttt{EntryPoint::\allowbreak{}From\allowbreak{}Sequence}.  A caller with
+authenticated prebuilt query minimizers uses
+\texttt{EntryPoint::\allowbreak{}With\allowbreak{}Prebuilt\allowbreak{}Minimizers}
+and begins
 at the index hand-off.  This is structural omission, not an empty runtime
 branch.
 
@@ -376,9 +392,10 @@ simple: seed lookup must see a complete, well-formed occurrence count and
 position set for every minimizer it is allowed to consume.
 
 For fragment-native CPU and SIMD execution, preparation can also create an
-owning \texttt{PreparedFragmentAnchorBatch} for a compatible query and target
-work set.  Its per-query index objects borrow already ordered anchor spans from
-that owner.  The owner remains alive through pipeline consumption, so the
+owning \texttt{PreparedFragment\allowbreak{}Anchor\allowbreak{}Batch} for a
+compatible query and target work set.  Its per-query index objects borrow
+already ordered anchor spans from that owner.  The owner remains alive
+through pipeline consumption, so the
 later seed stage can be a checked zero-copy hand-off rather than another
 allocation and sorting point.
 
@@ -410,11 +427,14 @@ to a strand-consistent query coordinate, and finally establishes one
 canonical anchor order.
 
 On the fragment-native route the index wire is
-\texttt{PreparedFragmentAnchorQueryIndex}.  The stage obtains
-\texttt{ordered\_fragment\_seed\_anchors} from its owning
-\texttt{PreparedFragmentAnchorBatch} and emits that borrowed canonical span
-directly.  It does not allocate another arena slab, copy anchors, or repeat a
-global MPF sort.  Preparation has already applied the occurrence and
+\texttt{PreparedFragment\allowbreak{}Anchor\allowbreak{}Query\allowbreak{}Index}.
+The stage obtains
+\texttt{ordered\_\allowbreak{}fragment\_\allowbreak{}seed\_\allowbreak{}anchors}
+from its owning
+\texttt{PreparedFragment\allowbreak{}Anchor\allowbreak{}Batch} and emits that
+borrowed canonical span directly.  It does not allocate another arena slab,
+copy anchors, or repeat a global MPF sort.  Preparation has already applied
+the occurrence and
 completeness rules.  The logical stage remains visible because it establishes
 the same downstream contract even when its physical work is a zero-copy
 handoff.
@@ -596,6 +616,8 @@ of each logical stage explicit.
   \end{tabular}
 \end{table}
 
+\clearpage
+
 \section{Compile-time algorithm selection and runtime routing}
 \label{sec:pipeline-dispatch}
 
@@ -606,10 +628,12 @@ contains \(w\), \(k\), scoring and chaining limits, output requirements,
 prefilter settings, algorithm selectors and Vulkan policy flags.  The
 dispatcher consumes the selectors at the top and fixes the tuple
 
+\begin{samepage}
 \[
   (\mathrm{Cep},\mathrm{BAA},\mathrm{CA},\mathrm{MA},\mathrm{EP}),
 \]
 
+\noindent
 where \(\mathrm{Cep}\) is the compile-time window, \(k\)-mer and
 sequence-length bucket, \(\mathrm{BAA}\) is the base aligner,
 \(\mathrm{CA}\) is the chainer, \(\mathrm{MA}\) is the minimizer algorithm,
@@ -618,6 +642,7 @@ and \(\mathrm{EP}\) is the entry point.  The concrete cascade is
 level 5 or higher, the execution leaf uses a specialized \(w=10\) parameter
 object when the runtime values match a registered tuple.  Lower optimization
 levels and unregistered tuples use the typed fallback.
+\end{samepage}
 
 Table~\ref{tab:pipeline-algorithm-axes} summarizes the independently selectable
 algorithm axes of the generic pipeline.
@@ -666,10 +691,12 @@ defined executed on the SIMD engine, not that host I/O or a small bookkeeping
 loop became a vector instruction.
 
 At statement level the allowed concurrency modes are
-\texttt{SINGLE}, \texttt{PARALLEL} and \texttt{TASK\_PARALLEL}.
+\texttt{SINGLE}, \texttt{PARALLEL} and
+\texttt{TASK\_\allowbreak{}PARALLEL}.
 \texttt{PARALLEL} allows the scheduler to distribute independent rows.
-\texttt{TASK\_PARALLEL} additionally enables coarse inner regions such as
-query batches, alignment regions, segment recomputation and fragment builds.
+\texttt{TASK\_\allowbreak{}PARALLEL} additionally enables coarse inner
+regions such as query batches, alignment regions, segment recomputation and
+fragment builds.
 The minimum triggers are four queries, four alignment regions, 64 seeds and
 four fragments.  A global \texttt{TaskParallelScope} permits only one active
 coarse nested region.  If a worker attempts to open another, the inner
@@ -679,15 +706,17 @@ multiplying the effective worker count.
 \subsection{The mandatory Vulkan route}
 
 Vulkan selection uses two predicates with deliberately different meanings.
-\texttt{vulkan\_components\_requested} asks whether a full biological GPU
-component, such as Vulkan sketching, seed lookup, tiled chaining or extension,
-was selected.  \texttt{vulkan\_accelerator\_requested} also includes an
-independent Vulkan prefilter.  The independent prefilter can accelerate one
-conservative test inside a CPU pipeline, so it must not relabel the entire
-statement as an all-GPU mapper.
+\texttt{vulkan\_\allowbreak{}components\_\allowbreak{}requested} asks whether
+a full biological GPU component, such as Vulkan sketching, seed lookup, tiled
+chaining or extension, was selected.
+\texttt{vulkan\_\allowbreak{}accelerator\_\allowbreak{}requested} also
+includes an independent Vulkan prefilter.  The independent prefilter can
+accelerate one conservative test inside a CPU pipeline, so it must not
+relabel the entire statement as an all-GPU mapper.
 
 The currently admitted dedicated GPU tuple is checked by
-\texttt{complete\_all\_gpu\_tuple\_selected} at
+\texttt{complete\_\allowbreak{}all\_\allowbreak{}gpu\_\allowbreak{}tuple\_%
+\allowbreak{}selected} at
 \path{pipe.cppm:8692}.  It requires Vulkan capability, Vulkan seed hits, the
 fused front end, GPU target-index build, Vulkan minimap-int, Vulkan tiled-DP
 chaining and the Block Aligner selector.  Divergence, MAPQ, exact edit
@@ -727,7 +756,9 @@ saying only ``the GPU pipeline was enabled''.
 The custom scan does not call the mapper once per tuple.  During its write
 phase, \texttt{TupleDispatchBuffer} copies eligible scan slots and records
 their query and target operands.  Its fixed capacity is 8,192 records.  At
-capacity or end of input, \texttt{run\_batch\_and\_build\_cursors} invokes the
+capacity or end of input,
+\texttt{run\_\allowbreak{}batch\_\allowbreak{}and\_\allowbreak{}build\_%
+\allowbreak{}cursors} invokes the
 typed processor.  The read phase then replays buffered slots, fills result
 placeholders from the matching cursor and executes the ordinary PostgreSQL
 projection.
@@ -760,7 +791,8 @@ the target locators remain lazy and are served through \texttt{scanner\_pg}.
 The system therefore degrades by reducing materialization, not by ignoring
 the budget.
 
-\texttt{MemoryAdmissionController::try\_reserve} takes one live snapshot of
+\texttt{MemoryAdmissionController::\allowbreak{}try\_\allowbreak{}reserve}
+takes one live snapshot of
 process footprint, system availability, process soft cap, minimum free memory
 and the optional index cap.  It then atomically accounts the reservation.
 The budgeted parallel helper attempts the requested fan-out, decreases it
@@ -771,10 +803,11 @@ tuple.
 
 \subsection{Sharing a prepared target}
 
-\texttt{pipeline\_run\_impl\_batch} at \path{pipe.cppm:9018} runs \(N\)
-queries against one target index.  It opens one outer arena chain for the
-batch and one nested arena scope per query, so query-local slabs are reclaimed
-before the next serial query.  A GPU index cache is shared by the batch wave.
+\texttt{pipeline\_\allowbreak{}run\_\allowbreak{}impl\_\allowbreak{}batch} at
+\path{pipe.cppm:9018} runs \(N\) queries against one target index.  It opens
+one outer arena chain for the batch and one nested arena scope per query, so
+query-local slabs are reclaimed before the next serial query.  A GPU index
+cache is shared by the batch wave.
 When Phase C GPU target-index build is active, the index is built once and
 inserted under the same identity that \texttt{SeedHitStage} will request.
 
@@ -965,7 +998,7 @@ minimap2 and G3SA at the level of complete execution systems.
 Compute Unified Device Architecture (CUDA) denotes NVIDIA's GPU programming
 platform in this comparison.
 
-\begin{table}[p]
+\begin{table}[!htbp]
   \centering
   \scriptsize
   \caption{Pipeline-level comparison of upstream minimap2, G3SA's minimap2
@@ -1072,7 +1105,8 @@ which is part of a command-line CUDA mapper.
 \subsection{Measurements from batched resident execution}
 
 The final addendum of DOC0356 points to
-\path{main/reporting/bioseq_bench_e2e_batch_gpu_proof/report_47.json}.  The
+\path{main/reporting/bioseq_bench_e2e_batch_gpu_proof/}\allowbreak
+\path{report_47.json}.  The
 artifact was generated on 28 June 2026 from commit
 \texttt{ac58f88500d4ad8652e26e163d2840e5713346b4}, with a dirty-tree marker.
 It contains no rule violation or regression, but it contains sanity warnings
@@ -1087,7 +1121,7 @@ does not establish authentic persisted all-GPU execution.  Its CIGAR case
 proves GPU DP and traceback plus host result construction for that historical
 route.  It does not prove persisted all-GPU CIGAR.
 
-\begin{table}[ht]
+\begin{table}[!htbp]
   \centering
   \small
   \caption{Selected end-to-end PostgreSQL cases from \texttt{report\_47.json}.
@@ -1112,7 +1146,7 @@ route.  It does not prove persisted all-GPU CIGAR.
 Figure~\ref{fig:pipeline-report47} visualizes the same wall times while
 retaining the unequal-output qualification of the coordinate case.
 
-\begin{figure}[ht]
+\begin{figure}[!htbp]
   \centering
   \begin{tikzpicture}[x=1cm,y=0.145cm,font=\scriptsize]
     \foreach \tick in {0,5,...,30} {
@@ -1173,6 +1207,8 @@ one-row mandatory GPU wave.  The later final CPU and SIMD path addresses a
 different bottleneck by handing fragment-native prepared anchors directly to
 the pipeline.
 
+\clearpage
+
 \section{Final architecture, invariants and remaining boundaries}
 \label{sec:pipeline-final}
 
@@ -1192,8 +1228,9 @@ The final pipeline is best summarized by its invariants.
   storage.
   \item \textbf{Target work has an explicit reuse scope.}  Prepared CPU or GPU
   targets, persisted readers and resident indexes can be reused across
-  compatible query waves.  A \texttt{PreparedFragmentAnchorBatch} belongs to
-  one query wave and shares its per-query views only within that wave.
+  compatible query waves.  A
+  \texttt{PreparedFragment\allowbreak{}Anchor\allowbreak{}Batch} belongs to one
+  query wave and shares its per-query views only within that wave.
   \item \textbf{Parallelism is bounded twice.}  A single TBB arena controls
   worker concurrency, while memory admission controls the number and size of
   concurrent materializations.
