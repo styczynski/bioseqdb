@@ -891,7 +891,8 @@ def _extract_paths_rec(path, data):
             all_indices.append(str(key))
         all_paths[path] = ",".join([escape(idx) for idx in all_indices])
     else:
-        all_paths[path] = f"{escape(str(data))}"
+        value = str(data)
+        all_paths[path] = value if path.endswith(".path") else escape(value)
     return all_paths
 
 def _extract_paths(data):
