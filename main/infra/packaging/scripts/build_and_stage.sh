@@ -121,6 +121,7 @@ export VCPKG_ROOT="${vcpkg_root}"
 export VCPKG_DEFAULT_BINARY_CACHE=/opt/bioseq-package-toolchain/vcpkg-binary-cache
 export VCPKG_DISABLE_METRICS=1
 export POSTGRESQL_VERSION="${postgres_major}"
+export PATH="${tool_root}/cmake/bin:${PATH}"
 
 if [[ "${action}" == "build" ]]; then
   python3 "${persistent_source_dir}/infra/packaging/scripts/prove_static_runtime.py" \

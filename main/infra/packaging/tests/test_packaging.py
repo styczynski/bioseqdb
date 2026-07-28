@@ -476,6 +476,10 @@ class StaticContractTests(unittest.TestCase):
             build_script,
         )
         self.assertIn(
+            'export PATH="${tool_root}/cmake/bin:${PATH}"',
+            build_script,
+        )
+        self.assertIn(
             "-DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF",
             build_script,
         )
