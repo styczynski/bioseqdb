@@ -220,15 +220,18 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
 \end{table}
 
 \paragraph{Can a batch mapper retain an ordinary SQL surface?}
-Yes.  The ordinary function definition supplies PostgreSQL types and a
-fail-closed direct-call contract.  Planner support and custom-path hooks
-identify supported \texttt{mmsearch} shapes, while the ordinary function's
-high cost makes unowned scalar evaluation unattractive.  The resulting custom
-plan carries the information required by \texttt{BioseqScan}.  Execution
-batches input rows and may produce several alignment rows for one input.
-Injected \texttt{Const} and \texttt{Var} nodes allow filters, projections, and
-joins to observe alignment fields without invoking an expensive scalar
-function for each row.
+Yes.  The ordinary \texttt{mmsearch} definition supplies PostgreSQL types and
+a fail-closed direct-call contract.  Planner support and custom-path hooks
+identify supported shapes, while the ordinary function's high cost makes
+unowned scalar evaluation unattractive.  The resulting custom plan carries
+the information required by \texttt{BioseqScan}.  Execution batches input rows
+and may produce several alignment rows for one input.  Injected
+\texttt{Const} and \texttt{Var} nodes allow filters, projections, and joins to
+observe alignment fields without invoking an expensive scalar function for
+each row.  \texttt{bioseq.edit} also fails closed without an owner, but the
+other projection helpers return diagnostic sentinels if rewriting fails.
+Exact ownership and placeholder rewriting therefore remain correctness
+invariants.
 
 \paragraph{Can the surrounding system remain reliable and inspectable?}
 The implementation provides strong mechanisms, but the result is not

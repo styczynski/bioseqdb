@@ -1252,7 +1252,12 @@ separates the checked-in default from each opt-in or rejected route.
     MPF is active by default. Updates use replace-in-place relation semantics,
     not immutable generation publication.\\
     Opt-in grouped publication &
-    Grouped setting enabled, provider \(=0\) &
+    \shortstack[l]{Grouped setting enabled,\\
+                   provider \(=0\),\\
+                   \texttt{index\_async\_persist}\\
+                   \texttt{=off},\\
+                   \texttt{recompute\_async\_persist}\\
+                   \texttt{=off}} &
     Authenticated PostgreSQL generation &
     MPF uses Format~5. A registered MPS dna4 \(k=15,w=10\) profile may use
     Format~6. Copy-on-publish and predecessor retirement apply here.\\
@@ -1274,6 +1279,12 @@ separates the checked-in default from each opt-in or rejected route.
     \bottomrule
   \end{tabularx}
 \end{table}
+
+Grouped publication is a deliberately synchronous controlled rebuild.  The
+caller must disable both \texttt{bioseq.index\_async\_persist} and
+\texttt{bioseq.recompute\_async\_persist}.  If either setting remains enabled,
+the rebuild is rejected with \texttt{FEATURE\_NOT\_SUPPORTED} before generation
+allocation or publication.
 
 MPF is the default active minimizer index and is enabled for update-on-insert.
 It matches the fragment-native sequence store and avoids a global MPS build.

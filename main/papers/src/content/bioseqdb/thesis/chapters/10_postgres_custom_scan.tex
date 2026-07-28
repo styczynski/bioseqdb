@@ -158,6 +158,16 @@ executor later replaces an attributable helper expression with a typed
 placeholder node.  A helper that refers to the wrong target recipe is not
 silently populated from whichever alignment happened to run.
 
+The direct-call boundary is not uniform across this family.  Both
+\texttt{mmsearch} and \texttt{bioseq.edit} raise
+\texttt{ERRCODE\_FEATURE\_NOT\_SUPPORTED} when they lack a custom-scan owner.
+The other projection helpers currently log an unexpected direct call and
+return diagnostic sentinels: numeric fields return \(-1\), Boolean fields
+return false, divergence returns \(-1.0\), and CIGAR returns
+\texttt{!UNEXPECTED!}.  Exact planner attribution and placeholder rewriting
+are therefore correctness invariants; those sentinels are not valid fallback
+alignment results.
+
 The design also avoids optional work.  During \texttt{BeginCustomScan}, the
 owner derives a requested-field mask from the expressions that survived
 planning.  That mask gates traceback construction and secondary metrics.
