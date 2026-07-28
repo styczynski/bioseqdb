@@ -475,6 +475,10 @@ The producer must never call PostgreSQL APIs.  \texttt{start\_streaming} creates
 a \texttt{std::jthread}; that thread runs either
 \texttt{run\_ncbi\_sequence\_stream} or
 \texttt{run\_ncbi\_datasets\_stream} and communicates only by owning messages.
+This is the current, PostgreSQL-proven implementation even though the broader
+project guideline normally prefers work submitted through the TBB pool and
+DOC0372 proposed fused provider tasks.  The chapter records the executed design
+rather than silently substituting the preferred tasking model.
 The current channel is bounded to 8~MiB and four items.  Its implementation in
 \path{main/bioseq/external/provider/bounded_channel.cppm} charges both bytes and
 items.  A popped item remains charged until its move-only lease is released,
