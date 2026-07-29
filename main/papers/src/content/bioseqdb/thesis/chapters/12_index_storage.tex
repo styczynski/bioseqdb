@@ -973,7 +973,7 @@ identity.
 Table~\ref{tab:index-gpu-residency-evidence} separates that losing phase from
 the later DOC0311 Phase-C result.
 
-\begin{table}[ht]
+\begin{table}[H]
   \centering
   \small
   \caption{Historical GPU-residency evidence by implementation phase. The
@@ -1019,7 +1019,7 @@ column and combines it with the query's read requirement, algorithm
 compatibility, source identity, memory admission, and backend availability.
 Algorithm~\ref{alg:index-runtime-selection} states the main decision shape.
 
-\begin{algorithm}[ht]
+\begin{algorithm}[H]
   \caption{Persisted-index selection in the alignment dispatcher}
   \label{alg:index-runtime-selection}
   \small
@@ -1451,7 +1451,7 @@ evidence. Matching parameters, generation identity, database OID, and row
 counts make the series useful, but it is manually assembled and does not prove
 source-frozen same-binary continuity.
 
-\begin{table}[ht]
+\begin{table}[H]
   \centering
   \small
   \caption{DOC0384 manually assembled E2E Reports 147 through 152. The exact
@@ -1486,7 +1486,7 @@ Using the conventional BioSeqDB median while leaving that baseline unchanged
 would give an approximately \(3.062\times\) speedup. Figure~\ref{fig:index-doc0384-bars} preserves
 the report-defined P50 so that its acceptance decision remains reproducible.
 
-\begin{figure}[ht]
+\begin{figure}[H]
   \centering
   \begin{tikzpicture}[x=.60cm,y=.78cm,font=\small,>=Latex]
     \draw[->] (0,0)--(18.3,0) node[right]{seconds};
