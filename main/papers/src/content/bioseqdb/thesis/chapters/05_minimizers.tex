@@ -53,7 +53,7 @@ lessons:
         transfers have been included in the contract.
 \end{enumerate}
 
-The discussion below first defines that contract.  It then reconstructs
+This chapter first defines that contract.  It then reconstructs
 minimap2 and SIMD-Minimizers before following the rejected and retained
 BioSeqDB designs.  Code locations refer to the current checkout.  Historical
 timing claims are tied to the archived report that measured them. They are not
@@ -954,7 +954,8 @@ The SIMD-Minimizers result was ultimately useful, but not as a drop-in faster
 implementation of the minimap2 sketch.  Its canonical hash selects an extreme
 minimum using the orientation of the complete $(K+W-1)$-base window. Minimap2
 instead hashes every canonical $K$-mer and applies the rightmost-minimum event
-rules described above.  Those definitions can choose different seeds even
+rules defined in Section~\ref{sec:minimizer-definition}.  Those definitions
+can choose different seeds even
 when both implementations are internally correct.  BioSeqDB therefore gives
 the paper-derived implementation a distinct, versioned identity:
 \texttt{PackedPaperNthash}. The persisted manifest stores scheme identifier

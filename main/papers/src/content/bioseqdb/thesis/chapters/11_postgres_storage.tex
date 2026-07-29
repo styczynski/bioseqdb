@@ -52,7 +52,7 @@ The design was reached through the Phase A, B, and C storage series
 corrective reports. Those documents are useful for understanding the rejected
 alternatives, but they do not define the current byte layout. In particular,
 the Phase C specification described a version-2 locator. The current source
-defines version~3 and adds an immutable source epoch. The account below follows
+defines version~3 and adds an immutable source epoch. This chapter follows
 the source in \path{backend/storage/bucket_math.cppm} and
 \path{backend/pg/storage_pg/sequence_storage_manager.cppm}.
 
@@ -848,7 +848,8 @@ with scalar aggregation until these initial states are corrected.
 \end{table}
 
 Unsupported plan shapes still fall back to PostgreSQL's ordinary plan, but
-that fallback does not repair the supported empty-input cases above.
+that fallback does not repair the supported empty-input cases in
+Table~\ref{tab:vector-aggregate-empty-limit}.
 Chunk-level min/max pruning remains independent. It can reduce the batch set
 even when aggregation itself is scalar, and a vector aggregate can still
 process a chunk for which no useful extrema exist.

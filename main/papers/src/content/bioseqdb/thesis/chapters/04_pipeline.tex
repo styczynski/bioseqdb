@@ -303,8 +303,8 @@ This chronology also changes how the older Vulkan results should be read.
 Report~47 records batching and residency counters for the recomputed resident
 route available in June.  It does not prove the later persisted
 \texttt{just\_index} route, a fresh-postmaster all-GPU result, or persisted
-CIGAR execution.  Those distinctions are retained in the evidence section
-below.
+CIGAR execution.  Those distinctions are retained in
+Section~\ref{sec:pipeline-evidence}.
 
 \section{The logical alignment chain}
 \label{sec:pipeline-logical-chain}
@@ -763,8 +763,8 @@ This is the most important qualification to the phrase ``all GPU''.  BioSeqDB
 has implemented Vulkan query sketching, seed lookup, tiled chaining,
 coordinate reduction and GPU DP with gridded traceback for admitted in-memory
 or recomputed resident routes.  Packed traceback data is still decoded into
-host result objects.  The statement-level definition in the 9 July 2026 cold
-persisted-index specification named above is stricter than a kernel-only
+host result objects.  The statement-level definition in the 9 July 2026
+DOC0371 cold persisted-index specification is stricter than a kernel-only
 definition.  It also forbids host biological planning and target-index
 rebuild.  The current authenticated Shape-V5 route can consume persisted
 PostgreSQL buffers directly for coordinate projection, with source identity
@@ -1285,7 +1285,7 @@ The direct coordinate proof machinery does not yet supply an accepted
 fresh-postmaster persisted all-GPU performance result, and persisted CIGAR is
 unsupported.  The newest demonstrated CPU and SIMD solution is the
 fragment-native prepared-anchor path described by the 17 July 2026
-implementation handoff named above.  Finally, small GPU batches can lose to
+DOC0383 implementation handoff.  Finally, small GPU batches can lose to
 fixed SQL and device overhead even when the kernel is faster.
 
 These qualifications do not weaken the contribution.  They explain why the

@@ -747,8 +747,8 @@ synchronization are included.  The project benchmark records
 \texttt{backend\_batch\_ns} for upload, dispatch, synchronization, and result
 readback.  Later hardware-route comparisons generally use that field.  It also
 records \texttt{wall\_clock\_ns} for the complete benchmark callback.  The
-report-138 aggregate reproduced below is an explicitly labeled exception that
-uses this complete-callback field.
+report-138 aggregate in Table~\ref{tab:sneakysnake-report138} is an explicitly
+labeled exception that uses this complete-callback field.
 Table~\ref{tab:sneaky-intermediate} transcribes complete-callback wall-clock
 P50 from report 127, not \texttt{backend\_batch\_ns}.  Correctness preparation
 and the exact truth oracle remain outside the measured callback.
@@ -825,8 +825,9 @@ unchanged empty match result.
 \subsection{Optimized SneakySnake CPU and Vulkan}
 
 The next-day optimization replaced gather-heavy independent-job SIMD with the
-contiguous-byte traversal described earlier, added the frozen-best candidate
-test, introduced the hybrid Vulkan mode, and retained recorded commands.
+contiguous-byte traversal described in
+Section~\ref{sec:prefilter-sneakysnake}, added the frozen-best candidate test,
+introduced the hybrid Vulkan mode, and retained recorded commands.
 DOC0382 identifies report 138 as the final uncontended reproduction.
 
 \begin{table}[htbp]

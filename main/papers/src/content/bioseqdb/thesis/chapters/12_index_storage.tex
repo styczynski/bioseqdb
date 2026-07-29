@@ -246,8 +246,9 @@ contiguous components:
   \((\mathit{globalPosition}\ll1)\mathbin{\vert}\mathit{strand}\).
 \end{itemize}
 
-In the record descriptions below, \texttt{u32} and \texttt{u64} denote
-unsigned fixed-width integer types of 32 and 64 bits, respectively, while
+In the version-2 and version-3 record descriptions, \texttt{u32} and
+\texttt{u64} denote unsigned fixed-width integer types of 32 and 64 bits,
+respectively, while
 \texttt{i64} denotes a signed 64-bit integer.
 The version-2 legacy serialization begins with a 32-byte header whose magic is
 \texttt{0xB1000001}. Every occupied logical bucket is a 16-byte record
@@ -1457,8 +1458,9 @@ pressure. They do
 not isolate a wire format.
 
 The apparent success of the \texttt{just\_index} rows coexisted with the
-80--93 GB temporary peaks described earlier. This is why the later work did not
-stop at “persisted queries are fast.” It pursued bounded construction,
+80--93 GB temporary peaks recorded in Table~\ref{tab:index-evolution}. This is
+why the later work did not stop at “persisted queries are fast.” It pursued
+bounded construction,
 query-selective reading, opt-in immutable publication, and finally a
 compact-direct reader route that did not turn a multi-gigabyte image into
 hundreds of thousands of heap fetches.

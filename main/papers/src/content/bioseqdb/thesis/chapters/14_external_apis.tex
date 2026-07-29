@@ -646,7 +646,8 @@ for up to 32 connections, a 30-second idle lifetime and a 10-second acquisition
 timeout.  Request targets, header names and header values are validated before
 transmission, and decoded response bodies are bounded.
 
-The streaming transport has the stricter locator firewall described above.
+The streaming transport has the stricter locator firewall described in
+Section~\ref{sec:external-policy}.
 Its current DNS resolution uses the system \texttt{getaddrinfo} call before
 pinning the result.  The proposed cancellable c-ares/OpenSSL endpoint connector
 for the Oat++ control plane remains deferred. Cancellation is therefore

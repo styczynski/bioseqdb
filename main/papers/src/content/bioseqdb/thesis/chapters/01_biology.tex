@@ -356,7 +356,7 @@ alignment~\cite{minimap2_paper}.
 BioSeqDB's current alignment pipeline is minimap2-derived. Individual stages
 are replaced or extended with CPU SIMD and GPU-oriented implementations.
 
-The biological discussion above determines what those algorithms must
+These biological constraints determine what those algorithms must
 preserve. They must handle strand orientation, tolerate both substitutions and
 length-changing differences, avoid being dominated by repeated sequence, and
 retain coordinates that can be joined with annotations. They must also avoid

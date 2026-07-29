@@ -348,8 +348,9 @@ constant determined by unit width, iterator form, and vectorization.  Packing
 an admitted interval of \(m\) symbols is \(O(m)\).
 \texttt{to\_encoded\_into} also performs \(O(m)\) resident work because it
 seeks directly to the containing unit.  The allocating range-vector overload
-has the prefix-traversal costs stated above even though it writes only \(m\)
-symbols.  These bounds do not imply that a source-backed rank is always
+performs \(O(\mathtt{to})\) forward traversal and can approach \(O(N)\) in
+reverse even though it writes only \(m\) symbols.  These bounds do not imply
+that a source-backed rank is always
 \(O(1)\) in wall time.  A provider may need a fragment lookup or bounded I/O.
 The facade guarantees that it asks the provider only for the selected window.
 
@@ -1292,8 +1293,9 @@ the generic facade does not own a stable typed allocation for that page.
 This honesty prevents an optimization from extending a cache pin or
 PostgreSQL memory-context pointer beyond its contract.
 
-The separate byte-upload-compatible policy described earlier grants a
-byte-copy capability.  It does not grant a cross-width typed CPU borrow.
+The byte-upload-compatible policy in
+Section~\ref{sec:sequence-bit-layout} grants a byte-copy capability.  It does
+not grant a cross-width typed CPU borrow.
 
 \section{Evolution of the design}
 \label{sec:sequence-abstraction-evolution}

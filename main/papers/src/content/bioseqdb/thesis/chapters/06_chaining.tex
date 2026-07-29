@@ -76,7 +76,8 @@ for the strand, however, and the region conversion casts coordinates to signed
 therefore below \(2^{63}\).  Nor does the physical layout imply end-to-end
 64-bit chaining arithmetic.  The current scalar and SIMD pair scorers narrow
 coordinate differences to signed 32-bit values and are valid only when the
-positive differences fit that domain.  This limitation is revisited below.
+positive differences fit that domain.
+Section~\ref{sec:chaining-scalar} examines this limitation.
 
 Figure~\ref{fig:chaining-dotplot} gives the usual dot-plot interpretation.
 Each anchor is a point.  A plausible chain advances in both axes and remains
@@ -442,7 +443,7 @@ reduces a range query to the boundary path and fully covered subtrees.
 priority \(\pi\), and cached subtree minimum \(m\).  A fully covered subtree
 contributes one cached minimum, while the boundary path checks the remaining
 included nodes.  The live implementation's correctness qualifications are
-stated below.}
+stated in Section~\ref{sec:chaining-rmq}.}
 \label{fig:rmq-augmented-tree}
 \end{figure}
 
