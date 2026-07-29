@@ -699,30 +699,42 @@ def _gpg_import_and_verify(
     work_dir: Path,
     environment: dict[str, str],
 ) -> str:
-    gnupg_home = work_dir / "gnupg"
-    gnupg_home.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(gnupg_home, 0o700)
     gpg = shutil.which("gpg", path=environment.get("PATH"))
-    if not gpg:
-        raise PackageBuildError("gpg is required to verify published repository signatures")
-    run_captured(
-        [gpg, "--batch", "--no-tty", "--homedir", str(gnupg_home), "--import", str(key)],
-        environment=environment,
-    )
+    gpgv = shutil.which("gpgv", path=environment.get("PATH"))
+    if not gpg or not gpgv:
+        raise PackageBuildError(
+            "gpg and gpgv are required to verify published repository signatures"
+        )
     fingerprint = _parse_gpg_fingerprint(
         run_captured(
             [gpg, "--batch", "--no-tty", "--with-colons", "--show-keys", str(key)],
             environment=environment,
         )
     )
-    for signature, payload in signatures:
-        command = [
+    # Verification needs only the downloaded public key. Importing it into a
+    # mutable GnuPG home unnecessarily starts gpg-agent and couples detached
+    # build units to a login user's runtime socket directory. Dearmor into an
+    # isolated keyring and use agent-free gpgv instead.
+    keyring = work_dir / "trustedkeys.gpg"
+    keyring.unlink(missing_ok=True)
+    run_captured(
+        [
             gpg,
             "--batch",
             "--no-tty",
-            "--homedir",
-            str(gnupg_home),
-            "--verify",
+            "--yes",
+            "--dearmor",
+            "--output",
+            str(keyring),
+            str(key),
+        ],
+        environment=environment,
+    )
+    for signature, payload in signatures:
+        command = [
+            gpgv,
+            "--keyring",
+            str(keyring),
             str(signature),
         ]
         if payload is not None:
