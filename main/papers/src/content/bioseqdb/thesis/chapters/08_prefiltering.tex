@@ -248,7 +248,8 @@ for each non-overlapping submaze [start,end):
         best = longest matching prefix among shifts -E..+E
         if best reaches end:
             break
-        lower_bound += 1                  # cross one obstacle
+        # cross one obstacle
+        lower_bound += 1
         if lower_bound > E:
             reject
         checkpoint += best + 1
