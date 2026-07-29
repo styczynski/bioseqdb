@@ -859,10 +859,10 @@ transaction semantics.
 
 BioSeqDB's ingestion path turns a textual archive record into two coordinated
 database objects: compact sequence fragments and a typed parent row carrying
-their locator. It does so without assembling a whole large packed sequence
-body, while retaining the current FASTQ quality-buffer limitation, and without
-letting worker threads enter PostgreSQL, and while dispatching through a
-compile-time registry of supported layouts. The reader's reusable concepts
+their locator. It does not assemble a whole large packed sequence body or let
+worker threads enter PostgreSQL. The current FASTQ quality-buffer limitation
+remains. Layout selection dispatches through a compile-time registry of
+supported layouts. The reader's reusable concepts
 isolate byte sources, incremental grammars, and compact packing. The identifier
 parser isolates repository dialects from SQL type conversion. The loader binds
 both to PostgreSQL locks, write states, constraints, visibility, and rollback.

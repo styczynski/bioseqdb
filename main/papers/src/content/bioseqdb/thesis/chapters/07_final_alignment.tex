@@ -1015,10 +1015,12 @@ recomputes the next tile. Packed \(M/I/D\) runs are generated backward and
 reversed at completion.
 
 Several constrained scripts avoid DP altogether: exact equal-length spans,
-one- or two-gap scripts, a bounded unit-gap walk, and a greedy anchored gap
-walk. Exact and recognized unit-gap jobs can reserve zero traceback words.
-The current caps are 256 symbols for an individual simple gap and 64 gap
-operations for the simple-script family.
+one-gap scripts, opposing deletion-plus-insertion or insertion-plus-deletion
+two-gap scripts, a bounded unit-gap walk, and a greedy anchored gap walk. Exact
+and recognized unit-gap jobs can reserve zero traceback words. The simple-gap
+search length is capped at 256 symbols, while repeated anchored or unit-gap
+discovery is capped at 64 operations. Greedy terminal-tail branches may append
+after that repeated-discovery check.
 
 \subsection{What was inherited and what was not}
 
