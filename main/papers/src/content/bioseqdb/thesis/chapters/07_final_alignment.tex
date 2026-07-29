@@ -913,7 +913,7 @@ touched by the final path.
       ..controls (5.5,3.6) and (5.2,6.0)..(6.3,6.2)
       ..controls (7.7,7.0) and (8.2,8.1)..(8.9,8.8);
     \node[align=center] at (4.5,10.0)
-      {\textbf{Forward pass}\\store only five-state tile borders};
+      {\textbf{BioSeqDB forward pass}\\store five-state tile borders};
     \node at (4.5,-0.9) {(a) boundary spill};
   \end{scope}
 
@@ -937,10 +937,11 @@ touched by the final path.
     \node at (4.5,-0.9) {(b) tile-local replay};
   \end{scope}
 \end{tikzpicture}
-\caption{Reconstruction of gridded traceback from the G3SA mechanism and the
-current BioSeqDB Vulkan shader. Blue grid boundaries survive the forward
-pass. Purple tiles are recomputed only while the orange path is traced. The
-drawing is a new TikZ reconstruction, not copied paper artwork.}
+\caption{Reconstruction of G3SA's boundary/recompute mechanism as instantiated
+by the current BioSeqDB Vulkan shader. The five-state border is
+BioSeqDB-specific. Blue grid boundaries survive the forward pass. Purple tiles
+are recomputed only while the orange path is traced. The drawing is a new TikZ
+reconstruction, not copied paper artwork.}
 \label{fig:gridded-traceback}
 \end{figure}
 
