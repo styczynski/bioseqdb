@@ -434,6 +434,7 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("libcap2-bin", preparation)
         self.assertIn("libcap-progs", preparation)
         self.assertIn("kernel-headers", preparation)
+        self.assertIn("perl-FindBin", preparation)
         self.assertIn("perl-IPC-Cmd", preparation)
         self.assertIn("setcap cap_sys_nice=ep", preparation)
         self.assertGreaterEqual(len([line for line in preparation.splitlines() if "sha256=" in line]), 4)
