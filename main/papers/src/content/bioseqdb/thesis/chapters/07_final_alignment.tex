@@ -205,7 +205,9 @@ in current code.
     seed/.style={circle,fill=black,inner sep=1.7pt},
     phase/.style={rounded corners,draw,fill=blue!7,align=center,
                   minimum height=0.65cm,font=\small},
-    lab/.style={font=\small}
+    lab/.style={font=\small},
+    annotation/.style={font=\small,fill=white,text opacity=1,
+                       inner xsep=2pt,inner ysep=1.5pt,rounded corners=1pt}
 ]
   \draw[->,thick] (0,0) -- (12.4,0) node[right,lab]{target coordinate};
   \draw[->,thick] (0,0) -- (0,4.4) node[above,lab]{query coordinate};
@@ -230,7 +232,8 @@ in current code.
   \draw[<->,orange!85!black,thick] (9.45,3.67) -- (11.5,4.05);
   \node[phase] at (10.35,2.72) {right extension\\forward input};
 
-  \node[lab,anchor=west] at (7.85,3.38) {$\texttt{min\_ksw\_len}=200$ governs fill boundaries};
+  \node[annotation,anchor=south east] at (11.85,4.20)
+        {$\texttt{min\_ksw\_len}=200$ governs fill boundaries};
 \end{tikzpicture}
 \caption{BioSeqDB's three-phase region alignment. The drawing reconstructs
 the implemented control flow. It is not a copy of a minimap2 figure. Exact
