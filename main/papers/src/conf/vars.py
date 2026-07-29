@@ -626,7 +626,11 @@ def _yaml_partial(main_file_name):
         values = load.construct_mapping(node)
         path = values["path"]
         del values["path"]
-        ref = "".join(os.path.basename(path).lower().split(" ")).strip()
+        ref = (
+            "".join(os.path.basename(path).lower().split(" "))
+            .replace("_", "-")
+            .strip()
+        )
         values["ref"] = ref
         values["path"] = f"{path}.tex"
         full_path = os.path.join(resource_base_path, f"{path}.tex")
@@ -887,7 +891,8 @@ def _extract_paths_rec(path, data):
             all_indices.append(str(key))
         all_paths[path] = ",".join([escape(idx) for idx in all_indices])
     else:
-        all_paths[path] = f"{escape(str(data))}"
+        value = str(data)
+        all_paths[path] = value if path.endswith(".path") else escape(value)
     return all_paths
 
 def _extract_paths(data):

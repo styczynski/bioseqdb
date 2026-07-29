@@ -92,12 +92,14 @@
 			in \MakeUppercase{\@kierunek} \\
 			\@zakres \par}
 		  \vspace{2cm plus 1.5fill}
-		  \begin{flushright}\large
-			\begin{tabular}{l}
-			  Supervisor:\\
-			  \bfseries \@opiekun
-			\end{tabular}
-		  \end{flushright}
+		  \ifx\@opiekun\empty\else
+		    \begin{flushright}\large
+			  \begin{tabular}{l}
+			    Supervisor:\\
+			    \bfseries \@opiekun
+			  \end{tabular}
+		    \end{flushright}
+		  \fi
 		  \vspace{1cm plus 1fill}
 		  {\large Warsaw, \@date\par}
 		\end{center}
@@ -241,12 +243,14 @@
 			na kierunku \MakeUppercase{\@kierunek} \\
 			\@zakres \par}
 		  \vspace{2cm plus 1.5fill}
-		  \begin{flushright}\large
-			\begin{tabular}{l}
-			  Praca wykonana pod kierunkiem\\
-			  \bfseries \@opiekun
-			\end{tabular}
-		  \end{flushright}
+		  \ifx\@opiekun\empty\else
+		    \begin{flushright}\large
+			  \begin{tabular}{l}
+			    Praca wykonana pod kierunkiem\\
+			    \bfseries \@opiekun
+			  \end{tabular}
+		    \end{flushright}
+		  \fi
 		  \vspace{1cm plus 1fill}
 		  {\large Warszawa, \@date\par}
 		\end{center}
