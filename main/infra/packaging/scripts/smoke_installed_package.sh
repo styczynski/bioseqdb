@@ -97,7 +97,30 @@ install_opensuse_package() {
 install_arch_package() {
   # pacman 7's Landlock downloader sandbox cannot initialize under Docker's
   # default seccomp profile. The smoke itself is already container-isolated.
-  sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+  pacman_conf=/etc/pacman.conf
+  sandbox_option=DisableSandbox
+  options_headers="$(awk '$0 ~ /^\[options\][[:space:]]*$/ { count++ } END { print count + 0 }' "${pacman_conf}")"
+  if [[ "${options_headers}" == 0 ]]; then
+    printf 'Expected at least one [options] section in pacman.conf\n' >&2
+    return 64
+  fi
+  sandbox_entries="$(awk -v option="${sandbox_option}" '$1 == option { count++ } END { print count + 0 }' "${pacman_conf}")"
+  if [[ "${sandbox_entries}" == 0 ]]; then
+    first_options_line="$(awk '$0 ~ /^\[options\][[:space:]]*$/ { print NR; exit }' "${pacman_conf}")"
+    sed -i "${first_options_line}a ${sandbox_option}" "${pacman_conf}"
+  elif [[ "${sandbox_entries}" != 1 ]]; then
+    printf 'pacman.conf contains duplicate sandbox settings\n' >&2
+    return 64
+  fi
+  if ! awk -v option="${sandbox_option}" '
+    /^\[options\][[:space:]]*$/ { in_options = 1; next }
+    /^\[/ { in_options = 0 }
+    in_options && $1 == option { count++ }
+    END { exit count == 1 ? 0 : 1 }
+  ' "${pacman_conf}"; then
+    printf 'Sandbox setting is not present exactly once under [options]\n' >&2
+    return 64
+  fi
   pacman -Syu --noconfirm --needed ca-certificates util-linux vulkan-icd-loader postgresql
   if [[ "${postgres_major}" == "17" ]]; then
     pacman -S --noconfirm --needed postgresql-old-upgrade

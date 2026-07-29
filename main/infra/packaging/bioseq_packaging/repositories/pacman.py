@@ -68,13 +68,14 @@ trap 'exit 143' TERM
 pacman_conf=/etc/pacman.conf
 sandbox_option=DisableSandbox
 options_headers="$(awk '$0 ~ /^\[options\][[:space:]]*$/ { count++ } END { print count + 0 }' "${pacman_conf}")"
-if [[ "${options_headers}" != 1 ]]; then
-  printf 'Expected exactly one [options] section in pacman.conf\n' >&2
+if [[ "${options_headers}" == 0 ]]; then
+  printf 'Expected at least one [options] section in pacman.conf\n' >&2
   exit 64
 fi
 sandbox_entries="$(awk -v option="${sandbox_option}" '$1 == option { count++ } END { print count + 0 }' "${pacman_conf}")"
 if [[ "${sandbox_entries}" == 0 ]]; then
-  sed -i "/^\[options\][[:space:]]*$/a ${sandbox_option}" "${pacman_conf}"
+  first_options_line="$(awk '$0 ~ /^\[options\][[:space:]]*$/ { print NR; exit }' "${pacman_conf}")"
+  sed -i "${first_options_line}a ${sandbox_option}" "${pacman_conf}"
 elif [[ "${sandbox_entries}" != 1 ]]; then
   printf 'pacman.conf contains duplicate sandbox settings\n' >&2
   exit 64

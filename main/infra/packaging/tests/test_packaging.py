@@ -6,8 +6,10 @@ import gzip
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import stat
+import subprocess
 import tarfile
 import tempfile
 from types import SimpleNamespace
@@ -531,6 +533,108 @@ class FormatPlanTests(unittest.TestCase):
                         plan.capabilities,
                         frozenset({model.ContainerCapability.SYS_NICE}),
                     )
+
+    def test_pacman_sandbox_adjustment_accepts_repeated_options_sections(self) -> None:
+        def sandbox_prelude(script: str) -> str:
+            start = script.index("pacman_conf=/etc/pacman.conf")
+            end = script.index("pacman -Syu", start)
+            body = script[start:end].replace(
+                "pacman_conf=/etc/pacman.conf",
+                'pacman_conf="${PACMAN_CONF_FIXTURE}"',
+                1,
+            )
+            return (
+                "set -Eeuo pipefail\n"
+                "configure_fixture() {\n"
+                f"{body}\n"
+                "}\n"
+                "configure_fixture\n"
+            )
+
+        smoke_script = (
+            PACKAGING_ROOT / "scripts" / "smoke_installed_package.sh"
+        ).read_text(encoding="utf-8")
+        scripts = {
+            "build": pacman.PACMAN_BUILD_SCRIPT,
+            "repository": pacman_repository.PACMAN_REPOSITORY_SCRIPT,
+            "smoke": smoke_script,
+        }
+        valid_fixtures = {
+            "single": "[options]\nArchitecture = auto\n[core]\nInclude = mirrorlist\n",
+            "repeated": (
+                "[options]\nArchitecture = auto\n"
+                "[core]\nInclude = mirrorlist\n"
+                "[options]\nNoExtract = usr/share/doc/*\n"
+            ),
+            "existing_first": (
+                "[options]\nDisableSandbox\nArchitecture = auto\n"
+                "[core]\nInclude = mirrorlist\n"
+            ),
+            "existing_second": (
+                "[options]\nArchitecture = auto\n"
+                "[core]\nInclude = mirrorlist\n"
+                "[options]\nDisableSandbox\nNoExtract = usr/share/doc/*\n"
+            ),
+        }
+        invalid_fixtures = {
+            "missing_options": "Architecture = auto\n[core]\nInclude = mirrorlist\n",
+            "duplicate_same_section": (
+                "[options]\nDisableSandbox\nDisableSandbox\nArchitecture = auto\n"
+            ),
+            "duplicate_across_sections": (
+                "[options]\nDisableSandbox\n[core]\nInclude = mirrorlist\n"
+                "[options]\nDisableSandbox\n"
+            ),
+            "outside_options": "DisableSandbox\n[options]\nArchitecture = auto\n",
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for script_name, script in scripts.items():
+                prelude = sandbox_prelude(script)
+                for name, contents in valid_fixtures.items():
+                    pacman_conf = root / f"pacman-{script_name}-{name}.conf"
+                    pacman_conf.write_text(contents, encoding="utf-8")
+                    environment = dict(os.environ)
+                    environment["PACMAN_CONF_FIXTURE"] = str(pacman_conf)
+                    environment["BIOSEQ_BUILD_DEPENDENCIES"] = "cmake"
+                    with self.subTest(script=script_name, fixture=name):
+                        for _ in range(2):
+                            subprocess.run(
+                                ["bash", "-c", prelude],
+                                check=True,
+                                env=environment,
+                                capture_output=True,
+                                text=True,
+                            )
+                        lines = pacman_conf.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                        self.assertEqual(lines.count("[options]"), contents.count("[options]"))
+                        self.assertEqual(lines.count("DisableSandbox"), 1)
+                        sandbox_index = lines.index("DisableSandbox")
+                        prior_headers = [
+                            line
+                            for line in lines[:sandbox_index]
+                            if line.startswith("[") and line.endswith("]")
+                        ]
+                        self.assertTrue(prior_headers)
+                        self.assertEqual(prior_headers[-1], "[options]")
+
+                for name, contents in invalid_fixtures.items():
+                    pacman_conf = root / f"pacman-{script_name}-{name}.conf"
+                    pacman_conf.write_text(contents, encoding="utf-8")
+                    environment = dict(os.environ)
+                    environment["PACMAN_CONF_FIXTURE"] = str(pacman_conf)
+                    environment["BIOSEQ_BUILD_DEPENDENCIES"] = "cmake"
+                    with self.subTest(script=script_name, invalid_fixture=name):
+                        result = subprocess.run(
+                            ["bash", "-c", prelude],
+                            check=False,
+                            env=environment,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(result.returncode, 64)
 
 
 class TemplateRendererTests(unittest.TestCase):
