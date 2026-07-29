@@ -519,8 +519,10 @@ PNT1 collector.
 \textbf{Output:} reconciled minimizer events from the eight logical streams.
 
 \begin{enumerate}
-  \item Split \(S\) into eight logical streams with \(k+w-2\) bases of
-    context.
+  \item Split \(S\) into eight logical streams. The packed kernel requests
+    \(k+w-1\) bases of boundary context and rounds offset planning to
+    storage-unit boundaries; this is one base beyond the \(k+w-2\)
+    biological minimum for complete windows.
   \item Initialize vector forward and reverse ntHash states and a
     \(w\)-slot ring.
   \item For each lock-step packed-symbol vector, perform the following steps.
@@ -804,9 +806,10 @@ integer scramble.  It is not ntHash.
 
 For a static $W,K$, \texttt{TwoStackContinuationState} retains:
 \begin{itemize}
-  \item at most $K+W-1$ normalized nt4 codes;
-  \item candidate hashes, raw records, and ordinals;
-  \item less than one pending SIMD block;
+  \item at most $K-1$ normalized context codes;
+  \item fewer than one SIMD block of pending codes together with their
+    position and valid-run metadata;
+  \item at most $W-1$ candidate hash/raw/ordinal triplets;
   \item the current minimum;
   \item counters;
   \item execution proof.
