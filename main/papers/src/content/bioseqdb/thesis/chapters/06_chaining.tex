@@ -306,7 +306,8 @@ relationships and computes mapping quality.
 
 The shared scalar/RMQ backtracker is intentionally simpler than the complete
 upstream minimap2 \texttt{mg\_chain\_backtrack} plus
-\texttt{compact\_a} sequence.  In particular, the current BioSeqDB helper has
+\texttt{compact\_a} sequence.  In particular, the current \mbox{BioSeqDB}
+helper has
 no explicit \texttt{max\_drop} parameter and does not reproduce minimap2's
 final target-position ordering step byte for byte.  The forward peak-score
 array is passed to the helper but currently unused.  Thus ``minimap2-compatible
@@ -370,9 +371,9 @@ remain deterministic because the anchor index is part of the key.
 Figure~\ref{fig:rmq-augmented-tree} illustrates how a cached subtree minimum
 reduces a range query to the boundary path and fully covered subtrees.
 
-\begin{figure}[tb]
+\begin{figure}[H]
 \centering
-\begin{tikzpicture}[font=\scriptsize, every node/.style={align=center}]
+\begin{tikzpicture}[xscale=1.12,font=\scriptsize, every node/.style={align=center}]
   \node[draw,rounded corners,fill=blue!12,minimum width=2.05cm]
     (root) at (4.0,3.2) {\((q,j)=(46,9)\)\\
       \(\pi=-81,\ m=-96\)};
@@ -395,7 +396,7 @@ reduces a range query to the boundary path and fully covered subtrees.
   \draw[->] (right) -- (rl);
   \draw[->] (right) -- (rr);
   \draw[orange!80!black,thick,rounded corners]
-    (-.35,.15) rectangle (4.25,2.58);
+    (-.35,.15) rectangle (4.15,2.58);
   \node[orange!80!black,anchor=west] at (.08,-.05)
     {fully covered subtree contributes cached \(m=-96\)};
   \node[blue!65!black,anchor=west] at (4.35,3.75)
@@ -632,7 +633,7 @@ Figure~6 in the G3SA paper by Y.~Han and colleagues
     \draw[->,thick,red!65!black] (sleft.south)
       .. controls (1.0,2.8) and (\x,2.1) .. (t\k.north);
   }
-  \node[align=center] at (2.7,2.5)
+  \node[align=center,fill=gray!12,inner sep=2pt] at (2.7,2.5)
     {source reloads and target\\updates cross global memory};
 
   % right panel
@@ -796,7 +797,7 @@ stale.
 Table~\ref{tab:g3sa-vulkan-comparison} separates the shared research lineage
 from the execution contracts that differ between the two implementations.
 
-\begin{table}[tb]
+\begin{table}[H]
 \centering
 \caption{G3SA and BioSeqDB Vulkan chaining are related designs, not equivalent
 implementations.}
@@ -902,7 +903,7 @@ the nested \texttt{backtrack\_chains} region.  The left panel is an inclusive
 chaining-kernel measurement, while the right panel isolates that nested
 backtracking component.
 
-\begin{figure}[tb]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[font=\small]
   % inclusive chaining panel
@@ -974,7 +975,7 @@ stops and skipped \(786{,}467{,}451\) candidate evaluations.  The removed work
 explains the observed reduction more directly than instruction-level
 vectorization alone.
 
-\begin{table}[tb]
+\begin{table}[H]
 \centering
 \caption{Intermediate inclusive CPU chaining-kernel snapshots in milliseconds.
 Each timing cell gives P50 on the first line and the complete
