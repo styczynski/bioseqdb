@@ -680,6 +680,13 @@ function(bioseq_add_codegen)
 
   set(_runtime_dir "${ARG_BINARY_DIR}/generator-bin")
   set(_executable "${_runtime_dir}/bioseq_codegen")
+  # CMake persists import-std target definitions in its generated compiler
+  # metadata. Keep module-std-disabled package configurations in a distinct
+  # nested cache so switching this contract cannot reuse incompatible files.
+  set(_bioseq_codegen_nested_cache_suffix "")
+  if(NOT _bioseq_codegen_use_module_std)
+    set(_bioseq_codegen_nested_cache_suffix "-no-module-std")
+  endif()
   set(_bioseq_codegen_gcc_cmake_args)
   if(_bioseq_codegen_gcc_only)
     string(REPLACE ";" "|"
@@ -729,9 +736,11 @@ function(bioseq_add_codegen)
   endif()
 
   ExternalProject_Add(${ARG_PROJECT_TARGET}
-    PREFIX "${ARG_BINARY_DIR}/generator-project"
+    PREFIX
+      "${ARG_BINARY_DIR}/generator-project${_bioseq_codegen_nested_cache_suffix}"
     SOURCE_DIR "${_bioseq_repo_root}/main/codegen"
-    BINARY_DIR "${ARG_BINARY_DIR}/generator-build"
+    BINARY_DIR
+      "${ARG_BINARY_DIR}/generator-build${_bioseq_codegen_nested_cache_suffix}"
     EXCLUDE_FROM_ALL TRUE
     LIST_SEPARATOR "|"
     CMAKE_ARGS
