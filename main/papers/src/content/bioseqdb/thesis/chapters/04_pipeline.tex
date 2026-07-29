@@ -325,18 +325,26 @@ branch.
 Algorithm~\ref{alg:bioseq-logical-pipeline} turns this order into the control
 flow for one query against one prepared target.
 
-\begin{algorithm}[!tbp]
+\begin{algorithm}[H]
   \caption{Logical execution of one BioSeqDB query against one prepared target}
   \label{alg:bioseq-logical-pipeline}
-  \footnotesize
+  \scriptsize
+  \setlength{\abovedisplayskip}{3pt}
+  \setlength{\belowdisplayskip}{3pt}
+  \setlength{\abovedisplayshortskip}{2pt}
+  \setlength{\belowdisplayshortskip}{2pt}
   \textbf{Input:} lazy query \(Q\), lazy target \(T\), target index \(I\),
   and parameters \(P\).
 
   \textbf{Output:} an ordered collection of typed mapping results.
 
   \begin{enumerate}
+    \setlength{\itemsep}{1pt}
+    \setlength{\parsep}{0pt}
     \item Select query minimizers \(M\).
       \begin{itemize}
+        \setlength{\itemsep}{0pt}
+        \setlength{\parsep}{0pt}
         \item If the entry point starts from sequence symbols, set
           \[
             M \gets
