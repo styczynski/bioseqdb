@@ -60,7 +60,8 @@ disagree.
       gpu/.style={box,fill=PaleGreen2},
       host/.style={box,fill=LightGoldenrod1},
       proof/.style={box,fill=LavenderBlush1},
-      every path/.style={thick}
+      every path/.style={thick},
+      flow/.style={-{Latex[length=2.2mm,width=1.5mm]},thick}
     ]
     \node[host,text width=7.6cm] (sql) at (0,0)
       {SQL \texttt{mmsearch} expression\\owned by a BioSeqDB custom scan};
@@ -68,53 +69,53 @@ disagree.
       {buffer rows and group compatible sequence layouts\\
        choose index source and split memory-admitted waves};
 
-    \node[cpu] (cpuprep) at (-2.4,-2.85)
+    \node[cpu] (cpuprep) at (-2.4,-2.95)
       {CPU/SIMD route\\lazy views or admitted\\hydration};
-    \node[gpu] (gpuprep) at (2.4,-2.85)
-      {Vulkan route\\resident query and target\\preparation};
+    \node[gpu] (gpuprep) at (2.4,-2.95)
+      {Vulkan route\\resident query and\\target preparation};
 
-    \node[cpu] (cpusketch) at (-2.4,-4.15)
+    \node[cpu] (cpusketch) at (-2.4,-4.55)
       {query sketch\\scalar or SIMD};
-    \node[gpu] (gpushape) at (2.4,-4.15)
+    \node[gpu] (gpushape) at (2.4,-4.55)
       {batched query sketch\\device minimizer\\buffer};
 
-    \node[cpu] (cpuseed) at (-2.4,-5.45)
+    \node[cpu] (cpuseed) at (-2.4,-6.05)
       {target-index lookup\\canonical anchors};
-    \node[gpu] (gpuseed) at (2.4,-5.45)
+    \node[gpu] (gpuseed) at (2.4,-6.05)
       {resident index lookup\\count, emit, and sort};
 
-    \node[cpu] (cpuchain) at (-2.4,-6.75)
+    \node[cpu] (cpuchain) at (-2.4,-7.55)
       {scalar, SIMD or RMQ chaining};
-    \node[gpu] (gpuchain) at (2.4,-6.75)
+    \node[gpu] (gpuchain) at (2.4,-7.55)
       {tiled-DP chaining\\coordinate reduction};
 
-    \node[cpu] (cpualign) at (-2.4,-8.05)
+    \node[cpu] (cpualign) at (-2.4,-9.05)
       {candidate regions\\optional prefilter\\KSW2 or Block Aligner};
-    \node[gpu] (gpualign) at (2.4,-8.05)
+    \node[gpu] (gpualign) at (2.4,-9.05)
       {coordinate projection\\or GPU DP with traceback};
 
-    \node[proof,text width=7.6cm] (attest) at (0,-9.55)
+    \node[proof,text width=7.6cm] (attest) at (0,-10.75)
       {validate requested and actual backends\\
        check index provenance and per-stage engine coverage\\
        require zero forbidden fallback};
-    \node[host,text width=7.6cm] (out) at (0,-10.95)
+    \node[host,text width=7.6cm] (out) at (0,-12.35)
       {\texttt{MatchResultCollection} $\rightarrow$ scan cursors\\
        $\rightarrow$ SQL projection};
 
-    \draw[->] (sql) -- (batch);
-    \draw[->] (batch) -- (cpuprep);
-    \draw[->] (batch) -- (gpuprep);
-    \draw[->] (cpuprep) -- (cpusketch);
-    \draw[->] (cpusketch) -- (cpuseed);
-    \draw[->] (cpuseed) -- (cpuchain);
-    \draw[->] (cpuchain) -- (cpualign);
-    \draw[->] (gpuprep) -- (gpushape);
-    \draw[->] (gpushape) -- (gpuseed);
-    \draw[->] (gpuseed) -- (gpuchain);
-    \draw[->] (gpuchain) -- (gpualign);
-    \draw[->] (cpualign) -- (attest);
-    \draw[->] (gpualign) -- (attest);
-    \draw[->] (attest) -- (out);
+    \draw[flow] (sql) -- (batch);
+    \draw[flow] (batch) -- (cpuprep);
+    \draw[flow] (batch) -- (gpuprep);
+    \draw[flow] (cpuprep) -- (cpusketch);
+    \draw[flow] (cpusketch) -- (cpuseed);
+    \draw[flow] (cpuseed) -- (cpuchain);
+    \draw[flow] (cpuchain) -- (cpualign);
+    \draw[flow] (gpuprep) -- (gpushape);
+    \draw[flow] (gpushape) -- (gpuseed);
+    \draw[flow] (gpuseed) -- (gpuchain);
+    \draw[flow] (gpuchain) -- (gpualign);
+    \draw[flow] (cpualign) -- (attest);
+    \draw[flow] (gpualign) -- (attest);
+    \draw[flow] (attest) -- (out);
   \end{tikzpicture}
   \caption{End-to-end BioSeqDB alignment dataflow.  The blue branch is the
   scalar/SIMD route and the green branch is the selected Vulkan route.  Both

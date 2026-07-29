@@ -737,9 +737,10 @@ The copied wrapper compiles a chaining search cap of 5000 into
 reference-distance and query-distance limits of 5000. The later RMQ pass uses
 limits of 20000 for both distances. The compile-time
 \path{MAX_ITER_CHAIN} cap remains 5000. The bandwidth is zero, and the
-gap-penalty scale is \(0.12\). The wrapper records zero in
-\path{max_chain_skip}, while the initial DP path assumes a query span of 15.
-No \path{max_chain_skip} argument reaches the kernel. The kernel
+gap-penalty scale is \(0.12\). The skip-penalty scale
+(\path{chn_pen_skip}) is zero, while the executable sets
+\path{opt.max_chain_skip} to 5000 and the initial DP path assumes a query span
+of 15. No \path{max_chain_skip} argument reaches the kernel. The kernel
 therefore does not implement minimap2's visited-generation heuristic and
 instead updates source-to-target scores within the fixed iteration cap.
 Agreement with minimap2 endpoints is consequently an empirical property of an
