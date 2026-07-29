@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Assertions intentionally match unexpanded source literals.
 set -Eeuo pipefail
 
 STACK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -7,6 +8,7 @@ VARIABLES_TF="$STACK_DIR/variables.tf"
 OUTPUTS_TF="$STACK_DIR/outputs.tf"
 BOOTSTRAP="$STACK_DIR/scripts/bootstrap.sh"
 USER_DATA="$STACK_DIR/scripts/user_data.sh.tftpl"
+CONTROLLER="$STACK_DIR/../package_builder.py"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -30,12 +32,17 @@ assert_literal "$MAIN_TF" '/amd64/hvm/ebs-gp3/ami-id'
 assert_literal "$MAIN_TF" 'for_each = local.builders'
 assert_literal "$MAIN_TF" 'volume_type           = "gp3"'
 assert_literal "$MAIN_TF" 'encrypted             = true'
+assert_literal "$MAIN_TF" 'disable_api_stop                     = true'
 assert_literal "$MAIN_TF" 'disable_api_termination              = true'
 assert_literal "$MAIN_TF" 'instance_initiated_shutdown_behavior = "stop"'
+assert_literal "$MAIN_TF" 'delete_on_termination = false'
+assert_literal "$MAIN_TF" 'Lifecycle           = "persistent-build-cache"'
 assert_literal "$MAIN_TF" 'prevent_destroy = true'
 assert_literal "$MAIN_TF" 'ignore_changes = ['
+assert_literal "$MAIN_TF" 'ami,'
 assert_literal "$MAIN_TF" 'associate_public_ip_address,'
 assert_literal "$MAIN_TF" 'user_data,'
+assert_literal "$MAIN_TF" 'user_data_replace_on_change = false'
 assert_literal "$OUTPUTS_TF" 'output "builder_user_data"'
 assert_literal "$MAIN_TF" 'block_public_policy     = true'
 assert_literal "$MAIN_TF" 'status = "Enabled"'
@@ -49,6 +56,11 @@ fi
 assert_literal "$VARIABLES_TF" 'root_volume_size_gb >= 500'
 assert_literal "$VARIABLES_TF" 'can(regex("/32$", var.ssh_ingress_cidr))'
 assert_literal "$VARIABLES_TF" 'var.ssh_ingress_cidr != "0.0.0.0/0"'
+if ! rg --multiline --quiet \
+    'variable "ami_schema_version" \{[^}]*default[[:space:]]*=[[:space:]]*"2"' \
+    "$VARIABLES_TF"; then
+  fail "$VARIABLES_TF must default ami_schema_version to schema 2"
+fi
 
 for output_name in \
   builders ssh_private_key_path region package_bucket_name package_bucket_arn \
@@ -69,7 +81,31 @@ assert_literal "$BOOTSTRAP" 'BIOSEQ_SOURCE_STAGING_DIR'
 assert_literal "$BOOTSTRAP" 'status READY'
 assert_literal "$BOOTSTRAP" 'rpm rpm2cpio rsync'
 assert_literal "$BOOTSTRAP" 'cpio dpkg-deb readelf rpm rpm2cpio tar zstd'
-assert_literal "$BOOTSTRAP" 'chmod 0755 "$RUSTUP_TMP"'
+assert_literal "$BOOTSTRAP" 'python3 python3-poetry'
+assert_literal "$BOOTSTRAP" 'python3-venv rpm rpm2cpio rsync'
+assert_literal "$BOOTSTRAP" 'caches/poetry-venvs'
+assert_literal "$BOOTSTRAP" 'python3 -m venv'
+assert_literal "$BOOTSTRAP" 'python3 --version && poetry --version'
+assert_literal "$BOOTSTRAP" '[[ $BIOSEQ_AMI_SCHEMA_VERSION == 2 ]]'
+
+if rg --quiet --ignore-case 'rustup|rustc --version|cargo --version|\.cargo/bin' "$BOOTSTRAP"; then
+  fail "$BOOTSTRAP must not install, expose, or verify the retired Rust/Cargo toolchain"
+fi
+
+# Persistent builders may be reconciled and snapshotted while running, but no
+# package-build path may stop, terminate, reboot, or power off an EC2 instance.
+for lifecycle_file in "$CONTROLLER" "$BOOTSTRAP" "$USER_DATA"; do
+  for forbidden_lifecycle in \
+    stop-instances terminate-instances \
+    'sudo shutdown' 'sudo poweroff' 'sudo halt' 'sudo reboot' \
+    '/sbin/shutdown' '/sbin/poweroff' '/sbin/halt' '/sbin/reboot' \
+    'systemctl poweroff' 'systemctl halt' 'systemctl reboot' \
+    'tofu destroy'; do
+    if rg --fixed-strings --quiet -- "$forbidden_lifecycle" "$lifecycle_file"; then
+      fail "forbidden instance lifecycle operation found in $lifecycle_file: $forbidden_lifecycle"
+    fi
+  done
+done
 
 # Protected development instances must never become targets of this isolated
 # stack. Their ids belong only in the orchestrator's explicit denylist.

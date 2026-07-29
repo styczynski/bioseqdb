@@ -40,8 +40,8 @@ printf '[bootstrap] starting %s architecture=%s aws_architecture=%s schema=%s\n'
   "$AWS_ARCHITECTURE" "$BIOSEQ_AMI_SCHEMA_VERSION"
 
 case "$(uname -m):$AWS_ARCHITECTURE" in
-  aarch64:arm64) RUST_TARGET=aarch64-unknown-linux-gnu ;;
-  x86_64:x86_64) RUST_TARGET=x86_64-unknown-linux-gnu ;;
+  aarch64:arm64) AWSCLI_ARCH=aarch64 ;;
+  x86_64:x86_64) AWSCLI_ARCH=x86_64 ;;
   *)
     printf '[bootstrap] architecture mismatch: kernel=%s expected=%s\n' \
       "$(uname -m)" "$AWS_ARCHITECTURE" >&2
@@ -55,7 +55,10 @@ getent passwd "$TARGET_USER" >/dev/null || {
 }
 TARGET_GROUP=$(id -gn "$TARGET_USER")
 install -d -m 0755 -o "$TARGET_USER" -g "$TARGET_GROUP" \
-  "$BIOSEQ_SOURCE_STAGING_DIR"
+  "$BIOSEQ_SOURCE_STAGING_DIR" \
+  "$BIOSEQ_SOURCE_STAGING_DIR/caches" \
+  "$BIOSEQ_SOURCE_STAGING_DIR/caches/poetry-venvs" \
+  "$BIOSEQ_SOURCE_STAGING_DIR/caches/poetry-venvs/.locks"
 
 retry() {
   local attempt
@@ -71,8 +74,8 @@ export DEBIAN_FRONTEND=noninteractive
 retry apt-get update -y
 retry apt-get install -y --no-install-recommends \
   binutils build-essential ca-certificates clang cmake cpio curl docker.io file \
-  git gnupg jq lsb-release ninja-build pkg-config python3 rpm rpm2cpio rsync \
-  sudo unzip util-linux xz-utils zip zstd
+  git gnupg jq lsb-release ninja-build pkg-config python3 python3-poetry \
+  python3-venv rpm rpm2cpio rsync sudo unzip util-linux xz-utils zip zstd
 
 systemctl enable --now docker
 usermod -aG docker "$TARGET_USER"
@@ -80,28 +83,13 @@ usermod -aG docker "$TARGET_USER"
 # AWS CLI v2 has separate official archives for the two native architectures.
 if ! command -v aws >/dev/null 2>&1; then
   AWSCLI_TMP=$(mktemp -d /tmp/bioseq-awscli.XXXXXX)
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${RUST_TARGET%%-*}.zip" \
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWSCLI_ARCH}.zip" \
     -o "$AWSCLI_TMP/awscliv2.zip"
   unzip -q "$AWSCLI_TMP/awscliv2.zip" -d "$AWSCLI_TMP"
   "$AWSCLI_TMP/aws/install"
   rm -rf "$AWSCLI_TMP"
 fi
 aws --version
-
-# Install a current stable Rust toolchain for the unprivileged build identity.
-if ! sudo -u "$TARGET_USER" -H bash -lc 'command -v rustc >/dev/null 2>&1'; then
-  RUSTUP_TMP=$(mktemp -d /tmp/bioseq-rustup.XXXXXX)
-  # mktemp creates a root-only directory.  The installer itself runs as the
-  # unprivileged build identity, so make the directory traversable without
-  # transferring ownership of the root-downloaded executable.
-  chmod 0755 "$RUSTUP_TMP"
-  curl -fsSL "https://static.rust-lang.org/rustup/dist/${RUST_TARGET}/rustup-init" \
-    -o "$RUSTUP_TMP/rustup-init"
-  chmod 0755 "$RUSTUP_TMP/rustup-init"
-  sudo -u "$TARGET_USER" -H "$RUSTUP_TMP/rustup-init" \
-    -y --profile minimal --default-toolchain stable
-  rm -rf "$RUSTUP_TMP"
-fi
 
 # High-priority compressed swap absorbs bursts before the deliberately lower
 # priority EBS swapfile. zram is recreated at every boot by this oneshot unit.
@@ -318,9 +306,9 @@ cat > /etc/profile.d/bioseq-package-builder.sh <<'PROFILE'
 source /etc/bioseq-package-builder.env
 export AWS_DEFAULT_REGION="$AWS_REGION"
 export BIOSEQ_COMPILER_RT_LAUNCHER=/usr/local/bin/bioseq-compiler-rt-launcher
+export BIOSEQ_POETRY_VENV_CACHE_DIR="$BIOSEQ_SOURCE_STAGING_DIR/caches/poetry-venvs"
 export CMAKE_C_COMPILER_LAUNCHER="$BIOSEQ_COMPILER_RT_LAUNCHER"
 export CMAKE_CXX_COMPILER_LAUNCHER="$BIOSEQ_COMPILER_RT_LAUNCHER"
-export PATH="$HOME/.cargo/bin:$PATH"
 PROFILE
 chmod 0644 /etc/profile.d/bioseq-package-builder.sh
 
@@ -339,16 +327,35 @@ case "$(uname -m):$AWS_ARCHITECTURE" in
   aarch64:arm64|x86_64:x86_64) ;;
   *) fail "architecture mismatch: kernel=$(uname -m) expected=$AWS_ARCHITECTURE" ;;
 esac
+[[ $BIOSEQ_AMI_SCHEMA_VERSION == 2 ]] || \
+  fail "bootstrap schema mismatch: expected=2 actual=$BIOSEQ_AMI_SCHEMA_VERSION"
 
 [[ $(stat -c %U "$BIOSEQ_SOURCE_STAGING_DIR") == "$TARGET_USER" ]] || \
   fail "$BIOSEQ_SOURCE_STAGING_DIR is not owned by $TARGET_USER"
 [[ -w $BIOSEQ_SOURCE_STAGING_DIR ]] || \
   fail "$BIOSEQ_SOURCE_STAGING_DIR is not writable"
+POETRY_VENV_CACHE_DIR="$BIOSEQ_SOURCE_STAGING_DIR/caches/poetry-venvs"
+[[ $(stat -c %U "$POETRY_VENV_CACHE_DIR") == "$TARGET_USER" ]] || \
+  fail "$POETRY_VENV_CACHE_DIR is not owned by $TARGET_USER"
+[[ -w $POETRY_VENV_CACHE_DIR ]] || \
+  fail "$POETRY_VENV_CACHE_DIR is not writable"
 
 systemctl is-active --quiet docker || fail "Docker is not active"
 systemctl is-active --quiet bioseq-zram-swap.service || fail "zram service is not active"
 sudo -u "$TARGET_USER" -H /usr/local/bin/bioseq-compiler-rt-launcher --preflight
-sudo -u "$TARGET_USER" -H bash -lc 'rustc --version && cargo --version'
+sudo -u "$TARGET_USER" -H bash -lc 'python3 --version && poetry --version'
+VENV_PROBE=$(mktemp -d "$BIOSEQ_SOURCE_STAGING_DIR/.venv-probe.XXXXXX")
+rmdir "$VENV_PROBE"
+if ! sudo -u "$TARGET_USER" -H python3 -m venv "$VENV_PROBE"; then
+  rm -rf "$VENV_PROBE"
+  fail "python3 -m venv failed for $TARGET_USER"
+fi
+sudo -u "$TARGET_USER" -H "$VENV_PROBE/bin/python" -c \
+  'import sys; raise SystemExit(sys.prefix == sys.base_prefix)' || {
+    rm -rf "$VENV_PROBE"
+    fail "created Python environment is not an isolated venv"
+  }
+rm -rf "$VENV_PROBE"
 sudo -u "$TARGET_USER" -H bash -lc 'docker version --format "{{.Server.Version}}"'
 gpg --version | head -1
 for tool in cpio dpkg-deb readelf rpm rpm2cpio tar zstd; do
@@ -412,6 +419,9 @@ zram_swap_priority=$ZRAM_PRIORITY
 disk_swap_priority=$DISK_PRIORITY
 compiler_rt_priority=$BIOSEQ_COMPILER_RT_PRIORITY
 ssh_rt_priority=$BIOSEQ_SSH_RT_PRIORITY
+python_version=$(python3 --version 2>&1)
+poetry_version=$(poetry --version 2>&1)
+poetry_venv_cache_dir=$BIOSEQ_SOURCE_STAGING_DIR/caches/poetry-venvs
 EOF
 chmod 0644 "$STATE_DIR/READY"
 status READY

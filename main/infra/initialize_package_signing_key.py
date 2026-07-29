@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Initialize the persistent OmniPackage signing key without exposing it.
+"""Initialize the persistent Bioseq repository signing key without exposing it.
 
 The OpenTofu stack creates only an empty Secrets Manager secret.  This helper is
 run serially on one package builder before either architecture starts.  It
 reuses an existing AWSCURRENT value or creates a non-expiring RSA signing key
 and writes it directly from a mode-0600 temporary file through the AWS CLI.
 Neither the private key nor the secret value is emitted to stdout/stderr.
+
+The OpenTofu resource and AWS secret deliberately retain the historical
+``omnipackage_signing_key`` address and ``-omnipackage-signing-key`` physical
+name.  Keeping them prevents replacement of the protected production signing
+identity; the names do not indicate a runtime dependency of the project-owned
+Python package publisher.
 """
 
 from __future__ import annotations

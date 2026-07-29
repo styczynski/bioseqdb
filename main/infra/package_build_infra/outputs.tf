@@ -15,7 +15,7 @@ output "builders" {
 }
 
 output "builder_user_data" {
-  description = "Exact rendered bootstrap user data, consumed only for safe stopped-instance refresh before AMI snapshots."
+  description = "Exact rendered bootstrap user data used to reconcile persistent running builders in place."
   value       = local.builder_user_data
   sensitive   = true
 }
@@ -31,7 +31,7 @@ output "region" {
 }
 
 output "package_bucket_name" {
-  description = "Private S3 bucket receiving omnipackage artifacts."
+  description = "Private S3 bucket receiving Python-native package artifacts."
   value       = aws_s3_bucket.artifacts.bucket
 }
 
@@ -41,6 +41,6 @@ output "package_bucket_arn" {
 }
 
 output "signing_key_secret_arn" {
-  description = "ARN of the empty persistent Secrets Manager container for the omnipackage GPG private key."
+  description = "ARN of the persistent Secrets Manager container for the Python-native publisher GPG private key."
   value       = aws_secretsmanager_secret.omnipackage_signing_key.arn
 }

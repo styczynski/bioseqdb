@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Prepare one clean OmniPackage distro container. This script runs as root
-# before rpmbuild/dpkg-buildpackage/makepkg changes to an unprivileged build
-# user. Everything is native to the worker architecture; no emulation or
-# cross-compilation is permitted.
+# Prepare one clean Bioseq package-build container. The project-owned Python
+# worker invokes this script as root before rpmbuild/dpkg-buildpackage/makepkg
+# changes to an unprivileged build user. Everything is native to the worker
+# architecture; no emulation or cross-compilation is permitted.
 set -euo pipefail
 
 readonly llvm_major=22

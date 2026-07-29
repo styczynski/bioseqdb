@@ -74,7 +74,7 @@ data "aws_subnets" "builder" {
 
 # ---------------------------------------------------------------------------
 # Artifact repository: private, encrypted, versioned, and protected from an
-# accidental `tofu destroy`. Omnipackage publishers use the EC2 instance role.
+# accidental `tofu destroy`. Python-native publishers use the EC2 instance role.
 # ---------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "artifacts" {
@@ -88,7 +88,7 @@ resource "aws_s3_bucket" "artifacts" {
   tags = {
     Name      = local.artifact_bucket_name
     Component = "package-artifacts"
-    Purpose   = "bioseq omnipackage repositories"
+    Purpose   = "bioseq native package repositories"
   }
 }
 
@@ -176,10 +176,12 @@ resource "aws_s3_bucket_policy" "artifact_transport" {
 
 # OpenTofu owns only the durable secret container. The package entrypoint
 # creates the first secret version at runtime, so signing-key material never
-# appears in configuration, plans, state, or user-data.
+# appears in configuration, plans, state, or user-data. Keep the historical
+# Terraform resource address and AWS name: renaming either would risk replacing
+# the protected secret that already contains the production signing identity.
 resource "aws_secretsmanager_secret" "omnipackage_signing_key" {
   name                    = "${var.name_prefix}-omnipackage-signing-key"
-  description             = "Persistent GPG private signing key used by bioseq omnipackage publishers"
+  description             = "Persistent GPG private signing key used by bioseq Python-native package publishers"
   recovery_window_in_days = 30
 
   lifecycle {
@@ -189,13 +191,14 @@ resource "aws_secretsmanager_secret" "omnipackage_signing_key" {
   tags = {
     Name      = "${var.name_prefix}-omnipackage-signing-key"
     Component = "package-signing"
-    Purpose   = "omnipackage GPG private key"
+    Purpose   = "Python-native package repository GPG private key"
   }
 }
 
 # ---------------------------------------------------------------------------
 # Shared builder identity: SSM fallback plus the minimum S3 repository actions
-# documented by omnipackage. No static AWS keys are created or stored in state.
+# required by the native publisher. No static AWS keys are created or stored in
+# state.
 # ---------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "builder_assume_role" {
@@ -224,7 +227,7 @@ data "aws_iam_policy_document" "artifact_publish" {
     sid = "ReadArtifactBucketLocation"
     actions = [
       "s3:GetBucketLocation",
-      # OmniPackage performs HeadBucket before any prefix-scoped operation;
+      # The publisher performs HeadBucket before any prefix-scoped operation;
       # AWS authorizes HeadBucket through s3:ListBucket without prefix context.
       "s3:ListBucket",
       "s3:ListBucketMultipartUploads",
@@ -364,6 +367,7 @@ resource "aws_instance" "builder" {
   vpc_security_group_ids               = [aws_security_group.builder.id]
   iam_instance_profile                 = aws_iam_instance_profile.builder.name
   associate_public_ip_address          = true
+  disable_api_stop                     = true
   disable_api_termination              = true
   instance_initiated_shutdown_behavior = "stop"
   ebs_optimized                        = true
@@ -374,7 +378,7 @@ resource "aws_instance" "builder" {
     iops                  = 6000
     throughput            = 500
     encrypted             = true
-    delete_on_termination = true
+    delete_on_termination = false
   }
 
   metadata_options {
@@ -403,15 +407,15 @@ resource "aws_instance" "builder" {
     Architecture        = each.value.aws_architecture
     AmiSchemaVersion    = var.ami_schema_version
     ProtectedFromDelete = "true"
-    Lifecycle           = "start-build-stop"
+    Lifecycle           = "persistent-build-cache"
   }
 
   lifecycle {
     prevent_destroy = true
-    # Cache AMIs apply only at first creation. User data is updated explicitly
-    # by the exact stopped-instance snapshot workflow: AWS reports public-IP
-    # association and user-data drift in ways that otherwise propose replacing
-    # these prevent_destroy persistent builders.
+    # Cache AMIs apply only at first creation. Running persistent builders are
+    # reconciled in place over SSH; AWS reports public-IP association and
+    # user-data drift in ways that otherwise propose replacing these
+    # prevent_destroy instances.
     ignore_changes = [
       ami,
       associate_public_ip_address,

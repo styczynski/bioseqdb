@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run compiler processes at the deliberately minimal real-time priority granted
-# to OmniPackage's typed SYS_NICE container. Keeping this in a launcher makes
-# the policy apply to CMake's main compile graph without altering compiler
-# command lines or generated module dependency information.
+# to the package container through its explicit SYS_NICE capability. Keeping
+# this in a launcher makes the policy apply to CMake's main compile graph
+# without altering compiler command lines or generated module dependency
+# information.
 set -euo pipefail
 
 readonly requested_priority="${BIOSEQ_COMPILER_RT_PRIORITY:-1}"

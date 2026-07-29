@@ -145,7 +145,7 @@ variable "x64_ami_id" {
 variable "ami_schema_version" {
   description = "Bootstrap/cache schema tag. Increment when cached package-builder AMIs become incompatible."
   type        = string
-  default     = "1"
+  default     = "2"
 
   validation {
     condition     = can(regex("^[0-9]+$", var.ami_schema_version))
