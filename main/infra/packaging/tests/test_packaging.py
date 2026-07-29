@@ -482,7 +482,7 @@ class StaticContractTests(unittest.TestCase):
             build_script,
         )
         self.assertIn(
-            "unset CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS",
+            "unset CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS MAKEFLAGS MAKELEVEL MFLAGS",
             build_script,
         )
         smoke_script = (SCRIPTS / "smoke_installed_package.sh").read_text()
