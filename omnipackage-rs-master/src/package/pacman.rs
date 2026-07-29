@@ -95,6 +95,10 @@ impl Package for Pacman {
             // !lto: makepkg enables LTO by default, which breaks crates that link prebuilt C/assembly objects
             // (e.g. aws-lc-sys: `undefined symbol: aws_lc_*_SHA512`); the rpm/deb paths don't LTO either.
             "echo 'OPTIONS+=(!debug !lto)' >> /etc/makepkg.conf".to_string(),
+            // Arch Linux ARM still defaults PKGEXT to .pkg.tar.xz, while OmniPackage's artifact
+            // discovery and signed repository contract use the current Arch .pkg.tar.zst format.
+            // zstd and COMPRESSZST are present in both native images, so make the format explicit.
+            r#"echo "PKGEXT='.pkg.tar.zst'" >> /etc/makepkg.conf"#.to_string(),
             // -m gives omnibuild a fresh /home/omnibuild it owns (cargo needs a writable ~/.cargo).
             "useradd -m -s /bin/bash omnibuild 2>/dev/null || true".to_string(),
             // NOPASSWD:SETENV lets the `sudo -E` below carry the injected build secrets through.
