@@ -206,7 +206,7 @@ still exists.
     ]
     \node[box,text width=2.5cm] (sql) at (0,0)
       {SQL over\\\texttt{bioseq\_external.*}};
-    \node[box,text width=2.5cm] (scan) at (3.4,0)
+    \node[box,text width=3.05cm] (scan) at (3.35,0)
       {\texttt{BioseqExternalScan}\\qual translation};
     \node[box,text width=2.65cm] (pack) at (6.8,0)
       {normalized query\\compile-time provider pack\\one runtime dispatch};
@@ -226,7 +226,10 @@ still exists.
     \draw[flow] (sql) -- (scan);
     \draw[flow] (scan) -- (pack);
     \draw[flow] (pack) -- (meta);
-    \draw[flow] (pack) -- node[below left]{NCBI accession} (stream);
+    \draw[flow] (pack) --
+      node[pos=.52,above=2pt,sloped,fill=white,inner sep=1pt]
+      {NCBI accession}
+      (stream);
     \draw[flow] (meta) -- (messages1);
     \draw[flow] (stream) -- (messages2);
     \draw[flow] (messages1) -- (writer);
@@ -798,7 +801,7 @@ FASTA path has explicit backpressure and measured memory bounds.
 Table~\ref{tab:external-reference-map} maps each runtime responsibility to its
 authoritative source file.
 
-\begin{table}[htbp]
+\begin{table}[H]
   \centering
   \small
   \caption{Authoritative current source locations for the external-provider
