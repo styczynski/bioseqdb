@@ -868,11 +868,11 @@ A reproducible update follows these steps:
   \item validate SQL parsing, graph completeness, physical order, manifests,
   fmgr ownership, row codecs, and GUC parity, then run the exhaustive safety
   ledger when performing the full qualification path.
-  \item compare proposed installation SQL with its checked golden and print the
-  bounded delta; validate and seal generated JSON and \texttt{.cppm} outputs
-  in the isolated build tree.
+  \item byte-compare proposed installation SQL with its checked golden and fail
+  on mismatch. Validate and seal generated JSON and \texttt{.cppm} outputs in
+  the isolated build tree.
   \item only under the explicit update target, replace the approved checked
-  SQL golden and rerun the ordinary check path.
+  SQL golden. Invoke the ordinary check path separately afterward.
 \end{enumerate}
 
 Generation signatures include:
