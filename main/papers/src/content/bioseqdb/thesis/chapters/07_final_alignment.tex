@@ -629,7 +629,8 @@ requested, the exact edit count.
 Implementation & Rust with explicit SSE2, AVX2, Arm NEON, WebAssembly SIMD and C
 bindings & C++26 module with Highway target dispatch and a capped, proven
 8/16-lane geometry\\
-Input & contiguous sequence or PSSM buffers & alphabet-generic lazy views over
+Input & contiguous sequence or position-specific scoring matrix (PSSM) buffers &
+alphabet-generic lazy views over
 packed, fragmented, or PostgreSQL-backed storage\\
 Reverse extension & caller-provided reversed input & direct reverse-oriented
 emission from compact storage, with no whole-buffer reverse copy\\
@@ -868,9 +869,9 @@ of the GPU kernel.
 
 G3SA's gridded traceback stores only score states on regularly spaced tile
 boundaries. Once the final endpoint is known, the backward kernel loads the
-nearest upper-left boundaries, recomputes one tile in fast memory, traces
-through that tile, discards its directions, and repeats for the next tile on
-the path. Forward memory traffic falls from an entire direction matrix to a
+nearest upper-left boundaries and recomputes one tile in fast memory. It traces
+through that tile, discards its directions, and repeats for the next tile on the
+path. Forward memory traffic falls from an entire direction matrix to a
 grid of borders. Traceback performs additional arithmetic only in tiles
 touched by the final path.
 
@@ -1052,8 +1053,8 @@ surface, gap model, result ABI, and fail-closed evidence.
 \subsection{CPU block-size sweep}
 
 The current \texttt{Minimap2Params} source preserves a tuning sweep performed
-on an Apple M1 with Arm NEON over a long, very-long, and extra-long CCS
-benchmark grid. It
+on an Apple M1 with Arm NEON over a long, very-long, and extra-long circular
+consensus sequencing (CCS) benchmark grid. It
 used ntHash minimizers and SIMD chaining, with KSW2 reported at 172\,ms for
 the cited very-long baseline. Table~\ref{tab:block-sweep} reproduces the
 displayed Block timings. The final column is calculated directly from the two
@@ -1186,8 +1187,9 @@ scoped cases, but it does not establish that explanation causally because the
 routes and workloads differ and each case has one sample.
 
 The 4096-job CIGAR case executed 4096 gridded jobs in one extension dispatch
-and planned 327,069,696 traceback words. It reduced wall time by 59.891\%.
-The 512-job version was correct and used 40,883,712 traceback words, but GPU
+and planned 327,069,696 traceback words. It reduced wall time by 59.892\%.
+The 512-job version passed its fixture gate and used 40,883,712 traceback
+words, but GPU
 and SIMD wall times were effectively equal. This is a useful negative result:
 gridded storage alone does not make a small batch fast. Runtime initialization,
 rank packing, job classification, allocation, submission, and result
@@ -1219,7 +1221,8 @@ The table therefore reports fixture-accepted CIGARs, not CIGAR path identity.
 
 Other source-config proof rows in the same report covered 64- and 512-job
 long CIGARs, 512- and 4096-job bounded CIGARs, a 4096-job indel case, and an
-8192-job bounded case. They reported correct non-empty CIGARs and zero
+8192-job bounded case. They reported non-empty CIGARs passing the case-specific
+acceptance gate and zero
 fallback/decline counters. The final unit and integration gate contained 196
 test cases, of which 195 passed and one was skipped, with 3071 of 3071
 assertions passing. That contemporaneous gate provides stronger repeatable

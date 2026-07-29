@@ -79,9 +79,15 @@ vocabulary, the per-column validity/value streams, compression metadata, and
 min/max pruning all have direct counterparts. BioSeqDB then changes the
 surrounding architecture. The code was moved behind a PostgreSQL-specific
 module boundary, renamed from generic ``columnar'' terminology to the BioSeq
-column store, and coupled to sequence locators, generated catalog rows,
-vector-batch slots, alignment custom scans, and sequence-specific pruning
-rules. These changes were consolidated by the refactor described in
+column store. It was coupled to the following BioSeq-specific components:
+\begin{itemize}
+  \item sequence locators,
+  \item generated catalog rows,
+  \item vector-batch slots,
+  \item alignment custom scans, and
+  \item sequence-specific pruning rules.
+\end{itemize}
+These changes were consolidated by the refactor described in
 \texttt{DOC0322} and its implementation report \texttt{DOC0323}.
 
 Table~\ref{tab:citus-bioseq-storage} separates inherited column-store
@@ -736,7 +742,7 @@ checksums. The wire representation carries:
   \item an endianness marker,
   \item the schema identity,
   \item the PostgreSQL-major and boot identity,
-  \item a CRC32C checksum, and
+  \item a 32-bit Castagnoli cyclic redundancy check (CRC32C), and
   \item a content digest.
 \end{itemize}
 Direct encodings are used only for

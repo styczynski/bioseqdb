@@ -460,7 +460,7 @@ forward and reverse-complement rolling states with the same wrapping sum.
 Their incompatibility instead comes from the compared hash width, endpoint
 selection, orientation evidence, event identity, and persisted scheme.
 
-\begin{table}[!htbp]
+\begin{table}[H]
 \centering
 \small
 \setlength{\tabcolsep}{5pt}
@@ -858,7 +858,7 @@ scalar Highway targets return a checked status and are converted into
 \texttt{ExactSimdRuntimeError}. The selected Exact backend does not silently
 call the scalar collector.
 
-An ambiguous base is also not an implicit fragment finalisation.  The kernel
+An ambiguous base is also not an implicit fragment finalization.  The kernel
 flushes any pending valid candidate block, clears the $K$-mer context and
 clean-run length, then advances one max-valued candidate through the ring.
 It does not clear the $W$-candidate tail, reset its chronological ordinal, or
@@ -1301,8 +1301,8 @@ failure mode.
 Minimizer benchmarks are unusually easy to misread. A shorter sketch can make
 chaining faster while reducing sensitivity. A warm target index can hide
 construction cost. A process exit status of one can mean either a crash or
-simply no complete end-to-end match. The tables below therefore report
-measurements only with their algorithm contract and experiment scope.
+simply no complete end-to-end match. The measurement tables therefore report
+only the applicable algorithm contract and experiment scope.
 
 \subsection{Historical controlled CPU checkpoint}
 
@@ -1454,8 +1454,8 @@ on every host, nor that the entire 2 and 4\,Gbp all-GPU pipeline has been
 qualified. DOC0369 explicitly records that the accepted 2 and 4\,Gbp runs
 available at that point exercised the CPU minimizer variants. The 4096-query
 bounded CIGAR proof used a tiny 8\,KiB target. It established selected GPU
-execution and correct CIGARs for all 4096 queries, but it covered the complete
-bounded alignment route rather than a minimizer-only Phase C kernel. GPU
+execution, and 4,096 CIGARs passed the report's fixture acceptance gate.  The
+proof covered the complete bounded alignment route rather than a minimizer-only Phase C kernel. GPU
 execution was slower than the minimap2 control on that case.
 The honest conclusion is narrower: Phase C removed the structural GPU sketch
 bottleneck and produced bit-exact device events for the recorded DNA4
@@ -1505,7 +1505,7 @@ compatible sketch/index scheme:
 
   \item[\texttt{PaperNtHashSimd}.] A versioned unequal-work
   alternative/prototype for packed DNA4 when both sides carry manifest scheme
-  $(1,1)$. It realises the eight-stream rolling idea while making BioSeqDB's
+  $(1,1)$. It realizes the eight-stream rolling idea while making BioSeqDB's
   tie rule and hash width part of a persistent contract. It cannot open or
   query a minimap-compatible index by treating every minimizer as an
   interchangeable 32-bit integer.

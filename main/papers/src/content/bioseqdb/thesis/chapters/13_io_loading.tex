@@ -113,7 +113,7 @@ decided from the file's magic bytes.
   \draw[arr] (flush) -- (index);
 
   \draw[arr, dashed, color=orange!75!black]
-      (chunks.south) to[bend left=25]
+      (chunks.south) to[bend left=32]
       node[pos=0.5,above=1pt,align=center,fill=white,inner sep=1pt]
       {default: direct\\single-backend call} (seqwriter.south);
 \end{tikzpicture}
@@ -480,10 +480,9 @@ available for other source/write ratios but defaults to off.
 A FASTA header is nominally free text, but established repositories encode
 structured identifiers inside it.  For example, a UniProtKB header begins with
 a pipe-delimited database, accession, and entry name, followed by a description
-and fields such as \texttt{OS=}, \texttt{OX=}, and \texttt{GN=}.  Treating
+and fields such as \texttt{OS=}, \texttt{OX=}, and \texttt{GN=}. Treating
 the whole header as one text column preserves bytes but loses the opportunity
-to index accession, organism, taxonomy identifier, dates, ranges, and numeric
-fields using PostgreSQL types.
+to use PostgreSQL types and indexes for its structured fields.
 
 BioSeqDB's parser recognizes the following 14 modes and dialects:
 \begin{itemize}

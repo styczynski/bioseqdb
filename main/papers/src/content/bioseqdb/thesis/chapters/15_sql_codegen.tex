@@ -548,7 +548,7 @@ The SQL renderer projects the normalized graph into:
   \item privileges.
   \item comments.
   \item configuration dumps.
-  \item bounded typed install actions.
+  \item bounded typed installation actions.
 \end{itemize}
 
 Clause spelling and property presence remain explicit where PostgreSQL
@@ -610,7 +610,7 @@ parameter, injects a call context when declared, calls the typed C++ function,
 and passes the result to \texttt{sql\_result\_to\_datum}.  Named and set-valued
 rows use a generated encoder derived from the result-row record.  Void,
 nullable, scalar, array, composite, polymorphic, record, and
-set-returning-function (SRF) forms have separate closed paths.
+set-returning function (SRF) forms have separate closed paths.
 
 The public wrapper has global C linkage and exactly one
 \texttt{PG\_FUNCTION\_INFO\_V1} declaration.  Its body invokes the common SQL
@@ -918,7 +918,7 @@ inputs.  The migration therefore converted implicit signature and ownership
 facts into checked graph data rather than merely changing where wrapper text
 was printed.
 
-\begin{table}[H]
+\begin{table}[htbp]
 \centering
 \small
 \begin{tabular}{p{3.0cm}p{5.0cm}p{5.6cm}}
@@ -1050,7 +1050,7 @@ Several limitations remain explicit:
   \item Clang structural collection and named-module preparation are
   substantial build-time dependencies.  Owner partitioning, depfiles, and
   content-keyed PCM reuse control their cost but do not make it zero.
-  \item the physical ledger preserves the current install order.  A future
+  \item the physical ledger preserves the current installation order. A future
   extension-upgrade system still needs version-to-version migration semantics,
   not only a reproducible version-1 installation.
   \item safety analysis is pinned to exact PostgreSQL source provenance.

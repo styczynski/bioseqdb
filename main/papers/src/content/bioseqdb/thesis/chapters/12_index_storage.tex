@@ -600,8 +600,9 @@ small descriptor only after the new generation has been authenticated.
 
     \draw[->,thick] (new)--(validate);
     \draw[->,thick] (validate.west)--
-      node[midway,above=2mm,font=\scriptsize,fill=white,inner sep=1pt]
-      {publish only on success}(head.east);
+      node[midway,above=2mm,font=\scriptsize,fill=white,inner sep=1pt,
+           align=center]
+      {publish only\\on success}(head.east);
     \draw[->,thick] (old)--(head);
     \draw[->,thick] (head)--(retire);
     \draw[->,dashed,thick] (retire.south)--++(0,-.55)
@@ -721,8 +722,9 @@ then reclaims the retired descriptor and artifact. Its work is bounded per
 pass: at most 64 descriptors, 4096 relation rows, 64 MiB of relation payload,
 64 files, and 64 orphan candidates. Readers do not acquire the writer advisory
 transaction lock. They retain ordinary \texttt{AccessShareLock} relation
-references and a registered MVCC snapshot for the lifetime of the read
-session. Writers, replacement, clear, and reaping are serialized by an
+references and a registered multiversion concurrency control (MVCC) snapshot
+for the lifetime of the read session. Writers, replacement, clear, and reaping
+are serialized by an
 advisory transaction lock.
 
 The mapping lifetime is also distinct from memory admission. A ResourceOwner

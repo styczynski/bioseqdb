@@ -131,10 +131,11 @@ disagree.
 \subsection{The direct minimap2-derived port}
 
 The earliest useful implementation was organized like an ordinary mapper.
-A call acquired a target index, collected query minimizers, looked up seed
-hits, chained anchors, generated regions, classified primary and secondary
-hits, ran dynamic programming, calculated mapping quality and converted the
-internal region into an output record.  This shape remains visible in
+A call acquired a target index and collected query minimizers.  It then looked
+up seed hits and chained anchors before generating regions and classifying
+primary and secondary hits.  Finally, it ran dynamic programming, calculated
+mapping quality, and converted the internal region into an output record.
+This shape remains visible in
 \path{minimap_port.cppm}.  For example, \texttt{collect\_seed\_hits} performs
 the minimizer-index lookup and canonical anchor sort, while
 \texttt{generate\_regions}, \texttt{classify\_primary\_secondary} and the
@@ -649,11 +650,16 @@ dispatcher consumes the selectors at the top and fixes the tuple
   (\mathrm{Cep},\mathrm{BAA},\mathrm{CA},\mathrm{MA},\mathrm{EP}),
 \]
 
-\noindent
-where \(\mathrm{Cep}\) is the compile-time window, \(k\)-mer and
-sequence-length bucket, \(\mathrm{BAA}\) is the base aligner,
-\(\mathrm{CA}\) is the chainer, \(\mathrm{MA}\) is the minimizer algorithm,
-and \(\mathrm{EP}\) is the entry point.  The concrete cascade is
+\begin{description}
+  \item[\(\mathrm{Cep}\)] Compile-time window, \(k\)-mer, and sequence-length
+  bucket.
+  \item[\(\mathrm{BAA}\)] Base aligner.
+  \item[\(\mathrm{CA}\)] Chainer.
+  \item[\(\mathrm{MA}\)] Minimizer algorithm.
+  \item[\(\mathrm{EP}\)] Entry point.
+\end{description}
+
+The concrete cascade is
 \texttt{dispatch\_pipeline} at \path{pipe.cppm:10321}.  At build optimization
 level 5 or higher, the execution leaf uses a specialized \(w=10\) parameter
 object when the runtime values match a registered tuple.  Lower optimization

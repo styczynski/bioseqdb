@@ -18,11 +18,11 @@ annotations~\cite{uniprot_programmatic_access}, while the European
 Bioinformatics Institute (EBI) Search API provides discovery over several
 domains~\cite{ebi_search_rest_api}. Their
 identifiers, paging rules, response schemas, rate
-limits and failure modes differ.  A conventional analysis script therefore
-contains a substantial amount of code that is not part of the biological
-question: uniform resource locator (URL) construction, authentication, JSON
-decoding, retries, FASTA
-parsing, identifier translation and conversion into local records.
+limits and failure modes differ. A conventional analysis script therefore
+contains substantial code that is unrelated to the biological question. It
+constructs uniform resource locators (URLs), authenticates requests, decodes
+JSON, and retries failures. It also parses FASTA, translates identifiers, and
+converts results into local records.
 
 BioSeqDB treats this integration problem as a database access problem.  It
 exposes six logical relations in the \texttt{bioseq\_external} schema:
@@ -625,7 +625,8 @@ thread owns PostgreSQL datums.
 \subsection{Authentication and configuration}
 
 Generated clients support an OpenAPI API-key scheme in either a header or query
-parameter.  Credentials are currently owning \texttt{std::string} values.  The
+parameter. Credentials are currently stored as owning \texttt{std::string}
+values. The
 NCBI adapter reads \texttt{NCBI\_API\_KEY} when it creates the generated
 metadata client. The direct nucleotide FASTA path is unauthenticated and does
 not place the key in its URL.  The broader DOC0372 design proposed

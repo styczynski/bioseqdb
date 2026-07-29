@@ -213,9 +213,9 @@ later batch could know that a row has no result.
 
 The early custom-scan proof exposed these issues directly.  It could replace
 one function call with one mutable constant.  It could also buffer tuples.
-However, it did not yet invoke the real aligner, return the complete result,
-filter a no-match row after batch execution, support the vectorized scan path,
-or emit multiple rows for one input.\footnote{
+However, it did not yet invoke the real aligner or return the complete result.
+It also could not filter a no-match row after batch execution, support the
+vectorized scan path, or emit multiple rows for one input.\footnote{
 \texttt{DOC0054}, ``Wiring the real aligner batch through the Postgres
 custom scan'', 2026-04-21.  This archived design is used as history.
 The current contract is stated in \texttt{DOC0321}.}
@@ -254,11 +254,21 @@ arguments and interacts badly with constant folding and error unwinding.
 \label{sec:representation-gap}
 
 A biological sequence is logically a range of symbols.  At the storage
-boundary it may be a PostgreSQL variable-length (varlena) value, an inline
-packed payload, a fragmented column, a lazy slice, a concatenation, a reverse view, a
-mapped external page, or a materialized C++ container.  Treating all of
-these as one owning byte string would simplify an interface by hiding the
-most important cost.  PostgreSQL's Oversized-Attribute Storage Technique
+boundary, it may have any of the following forms:
+
+\begin{itemize}
+  \item a PostgreSQL variable-length (varlena) value
+  \item an inline packed payload
+  \item a fragmented column
+  \item a lazy slice
+  \item a concatenation
+  \item a reverse view
+  \item a mapped external page
+  \item a materialized C++ container
+\end{itemize}
+
+Treating all of these as one owning byte string would simplify an interface by
+hiding the most important cost.  PostgreSQL's Oversized-Attribute Storage Technique
 (TOAST) can compress or move a variable-length value out of line, so C-level
 code cannot assume that a received datum is already one contiguous
 four-byte-header payload~\cite{postgresql17_toast}.
@@ -622,13 +632,12 @@ PostgreSQL~\cite{roehm_blakeley_genomics_2009,bio_strings_2022}.
 The design problem can now be stated precisely:
 
 \begin{quote}
-  Given biological sequences and relational metadata managed by
-  PostgreSQL, execute a minimap2-derived search as a planned,
-  set-oriented operation that can reuse compatible persistent indexes,
-  operate over compact or lazy representations, remain within explicit
-  host and device memory budgets, and return zero or more typed alignment
-  rows while failing closed if no BioSeqDB custom executor owns the
-  \texttt{mmsearch} expression.
+  Given biological sequences and relational metadata managed by PostgreSQL,
+  execute a minimap2-derived search as a planned, set-oriented operation.  The
+  operation must reuse compatible persistent indexes, operate over compact or
+  lazy representations, and remain within explicit host and device memory
+  budgets.  It must return zero or more typed alignment rows and fail closed if
+  no BioSeqDB custom executor owns the \texttt{mmsearch} expression.
 \end{quote}
 
 This statement yields eight requirements.

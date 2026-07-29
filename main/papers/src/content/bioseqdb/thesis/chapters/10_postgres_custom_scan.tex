@@ -79,9 +79,8 @@ This distinction is visible in cardinality.  Let input row \(i\) produce
 Thus a source row with no match vanishes, one with one match behaves like an
 ordinary filter result, and one with several matches is repeated with
 different match-field values.  A Boolean function can say whether
-\(m_i>0\), but it cannot supply the \(m_i\) rows or ensure that score,
-coordinates, CIGAR, strand, and mapping quality all refer to the same member
-of that set.
+\(m_i>0\), but it cannot supply the \(m_i\) rows or ensure that all projected
+alignment fields refer to the same member of that set.
 
 Table~\ref{tab:scalar-vs-owned-mmsearch} summarizes why executor ownership is a
 semantic requirement rather than only a batching optimization.
@@ -107,7 +106,7 @@ Exactly one Boolean or nullable Boolean &
 Zero, one, or many projected rows per input \\
 Expensive work &
 Repeated at every function call site &
-Performed once by the alignment owner.  Fields are projected afterwards \\
+Performed once by the alignment owner.  Fields are projected afterward \\
 Accelerator use &
 Submission overhead occurs at tuple granularity &
 The scheduler can choose single instruction, multiple data (SIMD), central
@@ -983,7 +982,7 @@ No real alignment, no filtering, unsafe fallback semantics, artificial cost
 race, and only one output value \\
 DOC0054 &
 Write/batch/read buffer, full placeholder list, proposed multirow draining &
-A pull executor can expose post-batch zero, one, or many cardinality &
+A pull executor can expose zero, one, or many rows after each batch &
 The first implementation still had global state, incomplete vector handling,
 and incomplete resource/rescan behavior \\
 DOC0058 &
@@ -994,7 +993,7 @@ Five inputs emitted nine rows &
 Join correlation and expression placement were not yet safe \\
 DOC0083 &
 Per-scan runtime, memory-context callback, parameter rebinding,
-ParadeDB-inspired PHV support &
+ParadeDB-inspired PostgreSQL \texttt{PlaceHolderVar} (PHV) support &
 Repeated scans, cross joins, LEFT JOIN projections, and correlated inner
 execution exposed and repaired global-state assumptions &
 Join selection still used cost forcing and did not prove exact single
@@ -1032,7 +1031,8 @@ unsupported-query error and cannot masquerade as a successful search.
 
 The original file-static buffer appeared to work for one scan node.  A cross
 join creates two scan nodes in the same backend, and repeated execution reuses
-the process.  One node could move the global state to read-mode EOF while the
+the process.  One node could move the global state to read-mode end-of-file
+(EOF) while the
 other still expected write mode.  An early EXPLAIN ANALYZE symptom was an
 outer scan reporting one row where the fixture contained five.  Moving the
 buffer, feature flags, output cursor, parameter state, placeholder nodes, and

@@ -272,7 +272,7 @@ with \(\sigma\) ranks uses the minimum width
  b=\lceil\log_2 \sigma\rceil
 \]
 bits per symbol.  The generic \texttt{sequence\_custom\_alphabet} type may
-instead receive an explicit width.  In the equations below,
+instead receive an explicit width.  For these layout equations,
 \(b=\texttt{traits::bits\_per\_char}\), and the selected policy must provide
 enough values to encode every alphabet rank.  Thus the ceiling formula is the
 default minimum, not a universal invariant of the range family.  For a
@@ -354,7 +354,7 @@ symbols.  These bounds do not imply that a source-backed rank is always
 The facade guarantees that it asks the provider only for the selected window.
 
 \raggedbottom
-\subsection{The bit-casted view}
+\subsection{The bit-cast view}
 
 \texttt{bit\_casted\_view} in \texttt{sequences.cppm}, lines 726--866, is a
 legacy target-specific view that changes the traversal unit of a resident byte

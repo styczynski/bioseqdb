@@ -129,11 +129,11 @@
     graphics processing unit (GPU) implementations using Vulkan for selected
     sketching and chaining operations.  It also provides bounded base-level
     extension based on established dynamic-programming kernels and optional
-    SneakySnake and GateKeeper prefilters.  It also develops persistent database-resident
-    minimizer indexes, bounded sequence ingestion, external sequence
-    providers, a cache with request coordination, and structural
-    generation of PostgreSQL Structured Query Language (SQL) installation code
-    and the function-manager boundary.
+    SneakySnake and GateKeeper prefilters.  The persistent database layer adds
+    minimizer indexes, bounded sequence ingestion, and external sequence
+    providers.  The design also includes a coordinated cache and structural
+    generation of the PostgreSQL extension surface from compact type and
+    function declarations.
 
     BioSeqDB does not expose alignment as an ordinary row-by-row scalar
     function.  Planner support functions introduce custom paths whose
