@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Provision, run, verify, and stop BioSeq's native AWS package builders.
+"""Provision, run, verify, and image BioSeq's native AWS package builders.
 
 This is the OpenTofu-only entry point for DOC0390.  The normal ``run`` command
 owns the complete lifecycle: it selects architecture-specific cached AMIs,
-applies the isolated OpenTofu stack, starts only the exact instances recorded
-in that stack, waits for bootstrap, builds on both native architectures,
-validates the remote manifests and S3 objects, and stops both instances in a
-``finally`` block.  It never terminates instances and hard-rejects the two
-protected development instance IDs from the specification.
+applies the isolated OpenTofu stack without permitting instance replacement,
+starts only the exact instances recorded in that stack, prepares lock-hashed
+Poetry environments, builds on both native architectures, validates the remote
+manifests and exact S3 object versions, and creates post-build AMIs only for the
+complete canonical matrix.  It never stops or terminates an instance and
+hard-rejects the two protected development instance IDs from the specification.
 
 Only committed source is transferred to builders.  Package signing material is
 kept in AWS Secrets Manager and is never copied through this process or placed
@@ -17,8 +18,6 @@ in OpenTofu state.
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 import concurrent.futures
 import contextlib
 import datetime as dt
@@ -45,6 +44,8 @@ from typing import Any, Iterable, Sequence
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 STACK_DIR = HERE / "package_build_infra"
+PACKAGING_DIR = HERE / "packaging"
+POETRY_LOCK_FILE = PACKAGING_DIR / "poetry.lock"
 MATRIX_FILE = HERE / "package_matrix.json"
 RUNTIME_DIR = STACK_DIR / ".runtime"
 LOG_DIR = STACK_DIR / ".logs"
@@ -63,7 +64,7 @@ EXPECTED_INSTANCE_TAGS = {
     "Component": "package-build-machine",
     "ManagedBy": "opentofu",
     "ProtectedFromDelete": "true",
-    "Lifecycle": "start-build-stop",
+    "Lifecycle": "persistent-build-cache",
 }
 
 CACHE_TAGS = {
@@ -72,12 +73,18 @@ CACHE_TAGS = {
     "ManagedBy": "bioseq-package-builder",
     "BaseOS": "ubuntu-24.04",
     "CacheStage": "post-build",
+    "WorkerGeneration": "python-poetry-v1",
 }
 
-BOOTSTRAP_SCHEMA = "1"
+BOOTSTRAP_SCHEMA = "2"
+WORKER_GENERATION = "python-poetry-v1"
+EXPECTED_PACKAGE_VERSION = "4.2.3"
+EXPECTED_SIGNING_FINGERPRINT = "452F34C5F1EF6D471EC041ADDD94780B0728F093"
 DEFAULT_REGION = "us-east-1"
 DEFAULT_S3_PREFIX = "bioseq/packages"
-REMOTE_ROOT = "/opt/bioseq-package-builder/workspace/builds"
+REMOTE_WORKSPACE = "/opt/bioseq-package-builder/workspace"
+REMOTE_ROOT = f"{REMOTE_WORKSPACE}/builds"
+REMOTE_POETRY_VENV_ROOT = f"{REMOTE_WORKSPACE}/caches/poetry-venvs"
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -165,9 +172,9 @@ def interrupt_active_children() -> None:
         try:
             child.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
-            # SIGINT is OpenTofu's state-flushing interrupt. Escalate only to
-            # TERM (never KILL), then let exact state recovery decide whether
-            # it is safe to stop instances.
+            # SIGINT is OpenTofu's state-flushing interrupt. Escalate only the
+            # local child process to TERM (never KILL); EC2 lifecycle is not
+            # changed by signal cleanup.
             with contextlib.suppress(ProcessLookupError):
                 child.terminate()
 
@@ -293,6 +300,30 @@ class Builder:
     public_ip: str
     private_ip: str
     source_ami_id: str
+
+
+@dataclass(frozen=True)
+class PoetryEnvironment:
+    lock_sha256: str
+    venv_path: str
+    python_version: str
+    poetry_version: str
+
+    def manifest_value(self) -> dict[str, str]:
+        return {
+            "python": self.python_version,
+            "poetry": self.poetry_version,
+        }
+
+
+@dataclass(frozen=True)
+class RemoteBuildHandle:
+    builder: Builder
+    unit_name: str
+    remote_log_path: str
+    manifest_path: str
+    build_root: str
+    local_log_path: Path
 
 
 def load_matrix(path: Path = MATRIX_FILE) -> Matrix:
@@ -569,6 +600,45 @@ def guard_local_state_against_protected_instances() -> None:
             )
 
 
+def validate_tofu_plan(plan: dict[str, Any]) -> None:
+    """Reject any plan that could replace/delete a builder or touch protected IDs."""
+
+    if not isinstance(plan, dict):
+        raise PackageBuilderError("OpenTofu plan JSON must be an object")
+    plan_text = json.dumps(plan, separators=(",", ":"), sort_keys=True)
+    protected = sorted(
+        instance_id for instance_id in PROTECTED_INSTANCE_IDS if instance_id in plan_text
+    )
+    if protected:
+        raise PackageBuilderError(
+            "refusing OpenTofu plan because it references protected development "
+            f"instance(s): {protected}"
+        )
+    resource_changes = plan.get("resource_changes", [])
+    if not isinstance(resource_changes, list):
+        raise PackageBuilderError("OpenTofu plan has malformed resource_changes")
+    forbidden: list[str] = []
+    for resource in resource_changes:
+        if not isinstance(resource, dict):
+            raise PackageBuilderError("OpenTofu plan contains a malformed resource change")
+        address = str(resource.get("address", ""))
+        resource_type = str(resource.get("type", ""))
+        if resource_type != "aws_instance" and not address.startswith("aws_instance."):
+            continue
+        change = resource.get("change", {})
+        actions = change.get("actions", []) if isinstance(change, dict) else []
+        if not isinstance(actions, list) or any(not isinstance(action, str) for action in actions):
+            raise PackageBuilderError(
+                f"OpenTofu plan has malformed actions for {address or resource_type}"
+            )
+        if "delete" in actions:
+            forbidden.append(f"{address or resource_type}: {actions}")
+    if forbidden:
+        raise PackageBuilderError(
+            "refusing OpenTofu instance deletion/replacement plan: " + "; ".join(forbidden)
+        )
+
+
 def tofu_apply(
     *,
     region: str,
@@ -590,9 +660,38 @@ def tofu_apply(
         "root_volume_size_gb": "500",
         "compiler_rt_priority": "1",
     }
-    argv = [tofu_executable(), "apply", "-input=false", "-auto-approve"]
-    argv.extend(f"-var={key}={value}" for key, value in variables.items())
-    run_command(argv, cwd=STACK_DIR)
+    variable_args = [f"-var={key}={value}" for key, value in variables.items()]
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="tofu-package-plan-", dir=RUNTIME_DIR
+    ) as plan_directory:
+        plan_path = Path(plan_directory) / "package-build.tfplan"
+        run_command(
+            [
+                tofu_executable(),
+                "plan",
+                "-input=false",
+                f"-out={plan_path}",
+                *variable_args,
+            ],
+            cwd=STACK_DIR,
+        )
+        rendered = run_command(
+            [tofu_executable(), "show", "-json", str(plan_path)],
+            cwd=STACK_DIR,
+            capture=True,
+        )
+        try:
+            plan = json.loads(rendered.stdout)
+        except json.JSONDecodeError as error:
+            raise PackageBuilderError(
+                f"OpenTofu plan output is not valid JSON: {error}"
+            ) from error
+        validate_tofu_plan(plan)
+        run_command(
+            [tofu_executable(), "apply", "-input=false", str(plan_path)],
+            cwd=STACK_DIR,
+        )
     outputs = tofu_outputs()
     if not outputs:
         raise PackageBuilderError("OpenTofu apply completed without readable outputs")
@@ -627,7 +726,16 @@ def normalize_s3_prefix(value: str) -> str:
     return value
 
 
-def latest_cached_ami(region: str, architecture: Architecture) -> dict[str, Any] | None:
+def latest_cached_ami(
+    region: str,
+    architecture: Architecture,
+    lock_sha256: str,
+    matrix_fingerprint: str,
+) -> dict[str, Any] | None:
+    if re.fullmatch(r"[0-9a-f]{64}", lock_sha256) is None or re.fullmatch(
+        r"[0-9a-f]{64}", matrix_fingerprint
+    ) is None:
+        raise PackageBuilderError("cached AMI lookup requires complete SHA-256 provenance")
     filters = [
         f"Name=tag:{key},Values={value}" for key, value in CACHE_TAGS.items()
     ]
@@ -636,6 +744,11 @@ def latest_cached_ami(region: str, architecture: Architecture) -> dict[str, Any]
             f"Name=tag:BuildArchitecture,Values={architecture.name}",
             f"Name=tag:Architecture,Values={architecture.aws_architecture}",
             f"Name=tag:BootstrapSchema,Values={BOOTSTRAP_SCHEMA}",
+            f"Name=tag:PoetryLockSha256,Values={lock_sha256}",
+            f"Name=tag:CompleteMatrixFingerprint,Values={matrix_fingerprint}",
+            f"Name=architecture,Values={architecture.aws_architecture}",
+            "Name=root-device-type,Values=ebs",
+            "Name=virtualization-type,Values=hvm",
             "Name=state,Values=available",
         ]
     )
@@ -651,7 +764,27 @@ def latest_cached_ami(region: str, architecture: Architecture) -> dict[str, Any]
     images = payload.get("Images", [])
     if not isinstance(images, list):
         raise PackageBuilderError("EC2 describe-images returned malformed Images")
-    candidates = [image for image in images if AMI_ID_RE.match(str(image.get("ImageId", "")))]
+    candidates: list[dict[str, Any]] = []
+    for image in images:
+        if not isinstance(image, dict) or AMI_ID_RE.match(str(image.get("ImageId", ""))) is None:
+            continue
+        tags = {tag.get("Key"): tag.get("Value") for tag in image.get("Tags", [])}
+        required_tags = {
+            **CACHE_TAGS,
+            "BuildArchitecture": architecture.name,
+            "Architecture": architecture.aws_architecture,
+            "BootstrapSchema": BOOTSTRAP_SCHEMA,
+            "PoetryLockSha256": lock_sha256,
+            "CompleteMatrixFingerprint": matrix_fingerprint,
+        }
+        if (
+            image.get("Architecture") != architecture.aws_architecture
+            or image.get("RootDeviceType") != "ebs"
+            or image.get("VirtualizationType") != "hvm"
+            or any(tags.get(key) != value for key, value in required_tags.items())
+        ):
+            continue
+        candidates.append(image)
     if not candidates:
         return None
     return max(candidates, key=lambda item: str(item.get("CreationDate", "")))
@@ -778,6 +911,19 @@ def describe_builder(region: str, builder: Builder, expected: Architecture) -> d
         raise PackageBuilderError(
             f"instance {builder.instance_id} does not have API termination protection"
         )
+    stop_protection = aws_json(
+        region,
+        "ec2",
+        "describe-instance-attribute",
+        "--instance-id",
+        builder.instance_id,
+        "--attribute",
+        "disableApiStop",
+    )
+    if stop_protection.get("DisableApiStop", {}).get("Value") is not True:
+        raise PackageBuilderError(
+            f"instance {builder.instance_id} does not have API stop protection"
+        )
     shutdown = aws_json(
         region,
         "ec2",
@@ -875,69 +1021,6 @@ def start_builders(
         for future in concurrent.futures.as_completed(futures):
             future.result()
     return validate_builders(region, builders, matrix)
-
-
-def stop_builders(
-    region: str, builders: dict[str, Builder], matrix: Matrix, *, wait: bool = True
-) -> None:
-    errors: list[str] = []
-    for name, builder in builders.items():
-        try:
-            record = describe_builder(region, builder, matrix.architectures[name])
-            state = instance_state(record)
-            if state in {"stopped", "stopping"}:
-                info(f"{name} builder {builder.instance_id} is {state}; no stop needed")
-                continue
-            if state == "pending":
-                # StopInstances rejects an EBS-backed instance that has not
-                # reached running yet. Finish the bounded launch waiter, then
-                # revalidate ownership/lifecycle invariants before stopping.
-                run_command(
-                    [
-                        require_executable("aws"),
-                        "--region",
-                        region,
-                        "ec2",
-                        "wait",
-                        "instance-running",
-                        "--instance-ids",
-                        builder.instance_id,
-                    ]
-                )
-                record = describe_builder(
-                    region, builder, matrix.architectures[name]
-                )
-                state = instance_state(record)
-            if state != "running":
-                raise PackageBuilderError(
-                    f"refusing to stop {builder.instance_id} from unexpected state {state!r}"
-                )
-            aws_no_output(
-                region, "ec2", "stop-instances", "--instance-ids", builder.instance_id
-            )
-        except Exception as error:  # continue so the other architecture is still stopped
-            errors.append(f"{name}: {error}")
-    if wait:
-        for name, builder in builders.items():
-            if any(error.startswith(f"{name}:") for error in errors):
-                continue
-            try:
-                run_command(
-                    [
-                        require_executable("aws"),
-                        "--region",
-                        region,
-                        "ec2",
-                        "wait",
-                        "instance-stopped",
-                        "--instance-ids",
-                        builder.instance_id,
-                    ]
-                )
-            except Exception as error:
-                errors.append(f"{name}: {error}")
-    if errors:
-        raise PackageBuilderError("failed to stop all managed builders: " + "; ".join(errors))
 
 
 def refreshed_builders(
@@ -1064,33 +1147,77 @@ def wait_for_bootstrap(builder: Builder, key_path: Path) -> None:
     info(f"bootstrap invariants passed on {builder.architecture}")
 
 
+def reconcile_remote_bootstrap(
+    builder: Builder, key_path: Path, remote_source: str
+) -> None:
+    """Reconcile schema-2 bootstrap in place without rebooting or stopping."""
+
+    wait_for_ssh(builder, key_path)
+    ssh_run(
+        builder,
+        key_path,
+        "for attempt in $(seq 1 720); do "
+        "if ! pgrep -f '[b]ioseq-package-builder-bootstrap' >/dev/null; then exit 0; fi; "
+        "sleep 5; done; exit 1",
+    )
+    ready = ssh_run(
+        builder,
+        key_path,
+        "set -eu; "
+        "test \"$(cat /opt/bioseq-package-builder/PROVISION_STATUS 2>/dev/null)\" = READY; "
+        f"grep -Fqx 'ami_schema_version={BOOTSTRAP_SCHEMA}' "
+        "/opt/bioseq-package-builder/READY; "
+        "sudo /usr/local/sbin/bioseq-package-builder-verify",
+        capture=True,
+        check=False,
+    )
+    if ready.returncode == 0:
+        info(f"schema-{BOOTSTRAP_SCHEMA} bootstrap already reconciled on {builder.architecture}")
+        return
+    source_bootstrap = (
+        f"{remote_source}/main/infra/package_build_infra/scripts/bootstrap.sh"
+    )
+    command = (
+        "set -Eeuo pipefail; "
+        f"test -f {shlex.quote(source_bootstrap)}; "
+        f"sudo install -o root -g root -m 0755 {shlex.quote(source_bootstrap)} "
+        "/usr/local/sbin/bioseq-package-builder-bootstrap; "
+        "sudo sed -i -E "
+        f"\"s/^BIOSEQ_AMI_SCHEMA_VERSION=.*/BIOSEQ_AMI_SCHEMA_VERSION='{BOOTSTRAP_SCHEMA}'/\" "
+        "/etc/bioseq-package-builder.env; "
+        f"grep -Fqx \"BIOSEQ_AMI_SCHEMA_VERSION='{BOOTSTRAP_SCHEMA}'\" "
+        "/etc/bioseq-package-builder.env; "
+        "sudo /usr/local/sbin/bioseq-package-builder-bootstrap"
+    )
+    ssh_run(builder, key_path, f"bash -lc {shlex.quote(command)}")
+    wait_for_bootstrap(builder, key_path)
+
+
 def create_cached_ami(
     region: str,
     builder: Builder,
     architecture: Architecture,
-    matrix: Matrix,
     key_path: Path,
-    user_data: str,
     revision: str,
+    lock_sha256: str,
+    matrix_fingerprint: str,
+    unit_name: str,
 ) -> dict[str, Any]:
-    # This runs only after the complete native package matrix and its SQL/S3
-    # attestations succeed.  The stopped image therefore preserves the costly
-    # CMake/Cargo/Docker build state instead of caching only bootstrap tools.
-    # Explicit --no-reboot is correct because the instance is already stopped.
-    ssh_run(
-        builder,
-        key_path,
-        "sudo cloud-init clean --logs --machine-id",
-    )
-    stop_builders(region, {architecture.name: builder}, matrix)
-    stopped_record = describe_builder(region, builder, architecture)
-    if instance_state(stopped_record) != "stopped":
+    """Create a no-reboot image from a quiescent, still-running builder."""
+
+    require_successful_remote_unit(builder, key_path, unit_name)
+    record = describe_builder(region, builder, architecture)
+    if instance_state(record) != "running":
         raise PackageBuilderError(
-            f"refusing user-data refresh on non-stopped builder {builder.instance_id}"
+            f"refusing to image {builder.instance_id} from non-running state "
+            f"{instance_state(record)!r}"
         )
-    update_stopped_builder_user_data(region, builder, user_data)
+    ssh_run(builder, key_path, "sync")
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    name = f"bioseq-package-builder-{architecture.name}-schema{BOOTSTRAP_SCHEMA}-{stamp}"
+    name = (
+        f"bioseq-package-builder-{architecture.name}-schema{BOOTSTRAP_SCHEMA}-"
+        f"{matrix_fingerprint[:12]}-{stamp}"
+    )
     payload = aws_json(
         region,
         "ec2",
@@ -1100,7 +1227,7 @@ def create_cached_ami(
         "--name",
         name,
         "--description",
-        f"BioSeq post-build package cache {architecture.name}, revision {revision}",
+        f"BioSeq complete post-build package cache {architecture.name}, revision {revision}",
         "--no-reboot",
     )
     image_id = str(payload.get("ImageId", ""))
@@ -1112,6 +1239,10 @@ def create_cached_ami(
         "Architecture": architecture.aws_architecture,
         "BootstrapSchema": BOOTSTRAP_SCHEMA,
         "SourceRevision": revision,
+        "SourceInstanceId": builder.instance_id,
+        "PoetryLockSha256": lock_sha256,
+        "CompleteMatrixFingerprint": matrix_fingerprint,
+        "WorkerGeneration": WORKER_GENERATION,
         "Name": name,
     }
     aws_no_output(
@@ -1124,72 +1255,34 @@ def create_cached_ami(
         *(f"Key={key},Value={value}" for key, value in tags.items()),
     )
     image = wait_for_cached_ami(region, image_id)
+    image_tags = {
+        tag.get("Key"): tag.get("Value")
+        for tag in image.get("Tags", [])
+        if isinstance(tag, dict)
+    }
+    required_image_tags = {
+        **CACHE_TAGS,
+        "BuildArchitecture": architecture.name,
+        "Architecture": architecture.aws_architecture,
+        "BootstrapSchema": BOOTSTRAP_SCHEMA,
+        "SourceRevision": revision,
+        "SourceInstanceId": builder.instance_id,
+        "PoetryLockSha256": lock_sha256,
+        "CompleteMatrixFingerprint": matrix_fingerprint,
+        "WorkerGeneration": WORKER_GENERATION,
+        "Name": name,
+    }
+    if (
+        image.get("Architecture") != architecture.aws_architecture
+        or image.get("RootDeviceType") != "ebs"
+        or image.get("VirtualizationType") != "hvm"
+        or any(image_tags.get(key) != value for key, value in required_image_tags.items())
+    ):
+        raise PackageBuilderError(
+            f"created AMI {image_id} failed architecture/provenance validation"
+        )
     info(f"created reusable post-build {architecture.name} package-builder AMI {image_id}")
     return image
-
-
-def rendered_builder_user_data(outputs: dict[str, Any], architecture: str) -> str:
-    values = outputs.get("builder_user_data")
-    if not isinstance(values, dict) or set(values) != {"arm64", "x64"}:
-        raise PackageBuilderError("OpenTofu output `builder_user_data` is incomplete")
-    user_data = values.get(architecture)
-    if not isinstance(user_data, str) or not user_data.startswith("#!/usr/bin/env bash\n"):
-        raise PackageBuilderError(
-            f"OpenTofu rendered invalid user data for {architecture}"
-        )
-    size = len(user_data.encode("utf-8"))
-    if size > 16 * 1024:
-        raise PackageBuilderError(
-            f"OpenTofu rendered {size} bytes of {architecture} user data; EC2 allows 16384"
-        )
-    return user_data
-
-
-def update_stopped_builder_user_data(
-    region: str, builder: Builder, user_data: str
-) -> None:
-    """Refresh exact EC2 user data without replacing a persistent builder."""
-
-    encoded = base64.b64encode(user_data.encode("utf-8"))
-    with tempfile.NamedTemporaryFile(
-        prefix=f"bioseq-{builder.architecture}-user-data-",
-        mode="w+b",
-    ) as payload_file:
-        os.fchmod(payload_file.fileno(), 0o600)
-        payload_file.write(encoded)
-        payload_file.flush()
-        aws_no_output(
-            region,
-            "ec2",
-            "modify-instance-attribute",
-            "--instance-id",
-            builder.instance_id,
-            "--attribute",
-            "userData",
-            "--value",
-            f"file://{payload_file.name}",
-        )
-    response = aws_json(
-        region,
-        "ec2",
-        "describe-instance-attribute",
-        "--instance-id",
-        builder.instance_id,
-        "--attribute",
-        "userData",
-    )
-    remote_value = response.get("UserData", {}).get("Value")
-    try:
-        remote_user_data = base64.b64decode(remote_value, validate=True).decode("utf-8")
-    except (TypeError, ValueError, binascii.Error, UnicodeDecodeError) as error:
-        raise PackageBuilderError(
-            f"EC2 returned invalid user data for {builder.instance_id}"
-        ) from error
-    if remote_user_data != user_data:
-        raise PackageBuilderError(
-            f"EC2 did not persist exact user data for {builder.instance_id}"
-        )
-    info(f"refreshed exact stopped-instance user data on {builder.architecture}")
 
 
 def wait_for_cached_ami(
@@ -1231,6 +1324,20 @@ def commit_id() -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise PackageBuilderError("could not resolve a full committed Git HEAD")
     return value
+
+
+def committed_poetry_lock_sha256(revision: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise PackageBuilderError("Poetry lock provenance requires a full Git revision")
+    relative = POETRY_LOCK_FILE.relative_to(REPO_ROOT).as_posix()
+    result = run_command(
+        ["git", "show", f"{revision}:{relative}"],
+        cwd=REPO_ROOT,
+        capture=True,
+    )
+    if not result.stdout:
+        raise PackageBuilderError("committed Poetry lockfile is empty")
+    return hashlib.sha256(result.stdout.encode("utf-8")).hexdigest()
 
 
 def require_committed_paths(paths: Iterable[Path]) -> None:
@@ -1295,6 +1402,101 @@ def sync_committed_source(builder: Builder, key_path: Path, revision: str) -> st
     return remote_source
 
 
+def prepare_remote_poetry_environment(
+    builder: Builder,
+    key_path: Path,
+    remote_source: str,
+    revision: str,
+    lock_sha256: str,
+) -> PoetryEnvironment:
+    """Verify committed provenance and atomically prepare a lock-keyed venv."""
+
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise PackageBuilderError("remote Poetry setup requires a full Git revision")
+    if re.fullmatch(r"[0-9a-f]{64}", lock_sha256) is None:
+        raise PackageBuilderError("remote Poetry setup requires a SHA-256 lock hash")
+    packaging_dir = f"{remote_source}/main/infra/packaging"
+    venv_path = f"{REMOTE_POETRY_VENV_ROOT}/{lock_sha256}"
+    sentinel_name = ".bioseq-poetry-environment.json"
+    source_q = shlex.quote(remote_source)
+    packaging_q = shlex.quote(packaging_dir)
+    revision_q = shlex.quote(revision)
+    lock_q = shlex.quote(lock_sha256)
+    cache_q = shlex.quote(REMOTE_POETRY_VENV_ROOT)
+    venv_q = shlex.quote(venv_path)
+    sentinel_q = shlex.quote(f"{venv_path}/{sentinel_name}")
+    setup = f"""set -Eeuo pipefail
+test \"$(cat {source_q}/.bioseq-source-revision)\" = {revision_q}
+test -f {packaging_q}/pyproject.toml
+test -f {packaging_q}/poetry.lock
+actual_lock=$(sha256sum {packaging_q}/poetry.lock | awk '{{print $1}}')
+test \"$actual_lock\" = {lock_q}
+install -d -m 0755 {cache_q}
+exec 9>{cache_q}/.{lock_sha256}.lock
+flock 9
+valid=0
+if [[ -x {venv_q}/bin/python && -s {sentinel_q} ]]; then
+  if {venv_q}/bin/python -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); raise SystemExit(0 if value.get("lock_sha256") == sys.argv[2] and value.get("python") and value.get("poetry") else 1)' {sentinel_q} {lock_q} && \
+     {venv_q}/bin/python -c 'import liquid'; then
+    valid=1
+  fi
+fi
+if [[ $valid -eq 0 ]]; then
+  if [[ -e {venv_q} ]]; then
+    mv -- {venv_q} {venv_q}.invalid.$(date -u +%Y%m%dT%H%M%SZ).$$
+  fi
+  temporary={venv_q}.tmp.$$
+  trap 'rm -rf -- "$temporary"' EXIT
+  rm -rf -- "$temporary"
+  python3 -m venv "$temporary"
+  VIRTUAL_ENV="$temporary" \
+    PATH="$temporary/bin:$PATH" \
+    POETRY_VIRTUALENVS_CREATE=false \
+    poetry install --directory {packaging_q} --only main --no-root --sync --no-interaction --no-ansi
+  "$temporary/bin/python" -c 'import liquid'
+  python_version=$("$temporary/bin/python" -c 'import platform; print(platform.python_version())')
+  poetry_version=$(poetry --version --no-ansi | sed -n 's/^Poetry (version \\(.*\\))$/\\1/p')
+  test -n "$python_version"
+  test -n "$poetry_version"
+  "$temporary/bin/python" -c 'import json,os,sys; path=sys.argv[1]; value={{"lock_sha256":sys.argv[2],"python":sys.argv[3],"poetry":sys.argv[4]}}; handle=open(path,"w",encoding="utf-8"); json.dump(value,handle,sort_keys=True); handle.write("\\n"); handle.flush(); os.fsync(handle.fileno()); handle.close(); descriptor=os.open(os.path.dirname(path),os.O_RDONLY); os.fsync(descriptor); os.close(descriptor)' "$temporary/{sentinel_name}" {lock_q} "$python_version" "$poetry_version"
+  mv -- "$temporary" {venv_q}
+  trap - EXIT
+  python3 -c 'import os,sys; descriptor=os.open(sys.argv[1],os.O_RDONLY); os.fsync(descriptor); os.close(descriptor)' {cache_q}
+fi
+flock -u 9
+"""
+    ssh_run(builder, key_path, f"bash -lc {shlex.quote(setup)}")
+    sentinel_result = ssh_run(
+        builder,
+        key_path,
+        f"cat {sentinel_q}",
+        capture=True,
+    )
+    try:
+        sentinel = json.loads(sentinel_result.stdout)
+    except json.JSONDecodeError as error:
+        raise PackageBuilderError(
+            f"{builder.architecture} Poetry environment sentinel is invalid JSON"
+        ) from error
+    if not isinstance(sentinel, dict) or sentinel.get("lock_sha256") != lock_sha256:
+        raise PackageBuilderError(
+            f"{builder.architecture} Poetry environment lock provenance mismatch"
+        )
+    python_version = str(sentinel.get("python", ""))
+    poetry_version = str(sentinel.get("poetry", ""))
+    if re.fullmatch(r"3\.12\.\d+", python_version) is None:
+        raise PackageBuilderError(
+            f"{builder.architecture} Poetry environment has unsupported Python "
+            f"{python_version!r}"
+        )
+    if re.fullmatch(r"1\.8\.\d+", poetry_version) is None:
+        raise PackageBuilderError(
+            f"{builder.architecture} Poetry environment has unsupported Poetry "
+            f"{poetry_version!r}"
+        )
+    return PoetryEnvironment(lock_sha256, venv_path, python_version, poetry_version)
+
+
 def initialize_signing_key(
     builder: Builder,
     key_path: Path,
@@ -1316,28 +1518,86 @@ def initialize_signing_key(
     ssh_run(builder, key_path, command)
 
 
-def run_remote_build(
+def remote_unit_status(
+    builder: Builder, key_path: Path, unit_name: str
+) -> dict[str, str]:
+    if re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", unit_name) is None:
+        raise PackageBuilderError(f"invalid remote systemd unit name {unit_name!r}")
+    result = ssh_run(
+        builder,
+        key_path,
+        command_text(
+            [
+                "sudo",
+                "systemctl",
+                "show",
+                unit_name,
+                "--no-pager",
+                "--property=LoadState",
+                "--property=ActiveState",
+                "--property=SubState",
+                "--property=Result",
+                "--property=ExecMainStatus",
+            ]
+        ),
+        capture=True,
+    )
+    status: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            status[key] = value
+    required = {"LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus"}
+    if set(status) != required:
+        raise PackageBuilderError(
+            f"{builder.architecture} systemd unit {unit_name} returned malformed "
+            f"status fields {sorted(status)}"
+        )
+    return status
+
+
+def require_successful_remote_unit(
+    builder: Builder, key_path: Path, unit_name: str
+) -> dict[str, str]:
+    status = remote_unit_status(builder, key_path, unit_name)
+    if (
+        status.get("LoadState") != "loaded"
+        or status.get("ActiveState") != "inactive"
+        or status.get("Result") != "success"
+        or status.get("ExecMainStatus") != "0"
+    ):
+        raise PackageBuilderError(
+            f"{builder.architecture} systemd unit {unit_name} is not a completed "
+            f"success: {status}"
+        )
+    return status
+
+
+def launch_remote_build(
     *,
     builder: Builder,
     key_path: Path,
     remote_source: str,
     revision: str,
+    poetry_environment: PoetryEnvironment,
     selection: Selection,
     region: str,
     bucket: str,
     s3_prefix: str,
     secret_arn: str,
     run_id: str,
-) -> dict[str, Any]:
+) -> RemoteBuildHandle:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"{run_id}-{builder.architecture}.log"
     manifest_path = f"{REMOTE_ROOT}/{run_id}-{builder.architecture}-manifest.json"
     build_root = f"{REMOTE_ROOT}/{run_id}-{builder.architecture}"
-    argv = [
-        "env",
-        "BIOSEQ_OPTTIMIZATION_LEVEL=0",
-        "python3",
-        f"{remote_source}/main/infra/packaging/build_packages.py",
+    packaging_dir = f"{remote_source}/main/infra/packaging"
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id)
+    unit_name = f"bioseq-package-{safe_run_id}-{builder.architecture}.service"
+    remote_log_path = f"{build_root}/build.log"
+    worker_argv = [
+        f"{poetry_environment.venv_path}/bin/python",
+        f"{packaging_dir}/build_packages.py",
         "--architecture",
         builder.architecture,
         "--bucket",
@@ -1358,44 +1618,120 @@ def run_remote_build(
         ",".join(str(value) for value in selection.postgresql_majors),
         "--distros",
         ",".join(selection.distributions),
+        "--source-revision",
+        revision,
+        "--poetry-lock-sha256",
+        poetry_environment.lock_sha256,
         "--fail-fast",
     ]
-    remote_command = (
-        "set -o pipefail; "
+    systemd_argv = [
+        "sudo",
+        "systemd-run",
+        "--unit",
+        unit_name,
+        "--property=Type=exec",
+        "--property=User=ubuntu",
+        "--property=Group=ubuntu",
+        f"--property=WorkingDirectory={packaging_dir}",
+        f"--property=StandardOutput=append:{remote_log_path}",
+        f"--property=StandardError=append:{remote_log_path}",
+        "--",
+        "/usr/bin/env",
+        "AWS_DEFAULT_REGION=" + region,
+        "BIOSEQ_OPTTIMIZATION_LEVEL=0",
+        "BIOSEQ_PACKAGE_PARALLELISM=4",
+        f"BIOSEQ_POETRY_VERSION={poetry_environment.poetry_version}",
+        "BIOSEQ_COMPILER_RT_LAUNCHER=/usr/local/bin/bioseq-compiler-rt-launcher",
+        "CMAKE_C_COMPILER_LAUNCHER=/usr/local/bin/bioseq-compiler-rt-launcher",
+        "CMAKE_CXX_COMPILER_LAUNCHER=/usr/local/bin/bioseq-compiler-rt-launcher",
+        "HOME=/home/ubuntu",
+        "VCPKG_MAX_CONCURRENCY=4",
+        f"PYTHONPATH={packaging_dir}",
+        f"VIRTUAL_ENV={poetry_environment.venv_path}",
+        (
+            f"PATH={poetry_environment.venv_path}/bin:/usr/local/sbin:"
+            "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
+        *worker_argv,
+    ]
+    source_check = (
+        "set -Eeuo pipefail; "
+        f"test \"$(cat {shlex.quote(remote_source + '/.bioseq-source-revision')})\" "
+        f"= {shlex.quote(revision)}; "
+        f"test \"$(sha256sum {shlex.quote(packaging_dir + '/poetry.lock')} | "
+        f"awk '{{print $1}}')\" = {shlex.quote(poetry_environment.lock_sha256)}; "
         f"install -d -m 0755 {shlex.quote(build_root)}; "
-        f"{command_text(argv)} 2>&1 | tee {shlex.quote(build_root + '/build.log')}"
+        f"{command_text(systemd_argv)}"
     )
     info(f"{builder.architecture} build log: {log_path}")
-    with log_path.open("w", encoding="utf-8") as log:
-        completed = ssh_run(
-            builder,
+    ssh_run(builder, key_path, f"bash -lc {shlex.quote(source_check)}")
+    return RemoteBuildHandle(
+        builder=builder,
+        unit_name=unit_name,
+        remote_log_path=remote_log_path,
+        manifest_path=manifest_path,
+        build_root=build_root,
+        local_log_path=log_path,
+    )
+
+
+def wait_remote_build(
+    handle: RemoteBuildHandle,
+    key_path: Path,
+    *,
+    timeout_seconds: int = 24 * 60 * 60,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    terminal_status: dict[str, str] | None = None
+    while time.monotonic() < deadline:
+        status = remote_unit_status(handle.builder, key_path, handle.unit_name)
+        if status["ActiveState"] in {"active", "activating", "reloading", "deactivating"}:
+            time.sleep(15)
+            continue
+        terminal_status = status
+        break
+    if terminal_status is None:
+        raise PackageBuilderError(
+            f"{handle.builder.architecture} systemd unit {handle.unit_name} did not "
+            f"finish within {timeout_seconds // 3600} hours"
+        )
+
+    with handle.local_log_path.open("w", encoding="utf-8") as log:
+        ssh_run(
+            handle.builder,
             key_path,
-            f"bash -lc {shlex.quote(remote_command)}",
+            f"cat {shlex.quote(handle.remote_log_path)}",
             stdout=log,
             check=False,
         )
     manifest_result = ssh_run(
-        builder,
+        handle.builder,
         key_path,
-        f"cat {shlex.quote(manifest_path)}",
+        f"cat {shlex.quote(handle.manifest_path)}",
         capture=True,
         check=False,
     )
     if not manifest_result.stdout.strip():
         raise PackageBuilderError(
-            f"{builder.architecture} produced no manifest; ssh exit "
-            f"{completed.returncode}; see {log_path}"
+            f"{handle.builder.architecture} produced no manifest; unit status "
+            f"{terminal_status}; see {handle.local_log_path}"
         )
     try:
         manifest = json.loads(manifest_result.stdout)
     except json.JSONDecodeError as error:
         raise PackageBuilderError(
-            f"{builder.architecture} manifest is invalid JSON: {error}"
+            f"{handle.builder.architecture} manifest is invalid JSON: {error}"
         ) from error
-    if completed.returncode != 0:
+    if (
+        terminal_status.get("LoadState") != "loaded"
+        or terminal_status.get("ActiveState") != "inactive"
+        or terminal_status.get("Result") != "success"
+        or terminal_status.get("ExecMainStatus") != "0"
+    ):
         raise PackageBuilderError(
-            f"{builder.architecture} package build failed with exit "
-            f"{completed.returncode}; see {log_path}; manifest={manifest.get('status')}"
+            f"{handle.builder.architecture} package build failed with unit status "
+            f"{terminal_status}; see {handle.local_log_path}; "
+            f"manifest={manifest.get('status')}"
         )
     return manifest
 
@@ -1447,13 +1783,26 @@ def validate_manifest(
     bucket: str,
     region: str,
     s3_prefix: str,
+    source_revision: str,
+    poetry_lock_sha256: str,
+    python_environment: PoetryEnvironment,
 ) -> list[dict[str, Any]]:
     if manifest.get("schema_version") != 1 or manifest.get("status") != "success":
         raise PackageBuilderError(
             f"{architecture} manifest did not report schema 1 success"
         )
+    if manifest.get("package_version") != EXPECTED_PACKAGE_VERSION:
+        raise PackageBuilderError(f"{architecture} manifest package version mismatch")
     if manifest.get("architecture") != architecture:
         raise PackageBuilderError(f"{architecture} manifest architecture mismatch")
+    if manifest.get("source_revision") != source_revision:
+        raise PackageBuilderError(f"{architecture} manifest source revision mismatch")
+    if manifest.get("poetry_lock_sha256") != poetry_lock_sha256:
+        raise PackageBuilderError(f"{architecture} manifest Poetry lock mismatch")
+    if manifest.get("python_environment") != python_environment.manifest_value():
+        raise PackageBuilderError(f"{architecture} manifest Python environment mismatch")
+    if manifest.get("errors") != []:
+        raise PackageBuilderError(f"{architecture} successful manifest contains errors")
     requested = manifest.get("requested", {})
     requested_pg = requested.get("postgres", requested.get("postgresql_majors", []))
     if sorted(requested_pg) != sorted(selection.postgresql_majors):
@@ -1469,9 +1818,9 @@ def validate_manifest(
         raise PackageBuilderError(f"{architecture} manifest S3 contract mismatch")
     signing = manifest.get("signing", {})
     signing_fingerprint = str(signing.get("fingerprint", ""))
-    if re.fullmatch(r"[0-9A-F]{40,64}", signing_fingerprint) is None:
+    if signing_fingerprint != EXPECTED_SIGNING_FINGERPRINT:
         raise PackageBuilderError(
-            f"{architecture} manifest signing-key fingerprint is invalid"
+            f"{architecture} manifest signing-key fingerprint is not the pinned key"
         )
 
     cells = manifest.get("cells")
@@ -1594,6 +1943,11 @@ def validate_manifest(
             or upload.get("key") != expected_key
             or upload.get("size") != artifact.get("size")
             or upload.get("sha256") != artifact.get("sha256")
+            or not isinstance(upload.get("etag"), str)
+            or not upload["etag"]
+            or not isinstance(upload.get("version_id"), str)
+            or not upload["version_id"]
+            or upload.get("server_side_encryption") != "AES256"
         ):
             raise PackageBuilderError(
                 f"{architecture} cell {key} upload contract mismatch: {upload}"
@@ -1673,6 +2027,9 @@ def validate_manifest(
                 is None
                 or not isinstance(signature_object.get("etag"), str)
                 or not signature_object["etag"]
+                or not isinstance(signature_object.get("version_id"), str)
+                or not signature_object["version_id"]
+                or signature_object.get("server_side_encryption") != "AES256"
             ):
                 raise PackageBuilderError(
                     f"{architecture} cell {key} has malformed signature object: "
@@ -1695,6 +2052,15 @@ def verify_s3_uploads(region: str, bucket: str, uploads: Iterable[dict[str, Any]
         signature = upload.get("signature_verification", {})
         signature_objects = signature.get("objects", []) if isinstance(signature, dict) else []
         for attestation in [upload, *signature_objects]:
+            version_id = attestation.get("version_id")
+            if not isinstance(version_id, str) or not version_id:
+                raise PackageBuilderError(
+                    f"S3 attestation has no captured VersionId for {attestation.get('key')}"
+                )
+            if attestation.get("server_side_encryption") != "AES256":
+                raise PackageBuilderError(
+                    f"S3 attestation does not require AES256 for {attestation.get('key')}"
+                )
             payload = aws_json(
                 region,
                 "s3api",
@@ -1703,6 +2069,8 @@ def verify_s3_uploads(region: str, bucket: str, uploads: Iterable[dict[str, Any]
                 bucket,
                 "--key",
                 str(attestation["key"]),
+                "--version-id",
+                version_id,
             )
             if payload.get("ContentLength") != attestation.get("size"):
                 raise PackageBuilderError(
@@ -1714,10 +2082,14 @@ def verify_s3_uploads(region: str, bucket: str, uploads: Iterable[dict[str, Any]
                 raise PackageBuilderError(
                     f"S3 object ETag mismatch for s3://{bucket}/{attestation['key']}"
                 )
-            encryption = payload.get("ServerSideEncryption")
-            if encryption not in {"AES256", "aws:kms"}:
+            if payload.get("VersionId") != version_id:
                 raise PackageBuilderError(
-                    "S3 object is not server-side encrypted: "
+                    f"S3 object version mismatch for s3://{bucket}/{attestation['key']}"
+                )
+            encryption = payload.get("ServerSideEncryption")
+            if encryption != "AES256":
+                raise PackageBuilderError(
+                    "S3 object does not use exact AES256 encryption: "
                     f"s3://{bucket}/{attestation['key']}"
                 )
 
@@ -1749,10 +2121,22 @@ def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
     aws_preflight(args.region)
     ssh_cidr = normalize_ssh_cidr(args.ssh_cidr)
     info(f"SSH ingress is fail-closed to {ssh_cidr}")
+    revision = commit_id()
+    lock_sha256 = committed_poetry_lock_sha256(revision)
+    matrix_fingerprint = complete_matrix_fingerprint(matrix, lock_sha256)
     cached: dict[str, str] = {}
     cache_hits: dict[str, bool] = {}
     for name, architecture in matrix.architectures.items():
-        image = None if args.from_scratch else latest_cached_ami(args.region, architecture)
+        image = (
+            None
+            if args.from_scratch
+            else latest_cached_ami(
+                args.region,
+                architecture,
+                lock_sha256,
+                matrix_fingerprint,
+            )
+        )
         cache_hits[name] = image is not None
         if image is not None:
             cached[name] = str(image["ImageId"])
@@ -1769,10 +2153,70 @@ def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
     builders = output_builders(outputs, matrix)
     records = start_builders(args.region, builders, matrix)
     builders = refreshed_builders(records, builders)
-    key_path = ssh_key_path(outputs)
-    for builder in builders.values():
-        wait_for_bootstrap(builder, key_path)
     return outputs, builders, records, cache_hits
+
+
+def is_complete_matrix_selection(selection: Selection, matrix: Matrix) -> bool:
+    return (
+        len(selection.architectures) == len(matrix.architectures)
+        and set(selection.architectures) == set(matrix.architectures)
+        and len(selection.distributions) == len(matrix.distributions)
+        and set(selection.distributions) == set(matrix.distributions)
+        and len(selection.postgresql_majors) == len(matrix.postgresql_majors)
+        and set(selection.postgresql_majors) == set(matrix.postgresql_majors)
+    )
+
+
+def complete_matrix_fingerprint(matrix: Matrix, lock_sha256: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", lock_sha256) is None:
+        raise PackageBuilderError("complete-matrix fingerprint requires a lock SHA-256")
+    payload = {
+        "bootstrap_schema": BOOTSTRAP_SCHEMA,
+        "worker_generation": WORKER_GENERATION,
+        "poetry_lock_sha256": lock_sha256,
+        "architectures": {
+            name: {
+                "aws_architecture": value.aws_architecture,
+                "artifact_architecture": value.artifact_architecture,
+                "instance_type": value.instance_type,
+            }
+            for name, value in sorted(matrix.architectures.items())
+        },
+        "distributions": {
+            name: value.package_format
+            for name, value in sorted(matrix.distributions.items())
+        },
+        "postgresql_majors": sorted(matrix.postgresql_majors),
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _result_poetry_environment(
+    build_result: dict[str, Any], architecture: str, lock_sha256: str
+) -> PoetryEnvironment:
+    environments = build_result.get("python_environments")
+    value = environments.get(architecture) if isinstance(environments, dict) else None
+    if not isinstance(value, dict):
+        raise PackageBuilderError(
+            f"aggregate result has no Python environment for {architecture}"
+        )
+    environment = PoetryEnvironment(
+        lock_sha256=lock_sha256,
+        venv_path=str(value.get("venv_path", "")),
+        python_version=str(value.get("python", "")),
+        poetry_version=str(value.get("poetry", "")),
+    )
+    expected_path = f"{REMOTE_POETRY_VENV_ROOT}/{lock_sha256}"
+    if (
+        environment.venv_path != expected_path
+        or re.fullmatch(r"3\.12\.\d+", environment.python_version) is None
+        or re.fullmatch(r"1\.8\.\d+", environment.poetry_version) is None
+    ):
+        raise PackageBuilderError(
+            f"aggregate result has invalid Python environment for {architecture}"
+        )
+    return environment
 
 
 def create_post_build_amis(
@@ -1782,15 +2226,72 @@ def create_post_build_amis(
     selection: Selection,
     outputs: dict[str, Any],
     builders: dict[str, Builder],
-    revision: str,
+    build_result: dict[str, Any],
+    lock_sha256: str,
 ) -> dict[str, dict[str, Any]]:
-    """Snapshot successful native builders concurrently after package delivery."""
+    """Image both live builders only after the canonical matrix passes again."""
 
+    if not is_complete_matrix_selection(selection, matrix):
+        raise PackageBuilderError(
+            "post-build AMIs require the complete canonical architecture/distro/"
+            "PostgreSQL matrix; partial selections cannot image"
+        )
+    if build_result.get("status") != "success":
+        raise PackageBuilderError("post-build AMIs require a successful aggregate result")
+    revision = str(build_result.get("revision", ""))
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise PackageBuilderError("post-build AMIs require committed source provenance")
+    if build_result.get("poetry_lock_sha256") != lock_sha256:
+        raise PackageBuilderError("post-build AMI Poetry lock provenance mismatch")
+    manifests = build_result.get("manifests")
+    worker_units = build_result.get("worker_units")
+    expected_architectures = set(matrix.architectures)
+    if not isinstance(manifests, dict) or set(manifests) != expected_architectures:
+        raise PackageBuilderError("post-build AMIs require both exact architecture manifests")
+    if not isinstance(worker_units, dict) or set(worker_units) != expected_architectures:
+        raise PackageBuilderError("post-build AMIs require both exact worker units")
+    bucket = outputs.get("package_bucket_name")
+    if not isinstance(bucket, str) or not bucket:
+        raise PackageBuilderError("OpenTofu output `package_bucket_name` is missing")
+    expected_artifact_count = (
+        len(matrix.architectures)
+        * len(matrix.distributions)
+        * len(matrix.postgresql_majors)
+    )
+    if build_result.get("artifact_count") != expected_artifact_count:
+        raise PackageBuilderError(
+            f"post-build AMIs require {expected_artifact_count} exact package uploads"
+        )
+    uploads: list[dict[str, Any]] = []
+    for name in matrix.architectures:
+        environment = _result_poetry_environment(build_result, name, lock_sha256)
+        manifest = manifests[name]
+        if not isinstance(manifest, dict):
+            raise PackageBuilderError(f"{name} aggregate manifest is malformed")
+        uploads.extend(
+            validate_manifest(
+                manifest,
+                architecture=name,
+                selection=selection,
+                matrix=matrix,
+                bucket=bucket,
+                region=args.region,
+                s3_prefix=args.s3_prefix,
+                source_revision=revision,
+                poetry_lock_sha256=lock_sha256,
+                python_environment=environment,
+            )
+        )
+    if len(uploads) != expected_artifact_count:
+        raise PackageBuilderError("post-build AMI upload set is not the canonical matrix")
+    verify_s3_uploads(args.region, bucket, uploads)
+
+    matrix_fingerprint = complete_matrix_fingerprint(matrix, lock_sha256)
     key_path = ssh_key_path(outputs)
     images: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=len(selection.architectures), thread_name_prefix="bioseq-cache"
+        max_workers=len(matrix.architectures), thread_name_prefix="bioseq-cache"
     ) as executor:
         futures = {
             executor.submit(
@@ -1798,12 +2299,13 @@ def create_post_build_amis(
                 args.region,
                 builders[name],
                 matrix.architectures[name],
-                matrix,
                 key_path,
-                rendered_builder_user_data(outputs, name),
                 revision,
+                lock_sha256,
+                matrix_fingerprint,
+                str(worker_units[name]),
             ): name
-            for name in selection.architectures
+            for name in matrix.architectures
         }
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]
@@ -1815,6 +2317,7 @@ def create_post_build_amis(
         raise PackageBuilderError(
             "post-build package cache creation failed: " + "; ".join(errors)
         )
+    build_result["complete_matrix_fingerprint"] = matrix_fingerprint
     return images
 
 
@@ -1831,17 +2334,26 @@ def execute_build(
             HERE / "package_builder.py",
             HERE / "initialize_package_signing_key.py",
             HERE / "package_matrix.json",
-            HERE / "packaging" / "build_packages.py",
+            STACK_DIR / "main.tf",
+            STACK_DIR / "variables.tf",
+            STACK_DIR / "outputs.tf",
+            STACK_DIR / "scripts" / "bootstrap.sh",
+            STACK_DIR / "scripts" / "user_data.sh.tftpl",
+            PACKAGING_DIR / "pyproject.toml",
+            PACKAGING_DIR / "poetry.lock",
+            PACKAGING_DIR / "build_packages.py",
+            PACKAGING_DIR / "bioseq_packaging",
+            PACKAGING_DIR / "rpm",
+            PACKAGING_DIR / "deb",
+            PACKAGING_DIR / "pacman",
+            PACKAGING_DIR / "scripts",
         ]
     )
+    lock_sha256 = committed_poetry_lock_sha256(revision)
     key_path = ssh_key_path(outputs)
     selected_builders = {
         name: builders[name] for name in selection.architectures
     }
-    remote_sources: dict[str, str] = {}
-    for name, builder in selected_builders.items():
-        remote_sources[name] = sync_committed_source(builder, key_path, revision)
-
     bucket = outputs.get("package_bucket_name")
     secret_arn = outputs.get("signing_key_secret_arn")
     output_region = outputs.get("region")
@@ -1853,6 +2365,45 @@ def execute_build(
         raise PackageBuilderError(
             f"OpenTofu region output {output_region!r} does not match {args.region!r}"
         )
+
+    remote_sources: dict[str, str] = {}
+    poetry_environments: dict[str, PoetryEnvironment] = {}
+
+    def prepare_builder(name: str, builder: Builder) -> tuple[str, PoetryEnvironment]:
+        wait_for_ssh(builder, key_path)
+        remote_source = sync_committed_source(builder, key_path, revision)
+        reconcile_remote_bootstrap(builder, key_path, remote_source)
+        environment = prepare_remote_poetry_environment(
+            builder,
+            key_path,
+            remote_source,
+            revision,
+            lock_sha256,
+        )
+        return remote_source, environment
+
+    preparation_errors: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(selected_builders), thread_name_prefix="bioseq-prepare"
+    ) as executor:
+        preparation_futures = {
+            executor.submit(prepare_builder, name, builder): name
+            for name, builder in selected_builders.items()
+        }
+        for future in concurrent.futures.as_completed(preparation_futures):
+            name = preparation_futures[future]
+            try:
+                remote_source, environment = future.result()
+                remote_sources[name] = remote_source
+                poetry_environments[name] = environment
+                info(f"{name} committed source and Poetry environment are ready")
+            except Exception as error:
+                preparation_errors.append(f"{name}: {error}")
+    if preparation_errors:
+        raise PackageBuilderError(
+            "native builder preparation failed: " + "; ".join(preparation_errors)
+        )
+
     signing_host_name = "x64" if "x64" in selected_builders else selection.architectures[0]
     initialize_signing_key(
         selected_builders[signing_host_name],
@@ -1863,18 +2414,20 @@ def execute_build(
     )
 
     run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{revision[:12]}"
+    handles: dict[str, RemoteBuildHandle] = {}
     build_results: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=len(selected_builders), thread_name_prefix="bioseq-package"
+        max_workers=len(selected_builders), thread_name_prefix="bioseq-launch"
     ) as executor:
-        futures = {
+        launch_futures = {
             executor.submit(
-                run_remote_build,
+                launch_remote_build,
                 builder=builder,
                 key_path=key_path,
                 remote_source=remote_sources[name],
                 revision=revision,
+                poetry_environment=poetry_environments[name],
                 selection=selection,
                 region=args.region,
                 bucket=bucket,
@@ -1884,15 +2437,34 @@ def execute_build(
             ): name
             for name, builder in selected_builders.items()
         }
-        for future in concurrent.futures.as_completed(futures):
-            name = futures[future]
+        for future in concurrent.futures.as_completed(launch_futures):
+            name = launch_futures[future]
+            try:
+                handles[name] = future.result()
+                info(f"{name} native systemd worker launched")
+            except Exception as error:
+                errors.append(f"{name} launch: {error}")
+
+    # Every successfully launched unit is allowed to finish even if its sibling
+    # failed to launch. Both units are started before either one is awaited.
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=max(1, len(handles)), thread_name_prefix="bioseq-package"
+    ) as executor:
+        wait_futures = {
+            executor.submit(wait_remote_build, handle, key_path): name
+            for name, handle in handles.items()
+        }
+        for future in concurrent.futures.as_completed(wait_futures):
+            name = wait_futures[future]
             try:
                 build_results[name] = future.result()
                 info(f"{name} native package matrix completed")
             except Exception as error:
-                errors.append(f"{name}: {error}")
+                errors.append(f"{name} build: {error}")
     if errors:
         raise PackageBuilderError("native package builds failed: " + "; ".join(errors))
+    if set(build_results) != set(selected_builders):
+        raise PackageBuilderError("native package builds omitted an architecture")
 
     uploads: list[dict[str, Any]] = []
     for name, manifest in build_results.items():
@@ -1905,6 +2477,9 @@ def execute_build(
                 bucket=bucket,
                 region=args.region,
                 s3_prefix=args.s3_prefix,
+                source_revision=revision,
+                poetry_lock_sha256=lock_sha256,
+                python_environment=poetry_environments[name],
             )
         )
     verify_s3_uploads(args.region, bucket, uploads)
@@ -1913,6 +2488,9 @@ def execute_build(
         "status": "success",
         "run_id": run_id,
         "revision": revision,
+        "source_revision": revision,
+        "poetry_lock_sha256": lock_sha256,
+        "worker_generation": WORKER_GENERATION,
         "completed_at": utc_now(),
         "selection": {
             "architectures": list(selection.architectures),
@@ -1922,9 +2500,18 @@ def execute_build(
         "bucket": bucket,
         "s3_prefix": args.s3_prefix,
         "artifact_count": len(uploads),
+        "python_environments": {
+            name: {
+                **environment.manifest_value(),
+                "venv_path": environment.venv_path,
+            }
+            for name, environment in poetry_environments.items()
+        },
+        "worker_units": {
+            name: handle.unit_name for name, handle in handles.items()
+        },
         "manifests": build_results,
     }
-    write_last_run(result)
     return result
 
 
@@ -1973,96 +2560,50 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def cmd_stop(args: argparse.Namespace) -> None:
-    matrix = load_matrix()
-    builders = recover_managed_builders(matrix)
-    if not builders:
-        info("package-build stack is not applied; no builders to stop")
-        return
-    stop_builders(args.region, builders, matrix)
-    info("all exact managed package builders are stopped")
-
-
 def cmd_up(args: argparse.Namespace) -> None:
     matrix = load_matrix()
-    try:
-        outputs, builders, _, _ = provision_and_start(args, matrix)
-    except BaseException as failure:
-        recovery_error: BaseException | None = None
-        try:
-            partial_builders = recover_managed_builders(matrix)
-            if partial_builders:
-                stop_builders(args.region, partial_builders, matrix)
-                info("stopped exact state-backed builders after incomplete up")
-        except BaseException as error:
-            recovery_error = error
-        if recovery_error is not None:
-            raise PackageBuilderError(
-                f"up failed ({failure}); partial-instance cleanup also failed "
-                f"({recovery_error})"
-            ) from failure
-        raise
+    outputs, builders, _, _ = provision_and_start(args, matrix)
     payload = {
         "region": args.region,
         "bucket": outputs.get("package_bucket_name"),
         "builders": {name: builder.__dict__ for name, builder in builders.items()},
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
-    info("builders remain running for explicit debugging; use `package_builder.py stop`")
+    info("builders remain running under the persistent-build-cache lifecycle")
 
 
 def cmd_run(args: argparse.Namespace) -> None:
     matrix = load_matrix()
     selection = select_matrix(args, matrix)
-    outputs: dict[str, Any] = {}
-    builders: dict[str, Builder] = {}
-    failure: BaseException | None = None
-    result: dict[str, Any] | None = None
-    try:
-        outputs, builders, _, _ = provision_and_start(args, matrix)
-        result = execute_build(args, matrix, selection, outputs, builders)
-        if not args.no_snapshot:
-            images = create_post_build_amis(
-                args=args,
-                matrix=matrix,
-                selection=selection,
-                outputs=outputs,
-                builders=builders,
-                revision=str(result["revision"]),
-            )
-            result["cache_images"] = {
-                name: str(image["ImageId"]) for name, image in images.items()
+    if not args.no_snapshot and not is_complete_matrix_selection(selection, matrix):
+        raise PackageBuilderError(
+            "partial matrix runs must pass --no-snapshot; only the canonical matrix may image"
+        )
+    outputs, builders, _, _ = provision_and_start(args, matrix)
+    result = execute_build(args, matrix, selection, outputs, builders)
+    if not args.no_snapshot:
+        images = create_post_build_amis(
+            args=args,
+            matrix=matrix,
+            selection=selection,
+            outputs=outputs,
+            builders=builders,
+            build_result=result,
+            lock_sha256=str(result["poetry_lock_sha256"]),
+        )
+        result["cache_images"] = {
+            name: {
+                "image_id": str(image["ImageId"]),
+                "source_instance_id": builders[name].instance_id,
             }
-            result["completed_at"] = utc_now()
-            write_last_run(result)
-    except BaseException as error:
-        failure = error
-    finally:
-        if not builders:
-            try:
-                builders = recover_managed_builders(matrix)
-            except BaseException as recovery_error:
-                if failure is None:
-                    failure = recovery_error
-                else:
-                    failure = PackageBuilderError(
-                        f"build failed ({failure}); exact OpenTofu state recovery also "
-                        f"failed ({recovery_error})"
-                    )
-        if builders:
-            try:
-                stop_builders(args.region, builders, matrix)
-                info("all exact managed package builders are stopped")
-            except BaseException as stop_error:
-                if failure is None:
-                    failure = stop_error
-                else:
-                    failure = PackageBuilderError(
-                        f"build failed ({failure}); stopping builders also failed ({stop_error})"
-                    )
-    if failure is not None:
-        raise failure
-    assert result is not None
+            for name, image in images.items()
+        }
+    result["completed_at"] = utc_now()
+    result["builders_left_running"] = {
+        name: builder.instance_id for name, builder in builders.items()
+    }
+    write_last_run(result)
+    info("package builders remain running; no stop or shutdown action was issued")
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
@@ -2089,7 +2630,7 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-snapshot",
         action="store_true",
-        help="do not create missing architecture-specific AMI caches after bootstrap",
+        help="skip post-build AMIs (required for any partial matrix run)",
     )
 
 
@@ -2102,7 +2643,7 @@ def add_matrix_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--distros",
         action="append",
-        help="comma-separated OmniPackage distro IDs (default: complete DOC0390 set)",
+        help="comma-separated native package distro IDs (default: complete DOC0390 set)",
     )
     parser.add_argument(
         "--postgres",
@@ -2116,7 +2657,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser(
-        "run", help="provision/start, build and upload the matrix, then always stop"
+        "run", help="provision/start, build, upload and optionally image; leave running"
     )
     add_common_options(run_parser)
     add_matrix_options(run_parser)
@@ -2127,12 +2668,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_options(up_parser)
     up_parser.set_defaults(handler=cmd_up)
-
-    stop_parser = subparsers.add_parser(
-        "stop", help="stop only the exact validated builders in OpenTofu output"
-    )
-    stop_parser.add_argument("--region", default=DEFAULT_REGION)
-    stop_parser.set_defaults(handler=cmd_stop)
 
     status_parser = subparsers.add_parser(
         "status", help="show validated builder state and the last successful run"
