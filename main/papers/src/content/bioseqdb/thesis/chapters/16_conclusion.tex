@@ -136,9 +136,8 @@ pairing, spliced alignment, rescue, and every command-line preset.
 
 Table~\ref{tab:conclusion-transformation} summarizes the retained decomposition
 and the changes made at each boundary.  Its extension and filtering rows refer
-to Block Aligner~\cite{block_aligner_paper},
-SneakySnake~\cite{sneakysnake_paper}, and
-GateKeeper~\cite{gatekeeper_paper,gatekeeper_gpu_paper}.
+to Block Aligner, SneakySnake, and GateKeeper
+\parencite{block_aligner_paper,sneakysnake_paper,gatekeeper_paper,gatekeeper_gpu_paper}.
 
 \begin{table}[htbp]
   \centering
@@ -423,13 +422,13 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
     Evidence & Measured result & Supported conclusion and qualification \\
     \midrule
     DOC0384 retained process-cold \texttt{just\_index} distribution &
-    5.368746 s versus minimap2 16.487527 s, \(3.071\times\) &
+    5.368746 s versus \mbox{minimap2} 16.487527 s, \(3.071\times\) &
     This is the newest retained result for the fragment-native CPU and SIMD
     path.  It uses six retained samples and the report's lower-middle P50
     convention.  The manually retained distribution and marginal target make
     it configuration-specific rather than universal. \\
     Report 154 same-run receipt &
-    6.080942 s versus minimap2 43.118771 s, \(7.091\times\) &
+    6.080942 s versus \mbox{minimap2} 43.118771 s, \(7.091\times\) &
     All 16 expected mappings were exact in that run.  A known wrapper and
     configuration-scope artifact affects the minimap2 comparator, so the ratio
     is an implementation receipt rather than a portable speedup estimate. \\
