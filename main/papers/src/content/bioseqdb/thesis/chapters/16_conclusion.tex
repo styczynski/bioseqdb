@@ -36,10 +36,10 @@ These are structural layers, not a second contribution list:
   materialization are expressed without requiring every consumer to accept a
   byte string.
   \item The alignment layer implements a minimap2-derived pipeline.  It
-  extracts minimizers, finds seed hits, chains anchors, constructs regions,
-  optionally prefilters mandatory gaps, extends selected regions, reconstructs
-  CIGAR operations, and calculates final classifications and mapping
-  qualities.
+  extracts minimizers and finds seed hits.  It then chains anchors and
+  constructs regions.  It optionally prefilters mandatory gaps before
+  extending selected regions.  Finally, it reconstructs CIGAR operations and
+  calculates final classifications and mapping qualities.
   \item The heterogeneous layer supplies Highway SIMD and Vulkan
   implementations for selected sketching, chaining, filtering, and extension
   work.  Admission, batching, resident state, and result proof are part of the

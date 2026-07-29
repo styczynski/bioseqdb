@@ -902,9 +902,9 @@ The complete BioSeqDB problem is nevertheless different.  Text search
 commonly associates one score with one hit already enumerated by the search
 node.  Sequence search must itself create a variable number of match rows
 after batch processing.  Its target value may be a large lazy sequence
-locator rather than a value that can be held in a conventional tuple datum,
-and each match has a coordinated record of scores, coordinates, strand,
-traceback, and mapping-quality fields.
+locator rather than a value that can be held in a conventional tuple datum.
+Each match has a coordinated record of scores and coordinates.  The record
+also contains strand, traceback, and mapping-quality fields.
 
 Table~\ref{tab:paradedb-bioseq-comparison} distinguishes the adopted
 placeholder technique from BioSeqDB's broader ownership and cardinality
@@ -1034,10 +1034,20 @@ join creates two scan nodes in the same backend, and repeated execution reuses
 the process.  One node could move the global state to read-mode end-of-file
 (EOF) while the
 other still expected write mode.  An early EXPLAIN ANALYZE symptom was an
-outer scan reporting one row where the fixture contained five.  Moving the
-buffer, feature flags, output cursor, parameter state, placeholder nodes, and
-pipeline description into \texttt{BioseqScanRuntime} gave each
-\texttt{CustomScanState} an independent lifecycle.
+outer scan reporting one row where the fixture contained five.  Each
+\texttt{BioseqScanRuntime} owns:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item the buffer,
+  \item feature flags,
+  \item the output cursor,
+  \item parameter state,
+  \item placeholder nodes, and
+  \item the pipeline description.
+\end{itemize}
+Moving these fields into the runtime gave each \texttt{CustomScanState} an
+independent lifecycle.
 
 The cleanup design also changed.  PostgreSQL errors use non-local jumps, so
 ordinary C++ stack unwinding cannot be assumed at every boundary.  The
@@ -1179,9 +1189,9 @@ This design addresses a common observability failure: an execution path
 changes, but EXPLAIN continues to print the old algorithm name.  The
 dispatcher tests require runtime selection and description selection to
 agree.  The custom scan augments that algorithmic description with database
-facts such as owned-qual audit counters, projected columns, index
-read/recompute decisions, storage hydration, submission counts, and fallback
-reasons.
+facts.  These include, for example, owned-qual audit counters, projected
+columns, and index read/recompute decisions.  They also include storage
+hydration, submission counts, and fallback reasons.
 
 \section[PostgreSQL configuration parameters, prepared plans, and resource
 safety]{PostgreSQL configuration parameters, prepared plans, and

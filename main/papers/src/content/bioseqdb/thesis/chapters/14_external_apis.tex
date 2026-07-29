@@ -67,13 +67,14 @@ network traffic.
 
 The schema separates discovery from retrieval. \texttt{taxonomy} normalizes
 taxon identifiers, names, ranks and lineage.  \texttt{catalog} is the
-cross-provider record inventory: it carries the original identifier,
-normalized accession, molecule kind, title, sequence length, assembly
-information and a \texttt{retrievable} flag.  \texttt{record\_genes} and
-\texttt{record\_locations} explode nested provider metadata into relational
-rows with stable per-record indices.  \texttt{sequences} returns a complete
-record as one \texttt{bioseq.seq} datum.  \texttt{sequence\_chunks} returns an
-ordered sequence of datums with \texttt{chunk\_index},
+cross-provider record inventory. It carries the original identifier,
+normalized accession, molecule kind, and title. It also carries sequence
+length, assembly information, and a \texttt{retrievable} flag.
+\texttt{record\_genes} and \texttt{record\_locations} explode nested provider
+metadata into relational rows with stable per-record indices.
+\texttt{sequences} returns a complete record as one \texttt{bioseq.seq}
+datum.  \texttt{sequence\_chunks} returns an ordered sequence of datums with
+\texttt{chunk\_index},
 \texttt{base\_offset} and \texttt{end\_of\_record}.
 
 The distinction between the last two relations is a resource contract, not

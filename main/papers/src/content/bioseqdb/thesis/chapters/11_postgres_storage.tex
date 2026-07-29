@@ -73,13 +73,14 @@ rows. The BioSeqDB port retains this family of mechanisms in the C++ modules
 \path{pg/table/io/writer.cppm}, and
 \path{pg/table/io/reader.cppm}.
 
-This is more specific than saying that both systems are columnar. The physical
-page convention, the reservation counters, the stripe and chunk-group
-vocabulary, the per-column validity/value streams, compression metadata, and
-min/max pruning all have direct counterparts. BioSeqDB then changes the
-surrounding architecture. The code was moved behind a PostgreSQL-specific
-module boundary, renamed from generic ``columnar'' terminology to the BioSeq
-column store. It was coupled to the following BioSeq-specific components:
+This is more specific than saying that both systems are columnar. Direct
+counterparts cover the physical page convention and the reservation counters.
+They also cover the stripe and chunk-group vocabulary, the per-column
+validity/value streams, compression metadata, and min/max pruning. BioSeqDB
+then changes the surrounding architecture. The code was moved behind a
+PostgreSQL-specific module boundary, renamed from generic ``columnar''
+terminology to the BioSeq column store. It was coupled to the following
+BioSeq-specific components:
 \begin{itemize}
   \item sequence locators,
   \item generated catalog rows,
@@ -670,9 +671,20 @@ dynamic shared area (DSA) lock is held while sleeping.
 
 The distinction from sequence shard locking is important. Fragment insertion
 uses a transaction advisory lock for a small internal resource with a 64-bit
-identity. Query coalescing needs generation state, waiters, readers,
-dependencies, manifests, failure codes, and ABA-safe identities. The shared
-registry supplies that information. The PostgreSQL lock table does not.
+identity. Query coalescing needs:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item generation state,
+  \item waiters,
+  \item readers,
+  \item dependencies,
+  \item manifests,
+  \item failure codes, and
+  \item ABA-safe identities.
+\end{itemize}
+The shared registry supplies that information. The PostgreSQL lock table does
+not.
 
 Figure~\ref{fig:query-cache-state} summarizes the request-registry transitions
 and distinguishes them from the physical-manifest states.

@@ -68,11 +68,23 @@ The user decides when to rebuild it, gives the resulting pathname to the next
 process, and accepts that the mapper's command-line parameters are part of the
 file's meaning. Inside PostgreSQL this model is insufficient. A BioSeqDB index
 belongs to a particular physical relation and sequence column. It was produced
-from one source epoch, alphabet, minimizer scheme, value width, \(k\), \(w\),
-occurrence threshold, and backend ABI. A transaction may replace it while
-another transaction is still reading the previous version. A failed build must
-not leave an apparently complete object. A query that requests a strictly
-compatible persisted index must not silently obtain a recomputed approximation.
+from:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item one source epoch,
+  \item alphabet,
+  \item minimizer scheme,
+  \item value width,
+  \item \(k\),
+  \item \(w\),
+  \item occurrence threshold, and
+  \item backend ABI.
+\end{itemize}
+A transaction may replace it while another transaction is still reading the
+previous version. A failed build must not leave an apparently complete object.
+A query that requests a strictly compatible persisted index must not silently
+obtain a recomputed approximation.
 
 For these reasons BioSeqDB treats a persistent sequence index as
 \emph{derived database state with an explicit identity}. The data plane may be
@@ -1157,10 +1169,11 @@ products from being presented as one implicit “best index.”
 
 The bundled minimap2 source provides a useful algorithmic baseline because the
 BioSeqDB seed lookup derives from the same mapping family. Its
-\texttt{mm\_idx\_t} records bucket bits \(b\), window \(w\), \(k\), flags,
-sequence metadata, an optional packed reference \(S\), and an array \(B\) of
-buckets. This comparison uses the published algorithm and the pinned software
-artifact cited for the thesis \autocite{minimap2_paper,minimap2_software}.
+\texttt{mm\_idx\_t} records bucket bits \(b\), window \(w\), \(k\), and flags.
+It also records sequence metadata, an optional packed reference \(S\), and an
+array \(B\) of buckets. This comparison uses the published algorithm and the
+pinned software artifact cited for the thesis
+\autocite{minimap2_paper,minimap2_software}.
 A bucket contains an array of minimizer/position pairs during construction, an
 open-addressing hash table, and a positions array.
 

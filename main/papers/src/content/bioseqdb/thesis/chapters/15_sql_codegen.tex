@@ -421,11 +421,22 @@ The SQL collector maps recognized attributes and compiler facts into
 \texttt{collected\_entity} records.  It first records all declarations, then
 resolves relationships.  This two-phase policy is necessary for references to
 objects declared later and for reciprocal operator relationships.  Each
-entity carries source module, path, range and hash, typed options with
-provenance, documentation, dependency references, routine parameters, result
-form, and physical compatibility bindings.  Result-row records separately
-describe named fields used by set-returning routines and composite
-materializers.
+entity carries:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item source module,
+  \item path,
+  \item range and hash,
+  \item typed options with provenance,
+  \item documentation,
+  \item dependency references,
+  \item routine parameters,
+  \item result form, and
+  \item physical compatibility bindings.
+\end{itemize}
+Result-row records separately describe named fields used by set-returning
+routines and composite materializers.
 
 The type registry is closed.  It distinguishes an SQL type from the physical
 fmgr or executor representation used to carry it.  For example,
@@ -860,10 +871,19 @@ A reproducible update follows these steps:
   artifacts and rerun the ordinary check path.
 \end{enumerate}
 
-Generation signatures include registered source hashes, normalized compiler
-arguments, profile definitions, module and Doxygen inputs, toolchain hashes,
-and the generator executable.  Depfiles make an ordinary incremental build
-sensitive to the same closure.  The repository retains an opt-in
+Generation signatures include:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item registered source hashes,
+  \item normalized compiler arguments,
+  \item profile definitions,
+  \item module and Doxygen inputs,
+  \item toolchain hashes, and
+  \item the generator executable.
+\end{itemize}
+Depfiles make an ordinary incremental build sensitive to the same closure.
+The repository retains an opt-in
 canonical/reversed/shuffled replay target and mutation tests that require
 byte-identical output.  The latest full replay exposed a lexical include-path
 spelling mismatch, so this thesis does not claim that the expensive permutation
@@ -1061,11 +1081,21 @@ Several limitations remain explicit:
 
 Within those limits, the final system changes SQL generation from an opaque
 configure-time side effect into a compiler-audited, dependency-explicit part
-of the extension build.  Its boundaries comprise AST extraction, canonical
-IR, graph validation, fragment rendering, SQL-to-C registration, runtime
-sealing, and calibration.  An ordinary build checks golden bytes, artifact
-seals, and cross-language contracts.  The exhaustive compiler-facts and
-PostgreSQL-\texttt{ERROR} analysis remains a separate opt-in qualification
-target.  The recorded ordinary qualification does not include a fresh
-execution of that heavy proof.  The concluding chapter therefore distinguishes
+of the extension build.  Its boundaries comprise these ordered stages:
+\begin{enumerate}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item AST extraction;
+  \item canonical IR;
+  \item graph validation;
+  \item fragment rendering;
+  \item SQL-to-C registration;
+  \item runtime sealing; and
+  \item calibration.
+\end{enumerate}
+An ordinary build checks golden bytes, artifact seals, and cross-language
+contracts.  The exhaustive compiler-facts and PostgreSQL-\texttt{ERROR}
+analysis remains a separate opt-in qualification target.  The recorded
+ordinary qualification does not include a fresh execution of that heavy
+proof.  The concluding chapter therefore distinguishes
 demonstrated capability from remaining qualification work.

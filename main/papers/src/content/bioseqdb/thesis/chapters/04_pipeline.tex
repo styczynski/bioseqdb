@@ -536,8 +536,18 @@ Without this second pass, a candidate rejected by the exact predicate could
 remain the parent of a survivor or influence the survivor's mapping quality.
 Reclassification makes the final candidate set self-consistent before
 \texttt{MapqStage}.  \texttt{SinkStage} finally converts regions into
-\texttt{MatchResult} values with 64-bit coordinates, score, chain and seed
-metadata, optional divergence, MAPQ, edit distance and CIGAR.
+\texttt{MatchResult} values.  Each value contains:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item 64-bit coordinates,
+  \item score,
+  \item chain and seed metadata,
+  \item optional divergence,
+  \item MAPQ,
+  \item edit distance, and
+  \item CIGAR.
+\end{itemize}
 
 Tables~\ref{tab:pipeline-stage-contracts-a}
 and~\ref{tab:pipeline-stage-contracts-b} make the input, output, and invariant
@@ -743,11 +753,21 @@ relabel the entire statement as an all-GPU mapper.
 The currently admitted dedicated GPU tuple is checked by
 \texttt{complete\_\allowbreak{}all\_\allowbreak{}gpu\_\allowbreak{}tuple\_%
 \allowbreak{}selected} at
-\path{pipe.cppm:8692}.  It requires Vulkan capability, Vulkan seed hits, the
-fused front end, GPU target-index build, Vulkan minimap-int, Vulkan tiled-DP
-chaining and the Block Aligner selector.  Divergence, MAPQ, exact edit
-filtering and the independent prefilter are excluded from this specialized
-shape.  CIGAR is allowed only when Vulkan extension is enabled.
+\path{pipe.cppm:8692}.  It requires:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item Vulkan capability,
+  \item Vulkan seed hits,
+  \item the fused front end,
+  \item GPU target-index build,
+  \item Vulkan minimap-int,
+  \item Vulkan tiled-DP chaining, and
+  \item the Block Aligner selector.
+\end{itemize}
+Divergence, MAPQ, exact edit filtering and the independent prefilter are
+excluded from this specialized shape.  CIGAR is allowed only when Vulkan
+extension is enabled.
 
 The PostgreSQL typed scheduler imposes additional physical constraints.  A
 selected GPU wave must contain at least two jobs.  It must be coordinate-only
@@ -1005,12 +1025,21 @@ required for its named route.
 
 Upstream minimap2~\cite{minimap2_paper} organizes the long-read mapper around
 \texttt{mm\_map\_frag\_core} in
-\path{main/bench/tool_minimap2/minimap2/map.c:588}.  It sketches the query,
-collects seed matches from an \texttt{.mmi} index, invokes DP or RMQ chaining,
-may re-chain under a different occurrence threshold, generates regions,
-performs post-chain processing and extension, then calculates MAPQ.  CPU
-parallelism is primarily expressed as \texttt{kt\_for} over input fragments,
-with a worker-local \texttt{mm\_tbuf\_t} allocation arena.
+\path{main/bench/tool_minimap2/minimap2/map.c:588}.  It performs the following
+stages:
+\begin{enumerate}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item sketch the query;
+  \item collect seed matches from an \texttt{.mmi} index;
+  \item invoke DP or RMQ chaining;
+  \item optionally re-chain under a different occurrence threshold;
+  \item generate regions;
+  \item perform post-chain processing and extension; and
+  \item calculate MAPQ.
+\end{enumerate}
+CPU parallelism is primarily expressed as \texttt{kt\_for} over input
+fragments, with a worker-local \texttt{mm\_tbuf\_t} allocation arena.
 
 BioSeqDB preserves the recognizable backbone, but not every minimap2 mode.
 Its current focus is the database-resident long-read and single-target path.

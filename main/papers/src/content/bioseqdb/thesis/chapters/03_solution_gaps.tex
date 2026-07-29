@@ -370,11 +370,23 @@ The index chapter describes the current generation and loading design.
 \label{sec:resource-gap}
 
 Sequence workloads combine large immutable inputs with variable-size
-derived structures.  Target minimizers, posting lists, query hashes,
-anchors, chain state, alignment matrices, traceback, and output rows can
-be live at overlapping times.  A planner estimate based only on source
-sequence bytes misses this amplification.  A GPU path adds device buffers
-and often a host staging representation.
+derived structures.  The following derived structures can be live at
+overlapping times:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item target minimizers,
+  \item posting lists,
+  \item query hashes,
+  \item anchors,
+  \item chain state,
+  \item alignment matrices,
+  \item traceback, and
+  \item output rows.
+\end{itemize}
+A planner estimate based only on source sequence bytes misses this
+amplification.  A GPU path adds device buffers and often a host staging
+representation.
 
 The naive responses are both undesirable.  Keeping every intermediate
 resident can exceed the backend or device budget.  Spilling immediately

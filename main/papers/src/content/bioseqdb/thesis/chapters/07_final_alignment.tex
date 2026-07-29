@@ -714,10 +714,18 @@ search.
 Runtime algorithm selection is resolved to a template registry before the hot
 loop. For Block Aligner the operation-local proof derives, from immutable
 region geometry, how many left, gap, and right calls should be eligible. The
-kernel then records how many actually ran, which lane width was used, how many
-SIMD vectors and cells were evaluated, whether native X-drop ran, whether the
-block grew or shrank, and whether a diagonal certificate replaced DP. The
-proof also counts forbidden KSW2 and scalar fallback attempts. A selected
+kernel then records:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item how many calls actually ran,
+  \item which lane width was used,
+  \item how many SIMD vectors and cells were evaluated,
+  \item whether native X-drop ran,
+  \item whether the block grew or shrank, and
+  \item whether a diagonal certificate replaced DP.
+\end{itemize}
+The proof also counts forbidden KSW2 and scalar fallback attempts. A selected
 Block route is accepted only if the derived and observed phase counts agree
 and all forbidden counters are zero.
 
@@ -825,9 +833,22 @@ Block Aligner. This omission reflects the true implementation state.
 \subsection{What was built for inter-sequence SIMD}
 
 The batched design first converts each left extension, global gap, and right
-extension into a descriptor. It records subrange coordinates, strand, phase,
-bandwidth, owning region, order within the region, scratch CIGAR, score, edit
-count, and final offsets. Descriptors are stably sorted into length brackets
+extension into a descriptor. It records:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item subrange coordinates,
+  \item strand,
+  \item phase,
+  \item bandwidth,
+  \item owning region,
+  \item order within the region,
+  \item scratch CIGAR,
+  \item score,
+  \item edit count, and
+  \item final offsets.
+\end{itemize}
+Descriptors are stably sorted into length brackets
 \[
        32,\ 64,\ 128,\ 256
 \]

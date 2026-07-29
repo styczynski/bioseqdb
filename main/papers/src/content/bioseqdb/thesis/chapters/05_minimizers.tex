@@ -1584,15 +1584,24 @@ decline is an error.}
 \label{sec:minimizer-limitations}
 
 Several limitations remain visible rather than hidden behind automatic
-fallbacks. PNT1 currently requires $K=15$, $W=10$, proved contiguous or
-admission-materialized \texttt{u32} DNA4, a full-\texttt{u32} hash field,
-representable positions, and a four- or eight-lane Highway shape. ExactSimd's best specialized
-continuation is the common $K=15,W=10$, eight-position shape. Other supported
-shapes use its generic exact-vector route. If ExactSimd admission fails,
-dispatch may select Scalar explicitly before ExactSimd execution begins. Once
-ExactSimd is selected, failure is an error. The Phase C tile owns one serial
-scalar-derived replay state, so positions within a tile are not independently
-parallel. Parallelism comes from many tiles and grid-stride work distribution.
+fallbacks. PNT1 currently requires:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item $K=15$,
+  \item $W=10$,
+  \item proved contiguous or admission-materialized \texttt{u32} DNA4,
+  \item a full-\texttt{u32} hash field,
+  \item representable positions, and
+  \item a four- or eight-lane Highway shape.
+\end{itemize}
+ExactSimd's best specialized continuation is the common $K=15,W=10$,
+eight-position shape. Other supported shapes use its generic exact-vector
+route. If ExactSimd admission fails, dispatch may select Scalar explicitly
+before ExactSimd execution begins. Once ExactSimd is selected, failure is an
+error. The Phase C tile owns one serial scalar-derived replay state, so
+positions within a tile are not independently parallel. Parallelism comes
+from many tiles and grid-stride work distribution.
 Its semantic acceptance remains representation-specific: exact for DNA4 and a
 bounded conservative superset for DNA5 and the tested DNA5/\texttt{u8}-packing route.
 The compact route deliberately runs count and emit to obtain deterministic
@@ -1717,15 +1726,26 @@ pipeline comparison \\
 
 Minimizer extraction began as a familiar rolling-hash loop and became a lesson
 in systems correctness. The observable object is not merely the minimum hash
-of a window. Its identity depends on canonicalization, hash width, tie
-direction, equal-hash $K$-mer identity, palindromes, ambiguity resets, fragment
-ownership, position width, and the final flush. ExactSimd and the compact
-Phase C route expose a chronological event stream. The PNT1 collector instead
-leaves cross-stream append order unspecified, while MPF persistence establishes
-canonical order through sort/unique. The scalar implementation makes the
-minimap-compatible rules explicit. The two-stack work shows how to remove
-rescans without changing them, and its failures show that SIMD width alone
-does not provide a speedup.
+of a window. Its identity depends on:
+\begin{itemize}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
+  \item canonicalization,
+  \item hash width,
+  \item tie direction,
+  \item equal-hash $K$-mer identity,
+  \item palindromes,
+  \item ambiguity resets,
+  \item fragment ownership,
+  \item position width, and
+  \item the final flush.
+\end{itemize}
+ExactSimd and the compact Phase C route expose a chronological event stream.
+The PNT1 collector instead leaves cross-stream append order unspecified, while
+MPF persistence establishes canonical order through sort/unique. The scalar
+implementation makes the minimap-compatible rules explicit. The two-stack
+work shows how to remove rescans without changing them, and its failures show
+that SIMD width alone does not provide a speedup.
 
 The current initializer-level CPU default is Scalar. ExactSimd retains the
 minimap-compatible contract as a production-targeted, explicitly selected
