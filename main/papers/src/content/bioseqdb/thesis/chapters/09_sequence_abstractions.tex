@@ -3,7 +3,7 @@
 
 The algorithms in the preceding chapters are easiest to describe over an array
 of nucleotide codes.  A database execution engine rarely provides such an
-array directly.  In BioSeqDB, the same logical sequence may be backed by an
+array directly.  In \mbox{BioSeqDB}, the same logical sequence may be backed by an
 in-memory bit-packed object, a PostgreSQL value stored out of line through the
 Oversized-Attribute Storage Technique (TOAST)~\cite{postgresql17_toast}, or a
 set of columnar fragments.  It may also denote a provider slice, a
@@ -12,7 +12,7 @@ vector would simplify algorithm interfaces, but it would discard one of the
 main advantages of in-database alignment: reading and decoding only the region
 selected by the query.
 
-BioSeqDB therefore separates four ideas that are easily conflated:
+\mbox{BioSeqDB} therefore separates four ideas that are easily conflated:
 
 \begin{enumerate}
     \item \emph{Logical sequence}: a length and an ordered stream of alphabet
@@ -186,10 +186,10 @@ The range family shares an algorithm-facing vocabulary, but Table
 \ref{tab:compact-range-specializations} shows why ``compact'' must not be read
 as a universal ownership or packing guarantee.
 
-\begin{table}[ht]
+\begin{table}[H]
 \centering
 \caption{Representation-bearing \texttt{compact\_sequence\_range}
-specializations used by BioSeqDB.}
+specializations used by \mbox{BioSeqDB}.}
 \label{tab:compact-range-specializations}
 \begin{tabular}{p{0.25\textwidth}p{0.20\textwidth}p{0.25\textwidth}p{0.20\textwidth}}
 \textbf{Source specialization} & \textbf{Physical form} &
@@ -279,7 +279,7 @@ unused high bits.  For logical position \(i\),
 \]
 The first logical symbol occupies the least significant \(b\) bits of the
 first unit.  Figure~\ref{fig:lsb-packed-layout} reconstructs a 16-bit DNA4
-example.  It is a description of BioSeqDB's source invariant, not a generic
+example.  It is a description of \mbox{BioSeqDB}'s source invariant, not a generic
 property of every biological file format.
 
 \begin{figure}[ht]
@@ -532,7 +532,7 @@ boundaries without implying a change to minimap2's mapping algorithm.
 \mbox{BioSeqDB}.}
 \label{tab:minimap2-sequence-representation}
 \begin{tabular}{p{0.23\textwidth}p{0.31\textwidth}p{0.36\textwidth}}
-\textbf{Aspect} & \textbf{minimap2 reference} & \textbf{BioSeqDB}\\
+\textbf{Aspect} & \textbf{minimap2 reference} & \textbf{\mbox{BioSeqDB}}\\
 \hline
 mapping query & ASCII-compatible \texttt{char*} and integer length &
 alphabet rank stream.  Bytes are produced only for a byte-oriented boundary\\
@@ -549,13 +549,13 @@ compile-time alphabet pack selected once from runtime datum metadata\\
 \end{tabular}
 \end{table}
 
-The BioSeqDB benchmark adapter preserves the reference contract rather than
+The \mbox{BioSeqDB} benchmark adapter preserves the reference contract rather than
 pretending minimap2 accepts the lazy facade.  The helper
 \texttt{compact\_sequence\_to\_acgt} in
 \path{main/bench/tool_minimap2/tool_minimap2.cppm}, lines 58--87, performs
 one \(O(N)\) rank-to-character pass.  The reference wrapper then calls
 \texttt{mm\_idx\_str} and \texttt{mm\_map} with those strings (lines
-218--310).  BioSeqDB-native routes avoid that boundary when their kernels
+218--310).  \mbox{BioSeqDB}-native routes avoid that boundary when their kernels
 support compact or lazy ranks.  This is a systems difference rather than a
 change to minimap2's seed-chain-extend mathematics.
 
@@ -665,7 +665,7 @@ may request those pieces in the opposite logical order.  Requiring a single
 pointer would force all fragments to be joined before a consumer could inspect
 the first rank.
 
-The first BioSeqDB lazy design, still visible in
+The first \mbox{BioSeqDB} lazy design, still visible in
 \path{main/bioseq/backend/storage/lazy_compact_sequence.cppm}, was
 parameterized by a concrete range and scanner.  Its no-fragment specialization
 was close to a pointer-sized wrapper.  The fragmented specialization held a
@@ -1061,7 +1061,7 @@ constraint without forcing eager payload materialization.
 The abstraction cannot make every algorithm streaming.  A scalar rank scan
 needs only sequential symbols.  A block-oriented kernel may need bounded
 random windows.  A GPU upload or a SIMD routine which forms typed unit pointers
-may require one contiguous packed region.  BioSeqDB makes this difference
+may require one contiguous packed region.  \mbox{BioSeqDB} makes this difference
 explicit through \texttt{sequence\_access\_requirement} in
 \texttt{sequence\_scanner.cppm}, lines 217--221, and the planner in
 \texttt{lazy\_compact\_sequence.cppm}, lines 2148--2405.
@@ -1168,7 +1168,7 @@ Allocation and memory permit live through the consumer/fence\\
 
 \subsection{What ``zero copy'' does and does not mean}
 
-BioSeqDB has several useful zero-copy cases, but no universal zero-copy
+\mbox{BioSeqDB} has several useful zero-copy cases, but no universal zero-copy
 promise:
 
 \begin{itemize}
@@ -1223,9 +1223,11 @@ are separate events.
     {declared flat boundary\\text/binary/array/heap/index/client};
   \draw[->,thick] (expr) -- (tree);
   \draw[->,thick] (tree) -- (facade);
-  \draw[->,thick] (facade) -- node[above,sloped] {sequential} (stream);
+  \draw[->,thick] (facade) -- node[midway,below,inner sep=1pt]
+    {sequential} (stream);
   \draw[->,thick] (facade) -- node[right] {resident probe} (borrow);
-  \draw[->,thick] (facade) -- node[above,sloped] {fallback} (pack);
+  \draw[->,thick] (facade) -- node[midway,below,inner sep=1pt]
+    {fallback} (pack);
   \draw[->,thick,dashed] (stream) -- (durable);
   \draw[->,thick,dashed] (borrow) -- (durable);
   \draw[->,thick,dashed] (pack) -- (durable);
@@ -1343,9 +1345,9 @@ than isolated codec speedups.}
 \begin{tabular}{lrrr}
 \textbf{Route} & \textbf{old} & \textbf{mitigated} & \textbf{change}\\
 \hline
-BioSeqDB Block Aligner SIMD & 62.27 s & 7.69 s & \(-88\%\)\\
-BioSeqDB KSW2 scalar & 9.89 s & 9.13 s & \(-8\%\)\\
-BioSeqDB KSW2 SIMD & 62.40 s & 8.49 s & \(-86\%\)\\
+\mbox{BioSeqDB} Block Aligner SIMD & 62.27 s & 7.69 s & \(-88\%\)\\
+\mbox{BioSeqDB} KSW2 scalar & 9.89 s & 9.13 s & \(-8\%\)\\
+\mbox{BioSeqDB} KSW2 SIMD & 62.40 s & 8.49 s & \(-86\%\)\\
 minimap2 reference & 36.99 s & 11.76 s & \(-68\%\)\\
 \end{tabular}
 \end{table}
@@ -1428,7 +1430,7 @@ iteration ratios.  It is not the quotient of the two independently aggregated
 P50 values.  The counters match the intended lifecycle.  Five eager
 intermediate payloads disappear, while one final payload boundary remains
 because the output itself must exist.  This is the operational definition of
-successful lazy composition in BioSeqDB.
+successful lazy composition in \mbox{BioSeqDB}.
 
 This focused artifact was recorded on 23 July 2026 before the masked-gather
 repair, at exact commit
