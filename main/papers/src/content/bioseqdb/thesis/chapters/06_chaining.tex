@@ -67,7 +67,8 @@ final aligner.
     \draw[red!75!black,thick] (\x-1.6,\y-1.6)--(\x+1.6,\y+1.6)
       (\x-1.6,\y+1.6)--(\x+1.6,\y-1.6);
   \draw[<->,orange!80!black,thick] (39,32) -- (39,38);
-  \node[orange!80!black,right] at (39,35) {diagonal deviation};
+  \node[orange!80!black,anchor=south west] at (42,29)
+    {diagonal deviation};
   \node[blue!70!black,below right] at (55,50) {selected collinear chain};
   \node[red!75!black,above] at (18,39) {incompatible hits};
 \end{tikzpicture}
@@ -394,7 +395,7 @@ reduces a range query to the boundary path and fully covered subtrees.
   \draw[->] (right) -- (rl);
   \draw[->] (right) -- (rr);
   \draw[orange!80!black,thick,rounded corners]
-    (.05,.15) rectangle (3.92,2.58);
+    (-.35,.15) rectangle (4.25,2.58);
   \node[orange!80!black,anchor=west] at (.08,-.05)
     {fully covered subtree contributes cached \(m=-96\)};
   \node[blue!65!black,anchor=west] at (4.35,3.75)
@@ -545,7 +546,7 @@ mathematical equivalence result.
 Figure~\ref{fig:simd-batch-control} contrasts the complete ordered replay of the
 exact policy with the explicit cutoff used by the bounded policy.
 
-\begin{figure}[tb]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[font=\scriptsize]
   \node[anchor=east,font=\bfseries] at (1.55,2.55) {exact};
@@ -617,7 +618,7 @@ within-tile prologue from the register-accumulating tail.  It is based on
 Figure~6 in the G3SA paper by Y.~Han and colleagues
 \cite{g3sa_paper}.
 
-\begin{figure}[tb]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[font=\small]
   % left panel
@@ -1020,7 +1021,7 @@ Table~\ref{tab:bounded-endpoint-proof} summarizes the 16-fixture endpoint suite
 from report 192.  The global-best counters show that the rescue fixture
 exercised the path rather than checking a dormant counter.
 
-\begin{table}[tb]
+\begin{table}[H]
 \centering
 \caption{Fixed-corpus endpoint evidence for bounded SIMD in report 192.}
 \label{tab:bounded-endpoint-proof}
