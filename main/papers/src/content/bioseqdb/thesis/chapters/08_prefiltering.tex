@@ -685,7 +685,7 @@ conversion, safe bounds checks, batching, runtime validation, and GPU
 synchronization are included.  The project benchmark records
 \texttt{backend\_batch\_ns} for upload, dispatch, synchronization, and result
 readback.  Later hardware-route comparisons generally use that field.  It also
-records \texttt{wall\_clock\_ns} for the complete benchmark callback; the
+records \texttt{wall\_clock\_ns} for the complete benchmark callback.  The
 report-138 aggregate reproduced below is an explicitly labelled exception that
 uses this complete-callback field.
 Table~\ref{tab:sneaky-intermediate} transcribes complete-callback wall-clock
@@ -705,7 +705,7 @@ The artifact is consequently described as a scoped measurement, not as a
 clean-tree run.  Each standalone cell used a
 deterministic 1,024-pair prefix from the bundled upstream corpus.  In the
 tables below, ERR and SRR retain the upstream run-accession prefixes from the
-\texttt{ERR240727} and \texttt{SRR826471} corpus names; the suffix \(E2\),
+\texttt{ERR240727} and \texttt{SRR826471} corpus names.  The suffix \(E2\),
 \(E8\), \(E40\), or \(E100\) records the source corpus label.  Decisions
 matched the original and false rejects were zero, but Table
 \ref{tab:sneaky-intermediate} shows that the initial BioSeqDB SIMD path was
@@ -783,7 +783,7 @@ production Highway, equal-weight mean over cells & 0.708 &
 production Highway, summed P50 & 0.482 &
 summed wall-clock P50 was 48.2\% of the original\\
 Vulkan, unequal-threshold summed P50 & 0.175 &
-configured-matrix sum only; not a direct speedup\\
+configured-matrix sum only, not a direct speedup\\
 \end{tabular}
 \end{table}
 
@@ -807,7 +807,7 @@ synchronous Vulkan complete-callback wall time was
 \(5.376\)--\(16.811\times\) the original CPU at \(E=2\) and
 \(1.822\)--\(2.483\times\) at \(E=8\).  The apparently small unequal-matrix
 sum is dominated by comparing the Vulkan \(E=16,31\) work budget with the
-original CPU \(E=40,100\) work budget; it cannot attribute a gain to the GPU
+original CPU \(E=40,100\) work budget.  It cannot attribute a gain to the GPU
 team path.  The report metadata records commit
 \texttt{71fe8366555f682571c8}\allowbreak
 \texttt{7005c3469a8e207307ab}, creation time

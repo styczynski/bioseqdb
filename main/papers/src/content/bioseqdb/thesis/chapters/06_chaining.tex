@@ -231,11 +231,11 @@ parameters.
               p_i\gets j,\qquad
               c\gets\max(0,c-1).
             \]
-          \item Otherwise, if \(p_j\ge0\) and predecessor \(p_j\) was marked
-            for \(i\), set \(c\gets c+1\). Break the descending visit when
+          \item Otherwise, if candidate \(j\) is already marked for generation
+            \(i\), set \(c\gets c+1\). Break the descending visit when
             \(c>\text{max-skip}\).
-          \item If the descending visit was not broken, mark \(j\) as visited
-            by generation \(i\).
+          \item If the descending visit was not broken and \(p_j\ge0\), mark
+            predecessor \(p_j\) for generation \(i\).
         \end{itemize}
       \item If the best earlier global endpoint was not scanned and improves
         \(f_i\), adopt it as \(p_i\). This is the global-best rescue.
@@ -252,11 +252,12 @@ search.  Candidates are visited newest-to-oldest, an update requires a strict
 improvement, and therefore the newest predecessor wins a score tie.  The
 \texttt{max\_skip} condition is not simply ``stop after 25 bad anchors.''
 The algorithm stores generation marks and increments the counter when a
-non-improving candidate's own predecessor was already encountered in the
-current generation.  A later improvement decrements that counter.  Reordering
-the scan or reducing a vector batch before replaying these events can therefore
-change both the stopping point and the selected predecessor even when every
-pair score is numerically exact.
+non-improving candidate was previously marked as the predecessor of a newer
+candidate in the same descending scan.  After processing candidate \(j\), it
+marks \(p_j\), not \(j\), for the current generation.  A later improvement
+decrements the counter.  Reordering the scan or reducing a vector batch before
+replaying these events can therefore change both the stopping point and the
+selected predecessor even when every pair score is numerically exact.
 
 The global-best rescue is a second subtlety.  Early stopping can leave an old,
 high-scoring endpoint outside the scanned suffix.  BioSeqDB tracks the best
@@ -1010,7 +1011,7 @@ Report 112 records the exact-SIMD milestone, report 118 the first
 bounded-policy measurement used in qualification work, and report 192 the most
 recent focused snapshot in the audited evidence.  Report 118 was
 \texttt{dirty=true} and its global report contained two rule violations and
-thirteen sanity warnings; it is therefore a scoped kernel snapshot rather than
+thirteen sanity warnings.  It is therefore a scoped kernel snapshot rather than
 a repository-wide sign-off.  The absolute values
 in Table~\ref{tab:chaining-history} should not be compared as a time series
 without controlling the host, build, and worktree.  Within every displayed
@@ -1047,15 +1048,36 @@ Candidate evaluations skipped & \(942{,}275{,}290\)\\
 
 These data support enabling bounded SIMD for an explicitly selected PostgreSQL
 SIMD request on the qualified workload.  They do not establish equivalence
-outside that workload or erase the constructed counterexample.  The available
-GPU comparison measured \(4.414989792\) seconds for a coordinate-only row in
-\path{main/reporting/bioseq_bench_e2e_chain_probe_gpu_coord_only/report_7.json}
-and \(4.928971958\) seconds for a SIMD row in
-\path{main/reporting/bioseq_bench_e2e_chain_probe_simd_current/report_1.json}.
-This June 2026 evidence is a historical whole-region
-comparison with different endpoint offsets, 48 and 3 bases respectively.  It
-is not a current chaining-only speed claim.  The audited evidence contains no
-equivalent GPU comparison for the more recent source.
+outside that workload or erase the constructed counterexample.
+Table~\ref{tab:historical-gpu-simd-context} records the only available
+GPU-versus-SIMD pair separately because it is not a valid speed comparison.
+
+\begin{table}[htbp]
+\centering
+\caption{Historical non-equivalent whole-region observations from June 2026.
+Different endpoint offsets prevent a speed comparison, and no equivalent GPU
+observation exists for the more recent source.}
+\label{tab:historical-gpu-simd-context}
+\footnotesize
+\begin{tabularx}{\linewidth}{p{0.19\linewidth}p{0.31\linewidth}rrX}
+\toprule
+Route & Artifact & Wall time & Offset & Status\\
+\midrule
+GPU coordinate-only &
+\path{bioseq_bench_e2e_chain_probe_gpu_coord_only/report_7.json} &
+\(4.414989792\) s & \(48\) bp &
+Historical whole-region observation\\
+SIMD &
+\path{bioseq_bench_e2e_chain_probe_simd_current/report_1.json} &
+\(4.928971958\) s & \(3\) bp &
+Historical whole-region observation\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The rows use different endpoint offsets and are not current chaining-only
+measurements.  They therefore provide historical context but no route speed
+claim.
 
 \section{The final execution policy}
 \label{sec:chaining-final-policy}

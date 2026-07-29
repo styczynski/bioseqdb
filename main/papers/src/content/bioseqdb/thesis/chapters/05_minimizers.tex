@@ -426,14 +426,15 @@ independent of the data.}
 
 SIMD-Minimizers combines the data-independent minimum with the ntHash rolling
 family \cite{nthash_2016,groot_koerkamp_simd_minimizers_2025}. Associate each
-nucleotide with a pseudo-random 32-bit constant $f(b)$ and choose a rotation
-$r$ (BioSeqDB freezes $r=7$). For a $k$-mer beginning at $i$,
+nucleotide with a pseudo-random 32-bit constant $f(b)$, let
+\(\operatorname{comp}(b)\) denote its Watson--Crick complement, and choose a
+rotation $r$ (BioSeqDB freezes $r=7$). For a $k$-mer beginning at $i$,
 \[
 \begin{aligned}
  H^F_i &= \bigoplus_{j=0}^{k-1}
        \operatorname{rotl}\!\left(f(s_{i+j}),r(k-1-j)\right),\\
  H^R_i &= \bigoplus_{j=0}^{k-1}
-       \operatorname{rotl}\!\left(f(\overline{s_{i+j}}),rj\right).
+       \operatorname{rotl}\!\left(f(\operatorname{comp}(s_{i+j})),rj\right).
 \end{aligned}
 \]
 After the $O(k)$ initialization, the forward state advances in constant time:
@@ -644,7 +645,7 @@ The repository-bundled
 2025-01-27 bioRxiv full-version preprint.  It reports an earlier measurement
 set, including 4.1\,s forward and 6.0\,s canonical CHM13 times, rather than the
 final SEA values 5.19\,s and 6.71\,s shown above.  Both versions define the
-canonical ntHash key with the wrapping forward-plus-reverse sum; the
+canonical ntHash key with the wrapping forward-plus-reverse sum.  The
 measurement revision does not explain or justify an XOR contract.  The final
 publication archives the corresponding SIMD-Minimizers software as
 \path{swh:1:dir:d2fbef4c7750f02bc5cb084d0873078fef7f4e22}.  The workspace
@@ -653,7 +654,7 @@ so observations from that copied tree are bound to the reviewed workspace
 snapshot rather than treated as byte-identical publication source.  Its
 crate-level overview still says XOR, but \texttt{Cargo.lock} pins
 \texttt{seq-hash} 0.1.1, whose executable canonical path uses
-\texttt{wrapping\_add}; the overview sentence is stale.  The same
+\texttt{wrapping\_add}.  The overview sentence is stale.  The same
 comparison-only rule applies to the copied G3SA tree, for which this thesis
 does not claim an independently recorded upstream revision.
 

@@ -963,7 +963,7 @@ Transaction and subtransaction callbacks manage chunk entries written in the
 current transaction: abort evicts them and commit clears their transient
 markers. Relcache and explicit index-identity invalidation remove affected
 entries from both containers. For production reads these coherence properties
-currently apply to the wired chunk cache; assembled-cache behavior remains a
+currently apply to the wired chunk cache. Assembled-cache behavior remains a
 fixture-level proof. This is backend-local acceleration, not a cross-backend
 consistency mechanism: PostgreSQL snapshots and generation descriptors remain
 authoritative.

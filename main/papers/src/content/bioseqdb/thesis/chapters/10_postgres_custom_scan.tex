@@ -165,7 +165,7 @@ The other projection helpers currently log an unexpected direct call and
 return diagnostic sentinels: numeric fields return \(-1\), Boolean fields
 return false, divergence returns \(-1.0\), and CIGAR returns
 \texttt{!UNEXPECTED!}.  Exact planner attribution and placeholder rewriting
-are therefore correctness invariants; those sentinels are not valid fallback
+are therefore correctness invariants.  Those sentinels are not valid fallback
 alignment results.
 
 The design also avoids optional work.  During \texttt{BeginCustomScan}, the
