@@ -454,6 +454,9 @@ while the stored strand records whether $H^R_i<H^F_i$.  This differs
 fundamentally from applying minimap2's integer scramble to
 $\min(F_i,R_i)$. The two schemes cannot share a persisted index.
 
+\clearpage
+\begingroup
+\raggedbottom
 Table~\ref{tab:upstream-pnt-delta} separates the upstream
 SIMD-Minimizers contract from BioSeqDB's PNT1 contract.  Both combine the
 forward and reverse-complement rolling states with the same wrapping sum.
@@ -501,6 +504,8 @@ endpoint. It then suppresses identical adjacent identities. This produces a
 reverse-complement-symmetric endpoint superset without importing the upstream
 window-orientation counter. Table~\ref{tab:upstream-pnt-delta} makes the
 incompatibility explicit.
+\clearpage
+\endgroup
 
 Algorithm~\ref{alg:paper-nthash} summarizes BioSeqDB's tie-aware, eight-stream
 PNT1 collector.
