@@ -10,10 +10,11 @@ die() {
 [[ "${BIOSEQ_OPTTIMIZATION_LEVEL:-}" == "0" ]] \
   || die "every package build must explicitly set BIOSEQ_OPTTIMIZATION_LEVEL=0"
 
-# RPM and DEB helpers export distro optimization, LTO, and linker flags before
-# invoking their build hooks. BioSeq owns this package profile explicitly; do
-# not let those ambient flags leak into CMake or vcpkg compiler detection.
-unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+# RPM and DEB helpers export distro compiler selectors, optimization, LTO, and
+# linker flags before invoking their build hooks. BioSeq owns this package
+# profile explicitly; do not let those ambient values override the pinned
+# Clang toolchain or leak into CMake/vcpkg compiler detection.
+unset CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
 
 readonly action="${1:-}"
 readonly package_metadata_dir="${2:-}"
