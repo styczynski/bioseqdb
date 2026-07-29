@@ -127,11 +127,13 @@ event-history contract rather than a single value per window.
   \foreach \i/\b in {0/A,1/C,2/G,3/T,4/A,5/C,6/C,7/G,8/T,9/A,10/G,11/T}
     \node[draw,minimum width=.52cm,minimum height=.52cm,inner sep=0pt]
       at (\i,2.65) {\ttfamily\b};
-  \foreach \i/\v in {0/8,1/3,2/7,3/3,4/9,5/6,6/2,7/5}
-    \node[hash,font=\scriptsize] at (\i+1.5,1.35) {$h_{\i}=\v$};
   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
       (0,2.17)--(3,2.17)
       node[midway,below=4pt,font=\scriptsize] {$k=4$};
+
+  \begin{scope}[yshift=-0.32cm]
+  \foreach \i/\v in {0/8,1/3,2/7,3/3,4/9,5/6,6/2,7/5}
+    \node[hash,font=\scriptsize] at (\i+1.5,1.35) {$h_{\i}=\v$};
   \node[anchor=east,font=\scriptsize] at (1.0,1.35) {candidate hashes};
 
   \foreach \x/\v in {1.5/8,2.5/3,3.5/7,4.5/3}
@@ -156,6 +158,7 @@ event-history contract rather than a single value per window.
   \node[event] at (5.0,-2.95)
       {event stream, not one row per window:\\
        emit identities according to entering, expiry, and tie chronology};
+  \end{scope}
 \end{tikzpicture}
 \caption{A minimizer is the minimum hashed $k$-mer in each sliding window.
 The example deliberately contains an equal-hash tie.  An implementation must
@@ -768,7 +771,6 @@ measured, not a fabricated common benchmark series.}
 \footnotesize
 \setlength{\tabcolsep}{3pt}
 \renewcommand{\arraystretch}{1.15}
-\textit{Table~\ref{tab:minimizer-history}, continued.}\par\smallskip
 \begin{tabularx}{\linewidth}{
   >{\raggedright\arraybackslash\hspace{0pt}}p{.10\linewidth}
   >{\raggedright\arraybackslash\hspace{0pt}}p{.22\linewidth}
@@ -1196,8 +1198,12 @@ and deterministic count/scan/emit path.
   \node[stage] (count) at (1.5,-0.15) {count admitted\\events per tile};
   \node[stage] (scan) at (5.15,-0.15) {exclusive device\\prefix scan};
   \node[stage] (emit) at (8.8,-0.15) {replay and emit\\owned events};
-  \draw[->,thick] (count) -- node[above]{counts} (scan);
-  \draw[->,thick] (scan) -- node[above]{offsets} (emit);
+  \draw[->,thick] (count) --
+      node[midway,above=2pt,font=\scriptsize,fill=white,
+           inner xsep=2pt,inner ysep=0pt]{counts} (scan);
+  \draw[->,thick] (scan) --
+      node[midway,above=2pt,font=\scriptsize,fill=white,
+           inner xsep=2pt,inner ysep=0pt]{offsets} (emit);
 \end{tikzpicture}
 \caption{Phase C tile replay and ownership for the compact deterministic route.
 Recomputed context overlaps, while half-open trigger intervals establish
