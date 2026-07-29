@@ -111,6 +111,9 @@
 \klasyfikacja{\mbox{Applied computing; Life and medical sciences; Bioinformatics}}
 
 \begin{abstract}
+    % This abstract is too long for the class's vertically centered layout.
+    % Cancel its opening stretch so the complete front matter uses the page.
+    \vfilneg
     Genomic analysis is commonly organized as a sequence of standalone
     programs connected by files.  This model provides specialized tools,
     but it separates sequence data from relational metadata, repeats
@@ -279,7 +282,11 @@
     planning, physical storage, persistent indexes, ingestion, external
     providers, and generated SQL boundary code.
 
+    % Keep all generated chapter briefs on this final Introduction text page;
+    % the class still opens Chapter 1 on the following recto.
     \begin{itemize}
+        \setlength{\itemsep}{0pt}
+        \setlength{\parsep}{0pt}
         \foreachdata{chapters}{\chapteri} {
             \chapterbrief{r:\data{chapters.\chapteri.ref}}{\data{chapters.\chapteri.description}}
         }
