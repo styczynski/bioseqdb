@@ -969,8 +969,9 @@ follows:
     \item If CIGAR is not requested, those coordinate results are returned
     without running the CPU \texttt{AlignStage}.
     \item If CIGAR is requested, the PostgreSQL scheduler packs only each
-    selected query and target window into 32-bit symbol ranks. It classifies
-    exact, simple-gap, bounded, and gridded jobs.
+    selected query and target window into 32-bit symbol ranks and plans
+    traceback capacity from host-visible bounds. Exact, simple, greedy, and
+    dynamic-programming subpath selection occurs inside the shader.
     \item One Vulkan dispatch solves the batch. Results contain score,
     endpoints, a packed-CIGAR slice, and status. The host verifies every
     slice, replays generic \(M\) against the rank buffers to count equal
@@ -1194,7 +1195,8 @@ be treated as one uniform equivalence test.
   \node[align=center] at (2.50,-0.28) {16 queries\\300\,Mbp target};
 \end{tikzpicture}
 \caption{Workload-size pattern in the selected E2E evidence. The dashed line
-is break-even. A 512-job gridded CIGAR batch is tied, while the two
+is break-even. A 512-job many-gap batch with host-planned gridded-capacity
+storage is tied, while the two
 higher-work cases are consistent with amortization of PostgreSQL and Vulkan
 fixed costs. The one-sample cases do not isolate batch size or target size as
 the cause.}
@@ -1208,12 +1210,14 @@ many-gap case sits at break-even, while the two larger-work cases exceed
 scoped cases, but it does not establish that explanation causally because the
 routes and workloads differ and each case has one sample.
 
-The 4096-job CIGAR case executed 4096 gridded jobs in one extension dispatch
-and planned 327,069,696 traceback words. It reduced wall time by 59.892\%.
+For the 4096-job CIGAR case, the host classified and planned all 4096 jobs for
+gridded traceback capacity, reserving 327,069,696 words, and issued one
+extension dispatch. The receipt does not identify the shader-internal subpath
+used by each job. The case reduced wall time by 59.892\%.
 The 512-job version passed its fixture gate and used 40,883,712 traceback
 words, but GPU
 and SIMD wall times were effectively equal. This is a useful negative result:
-gridded storage alone does not make a small batch fast. Runtime initialization,
+host-planned traceback capacity alone does not make a small batch fast. Runtime initialization,
 rank packing, job classification, allocation, submission, and result
 construction remain.
 

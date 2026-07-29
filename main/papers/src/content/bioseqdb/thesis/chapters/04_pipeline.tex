@@ -1176,9 +1176,11 @@ general claim that GPU execution is always faster.
 
 Report~47 predates the strict persisted-index route and measures a recomputed
 resident source configuration.  It is not a \texttt{just\_index} receipt and
-does not establish authentic persisted all-GPU execution.  Its CIGAR case
-proves GPU DP and traceback plus host result construction for that historical
-route.  It does not prove persisted all-GPU CIGAR.
+does not establish authentic persisted all-GPU execution.  Its CIGAR receipt
+establishes one GPU extension dispatch, host-planned gridded-capacity
+allocation, accepted CIGARs, zero fallback or decline, and host result
+construction.  It does not identify each shader-internal alignment subpath or
+prove persisted all-GPU CIGAR.
 
 \begin{table}[!htbp]
   \centering
@@ -1252,8 +1254,9 @@ The 300 Mbp case executed 608 query-segment problems in 38 waves.  It built
 rows while the SIMD result set contained 16.  The correctness gate proves at
 least one in-tolerance hit for each of the 16 expected queries, not exact
 row-set parity.  The many-gap case is stronger evidence for final alignment.
-It reported exactly 4,096 matches, 4,096 fixture-accepted CIGARs and 4,096
-gridded jobs.  One resident index was reused 4,095 times.  The receipt records zero
+It reported exactly 4,096 matches and 4,096 fixture-accepted CIGARs.  The host
+classified and planned all 4,096 jobs for gridded traceback capacity.  One
+resident index was reused 4,095 times.  The receipt records zero
 CPU fallback rows, zero SIMD fallback rows and zero Vulkan declines.
 
 These historical results support the architectural story rather than an

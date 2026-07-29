@@ -45,7 +45,8 @@ These are structural layers, not a second contribution list:
   work.  Admission, batching, resident state, and result proof are part of the
   route rather than hidden behind the same name.
   \item The database layer stores sequence fragments and index generations. It
-  loads input through bounded streaming paths and exposes remote providers. It
+  loads packed sequence bodies through bounded streaming paths, with a current
+  record-sized FASTQ quality-scratch exception, and exposes remote providers. It
   also turns alignment expressions into custom paths, plans, and scans.
   \item The boundary-generation layer derives SQL installation objects,
   fmgr entrypoints, row codecs, GUC bindings, catalog handles, and validation
@@ -77,7 +78,7 @@ from becoming an additional, unsupported contribution claim.
     packed, fragmented, PostgreSQL-backed, and lazily composed data
     through a common range contract. &
     Chapter 9 defines the representation and access contracts. Chapters 11
-    and 13 connect them to PostgreSQL storage and bounded loading. \\
+    and 13 connect them to PostgreSQL storage and bounded packed-sequence loading. \\
     C2 &
     A staged minimap2-derived mapper with scalar, SIMD, and
     Vulkan components, including explicit dispatch and evidence for
@@ -93,7 +94,8 @@ from becoming an additional, unsupported contribution claim.
     enforcement, backend selection, and qualified CPU and GPU evidence. \\
     C4 &
     Persistent sequence and minimizer-index storage derived from
-    a columnar PostgreSQL access method, with bounded loading,
+    a columnar PostgreSQL access method, with bounded packed-sequence loading
+    and record-sized FASTQ quality scratch,
     caching, and selective cold-index reads. &
     Chapters 11--13 establish the physical and lifecycle mechanisms. The
     checked-in MPF default is legacy replace-in-place. Authenticated immutable
@@ -623,9 +625,11 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
     Historical Report 47 recomputed resident Vulkan route &
     Coordinate case \(2.432\times\), many-gap CIGAR case \(2.493\times\) &
     Both are dirty one-sample measurements.  The coordinate case did not
-    establish exact row-set parity.  The CIGAR fixture exercised GPU dynamic
-    programming (DP) and traceback followed by host result construction.  It
-    does not demonstrate persisted all-GPU CIGAR. \\
+    establish exact row-set parity.  The CIGAR receipt establishes one GPU
+    extension dispatch, host-planned gridded-capacity allocation, accepted
+    CIGARs, zero fallback or decline, and host result construction.  It does
+    not identify each shader-internal subpath or demonstrate persisted all-GPU
+    CIGAR. \\
     Current opt-in authenticated persisted-format route (Shape-V5) &
     No accepted performance ratio after a fresh PostgreSQL postmaster start &
     Direct coordinate execution and fail-closed attestation machinery exist.
@@ -658,7 +662,8 @@ uniformly complete. Important failures are made visible by:
 \begin{itemize}
   \item opt-in versioned storage and legacy default MPF relations.
   \item explicit memory admission.
-  \item bounded PostgreSQL loading.
+  \item bounded packed-sequence PostgreSQL loading, with record-sized FASTQ
+  quality scratch stated as a limitation.
   \item transaction-aware persistence.
   \item custom-scan ownership and plan-shape checks.
   \item hardware-only accelerator qualification.
@@ -797,6 +802,8 @@ The most valuable future work follows directly from the limitations:
   \item make the proper-container compact range reject or own rvalues, and
   restore VectorAgg scalar parity for empty, all-NULL, mixed-NULL, and ordinary
   inputs before enabling an affected rewrite.
+  \item stream or discard FASTQ quality bytes incrementally so that the SQL
+  loader's whole-record memory bound matches its packed sequence-body bound.
   \item finish strict-alphabet enforcement and explicit dropped-symbol
   accounting. Wire gzip CRC32 and ISIZE validation, add corrupted-member
   tests, and prove multi-record FASTQ and compressed
