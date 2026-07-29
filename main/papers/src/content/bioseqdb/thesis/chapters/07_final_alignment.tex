@@ -1017,6 +1017,7 @@ the shared scratch slice, walks until it crosses a tile boundary, then
 recomputes the next tile. Packed \(M/I/D\) runs are generated backward and
 reversed at completion.
 
+\begin{samepage}
 Several constrained scripts avoid DP altogether:
 \begin{itemize}
   \item exact equal-length spans
@@ -1025,6 +1026,7 @@ Several constrained scripts avoid DP altogether:
   \item a bounded unit-gap walk
   \item a greedy anchored gap walk
 \end{itemize}
+\end{samepage}
 Exact and recognized unit-gap jobs can reserve zero traceback words. The
 simple-gap search length is capped at 256 symbols, while repeated anchored or unit-gap
 discovery is capped at 64 operations. Greedy terminal-tail branches may append
