@@ -371,6 +371,8 @@ resource "aws_instance" "builder" {
   root_block_device {
     volume_size           = var.root_volume_size_gb
     volume_type           = "gp3"
+    iops                  = 6000
+    throughput            = 500
     encrypted             = true
     delete_on_termination = true
   }
