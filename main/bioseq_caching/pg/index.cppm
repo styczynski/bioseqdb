@@ -6258,7 +6258,9 @@ void register_cache_gucs() {
         nullptr,
         nullptr,
         nullptr);
-    MarkGUCPrefixReserved("bioseq");
+    // The bioseq prefix is shared with the main extension DSO, which can be
+    // loaded after this preloaded cache DSO. Reserving it here would make
+    // PostgreSQL reject the main extension's GUC registrations.
     g_gucs_registered = true;
 }
 

@@ -85,6 +85,18 @@ class OpenTofuOnlyTests(unittest.TestCase):
                 package_builder.tofu_executable()
 
 
+class InstalledRuntimeContractTests(unittest.TestCase):
+    def test_cache_dso_does_not_reserve_the_shared_bioseq_guc_prefix(self) -> None:
+        cache_source = (
+            Path(__file__).resolve().parents[2]
+            / "bioseq_caching"
+            / "pg"
+            / "index.cppm"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"bioseq.query_cache_optimisation_mode"', cache_source)
+        self.assertNotIn('MarkGUCPrefixReserved("bioseq")', cache_source)
+
+
 class LifecycleSafetyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.matrix = package_builder.load_matrix()
