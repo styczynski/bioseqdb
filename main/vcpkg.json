@@ -34,7 +34,8 @@
     "zlib",
     "lfreist-hwinfo",
     "spirv-cross",
-    "vulkan-utility-libraries",
-    "vulkan-sdk-components"
+    "glslang",
+    "vulkan",
+    "vulkan-utility-libraries"
   ]
 }
