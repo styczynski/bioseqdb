@@ -830,7 +830,7 @@ class AmiCacheTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
-    def test_s3_verification_heads_package_and_every_signature_object(self) -> None:
+    def test_s3_verification_heads_package_signature_and_repository_objects(self) -> None:
         upload = {
             "key": "bioseq/packages/x64/postgresql17/debian_13/stable/package.deb",
             "size": 10,
@@ -849,7 +849,19 @@ class ManifestTests(unittest.TestCase):
                         "version_id": "signature-version",
                         "server_side_encryption": "AES256",
                     }
-                ]
+                ],
+                "repository_objects": [
+                    {
+                        "key": (
+                            "bioseq/packages/x64/postgresql17/debian_13/"
+                            "stable/Packages"
+                        ),
+                        "size": 30,
+                        "etag": "repository-etag",
+                        "version_id": "repository-version",
+                        "server_side_encryption": "AES256",
+                    }
+                ],
             },
         }
         responses = [
@@ -865,13 +877,20 @@ class ManifestTests(unittest.TestCase):
                 "VersionId": "signature-version",
                 "ServerSideEncryption": "AES256",
             },
+            {
+                "ContentLength": 30,
+                "ETag": '"repository-etag"',
+                "VersionId": "repository-version",
+                "ServerSideEncryption": "AES256",
+            },
         ]
         with mock.patch.object(package_builder, "aws_json", side_effect=responses) as aws:
             package_builder.verify_s3_uploads("us-east-1", "bucket", [upload])
-        self.assertEqual(aws.call_count, 2)
+        self.assertEqual(aws.call_count, 3)
         self.assertIn("--version-id", aws.call_args_list[0].args)
         self.assertIn("package-version", aws.call_args_list[0].args)
         self.assertIn("signature-version", aws.call_args_list[1].args)
+        self.assertIn("repository-version", aws.call_args_list[2].args)
 
     def test_s3_verification_rejects_kms_when_aes256_is_required(self) -> None:
         upload = {
@@ -1059,6 +1078,30 @@ class ManifestTests(unittest.TestCase):
                                     "sha256": "e" * 64,
                                     "etag": "etag-inrelease",
                                     "version_id": "version-inrelease",
+                                    "server_side_encryption": "AES256",
+                                },
+                            ],
+                            "repository_objects": [
+                                {
+                                    "key": (
+                                        "bioseq/packages/x64/postgresql17/"
+                                        "debian_13/stable/Packages"
+                                    ),
+                                    "size": 5,
+                                    "sha256": "f" * 64,
+                                    "etag": "etag-packages",
+                                    "version_id": "version-packages",
+                                    "server_side_encryption": "AES256",
+                                },
+                                {
+                                    "key": (
+                                        "bioseq/packages/x64/postgresql17/"
+                                        "debian_13/stable/Packages.gz"
+                                    ),
+                                    "size": 6,
+                                    "sha256": "1" * 64,
+                                    "etag": "etag-packages-gz",
+                                    "version_id": "version-packages-gz",
                                     "server_side_encryption": "AES256",
                                 },
                             ],

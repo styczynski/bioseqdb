@@ -27,6 +27,7 @@ from . import RepositoryBuild, RepositoryBuildError
 RPM_REPOSITORY_SCRIPT = r"""set -Eeuo pipefail
 private_key_value="${GPG_PRIVATE_KEY:?GPG_PRIVATE_KEY is required}"
 unset GPG_PRIVATE_KEY
+export -n private_key_value
 
 case "${BIOSEQ_DISTRO_ID}" in
   fedora_44)

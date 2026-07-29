@@ -2041,6 +2041,74 @@ def validate_manifest(
                 f"{architecture} cell {key} signature-object keys mismatch: "
                 f"{sorted(actual_signature_keys)}"
             )
+        repository_objects = signature.get("repository_objects")
+        if not isinstance(repository_objects, list) or not repository_objects:
+            raise PackageBuilderError(
+                f"{architecture} cell {key} repository-object evidence is missing"
+            )
+        actual_repository_keys: list[str] = []
+        for repository_object in repository_objects:
+            if (
+                not isinstance(repository_object, dict)
+                or not isinstance(repository_object.get("key"), str)
+                or not isinstance(repository_object.get("size"), int)
+                or repository_object["size"] <= 0
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(repository_object.get("sha256", ""))
+                )
+                is None
+                or not isinstance(repository_object.get("etag"), str)
+                or not repository_object["etag"]
+                or not isinstance(repository_object.get("version_id"), str)
+                or not repository_object["version_id"]
+                or repository_object.get("server_side_encryption") != "AES256"
+            ):
+                raise PackageBuilderError(
+                    f"{architecture} cell {key} has malformed repository object: "
+                    f"{repository_object}"
+                )
+            actual_repository_keys.append(repository_object["key"])
+        if len(actual_repository_keys) != len(set(actual_repository_keys)):
+            raise PackageBuilderError(
+                f"{architecture} cell {key} repository-object keys contain duplicates"
+            )
+        repository_key_set = set(actual_repository_keys)
+        if repository_key_set & (expected_signature_keys | {expected_key}):
+            raise PackageBuilderError(
+                f"{architecture} cell {key} repository-object evidence overlaps the "
+                "package or required signature set"
+            )
+        expected_repository_keys = {
+            "deb": {
+                f"{signature_base}/stable/Packages",
+                f"{signature_base}/stable/Packages.gz",
+            },
+            "pacman": {
+                f"{signature_base}/{cell['package_name']}.files.tar.gz",
+                f"{signature_base}/{cell['package_name']}.files.tar.gz.sig",
+                f"{signature_base}/{cell['package_name']}.db",
+                f"{signature_base}/{cell['package_name']}.db.sig",
+                f"{signature_base}/{cell['package_name']}.files",
+                f"{signature_base}/{cell['package_name']}.files.sig",
+            },
+        }.get(package_format)
+        if expected_repository_keys is not None:
+            if repository_key_set != expected_repository_keys:
+                raise PackageBuilderError(
+                    f"{architecture} cell {key} repository-object keys mismatch: "
+                    f"{sorted(repository_key_set)}"
+                )
+        else:
+            rpm_repodata_prefix = f"{signature_base}/repodata/"
+            if any(
+                not repository_key.startswith(rpm_repodata_prefix)
+                or repository_key == rpm_repodata_prefix
+                for repository_key in repository_key_set
+            ):
+                raise PackageBuilderError(
+                    f"{architecture} cell {key} RPM repository objects escaped repodata: "
+                    f"{sorted(repository_key_set)}"
+                )
         uploads.append(upload)
     if seen != expected_cells:
         raise PackageBuilderError(f"{architecture} manifest omitted cells")
@@ -2051,7 +2119,10 @@ def verify_s3_uploads(region: str, bucket: str, uploads: Iterable[dict[str, Any]
     for upload in uploads:
         signature = upload.get("signature_verification", {})
         signature_objects = signature.get("objects", []) if isinstance(signature, dict) else []
-        for attestation in [upload, *signature_objects]:
+        repository_objects = (
+            signature.get("repository_objects", []) if isinstance(signature, dict) else []
+        )
+        for attestation in [upload, *signature_objects, *repository_objects]:
             version_id = attestation.get("version_id")
             if not isinstance(version_id, str) or not version_id:
                 raise PackageBuilderError(

@@ -32,6 +32,7 @@ from . import RepositoryBuild, RepositoryBuildError
 PACMAN_REPOSITORY_SCRIPT = r"""set -Eeuo pipefail
 private_key_value="${GPG_PRIVATE_KEY:?GPG_PRIVATE_KEY is required}"
 unset GPG_PRIVATE_KEY
+export -n private_key_value
 
 signing_home="$(mktemp -d /tmp/bioseq-pacman-signing.XXXXXXXX)"
 private_key_file="${signing_home}/private-key.asc"
@@ -406,15 +407,20 @@ def _repository_result(cell: CellContext, package_path: Path) -> RepositoryBuild
                 f"PACMAN alias does not match canonical bytes: {alias.name}"
             )
 
-    verify_with_gpgv(
-        public_key=public_key,
-        signatures=(
-            (package_signature, package_path),
-            (database_signature, database),
-            (files_signature, files),
-        ),
-        expected_fingerprint=PINNED_SIGNING_FINGERPRINT,
-    )
+    try:
+        verify_with_gpgv(
+            public_key=public_key,
+            signatures=(
+                (package_signature, package_path),
+                (database_signature, database),
+                (files_signature, files),
+            ),
+            expected_fingerprint=PINNED_SIGNING_FINGERPRINT,
+        )
+    except SigningError as error:
+        raise RepositoryBuildError(
+            "PACMAN package/database/files signature verification failed"
+        ) from error
     _verify_database_binding(cell, database, package_path)
 
     signature_paths = (

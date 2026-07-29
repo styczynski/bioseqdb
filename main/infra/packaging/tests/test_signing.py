@@ -58,6 +58,7 @@ class SigningMaterialTests(unittest.TestCase):
     def test_isolated_workspace_has_strict_modes_and_is_always_removed(self) -> None:
         key = signing.normalize_signing_key(ARMORED_PRIVATE_KEY)
         workspace_home: Path | None = None
+        environment_before = dict(os.environ)
         try:
             with signing.signing_workspace(key) as workspace:
                 workspace_home = workspace.home
@@ -67,9 +68,10 @@ class SigningMaterialTests(unittest.TestCase):
                 self.assertEqual(
                     stat.S_IMODE(workspace.private_key_path.stat().st_mode), 0o600
                 )
-                self.assertNotIn("GPG_PRIVATE_KEY", os.environ)
+                self.assertEqual(dict(os.environ), environment_before)
             assert workspace_home is not None
             self.assertFalse(workspace_home.exists())
+            self.assertEqual(dict(os.environ), environment_before)
         finally:
             key.destroy()
 
