@@ -10,15 +10,18 @@
 
 Public sequence databases are indispensable, but they do not expose one common
 data model. NCBI separates taxonomy, gene, assembly, and sequence retrieval
-among several services~\cite{ncbi_datasets_v2_api}. UCSC organizes sequence by
-genome assembly and genomic interval~\cite{ucsc_rest_api}. UniProt centers its
-interface on protein accessions and protein-specific
-annotations~\cite{uniprot_programmatic_access}, while the EBI Search API
-provides discovery over several domains~\cite{ebi_search_rest_api}. Their
+among several services~\cite{ncbi_datasets_v2_api}. The University of
+California, Santa Cruz (UCSC), organizes sequence by genome assembly and
+genomic interval~\cite{ucsc_rest_api}. UniProt centers its interface on
+protein accessions and protein-specific
+annotations~\cite{uniprot_programmatic_access}, while the European
+Bioinformatics Institute (EBI) Search API provides discovery over several
+domains~\cite{ebi_search_rest_api}. Their
 identifiers, paging rules, response schemas, rate
 limits and failure modes differ.  A conventional analysis script therefore
 contains a substantial amount of code that is not part of the biological
-question: URL construction, authentication, JSON decoding, retries, FASTA
+question: uniform resource locator (URL) construction, authentication, JSON
+decoding, retries, FASTA
 parsing, identifier translation and conversion into local records.
 
 BioSeqDB treats this integration problem as a database access problem.  It
@@ -32,13 +35,13 @@ selected service, and returns ordinary typed tuples.  Consequently, a remote
 record can participate in a join, projection or residual PostgreSQL filter
 without first being downloaded by an external script.
 
-This design is not equivalent to wrapping an HTTP call in a scalar SQL
-function.  A scalar function has no natural place to represent a stream of
-records, cannot conveniently expose provider capabilities to planning, and
-encourages one remote request per evaluated row.  It also makes cancellation
-and memory bounds accidental properties of the function implementation.  The
-external table instead gives the remote operation a PostgreSQL Custom Scan
-lifecycle~\cite{postgresql17_custom_scan}:
+This design is not equivalent to wrapping a Hypertext Transfer Protocol (HTTP)
+call in a scalar SQL function.  A scalar function has no natural place to
+represent a stream of records, cannot conveniently expose provider capabilities
+to planning, and encourages one remote request per evaluated row.  It also
+makes cancellation and memory bounds accidental properties of the function
+implementation.  The external table instead gives the remote operation a
+PostgreSQL Custom Scan lifecycle~\cite{postgresql17_custom_scan}:
 \texttt{BeginCustomScan}, repeated \texttt{ExecCustomScan},
 \texttt{ReScanCustomScan}, \texttt{EndCustomScan}, and
 \texttt{ExplainCustomScan}.  The scan can defer network access until the first
@@ -271,8 +274,9 @@ not be confused with the runtime provider adapters under
 The current generator is implemented under
 \path{main/codegen/external/}. The annotation parser uses cppast/libclang on a
 normalized shadow source. The OpenAPI parser accepts GET operations, typed
-path/query/header parameters, HTTPS server metadata and a restricted API-key
-security model.  It rejects unsupported or ambiguous constructs at build time.
+path/query/header parameters, Hypertext Transfer Protocol Secure (HTTPS) server
+metadata and a restricted API-key security model.  It rejects unsupported or
+ambiguous constructs at build time.
 The client renderer emits a C++ module named
 \texttt{bioseq.external.api.<provider>}.  The artifact handler writes
 \texttt{client/index.cppm}, a generated integration test, a CMake fragment,
@@ -472,16 +476,18 @@ to an otherwise non-constructible
 \texttt{validated\_transfer\_request}, and libcurl receives them through
 \texttt{CURLOPT\_RESOLVE}~\cite{libcurl_url_api}. Redirects, proxies and
 automatic decoding are disabled.  These controls prevent redirect-based
-allowlist bypasses and pin the approved DNS result for the lifetime of the
-transfer.
+allowlist bypasses and pin the approved Domain Name System (DNS) result for
+the lifetime of the transfer.
 
 The address classifier is an explicit deny list rather than a complete
 global-unicast test.  It rejects the implemented unspecified, loopback,
-private or unique-local, link-local, CGNAT and multicast ranges.  It does not
-yet exhaust every special-use range or comprehensively handle IPv4-mapped IPv6
-addresses.  The implementation therefore narrows the usual DNS-rebinding and
-private-service exposure, but the stronger claim that every non-public endpoint
-is excluded remains a security-hardening objective.
+private or unique-local, link-local, carrier-grade network address translation
+(CGNAT) and multicast ranges.  It does not
+yet exhaust every special-use range or comprehensively handle Internet Protocol
+version 4 (IPv4) addresses mapped into the Internet Protocol version 6 (IPv6)
+address space.  The implementation therefore narrows the usual DNS-rebinding
+and private-service exposure, but the stronger claim that every non-public
+endpoint is excluded remains a security-hardening objective.
 
 \texttt{remote\_byte\_source} in
 \path{main/bioseq/external/transport/remote_source.cppm} satisfies the shared
@@ -491,11 +497,12 @@ buffer whose default capacity is 256~KiB.  If the next callback would exceed
 that capacity, it returns \texttt{CURL\_WRITEFUNC\_PAUSE}. Draining
 \texttt{read\_into} resumes the transfer. Hence BioSeqDB's carry buffer retains
 at most the configured capacity rather than a complete FASTA response. This is
-not a bound on libcurl or TLS internal allocations. The source
+not a bound on libcurl or Transport Layer Security (TLS) internal allocations.
+The source
 also applies a 15-second connect timeout, a low-speed threshold of one byte per
-second over 120 seconds, an optional total timeout, TLS peer and host
-verification, a wire-byte cap, and a one-second maximum poll interval for
-cooperative stop checks.
+second over 120 seconds, and an optional total timeout. It verifies the TLS peer
+and host, enforces a wire-byte cap, and limits each poll interval to one second
+for cooperative stop checks.
 
 The incremental \texttt{fasta\_chunk\_emitter} in
 \path{main/bioseq/external/io/sequence_stream.cppm} discards headers and
@@ -516,11 +523,12 @@ ZIP package~\cite{ncbi_datasets_v2_api}. The current implementation downloads
 the compressed ZIP into a bounded in-memory vector with a 64~MiB default wire
 cap, then makes two libarchive passes.  The first pass reads bounded control
 members.  During the second pass, the extractor materializes one selected
-decoded member in a \texttt{std::string}, checks its MD5, and only then feeds
-the verified bytes to the shared FASTA emitter.  The configured path enforces a
-512~MiB total decoded cap and an expansion-ratio cap, while its per-member
-decoded cap is zero.  A single selected member may therefore approach the total
-cap.  For the whole-record \texttt{sequences} target, an additional
+decoded member in a \texttt{std::string}. It validates the member against its
+Message Digest Algorithm 5 (MD5) checksum before feeding the verified bytes to
+the shared FASTA emitter.  The configured path enforces a 512~MiB total decoded
+cap and an expansion-ratio cap, while its per-member decoded cap is zero.  A
+single selected member may therefore approach the total cap.  For the
+whole-record \texttt{sequences} target, an additional
 record-sized payload may coexist with the buffered member.
 
 This path is verify-before-emit and bounded by explicit caps, but neither the
@@ -640,12 +648,23 @@ checks.  There is no immediate cross-thread socket close.
 
 The provider core defines a structured, bounded
 \texttt{external\_error} in
-\path{main/bioseq/external/provider/errors.cppm}.  Its kinds distinguish invalid
-queries, unsupported capabilities, transport and timeout failures, HTTP
-errors, rate limits, incomplete responses, size limits, parsing, integrity,
-cancellation and provider-contract violations.  Diagnostics, response
-excerpts, operation names and identifiers have compile-time length caps, so an
-untrusted upstream body cannot become an unbounded error object.
+\path{main/bioseq/external/provider/errors.cppm}.  Its kinds distinguish:
+\begin{itemize}
+  \item Invalid queries.
+  \item Unsupported capabilities.
+  \item Transport and timeout failures.
+  \item HTTP errors.
+  \item Rate limits.
+  \item Incomplete responses.
+  \item Size limits.
+  \item Parsing.
+  \item Integrity.
+  \item Cancellation.
+  \item Provider-contract violations.
+\end{itemize}
+Diagnostics, response excerpts, operation names and identifiers have
+compile-time length caps, so an untrusted upstream body cannot become an
+unbounded error object.
 
 \texttt{gcra\_request\_policy} in
 \path{main/bioseq/external/provider/rate_limit.cppm} implements a process-local
@@ -804,43 +823,64 @@ authoritative source file.
 
 \begin{table}[H]
   \centering
-  \small
+  \footnotesize
   \caption{Authoritative current source locations for the external-provider
   chapter.}
   \label{tab:external-reference-map}
-  \begin{tabularx}{\linewidth}{
-      >{\raggedright\arraybackslash}p{.32\linewidth}
-      >{\raggedright\arraybackslash}X}
+  \begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X}
     \toprule
-    File & Principal symbols or responsibility \\
+    Source and principal symbols or responsibility \\
     \midrule
-    \path{main/bioseq/external/provider/concepts.cppm} &
+    \path{main/bioseq/external/provider/concepts.cppm} \\
+    \textit{Responsibility:}
     \texttt{external\_api\_session\_implementation},
     \texttt{external\_api\_provider\_implementation}. \\
-    \path{main/bioseq/external/provider/pack.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/external/provider/pack.cppm} \\
+    \textit{Responsibility:}
     \texttt{external\_api\_provider<...>} and one-time runtime dispatch. \\
-    \path{main/bioseq/external/providers/configured.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/external/providers/configured.cppm} \\
+    \textit{Responsibility:}
     \texttt{configured\_external\_api\_provider}. \\
-    \path{main/bioseq/external/providers/run.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/external/providers/run.cppm} \\
+    \textit{Responsibility:}
     \texttt{run\_external\_query}, the current collecting bridge. \\
-    \path{main/bioseq/external/transport/locator.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/external/transport/locator.cppm} \\
+    \textit{Responsibility:}
     \texttt{validate\_candidate},
     \texttt{validated\_transfer\_request}. \\
-    \path{main/bioseq/external/transport/remote_source.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/external/transport/remote_source.cppm} \\
+    \textit{Responsibility:}
     \texttt{remote\_byte\_source}, bounded libcurl pull source. \\
-    \path{main/bioseq/external/io/sequence_stream.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/external/io/sequence_stream.cppm} \\
+    \textit{Responsibility:}
     \texttt{fasta\_chunk\_emitter},
     \texttt{run\_ncbi\_sequence\_stream}. \\
-    \path{main/bioseq/external/io/datasets_stream.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/external/io/datasets_stream.cppm} \\
+    \textit{Responsibility:}
     \texttt{run\_ncbi\_datasets\_stream}. \\
-    \path{main/bioseq/backend/pg/external/scan.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/backend/pg/external/scan.cppm} \\
+    \textit{Responsibility:}
     \texttt{BioseqExternalScanState}, path/plan/executor callbacks,
     producer and channel drain. \\
-    \path{main/bioseq/backend/pg/external/row_writer.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/backend/pg/external/row_writer.cppm} \\
+    \textit{Responsibility:}
     \texttt{bioseq\_external\_fill\_slot}, \texttt{set\_seq}. \\
-    \path{main/bioseq/backend/pg/external/sql_catalog.cppm} &
+    \addlinespace[0.3em]
+    \path{main/bioseq/backend/pg/external/sql_catalog.cppm} \\
+    \textit{Responsibility:}
     Annotated definitions of the six SQL relations. \\
-    \path{main/codegen/external/client_renderer.cppm} &
+    \addlinespace[0.3em]
+    \path{main/codegen/external/client_renderer.cppm} \\
+    \textit{Responsibility:}
     Generated request/response API and Oat++ client implementation. \\
     \bottomrule
   \end{tabularx}

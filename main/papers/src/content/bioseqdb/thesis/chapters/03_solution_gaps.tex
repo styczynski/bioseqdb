@@ -17,10 +17,16 @@ owns a process, reads files or an index image, maps a stream of queries,
 and writes another file or stream.  PostgreSQL owns relations, snapshots,
 transactions, typed expressions, joins, memory contexts, and a
 cost-based plan.  Calling the first system from the second does not make
-their execution models coincide.  The database still needs to know when
-alignment will run, which rows supply its operands, whether one input row
-can yield several outputs, which intermediate data can be reused, and how
-the work is bounded when a relation contains billions of bases.
+their execution models coincide.  The database still needs to answer five
+questions:
+\begin{enumerate}
+  \item When will alignment run?
+  \item Which rows will supply its operands?
+  \item Can one input row yield several outputs?
+  \item Which intermediate data can be reused?
+  \item How will the work be bounded when a relation contains billions of
+  bases?
+\end{enumerate}
 
 BioSeqDB addresses this mismatch.  Its problem is not merely
 ``alignment from SQL''.  A scalar PostgreSQL function can invoke a mapper
@@ -205,11 +211,11 @@ one expensive function for each projected field would duplicate work.
 Fourth, a hypothetical scalar implementation would be evaluated before a
 later batch could know that a row has no result.
 
-The early custom-scan proof exposed these issues directly.  It could
-replace one function call with one mutable constant and could buffer
-tuples, but it did not yet invoke the real aligner, return the complete
-result, filter a no-match row after batch execution, support the
-vectorized scan path, or emit multiple rows for one input.\footnote{
+The early custom-scan proof exposed these issues directly.  It could replace
+one function call with one mutable constant.  It could also buffer tuples.
+However, it did not yet invoke the real aligner, return the complete result,
+filter a no-match row after batch execution, support the vectorized scan path,
+or emit multiple rows for one input.\footnote{
 \texttt{DOC0054}, ``Wiring the real aligner batch through the Postgres
 custom scan'', 2026-04-21.  This archived design is used as history.
 The current contract is stated in \texttt{DOC0321}.}

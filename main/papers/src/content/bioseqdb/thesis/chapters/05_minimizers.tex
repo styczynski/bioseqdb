@@ -460,7 +460,7 @@ forward and reverse-complement rolling states with the same wrapping sum.
 Their incompatibility instead comes from the compared hash width, endpoint
 selection, orientation evidence, event identity, and persisted scheme.
 
-\begin{table}[ht]
+\begin{table}[H]
 \centering
 \small
 \begin{tabularx}{\linewidth}{p{.24\linewidth}XX}
@@ -517,8 +517,8 @@ PNT1 collector.
   \item For each lock-step packed-symbol vector, perform the following steps.
     \begin{enumerate}
       \item Decode ranks directly from packed sequence words.
-      \item Update forward and reverse ntHash with rotations, XOR, and table
-        lookup.
+      \item Update forward and reverse ntHash with rotations, exclusive OR
+        (XOR), and table lookup.
       \item Set
         \[
           h\gets H^F+H^R\pmod{2^{32}},
@@ -631,7 +631,7 @@ NEON & packed canonical minimizers & 1.82--1.85 & --\\
 NEON & scalar/rescan comparison & 2.82--5.95 & --\\
 \bottomrule
 \end{tabular}
-\caption{Published SIMD-Minimizers measurements from the final SEA 2025
+\caption{Published SIMD-Minimizers measurements from the final 2025
 publication and its benchmark artifacts
 \cite{groot_koerkamp_simd_minimizers_2025}. These are upstream measurements on
 the paper's inputs and machines, not BioSeqDB benchmark results. They establish
@@ -756,7 +756,7 @@ fixture values 0.958/0.972, metric incompletely specified\\
 V2 & complement/mask micro-tuning & instruction cleanup cannot fix divergent
 rescans & $40.8\rightarrow39.6$ ms\\
 V3 & packed storage, smaller state & conversion removal helped but SIMD still
-lost end to end & 170.7 vs 158.4 ms at 903 kbp\\
+lost end-to-end performance & 170.7 vs 158.4 ms at 903 kbp\\
 V4 & first two-stack route & regular control flow is necessary, not sufficient
 & 28.02 vs 14.31 ms sketch\\
 \bottomrule
@@ -806,13 +806,19 @@ integer scramble.  It is not ntHash.
 
 \subsubsection{Bounded state across arbitrary fragments}
 
-For a static $W,K$, \texttt{TwoStackContinuationState} retains at most
-$K-1$ normalized nt4 codes, $W-1$ candidate hashes/raw records/ordinals, less
-than one pending SIMD block, the current minimum, counters, and execution
-proof.  A fragment boundary neither resets nor replays the biological
-algorithm.  The next call completes the pending chronological block and
-continues from the saved carries.  The memory bound depends on $K$, $W$, and
-the vector width, not on sequence length or fragment count.
+For a static $W,K$, \texttt{TwoStackContinuationState} retains:
+\begin{itemize}
+  \item at most $K+W-1$ normalized nt4 codes;
+  \item candidate hashes, raw records, and ordinals;
+  \item less than one pending SIMD block;
+  \item the current minimum;
+  \item counters;
+  \item execution proof.
+\end{itemize}
+A fragment boundary neither resets nor replays the biological algorithm.  The
+next call completes the pending chronological block and continues from the
+saved carries.  The memory bound depends on $K$, $W$, and the vector width,
+not on sequence length or fragment count.
 
 Figure~\ref{fig:exact-continuation} distinguishes an invisible storage-fragment
 boundary from an ambiguity event that resets biological state.
@@ -821,11 +827,12 @@ boundary from an ambiguity event that resets biological state.
 \centering
 \begin{tikzpicture}[x=.66cm,y=.6cm,>=Latex,font=\scriptsize]
   \draw[thick,fill=blue!8] (0,1.2) rectangle (5.4,1.8);
-  \node at (2.7,1.5) {fragment $f_i$: packed symbols};
+  \node at (2.7,1.5) {packed fragment $f_i$};
   \draw[thick,fill=orange!10] (6.8,1.2) rectangle (12.2,1.8);
-  \node at (9.5,1.5) {fragment $f_{i+1}$: packed symbols};
+  \node at (9.5,1.5) {packed fragment $f_{i+1}$};
   \draw[->,very thick] (5.4,1.5)--(6.8,1.5);
-  \node[above,align=center] at (6.1,1.6) {logical boundary\\no reset};
+  \node[above=1pt,align=center] at (6.1,1.8)
+    {logical boundary\\no reset};
 
   \node[draw,rounded corners,fill=gray!8,minimum width=11.5cm,
         minimum height=1.4cm,align=center] (state) at (6.1,-.05) {
@@ -879,15 +886,14 @@ about 250 million vector batches but 9.75 billion scalar-orchestration steps,
 behaving like $O(N(K+W)/2)$ rather than a rolling hash plus amortized minimum.
 
 The retained specialization processes eight candidates at a time.  It takes
-the $K+B-1=22$ needed DNA4 codes, applies SIMD within a register (SWAR) to pack
-them into 44 bits, and extracts eight
-overlapping 30-bit K15 words through fixed shifts, forms forward and reverse
-orientations in two independent \texttt{u32} streams, applies the exact minimap
-scramble, and carries 64-bit position/strand metadata separately.  The
-$W=10$ reduction still scans ten chronological slots, deliberately using
-\texttt{<=} so each lane ends on the rightmost equal minimum.  This is more
-work than the paper's prefix/suffix combine, but it preserves the deployed
-event chronology.
+the $K+B-1=22$ needed DNA4 codes and applies SIMD within a register (SWAR) to
+pack them into 44 bits.  Fixed shifts extract eight overlapping 30-bit K15
+words.  The implementation forms forward and reverse orientations in two
+independent \texttt{u32} streams, applies the exact minimap scramble, and
+carries 64-bit position/strand metadata separately.  The $W=10$ reduction
+still scans ten chronological slots, deliberately using \texttt{<=} so each
+lane ends on the rightmost equal minimum.  This is more work than the paper's
+prefix/suffix combine, but it preserves the deployed event chronology.
 
 Most windows have no equal-hash, different-identity event.  The common path
 therefore performs a stable \texttt{CompressStore} directly.  A hash-only
@@ -1118,8 +1124,13 @@ distinction concrete.
 \caption{G3SA's reference sketch kernel and BioSeqDB Vulkan Phase C
 \cite{g3sa_paper}.}
 \label{tab:g3sa-comparison}
-\small
-\begin{tabularx}{\textwidth}{p{0.22\textwidth}XX}
+\footnotesize
+\begin{tabularx}{0.96\linewidth}{
+  @{}
+  >{\raggedright\arraybackslash\hspace{0pt}}p{0.22\linewidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  @{}}
 \toprule
 Dimension & G3SA reference & BioSeqDB Phase C \\
 \midrule

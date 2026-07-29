@@ -95,7 +95,8 @@ must participate. Three objectives are especially important:
   one sequence matching a prefix of the other.
 \end{description}
 
-These names are useful shorthand, but software APIs often provide finer
+These names are useful shorthand, but software application programming
+interfaces (APIs) often provide finer
 combinations. Ends-free, extension, clipping and local-extension modes differ
 in which matrix borders are free and which endpoint is fixed. The 6 July 2026
 project specification DOC0367, \emph{Reconstruction Reference for 14
@@ -110,7 +111,15 @@ endpoint conventions.
 \begin{table}[H]
   \centering
   \small
-  \begin{tabular}{p{0.16\linewidth}p{0.27\linewidth}p{0.25\linewidth}p{0.22\linewidth}}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabularx}{\linewidth}{
+      @{}
+      >{\raggedright\arraybackslash}p{0.15\linewidth}
+      >{\raggedright\arraybackslash}X
+      >{\raggedright\arraybackslash}X
+      >{\raggedright\arraybackslash}p{0.24\linewidth}
+      @{}
+    }
     \toprule
     Objective & Initialization & Traceback endpoints & Typical interpretation \\
     \midrule
@@ -135,7 +144,7 @@ endpoint conventions.
     Anchor to the best permitted endpoint &
     Extend a known seed until evidence deteriorates \\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
   \caption{Alignment objectives are distinguished by boundary and endpoint
     rules, not by a different biological alphabet or a wholly different
     recurrence.}

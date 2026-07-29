@@ -58,7 +58,8 @@ The small protocol at the bottom of the reader is
 \texttt{read\_into(dst,capacity)} operation returning the byte count, end-of-file
 state, and error state, together with \texttt{last\_error\_message()}.  There is
 no virtual base class.  Each parser instantiation is monomorphic in its source,
-so a POSIX read, an mmap view, zlib, and the custom parallel gzip source share
+so a Portable Operating System Interface (POSIX) read, an mmap view, zlib, and
+the custom parallel gzip source share
 one loop without paying a virtual call at every refill.  This lightweight
 contract also lets generated external-provider clients, discussed in the next
 chapter, supply bytes without importing the sequence-alphabet or PostgreSQL
@@ -91,7 +92,7 @@ decided from the file's magic bytes.
 
   \node[box, below=1.05cm of source] (fsm) {multiline record FSM\\SIMD scan and pack};
   \node[box, left=of fsm] (chunks) {bounded native\\packed chunks};
-  \node[opt, left=of chunks] (queue) {optional FIFO\\capacity 16};
+  \node[opt, left=of chunks] (queue) {optional first-in, first-out (FIFO) queue\\capacity 16};
   \node[pg, left=of queue] (seqwriter) {sequence stream writer\\fragment relations};
 
   \node[pg, below=1.05cm of seqwriter] (parent) {typed header fields +\\parent locator row};
@@ -133,7 +134,12 @@ small decompressed prefix for header-format sampling.
 \begin{table}[htbp]
 \centering
 \small
-\begin{tabular}{p{0.20\textwidth}p{0.31\textwidth}p{0.39\textwidth}}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabular}{
+  >{\raggedright\arraybackslash}p{0.19\textwidth}
+  >{\raggedright\arraybackslash}p{0.31\textwidth}
+  >{\raggedright\arraybackslash}p{0.42\textwidth}}
 \toprule
 \textbf{Layer} & \textbf{Contract} & \textbf{Current implementation anchor}\\
 \midrule
@@ -174,8 +180,9 @@ It accepts \texttt{.fasta}, \texttt{.fa}, and \texttt{.fna} for FASTA and
 \texttt{.fastq}, \texttt{.fq}, and \texttt{.fnq} for FASTQ, case
 insensitively.  The optional suffixes \texttt{.gz}, \texttt{.bgz}, and
 \texttt{.bgzf} are stripped before that lookup.  The resulting gzip-suffix bit
-is informational. The byte source independently checks for the RFC 1952 magic
-bytes \texttt{1f 8b}~\cite{rfc1952_gzip}. Thus a gzip-compressed file with a
+is informational. The byte source independently checks for the magic bytes
+defined by Request for Comments (RFC) 1952,
+\texttt{1f 8b}~\cite{rfc1952_gzip}. Thus a gzip-compressed file with a
 misleading plain suffix can still be decompressed, while a plain file named
 with a gzip suffix does not force decompression.
 
@@ -196,7 +203,8 @@ unavailable or outside its configured size limit, a
 \texttt{posix\_read\_source} retries \texttt{EINTR} and supplies sequential
 access hints where the platform supports them. For every gzip input the SQL
 loader and prefix sampler select zlib's \texttt{gzread}-based source. These
-loader-selected sources strip one leading UTF-8 byte-order mark.
+loader-selected sources strip one leading 8-bit Unicode Transformation Format
+(UTF-8) byte-order mark.
 
 The general batch entry point, \texttt{read\_sequences\_file}, has a broader
 dispatcher. It uses zlib below the 16 MiB compressed threshold and attempts
@@ -245,8 +253,8 @@ dispatch rather than the gzip bucket, so that bar is excluded from the
 evidence. The retained result did not meet the original multi-gigabyte target.
 
 There is also a current integrity limitation. The compression tree contains a
-gzip-footer parser and state fields for the expected CRC32 checksum and the
-modulo-\(2^{32}\) uncompressed-size field, ISIZE. The setting
+gzip-footer parser and state fields for the expected 32-bit cyclic redundancy
+check (CRC32) and the modulo-$2^{32}$ uncompressed-size field (ISIZE). The setting
 \texttt{parallel\_gzip\_verify\_crc} defaults to true. In the inspected
 \texttt{parallel\_gzip\_decoder}, however, the emitted bytes only update a
 running CRC before the state is reset at a member boundary.  No current path
@@ -273,7 +281,8 @@ not need the slab to grow to the record's full size.
 \subsection{FASTA framing}
 
 The FASTA state machine moves through header sigil, header, body, and finished
-states.  It accepts CRLF and LF line endings and arbitrary body line wrapping.
+states.  It accepts carriage-return/line-feed (CRLF) and line-feed (LF) line
+endings and arbitrary body line wrapping.
 For the common DNA4/\texttt{uint64\_t} case, a fused SIMD loop both finds the
 next record sigil and converts body bytes into two-bit words, avoiding a
 separate boundary scan over the same memory.  Other alphabets use the generic
@@ -357,8 +366,14 @@ memory bounds, and scheduling contracts.
 
 \begin{table}[htbp]
 \centering
-\small
-\begin{tabular}{p{0.20\textwidth}p{0.24\textwidth}p{0.25\textwidth}p{0.21\textwidth}}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabular}{
+  >{\raggedright\arraybackslash}p{0.20\textwidth}
+  >{\raggedright\arraybackslash}p{0.23\textwidth}
+  >{\raggedright\arraybackslash}p{0.25\textwidth}
+  >{\raggedright\arraybackslash}p{0.24\textwidth}}
 \toprule
 \textbf{Path} & \textbf{Payload} & \textbf{Bound} & \textbf{Ordering/concurrency}\\
 \midrule
@@ -466,10 +481,24 @@ the whole header as one text column preserves bytes but loses the opportunity
 to index accession, organism, taxonomy identifier, dates, ranges, and numeric
 fields using PostgreSQL types.
 
-BioSeqDB's parser recognizes AUTO and PLAIN modes plus UniProtKB, UniRef,
-UniParc, UniMes, SPD, NCBI generic, NCBI GI, NCBI Protein Data Bank (PDB),
-RefSeq, GenBank,
-GISAID, and IMGT dialects.  Format definitions are constexpr tables in
+BioSeqDB's parser recognizes the following 14 modes and dialects:
+\begin{itemize}
+  \item AUTO.
+  \item PLAIN.
+  \item UniProtKB.
+  \item UniRef.
+  \item UniParc.
+  \item UniMes.
+  \item SPD.
+  \item National Center for Biotechnology Information (NCBI) generic.
+  \item NCBI GenInfo Identifier (GI).
+  \item NCBI Protein Data Bank (PDB).
+  \item RefSeq.
+  \item GenBank.
+  \item GISAID.
+  \item IMGT.
+\end{itemize}
+Format definitions are constexpr tables in
 \path{io/identifier_parser/identifier_formats.cppm}.  They state
 whether a field is positional, free description text, a
 \texttt{KEY=VALUE} tag, or a bracket tag, together with canonical names and

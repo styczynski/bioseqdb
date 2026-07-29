@@ -2,13 +2,45 @@
 \label{sec:postgres-custom-scan-scope}
 
 The alignment pipeline described in the preceding chapters is not naturally a
-scalar SQL function.  Its useful unit of work is a batch of sequence pairs,
-its result for one pair is a set of matches, and its implementation may need
-to retain an index, submit work to a scheduler, or materialize a query
-collection before it emits the first row.  PostgreSQL, in contrast, initially
+scalar SQL function.  Its useful unit of work is a batch of sequence pairs.
+One pair may produce a set of matches.  Before it emits the first row, the
+implementation may need to retain an index, submit work to a scheduler, or
+materialize a query collection.  PostgreSQL, in contrast, initially
 sees an SQL predicate as an expression that is evaluated once for each input
 tuple and returns one value.  The main purpose of the BioSeqDB PostgreSQL API
 is to reconcile these two execution models.
+
+Table~\ref{tab:customscan-production-source-map} anchors this chapter to the
+current implementation.  The final entry is test evidence only, not production
+code.
+
+\begin{table}[htbp]
+  \centering
+  \footnotesize
+  \caption{Current production source map for the PostgreSQL alignment API.}
+  \label{tab:customscan-production-source-map}
+  \begin{tabularx}{\linewidth}{
+      @{}>{\raggedright\arraybackslash}X@{}}
+    \toprule
+    \textbf{Source and responsibility}\\
+    \midrule
+    \path{main/bioseq/backend/pg/mod.cppm}\newline
+    Public \texttt{mmsearch} entry points, PostgreSQL support functions, and
+    match-field projections.\\[0.35em]
+    \path{main/bioseq/backend/pg/table/custom_scan.cppm}\newline
+    Planner and executor implementation, including
+    \texttt{BioseqBatchJoin} and \texttt{BioseqSliceProject}.\\[0.35em]
+    \path{main/bioseq/backend/pg/table/bioseq_scan_state.cppm}\newline
+    Per-scan state, lifetime checks, and execution statistics.\\[0.35em]
+    \path{main/bioseq/backend/pipeline/pipe.cppm}\newline
+    Pipeline composition, compile-time stage dispatch, and structured
+    descriptions used by PostgreSQL \texttt{EXPLAIN}.\\[0.35em]
+    \path{main/bioseq/integration_tests/test_mmsearch.cpp}\newline
+    \emph{Test evidence only.} Integration assertions for ownership,
+    cardinality, projections, joins, rescans, and configuration changes.\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 The public expression is deliberately ordinary:
 
@@ -60,7 +92,10 @@ semantic requirement rather than only a batching optimization.
 \caption{The semantic mismatch between an ordinary predicate and a
 BioSeqDB-owned search.}
 \label{tab:scalar-vs-owned-mmsearch}
-\begin{tabular}{@{}p{0.22\textwidth}p{0.34\textwidth}p{0.34\textwidth}@{}}
+\begin{tabularx}{\linewidth}{
+    @{}>{\raggedright\arraybackslash}p{0.20\linewidth}
+    >{\raggedright\arraybackslash}X
+    >{\raggedright\arraybackslash}X@{}}
 \toprule
 Property & Ordinary scalar expression & BioSeqDB executor owner \\
 \midrule
@@ -85,7 +120,7 @@ Planner safety &
 A surviving function copy may execute anywhere it is placed &
 The exact restriction has one owner and no executable descendant copy \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 The final design therefore treats SQL syntax, planner ownership, and executor

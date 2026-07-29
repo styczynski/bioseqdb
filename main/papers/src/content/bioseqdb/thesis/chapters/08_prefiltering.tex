@@ -34,6 +34,31 @@ bound.  In current source this ordering is explicit in
 primary/secondary classification and mapping-quality calculation
 (\texttt{pipe.cppm}, lines 8618--8628 in the inspected revision).
 
+\paragraph{Implementation source map.}
+The implementation discussed in this chapter is distributed across the
+following current-source anchors:
+
+\begin{itemize}
+    \item Pipeline integration.\\
+    \path{main/bioseq/backend/pipeline/pipe.cppm}
+    \item Shared prefilter job and result ABI.\\
+    \path{main/bioseq/backend/sequences/prefilters/prefilter_types.cppm}
+    \item SneakySnake CPU implementation.\\
+    \path{main/bioseq/backend/sequences/prefilters/sneaky_snake.cppm}
+    \item GateKeeper CPU implementation.\\
+    \path{main/bioseq/backend/sequences/prefilters/gatekeeper.cppm}
+    \item Exact edit-threshold guard.\\
+    \path{main/bioseq/backend/sequences/edit_distance_threshold.cppm}
+    \item Phase C Vulkan ABI.\\
+    \path{main/bioseq/backend/gpu/vulkan/phase_c_abi.cppm}
+    \item Vulkan runtime and command replay.\\
+    \path{main/bioseq/backend/gpu/vulkan/runtime.cppm}
+    \item Vulkan shader selection.\\
+    \path{main/bioseq/backend/gpu/vulkan/shader_variants.cppm}
+    \item PostgreSQL planner and custom-scan integration.\\
+    \path{main/bioseq/backend/pg/table/custom_scan.cppm}
+\end{itemize}
+
 Let \(D(Q,T)\) denote the global unit-cost Levenshtein distance of a mandatory
 query gap \(Q\) and target gap \(T\).  A conventional safe filter computes a
 quantity \(L(Q,T)\) with
@@ -89,8 +114,10 @@ Four additional rules close common correctness gaps:
     approximation is not extrapolated to geometry for which the port has no
     proof.
     \item A dispatched job whose slice or shader geometry fails per-job
-    validation returns
-    \texttt{unsupported\_\allowbreak conservative} and is accepted.
+    validation returns the following status and is accepted:
+    \begin{itemize}
+        \item \path{unsupported_conservative}
+    \end{itemize}
     ``Fail open'' here means preserving the candidate.
     \item Overflow while materializing a flat slice or aggregate offset omits
     that job conservatively before dispatch.  No job or result record is
@@ -105,11 +132,16 @@ The common ABI makes these cases visible.  \texttt{PrefilterJob} is a 20-byte
 record containing two offsets, two lengths, and \(E\).
 \texttt{PrefilterResult} is a 16-byte record containing a lower bound, status,
 accept bit, and diagnostic word
-(\texttt{prefilter\_types.cppm}, lines 16--61).  The three statuses are
-\texttt{success}, \texttt{conservative\_unequal}, and
-\texttt{unsupported\_conservative}.  The same records cross the scalar,
-Highway, and Vulkan boundaries, avoiding a host-side translation whose
-semantics could drift.
+(\texttt{prefilter\_types.cppm}, lines 16--61).  The three statuses are:
+
+\begin{itemize}
+    \item \path{success}
+    \item \path{conservative_unequal}
+    \item \path{unsupported_conservative}
+\end{itemize}
+
+The same records cross the scalar, Highway, and Vulkan boundaries, avoiding a
+host-side translation whose semantics could drift.
 
 \subsection{Difference from the minimap2 baseline}
 
@@ -283,8 +315,11 @@ algorithmic walk but changes the representation and execution contract:
     spans and invalid slices conservatively survive.
     \item \textbf{Safe unequal lengths.}  Instead of importing the archived
     unequal-maze deduction, the implementation returns the exact length
-    difference and marks the result \texttt{conservative\_unequal}
-    (\texttt{sneaky\_snake.cppm}, lines 402--425).
+    difference and marks the result with:
+    \begin{itemize}
+        \item \path{conservative_unequal}
+    \end{itemize}
+    The implementation is in \texttt{sneaky\_snake.cppm}, lines 402--425.
     \item \textbf{Pipeline-safe windows.}  Only mandatory global fills are
     evaluated.  Reverse-strand gaps are materialized in their oriented rank
     order.  Local extension regions never cause a rejection.
@@ -316,9 +351,14 @@ best.  Full prefix scanning is performed for every surviving candidate.
 
 The Vulkan route uses the same job and result layout as the CPU paths and one
 hardware-only runtime.  The shader domain is bounded by a 512-symbol submaze
-and \(E\le31\) (\texttt{phase\_c\_abi.cppm}, lines 61--64).  Larger thresholds
-return an unsupported conservative result.  Two execution modes were retained
-after measurement:
+and \(E\le31\).  The defining source anchor is:
+
+\begin{itemize}
+    \item \path{main/bioseq/backend/gpu/vulkan/phase_c_abi.cppm}, lines 61--64
+\end{itemize}
+
+Larger thresholds return an unsupported conservative result.  Two execution
+modes were retained after measurement:
 
 \begin{itemize}
     \item mode 1 assigns an independent invocation to a job and is used for
@@ -428,8 +468,9 @@ popcount.
   \node[draw=black!55,fill=green!9,rounded corners=2pt,
         minimum width=2.4cm,minimum height=0.72cm,align=center] (fastaccept)
         at (13.0,6.1) {\textbf{accept}\\no rejection proof};
-  \draw[->,thick] (raw.east) -- node[above,align=center]
-        {\(\mathrm{popcount}(H_0)\le E\)} (fastaccept.west);
+  \draw[->,thick] (raw.east) --
+        node[midway,above=3pt,align=center,font=\tiny]
+        {\(\mathrm{popcount}(H_0)\)\\\(\le E\)} (fastaccept.west);
 
   \node[draw=black!55,fill=orange!8,rounded corners=2pt,
         minimum width=7.3cm,minimum height=0.92cm,align=center] (amend) at (6.9,4.65)
@@ -455,8 +496,9 @@ popcount.
   \node[draw=black!55,fill=green!9,rounded corners=2pt,
         minimum width=2.4cm,minimum height=0.72cm,align=center] (estimateaccept)
         at (13.0,1.95) {\textbf{accept}\\mask estimate within \(E\)};
-  \draw[->,thick] (group.east) -- node[above]
-        {\(\widehat e(A)\le E\)} (estimateaccept.west);
+  \draw[->,thick] (group.east) --
+        node[midway,above=3pt,align=center,font=\tiny]
+        {\(\widehat e(A)\)\\\(\le E\)} (estimateaccept.west);
 
   \node[draw=black!55,fill=red!7,rounded corners=2pt,
         minimum width=5.0cm,minimum height=0.72cm,align=center] (guard)
@@ -632,10 +674,15 @@ automatic Vulkan algorithm-selection domain.  This is distinct from
 rather than automatically selecting Vulkan.
 
 At the PostgreSQL boundary, the planner accepts exactly one top-level
-\texttt{bioseq.edit(sequence\_column) < integer\_constant} predicate using the
-built-in operators for 16-, 32-, or 64-bit integer constants.  An overloaded
-operator merely named ``\(<\)'', a nonconstant bound, a wrong target column,
-\(\le\), or an ambiguous placeholder does not enter the optimization
+predicate:
+
+\begin{itemize}
+    \item \path{bioseq.edit(sequence_column) < integer_constant}
+\end{itemize}
+
+It uses the built-in operators for 16-, 32-, or 64-bit integer constants.  An
+overloaded operator merely named ``\(<\)'', a nonconstant bound, a wrong target
+column, \(\le\), or an ambiguous placeholder does not enter the optimization
 (\texttt{custom\_scan.cppm}, lines 1976--2050).  Unsupported forms fail with a
 feature-not-supported error rather than silently evaluating a stub with
 different semantics.
@@ -670,11 +717,20 @@ diagnostic bits, and the relationship between rejection and guard counters.
 
 An \texttt{EXPLAIN ANALYZE} proof can consequently distinguish capability from
 actual work.  The final GateKeeper SQL run recorded:
-\texttt{algorithm: batch\_resolved\_gatekeeper\_or\_sneaky\_snake},
-\texttt{Prefilter Resolved Algorithm: gatekeeper}, three Vulkan dispatches,
-three evaluated jobs, one rejected region, one mask candidate, one guard
-activation, and one guard-confirmed rejection.  The following exact stage
-retained two rows with edit counts zero and four under the strict bound five.
+
+\begin{itemize}
+    \item \textbf{Algorithm.}\\
+    \path{batch_resolved_gatekeeper_or_sneaky_snake}
+    \item \textbf{Resolved algorithm.} \path{gatekeeper}
+    \item \textbf{Vulkan dispatches.} Three.
+    \item \textbf{Evaluated jobs.} Three.
+    \item \textbf{Rejected regions.} One.
+    \item \textbf{Mask candidates.} One.
+    \item \textbf{Guard activations.} One.
+    \item \textbf{Guard-confirmed rejections.} One.
+    \item \textbf{Exact stage.} Two retained rows, with edit counts zero and four under
+    the strict bound five.
+\end{itemize}
 
 \section{Intermediate results and the final routing policy}
 \label{sec:prefilter-results}
@@ -686,7 +742,7 @@ synchronization are included.  The project benchmark records
 \texttt{backend\_batch\_ns} for upload, dispatch, synchronization, and result
 readback.  Later hardware-route comparisons generally use that field.  It also
 records \texttt{wall\_clock\_ns} for the complete benchmark callback.  The
-report-138 aggregate reproduced below is an explicitly labelled exception that
+report-138 aggregate reproduced below is an explicitly labeled exception that
 uses this complete-callback field.
 Table~\ref{tab:sneaky-intermediate} transcribes complete-callback wall-clock
 P50 from report 127, not \texttt{backend\_batch\_ns}.  Correctness preparation
@@ -802,13 +858,17 @@ zero false rejects.  Command replay reduced summed GPU P50 by 9.1\% relative to
 the pre-cache hybrid in report 134, and reports 137 and 138 differed by only
 0.45\% in summed GPU P50.
 
-Matched cells show the opposite small-threshold result. In report 138 the
-synchronous Vulkan complete-callback wall time was
-\(5.376\)--\(16.811\times\) the original CPU at \(E=2\) and
-\(1.822\)--\(2.483\times\) at \(E=8\).  The apparently small unequal-matrix
-sum is dominated by comparing the Vulkan \(E=16,31\) work budget with the
-original CPU \(E=40,100\) work budget.  It cannot attribute a gain to the GPU
-team path.  The report metadata records commit
+Matched cells show the opposite small-threshold result.  In report 138, the
+synchronous Vulkan complete-callback measurements were:
+
+\begin{itemize}
+    \item At \(E=2\), \(5.376\)--\(16.811\times\) the original CPU time.
+    \item At \(E=8\), \(1.822\)--\(2.483\times\) the original CPU time.
+\end{itemize}
+
+The apparently small unequal-matrix sum is dominated by comparing the Vulkan
+\(E=16,31\) work budget with the original CPU \(E=40,100\) work budget.  It
+cannot attribute a gain to the GPU team path.  The report metadata records commit
 \texttt{71fe8366555f682571c8}\allowbreak
 \texttt{7005c3469a8e207307ab}, creation time
 2026-07-17T00:54:28Z, and \texttt{dirty=true}.  The result is therefore useful
@@ -858,12 +918,18 @@ recorded zero false rejects.}
 \label{tab:gatekeeper-report151}
 \end{table}
 
-Report 151 is
-\path{main/reporting/bioseq_bench/report_151.json}, commit
-\texttt{0c2c8fb7cb4570a046bb}\allowbreak
-\texttt{01f682b32484a76b7afb},
-\texttt{dirty=false}, \texttt{fast=false}, created
-2026-07-17T15:43:33Z.  Its 13 benchmark blocks and raw evidence were complete.
+Report 151 records the following provenance:
+
+\begin{itemize}
+    \item \textbf{Artifact.}\\
+    \path{main/reporting/bioseq_bench/report_151.json}
+    \item \textbf{Commit.}\\
+    \path{0c2c8fb7cb4570a046bb01f682b32484a76b7afb}
+    \item \textbf{State.} \texttt{dirty=false} and \texttt{fast=false}.
+    \item \textbf{Created.} 2026-07-17T15:43:33Z.
+\end{itemize}
+
+Its 13 benchmark blocks and raw evidence were complete.
 The process exit status was nonzero because unrelated chaining, historical XXL,
 and paper-ntHash rules failed.  No violation or regression referenced
 \texttt{bench\_prefilter\_small\_seeds}.  Keeping this distinction prevents a
@@ -973,11 +1039,20 @@ the longest escape segment, count unavoidable obstacles, and reject only when
 the count exceeds the threshold.  GateKeeper contributes a compact small-window
 GPU path: build \(2E+1\) shifted mismatch masks, amend short internal matches,
 compensate exposed boundaries, intersect the masks, and count grouped error
-patterns.  BioSeqDB adds the safety and systems layers that neither paper alone
-defines for this pipeline: mandatory-gap scoping, alphabet-generic ranks,
-checked batch slices, conservative unequal and unsupported results, an exact
-GateKeeper rejection guard, hardware-only Vulkan routes, stable region
-compaction, SQL-derived thresholds, and exact post-traceback filtering.
+patterns.  BioSeqDB adds the following safety and systems layers that neither
+paper alone defines for this pipeline:
+
+\begin{itemize}
+    \item Mandatory-gap scoping.
+    \item Alphabet-generic ranks.
+    \item Checked batch slices.
+    \item Conservative unequal and unsupported results.
+    \item An exact GateKeeper rejection guard.
+    \item Hardware-only Vulkan routes.
+    \item Stable region compaction.
+    \item SQL-derived thresholds.
+    \item Exact post-traceback filtering.
+\end{itemize}
 
 The intermediate measurements also explain the final design.  The first
 SneakySnake port preserved decisions but its SIMD kernel was slower than the

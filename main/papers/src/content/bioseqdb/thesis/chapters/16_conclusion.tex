@@ -370,10 +370,14 @@ implemented selector is not automatically a qualified final route.
     Authorized provider relations through
     \texttt{Bioseq\allowbreak External\allowbreak Scan}, with provider-specific
     capabilities. &
-    The remote data plane remains privileged experimental functionality. &
+    The remote data plane remains privileged experimental functionality.
+    A 64-combination expansion cap and mixed-success provider unions currently
+    permit incomplete result sets. &
     Complete special-use-address exclusion, cluster-wide rate limiting,
     structured SQLSTATE mapping, immediate cancellation, UniProt sequence
-    materialization, and EBI sequence retrieval. &
+    materialization, and EBI sequence retrieval. Fail-closed expansion
+    overflow and surfaced per-subquery failures, or explicit completeness
+    metadata, are also required. &
     Chapter 14 capability and live-proof tables. \\
     \bottomrule
   \end{longtblr}
@@ -384,25 +388,209 @@ implemented selector is not automatically a qualified final route.
 \paragraph{\textbf{RQ1.} Which parts of seeding, chaining, and extension can
 be expressed over a common compact sequence abstraction without eager
 conversion?}
-Yes, for the implemented paths, but the answer requires more than a range
-concept at a public function boundary.  Iterators need precise symbol and bit
-geometry.  Fragments need stable ownership and cross-boundary context.
-Algorithms that require contiguous ranks need an access plan that says when a
-bounded materialization is unavoidable.  PostgreSQL slices and concatenations
-need lifetimes that survive planner and executor transitions.  The final
-abstraction makes these choices visible instead of converting every value
-eagerly.
+Yes, but the common abstraction carries sequence symbols only as far as each
+stage needs them. It is not a promise that every intermediate is a lazy
+sequence. Table~\ref{tab:conclusion-rq1-stage-boundaries} gives the precise
+boundary.
+
+\begingroup
+  \centering
+  \scriptsize
+  \begin{longtblr}[
+    caption={Stage-by-stage answer to RQ1. A bounded materialization is not an
+    eager whole-value conversion.},
+    label={tab:conclusion-rq1-stage-boundaries},
+  ]{
+    width=\linewidth,
+    colspec={Q[l,wd=.13\linewidth] X[l] X[l] X[l]},
+    colsep=4pt,
+    rowhead=1,
+  }
+    \toprule
+    Stage & Common representation used & Materialization boundary &
+    Resulting intermediate \\
+    \midrule
+    Minimizer extraction and seeding &
+    Scalar and ExactSimd consume typed compact ranges or sequential lazy
+    chunks. Fragment continuation retains only bounded \(K\)-mer and window
+    state. Flat, TOASTed, fragmented, source-backed, sliced, concatenated, and
+    transformed PostgreSQL values can enter through the same lazy facade. &
+    PNT1 and resident-only SIMD or Vulkan kernels require a proved contiguous
+    packed interval. The access planner first borrows an aligned resident
+    interval and otherwise packs only the admitted request interval. &
+    Minimizer events and index occurrences become explicit compact records.
+    Index lookup converts them to canonical anchor records. \\
+    Chaining &
+    No sequence payload is required. Scalar, RMQ, SIMD, and Vulkan chaining
+    consume the canonical anchor array produced by seed lookup. &
+    There is no eager conversion of the query or target sequence for chaining.
+    Device routes may upload or retain anchor arrays, score arrays, and
+    predecessor arrays. &
+    Scores, predecessors, compacted chains, and candidate coordinate regions
+    are ordinary metadata arrays rather than sequence views. \\
+    Prefiltering &
+    Candidate coordinates select query and target subranges from the same
+    compact or lazy sources. &
+    Only mandatory seed-to-seed global-fill windows are converted to flat
+    alphabet ranks. Optional left and right local-extension windows are
+    excluded. Each admitted copy is bounded by the selected window. &
+    A conservative reject or accept decision is attached to each region.
+    Acceptance still proceeds to exact post-alignment filtering. \\
+    CPU extension &
+    KSW2 accepts alphabet-generic lazy views and encodes only each admitted
+    subrange through its bounded slot ring. Compact and lazy views emit the
+    reversed left extension directly, so the whole query is not reversed or
+    flattened. The Highway Block route can consume direct compact input. &
+    Dynamic-programming scratch, encoded ranks, and trace state are allocated
+    per selected fill or extension window. A fragmented or PostgreSQL-backed
+    whole sequence is not flattened in advance. &
+    Scores, endpoints, edit counts, and owned CIGAR runs leave the window
+    kernel. \\
+    Vulkan extension &
+    Resident minimizer, seed, and chain stages provide coordinate windows.
+    The PostgreSQL scheduler still obtains their symbols through the compact
+    or lazy source contract. &
+    Only selected query and target windows are packed into 32-bit ranks for
+    the admitted Vulkan batch. Device and memory-permit ownership survive
+    through the completion fence. &
+    The device returns bounded score, endpoint, status, and packed-CIGAR
+    slices. Host validation constructs the durable SQL result. \\
+    SQL and durable boundaries &
+    A call owner or PostgreSQL read session keeps borrowed flat data, expanded
+    piece trees, fragmented scanners, and provider-backed pieces alive. &
+    Text, binary send, \texttt{bioseq.letter[]} output, heap or index tuples,
+    and cross-transaction provider values require a durable materialized
+    representation. &
+    The persistent value is independent of the executor or provider lifetime.
+    \\
+    \bottomrule
+  \end{longtblr}
+\endgroup
+
+Thus, minimizer extraction and bounded alignment windows use the common
+sequence data plane directly. Chaining deliberately does not because its
+correct input is the anchor array, not letters. Eager whole-sequence
+conversion is avoided for the implemented PostgreSQL and provider-backed
+paths, while every unavoidable copy is explicit, interval-bounded, and
+accounted by the access plan.
 
 \paragraph{\textbf{RQ2.} Which scalar operations benefit from SIMD or GPU
 execution, and which overheads move the break-even point?}
-There is no stage-only answer.  Benefit depends on length, error profile,
-alphabet, intermediate representation, batch size, residency, submission
-count, and the amount of exact post-processing that remains on the host.
+There is no backend-only answer. Benefit depends on:
+\begin{itemize}
+  \item sequence length and error profile.
+  \item alphabet and intermediate representation.
+  \item batch size.
+  \item host and device residency.
+  \item submission count.
+  \item the amount of exact post-processing that remains on the host.
+\end{itemize}
 SIMD is most effective when loads are contiguous and lane work is uniform.
 GPU speedups appear when many compatible jobs reuse resident inputs and keep
 intermediate state on the device.  Small jobs and cold first submissions can
 remain slower.  The final system therefore makes CPU, SIMD, and Vulkan routes
 policy choices whose execution is observable.
+
+Table~\ref{tab:conclusion-rq2-stage-backends} answers the question at the
+operation level. ``Beneficial'' means that a qualified scoped observation
+favored the route. ``Conditional'' means that the sign changed with the
+workload or batch. ``Unresolved'' means that the available observations do not
+support a same-work winner.
+
+\begingroup
+  \centering
+  \scriptsize
+  \begin{longtblr}[
+    caption={Stage-by-backend synthesis for RQ2. Performance classifications
+    are restricted to the named evidence and do not imply a universal route.},
+    label={tab:conclusion-rq2-stage-backends},
+  ]{
+    width=\linewidth,
+    colspec={Q[l,wd=.12\linewidth] X[l] X[l] X[l] X[l]},
+    colsep=3pt,
+    rowhead=1,
+  }
+    \toprule
+    Operation & CPU and SIMD result & Vulkan result & Semantic status &
+    Decisive overhead and evidence \\
+    \midrule
+    Minimizer extraction &
+    \textbf{Beneficial, qualified.} The explicitly selected ExactSimd B8
+    query-sketch path retained approximately \(1.90\)--\(1.92\) s observations,
+    down from approximately \(2.72\) s on its later E2E boundary. Scalar
+    remains the initializer default. PNT1 is unresolved as a replacement
+    because it implements a different seed scheme. &
+    \textbf{Beneficial inside the recorded Phase C rewrite, unresolved against
+    the current CPU route.} The kernel changed from \(272.0\) to \(40.3\) ms,
+    a \(6.75\times\) scoped improvement. No equal-work large-scale
+    cross-backend winner is established. &
+    ExactSimd preserves the scalar minimap-compatible event contract. Phase C
+    requires exact DNA4 events and accepts a bounded conservative superset for
+    the qualified DNA5 route. PNT1 has its own persisted identity. &
+    Fragment continuation avoids repeated packing on the CPU. Count/scan/emit,
+    upload, dispatch, first-use setup, and whether later stages remain resident
+    determine the Vulkan break-even point. Chapter 5, DOC0353 and DOC0384. \\
+    Chaining &
+    \textbf{Beneficial for the measured CPU case.} Exact SIMD reduced the
+    inclusive chaining-kernel P50 by \(11.6\%\). Bounded SIMD reduced it by
+    \(41.9\%\) by skipping \(786{,}467{,}451\) candidate evaluations. &
+    \textbf{Unresolved versus SIMD.} The retained GPU and SIMD whole-region
+    observations have different endpoint offsets and cannot support a speed
+    comparison. Residency removes transfers only for the admitted coordinate
+    route. &
+    Exact SIMD preserves the BioSeqDB scalar \(f/p\) contract in its admitted
+    domain. Bounded SIMD and Vulkan use explicitly approximate stopping and
+    range policies. &
+    Predecessor-window width, divergence, \texttt{max\_skip}, backtracking,
+    anchor transfer, reduction, and projection shape dominate. Chapter 6,
+    report 192 and Table 6.4. \\
+    Prefiltering &
+    \textbf{Conditional.} When no HiFi region was rejected, the filter was
+    neutral or slightly slower. On the recorded ONT fixture it removed all six
+    candidates and reduced whole-pipeline time by approximately
+    \(2.1\times\). &
+    \textbf{Historically beneficial within the admitted small-window GPU
+    choice, current-head relation unresolved.} GateKeeper used
+    \(0.492\)--\(0.881\) of SneakySnake Vulkan P50 in report 151, but later
+    observations did not retain a stable current performance win. &
+    Both filters are conservative prefilters in the proved mandatory-global-
+    gap domain. A reject is actionable, while an accept is not an alignment
+    result and exact post-alignment filtering remains mandatory. &
+    Rejection rate determines whether avoided dynamic programming repays rank
+    packing and filter work. Submission, synchronization, and readback dominate
+    small GPU jobs. Chapter 8 and reports 127, 138 and 151. \\
+    Final extension &
+    \textbf{Conditional.} Highway KSW2 and Block kernels benefit from direct
+    compact input, vector recurrence work, bounded windows, and arena reuse.
+    KSW2 remains preferable when its two-piece-affine or endpoint semantics are
+    required, so there is no single CPU winner. &
+    \textbf{Batch-dependent.} The 512-job CIGAR case was tied at
+    \(0.999\times\). The 4096-job CIGAR case favored Vulkan by
+    \(2.493\times\), and the 300 Mbp coordinate case by \(2.432\times\) in
+    total wall time. &
+    The device solves the admitted dynamic-programming recurrence, but the
+    benchmark gates do not establish literal CIGAR-path identity. The
+    coordinate case establishes in-tolerance hits rather than exact row-set
+    parity. &
+    Rank packing, classification, trace allocation, submission, result
+    construction, batch size, and target reuse move break-even. Chapter 7 and
+    report 47. \\
+    Persistent index reads &
+    \textbf{Beneficial for one qualified route.} The retained process-cold
+    \texttt{just\_index} distribution recorded \(5.368746\) s for BioSeqDB
+    versus \(16.487527\) s for minimap2, a route-specific
+    \(3.071\times\) ratio. &
+    \textbf{Unresolved for the current persisted boundary.} Authenticated
+    Shape V5 coordinate execution exists, but no accepted fresh-postmaster
+    performance ratio exists and persisted CIGAR is unsupported. &
+    Format, shape, sketch scheme, width, checksum, and accelerator attestation
+    must match before either host or device execution. &
+    Cold relation scans, sidecar mapping, admitted memory, cache residency,
+    device assembly, and whether the query requests coordinates or CIGAR
+    determine the result. Chapter 12 and DOC0384. \\
+    \bottomrule
+  \end{longtblr}
+\endgroup
 
 The measured evidence supports route-specific conclusions rather than one
 unqualified speedup claim.  The detailed receipts and benchmark conventions
@@ -466,11 +654,17 @@ invariants.
 data, caches, and generated boundary code fit around the kernels so that the
 resulting system remains inspectable and reliable?}
 The implementation provides strong mechanisms, but the result is not
-uniformly complete. Opt-in versioned storage, legacy default MPF relations,
-explicit memory admission, bounded PostgreSQL loading, transaction-aware
-persistence, custom-scan ownership and plan-shape checks,
-hardware-only accelerator qualification, and generated physical ledgers make
-important failures visible.  The chapter audits also identify places where an
+uniformly complete. Important failures are made visible by:
+\begin{itemize}
+  \item opt-in versioned storage and legacy default MPF relations.
+  \item explicit memory admission.
+  \item bounded PostgreSQL loading.
+  \item transaction-aware persistence.
+  \item custom-scan ownership and plan-shape checks.
+  \item hardware-only accelerator qualification.
+  \item generated physical ledgers.
+\end{itemize}
+The chapter audits also identify places where an
 option exists but is not wired, a footer is accumulated but not validated, a
 provider path is partial, or a benchmark is a one-hit correctness gate rather
 than exact row-set parity.  Inspectability requires reporting these facts,
@@ -567,6 +761,19 @@ public-address policy, cluster-wide quota enforcement, the documented
 structured SQLSTATE mapping, and stop-aware DNS and backoff behavior in
 addition to provider-specific capability tests.
 
+Two current behaviors are result-completeness defects, not merely transport
+limitations. First, lowering \texttt{= ANY(...)} predicates expands at most
+64 equality combinations. Additional combinations are warned about but never
+queried, and PostgreSQL residual filtering cannot reconstruct their rows.
+Second, rows from successful provider/query pairs can suppress the first error
+from a failed pair, so a mixed-success union can look complete. Both behaviors
+can silently return an incomplete relation. Production qualification requires
+one of two explicit contracts: fail closed on expansion overflow and on every
+failed subquery, or return machine-readable completeness metadata that names
+omitted combinations and failed pairs. Regression tests must cover more than
+64 combinations, mixed success and failure, all-failure unions, and
+de-duplication without error suppression.
+
 Finally, database integration increases the amount of correctness surface.
 PostgreSQL can abort through a non-local jump
 \parencite{postgresql17_cpp_extensibility}.  The planner may rewrite expressions, a
@@ -597,7 +804,10 @@ The most valuable future work follows directly from the limitations:
   flush, synchronization, and atomic-publication protocol.
   \item extend external providers with a complete public-address policy,
   cluster-wide rate limiting, cancellation-safe DNS and retry waits,
-  credential handling, and uniform structured SQL errors.
+  credential handling, and uniform structured SQL errors. Make the
+  64-combination expansion fail closed or expose explicit completeness
+  metadata, and never suppress a failed provider/query pair merely because
+  another pair returned rows.
   \item qualify the generated SQL and fmgr boundary across the intended
   PostgreSQL, operating-system, and architecture matrix.
   \item maintain benchmark qualifications as versioned evidence whose

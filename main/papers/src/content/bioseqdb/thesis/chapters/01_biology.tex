@@ -25,7 +25,7 @@ system must preserve enough of that interpretation to distinguish, for
 example, a nucleotide sequence from a protein sequence and an unknown base
 from an ordinary base.
 
-\subsection{DNA, RNA and protein alphabets}
+\subsection{DNA, ribonucleic acid (RNA), and protein alphabets}
 
 DNA is a polymer whose monomers contain one of four canonical bases:
 adenine, cytosine, guanine and thymine. Their conventional one-letter symbols
@@ -83,7 +83,14 @@ and alignment must preserve.
 \begin{table}[ht]
   \centering
   \small
-  \begin{tabular}{p{0.16\linewidth}p{0.27\linewidth}p{0.47\linewidth}}
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabularx}{\linewidth}{
+      @{}
+      >{\raggedright\arraybackslash}p{0.16\linewidth}
+      >{\raggedright\arraybackslash}p{0.27\linewidth}
+      >{\raggedright\arraybackslash}X
+      @{}
+    }
     \toprule
     Sequence class & Core symbols & Computational consequences \\
     \midrule
@@ -103,7 +110,7 @@ and alignment must preserve.
     normally encode biochemical or evolutionary similarity rather than
     equality alone. \\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
   \caption{Biological alphabets and the distinctions that a sequence-processing
     system must not erase. The table describes biological data in general. It
     does not assert that every alphabet or ambiguity convention is exposed by
@@ -246,7 +253,15 @@ distinct causes that remain unresolved at this stage.
 \begin{table}[ht]
   \centering
   \small
-  \begin{tabular}{p{0.16\linewidth}p{0.29\linewidth}p{0.29\linewidth}p{0.16\linewidth}}
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabularx}{\linewidth}{
+      @{}
+      >{\raggedright\arraybackslash}p{0.15\linewidth}
+      >{\raggedright\arraybackslash}X
+      >{\raggedright\arraybackslash}X
+      >{\raggedright\arraybackslash}p{0.18\linewidth}
+      @{}
+    }
     \toprule
     Observed pattern & Possible biological explanation &
     Possible observational or representation explanation &
@@ -269,7 +284,7 @@ distinct causes that remain unresolved at this stage.
     incomplete reference or query too short to disambiguate &
     competing mappings with similar scores \\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
   \caption{The same alignment pattern can have several causes. The table is a
     reminder that similarity search generates evidence. It does not by itself
     determine the biological event.}
@@ -354,17 +369,25 @@ support.
 Sequence analysis is often presented as a file-to-file transformation. A FASTA
 or FASTQ file enters a command-line program and an alignment file leaves it.
 That model is effective for a single tool invocation, but a real study also
-contains sample identifiers, collection conditions, organism labels, cohort
-membership, reference versions, quality-control decisions and derived
-annotations. When each stage writes another loosely coupled file, the
+contains:
+\begin{itemize}
+  \item sample identifiers,
+  \item collection conditions,
+  \item organism labels,
+  \item cohort membership,
+  \item reference versions,
+  \item quality-control decisions, and
+  \item derived annotations.
+\end{itemize}
+When each stage writes another loosely coupled file, the
 relationship between a sequence and its provenance is maintained by file
 names, scripts and conventions outside the data itself.
 
 A database-resident design changes the unit of work. Instead of asking an
 aligner to process every record in a file, a relational query can first select
-the relevant samples, join them with the chosen reference or query set, invoke
-similarity search on the resulting sequence pairs, and aggregate or filter the
-results. A schematic workload is:
+the relevant samples. It can join them with the chosen reference or query set
+and invoke similarity search on the resulting sequence pairs. It can then
+aggregate or filter the results. A schematic workload is:
 \[
   \text{metadata selection}
   \;\longrightarrow\;

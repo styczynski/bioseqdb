@@ -132,11 +132,18 @@ offset is \(2P\). For a logical offset \(x\), the storage layer computes
 Higher layers can therefore reserve and address one continuous byte space
 without manually splitting every stream at page boundaries.
 
-The metapage records the format version, a storage identifier, the first unused
-stripe identifier, the first unused logical row number, the first unused
-logical byte offset, and an unlogged-reset flag. Reservations modify these
-counters while holding the relation extension lock. Initialization and
-truncation require an access-exclusive relation lock. Metapage changes use
+The metapage records:
+\begin{itemize}
+  \item the format version,
+  \item a storage identifier,
+  \item the first unused stripe identifier,
+  \item the first unused logical row number,
+  \item the first unused logical byte offset, and
+  \item an unlogged-reset flag.
+\end{itemize}
+Reservations modify the allocation counters in this metadata while holding
+the relation extension lock. Initialization and truncation require an
+access-exclusive relation lock. Metapage changes use
 PostgreSQL generic WAL through \texttt{GenericXLogStart},
 \texttt{GenericXLogRegisterBuffer}, and \texttt{GenericXLogFinish}. Thus the
 column format does not replace PostgreSQL's page, buffer, lock, or recovery
@@ -663,25 +670,30 @@ and distinguishes them from the physical-manifest states.
 \begin{figure}[ht]
   \centering
   \begin{tikzpicture}[x=1cm,y=1cm,font=\small,>=Latex]
-    \node[draw,rounded corners,fill=gray!12] (a) at (0,2.2) {ABSENT};
-    \node[draw,rounded corners,fill=blue!12] (c) at (3,2.2) {CLAIMED};
-    \node[draw,rounded corners,fill=orange!14] (b) at (6,2.2) {BUILDING};
-    \node[draw,rounded corners,fill=green!14] (d) at (9,3.25) {COMPLETE};
-    \node[draw,rounded corners,fill=red!12] (f) at (6.7,0.65) {FAILED};
-    \node[draw,rounded corners,fill=purple!12] (i) at (12,2.2) {INVALIDATED};
-    \node[draw,rounded corners,fill=gray!18] (e) at (9,-0.5) {EVICTING};
+    \node[draw,rounded corners,fill=gray!12] (a) at (0,2.55) {ABSENT};
+    \node[draw,rounded corners,fill=blue!12] (c) at (2.7,2.55) {CLAIMED};
+    \node[draw,rounded corners,fill=orange!14] (b) at (5.4,2.55) {BUILDING};
+    \node[draw,rounded corners,fill=green!14] (d) at (8.1,2.55) {COMPLETE};
+    \node[draw,rounded corners,fill=purple!12] (i) at (11.3,2.55)
+      {INVALIDATED};
+    \node[draw,rounded corners,fill=red!12] (f) at (5.4,0.45) {FAILED};
+    \node[draw,rounded corners,fill=gray!18] (e) at (8.6,0.45) {EVICTING};
 
     \draw[->,thick] (a) -- (c);
     \draw[->,thick] (c) -- (b);
-    \draw[->,thick] (b) -- (d);
-    \draw[->,thick] (c) -- (f);
-    \draw[->,thick] (b) -- (f);
-    \draw[->,thick] (b) -- (i);
-    \draw[->,thick] (d) -- (i);
-    \draw[->,thick] (d) -- (e);
-    \draw[->,thick] (f) -- (e);
-    \draw[->,thick] (i) -- (e);
-    \draw[->,thick,bend right=35] (e) to (a);
+    \draw[->,thick] (b) -- node[above,font=\scriptsize] {publish} (d);
+    \draw[->,thick] (d) -- node[above,font=\scriptsize] {invalidate} (i);
+    \draw[->,thick] (c) to[bend right=12]
+      node[below left,font=\scriptsize] {claim failure} (f);
+    \draw[->,thick] (b) -- node[right,font=\scriptsize] {build failure} (f);
+    \draw[->,thick] (b.north) -- ++(0,0.7) -|
+      node[pos=0.58,above,font=\scriptsize] {invalidate before publication}
+      (i.north);
+    \draw[->,thick] (d) -- node[left,font=\scriptsize] {expire} (e);
+    \draw[->,thick] (f) -- node[above,font=\scriptsize] {reclaim} (e);
+    \draw[->,thick] (i) -- node[right,font=\scriptsize] {retire} (e);
+    \draw[->,thick] (e.south) -- ++(0,-0.65) -|
+      node[pos=0.48,below,font=\scriptsize] {remove} (a.south);
   \end{tikzpicture}
   \caption{Simplified request-registry state machine. Registry
   \texttt{COMPLETE} is exposed only after the separate physical manifest
@@ -714,9 +726,16 @@ newly reused slot. The janitor can repair or reclaim a manifest left in
 Cached tuples are stored in row groups which are internally columnar. A row
 group contains a row ordinal interval, one chunk descriptor per column,
 validity information, offsets for variable-width values, encoded values, and
-checksums. The current wire layer uses a fixed magic and format version,
-little-endian metadata, schema identity, PostgreSQL-major and boot identity,
-block CRC32C, and a manifest digest. Direct encodings are used only for
+checksums. The wire representation carries:
+\begin{itemize}
+  \item a fixed magic and format version,
+  \item an endianness marker,
+  \item the schema identity,
+  \item the PostgreSQL-major and boot identity,
+  \item a CRC32C checksum, and
+  \item a content digest.
+\end{itemize}
+Direct encodings are used only for
 representations proven safe. Varlena values are flattened. External TOAST and
 expanded-object pointers are never persisted as if they were ordinary bytes.
 
@@ -877,44 +896,47 @@ because the implementation is still actively refactored.
 
 \begin{table}[ht]
   \centering
-  \small
+  \footnotesize
   \caption{Current implementation anchors for the physical storage chapter.}
   \label{tab:storage-reference-map}
-  \begin{tabular}{p{0.30\linewidth}p{0.60\linewidth}}
+  \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}X@{}}
     \toprule
-    \textbf{Topic} & \textbf{Current source}\\
+    \textbf{Topic and current source}\\
     \midrule
-    Page layout and WAL &
-    \path{backend/pg/column/storage_physical.cppm}\\
-    In-memory storage structures &
-    \path{backend/pg/column/metadata/types.cppm}\\
-    Generated storage catalogs &
-    \path{backend/pg/column/metadata/sql_rows.cppm}\\
-    Stripe writer and reader &
-    \path{backend/pg/table/io/writer.cppm},
-    \path{reader.cppm}, \path{reader_chunk.cppm}\\
-    Chunk pruning and decompression cache &
-    \path{backend/pg/table/io/reader_pruning.cppm},
-    \path{cache.cppm}\\
-    Locator and bucket mathematics &
-    \path{backend/storage/bucket_math.cppm}\\
-    Fragment shard manager and scanner &
-    \path{backend/pg/storage_pg/sequence_storage_manager.cppm},
-    \path{sequence_scanner_pg.cppm}\\
-    Datum serialization &
-    \path{backend/pg/pg_utils/datums.cppm}\\
-    Vector aggregate rewrite &
-    \path{backend/pg/column/planner_hook.cppm},
-    \path{backend/pg/vectorization/types/aggregates.cppm}\\
-    Shared query cache &
-    \path{bioseq_caching/core/state_machine.cppm},
-    \path{core/column_format.cppm},
-    \path{pg/shared_registry.cppm}, \path{pg/storage.cppm}\\
-    Citus comparison baseline &
+    \textbf{Page layout and WAL}\newline
+    \path{main/bioseq/backend/pg/column/storage_physical.cppm}\\[0.35em]
+    \textbf{In-memory storage structures}\newline
+    \path{main/bioseq/backend/pg/column/metadata/types.cppm}\\[0.35em]
+    \textbf{Generated storage catalogs}\newline
+    \path{main/bioseq/backend/pg/column/metadata/sql_rows.cppm}\\[0.35em]
+    \textbf{Stripe writer and reader}\newline
+    \path{main/bioseq/backend/pg/table/io/writer.cppm},
+    \path{main/bioseq/backend/pg/table/io/reader.cppm},
+    \path{main/bioseq/backend/pg/table/io/reader_chunk.cppm}\\[0.35em]
+    \textbf{Chunk pruning and decompression cache}\newline
+    \path{main/bioseq/backend/pg/table/io/reader_pruning.cppm},
+    \path{main/bioseq/backend/pg/table/io/cache.cppm}\\[0.35em]
+    \textbf{Locator and bucket mathematics}\newline
+    \path{main/bioseq/backend/storage/bucket_math.cppm}\\[0.35em]
+    \textbf{Fragment shard manager and scanner}\newline
+    \path{main/bioseq/backend/pg/storage_pg/sequence_storage_manager.cppm},
+    \path{main/bioseq/backend/pg/storage_pg/sequence_scanner_pg.cppm}\\[0.35em]
+    \textbf{Datum serialization}\newline
+    \path{main/bioseq/backend/pg/pg_utils/datums.cppm}\\[0.35em]
+    \textbf{Vector aggregate rewrite}\newline
+    \path{main/bioseq/backend/pg/column/planner_hook.cppm},
+    \path{main/bioseq/backend/pg/vectorization/types/aggregates.cppm}\\[0.35em]
+    \textbf{Shared query cache}\newline
+    \path{main/bioseq_caching/core/state_machine.cppm},
+    \path{main/bioseq_caching/core/column_format.cppm},
+    \path{main/bioseq_caching/pg/shared_registry.cppm},
+    \path{main/bioseq_caching/pg/storage.cppm}\\[0.35em]
+    \textbf{Citus comparison baseline}\newline
     \path{citus-main/src/backend/columnar/columnar_storage.c},
-    \path{columnar_writer.c}, \path{columnar_reader.c}\\
+    \path{citus-main/src/backend/columnar/columnar_writer.c},
+    \path{citus-main/src/backend/columnar/columnar_reader.c}\\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
 \end{table}
 
 With source bytes, epochs, and bounded fragment access established,

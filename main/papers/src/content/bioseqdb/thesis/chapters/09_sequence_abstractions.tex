@@ -191,7 +191,14 @@ as a universal ownership or packing guarantee.
 \caption{Representation-bearing \texttt{compact\_sequence\_range}
 specializations used by \mbox{BioSeqDB}.}
 \label{tab:compact-range-specializations}
-\begin{tabular}{p{0.25\textwidth}p{0.20\textwidth}p{0.25\textwidth}p{0.20\textwidth}}
+\begingroup
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.24\textwidth}
+  >{\raggedright\arraybackslash}p{0.19\textwidth}
+  >{\raggedright\arraybackslash}p{0.25\textwidth}
+  >{\raggedright\arraybackslash}X@{}}
 \textbf{Source specialization} & \textbf{Physical form} &
 \textbf{Ownership and lifetime} & \textbf{Construction}\\
 \hline
@@ -203,7 +210,8 @@ owns the vector and its packed payload & \(O(N)\) from symbols\\
 \path{compact_sequence_stdc_instance} & bit-packed flat
 \texttt{data[]} payload & borrows a previously validated datum &
 \(O(1)\), with no payload copy\\
-\end{tabular}
+\end{tabularx}
+\endgroup
 \end{table}
 
 The proper-container specialization currently stores \texttt{const R\&} and
@@ -384,7 +392,13 @@ operations whose work scales with total or selected symbols.
 \centering
 \caption{Packed-range operations and their data movement.}
 \label{tab:compact-operation-costs}
-\begin{tabular}{p{0.27\textwidth}p{0.16\textwidth}p{0.47\textwidth}}
+\begingroup
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.25\textwidth}
+  >{\raggedright\arraybackslash}p{0.15\textwidth}
+  >{\raggedright\arraybackslash}X@{}}
 \textbf{Operation} & \textbf{Cost} & \textbf{Ownership/copy behavior}\\
 \hline
 construct owning range from symbols & \(O(N)\) & packs into an owned vector\\
@@ -404,7 +418,8 @@ Only aligned boundaries are zero-copy\\
 construct legacy \texttt{bit\_casted\_view} & \(O(1)\) & borrows its base.
 Typed use also requires effective-type, alignment, endian, and step
 preconditions\\
-\end{tabular}
+\end{tabularx}
+\endgroup
 \end{table}
 
 \section{A C-compatible packed object}
@@ -534,7 +549,13 @@ boundaries without implying a change to minimap2's mapping algorithm.
 \caption{Representation boundary in the minimap2 reference and
 \mbox{BioSeqDB}.}
 \label{tab:minimap2-sequence-representation}
-\begin{tabular}{p{0.23\textwidth}p{0.31\textwidth}p{0.36\textwidth}}
+\begingroup
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.22\textwidth}
+  >{\raggedright\arraybackslash}p{0.30\textwidth}
+  >{\raggedright\arraybackslash}X@{}}
 \textbf{Aspect} & \textbf{minimap2 reference} & \textbf{\mbox{BioSeqDB}}\\
 \hline
 mapping query & ASCII-compatible \texttt{char*} and integer length &
@@ -549,7 +570,8 @@ expanded object, arena dependencies, retained source handle, and declared
 flattening boundary\\
 alphabet dispatch & nucleotide lookup tables and reference-specific encoding &
 compile-time alphabet pack selected once from runtime datum metadata\\
-\end{tabular}
+\end{tabularx}
+\endgroup
 \end{table}
 
 The \mbox{BioSeqDB} benchmark adapter preserves the reference contract rather than
@@ -641,13 +663,15 @@ using seq [[bioseq_sql::type({
 \end{lstlisting}
 
 The \texttt{bioseq\_sql} attributes are consumed by
-\texttt{main/codegen/sql}: the annotation model describes entities and
-options, the collector reads annotated declarations, the graph layer resolves
-dependencies and fmgr facets, and renderers produce installation SQL, C/fmgr
-boundary code, and manifests.  Function, result, parameter, operator, and
-subscript attributes in \texttt{concat\_reverse.cppm},
-\texttt{subscript.cppm}, \texttt{letter.cppm}, and related partitions keep the
-SQL signature next to its C++ authority.
+\texttt{main/codegen/sql}.  The annotation model describes entities and
+options.  The collector reads annotated declarations, while the graph layer
+resolves dependencies and fmgr facets.  Renderers then produce installation
+SQL, C/fmgr boundary code, and manifests.
+
+Function, result, parameter, operator, and subscript attributes keep each SQL
+signature next to its C++ authority.  These attributes appear in
+\texttt{concat\_reverse.cppm}, \texttt{subscript.cppm},
+\texttt{letter.cppm}, and related partitions.
 
 This generation path does \emph{not} select a nucleotide alphabet at query
 run time.  Conversely, \texttt{supported\_alphabets} does not generate SQL.
@@ -1277,7 +1301,13 @@ approaches superseded by later implementation.
 \centering
 \caption{Evolution from eager resident data to the final lazy SQL value.}
 \label{tab:sequence-evolution}
-\begin{tabular}{p{0.21\textwidth}p{0.24\textwidth}p{0.45\textwidth}}
+\begingroup
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.20\textwidth}
+  >{\raggedright\arraybackslash}p{0.23\textwidth}
+  >{\raggedright\arraybackslash}X@{}}
 \textbf{Date/evidence} & \textbf{Design stage} & \textbf{Outcome}\\
 \hline
 May 7, 2026, DOC0215 & owning packed inputs plus reference-tool ASCII conversion &
@@ -1302,7 +1332,8 @@ July 19--23, 2026, DOC0387 and the July 23 DOC0388 lazy-sequence report &
 final expanded tree and facade &
 delivered zero-based logical SQL views, source ownership, one alphabet-generic
 facade, admitted resident routes, tracing, tests, and bounded benchmarks\\
-\end{tabular}
+\end{tabularx}
+\endgroup
 \end{table}
 
 Three engineering lessons follow from this history.
@@ -1388,14 +1419,14 @@ whole source & 8,388,608 & 38,177 \(\mu\)s & 38,964 \(\mu\)s &
 \end{tabular}
 \end{table}
 
-The slice-to-whole median-time ratio was 0.0157.  Timing alone could still be explained by caching
-or a special text path, so the materialization trace is the stronger evidence:
-the slice expression reported one SQL conversion with 64 input symbols, 64
-output symbols, and 68 bytes, and did not report a whole-source packed
-boundary.  This establishes bounded source access for that expression.  It
-does not imply that every arbitrary provider has constant latency or that a
-resident-only alignment kernel can process a lazy tree without packing its
-selected region.
+The slice-to-whole median-time ratio was 0.0157.  Timing alone could still be
+explained by caching or a special text path.  The materialization trace is
+stronger evidence.  The slice expression reported one SQL conversion with 64
+input symbols, 64 output symbols, and 68 bytes.  It did not report a
+whole-source packed boundary.  This establishes bounded source access for that
+expression.  It does not imply that every arbitrary provider has constant
+latency or that a resident-only alignment kernel can process a lazy tree
+without packing its selected region.
 
 \subsection{Deferred composition versus eager intermediates}
 
@@ -1407,16 +1438,21 @@ the artifact records.  It is not presented as a byte-for-byte output
 comparison.  Table~\ref{tab:lazy-io-results} shows the allocation and time
 differences.  The source artifact is
 \texttt{bioseq\_io\_bench/report\_7.json}.
+Each table row aligns one metric with its deferred value, eager value, and
+reported ratio.
 
 \begin{table}[ht]
 \centering
 \caption{Deferred and eager lazy-I/O benchmark evidence.}
 \label{tab:lazy-io-results}
-\begin{tabularx}{\textwidth}{
-  >{\raggedright\arraybackslash}p{0.29\textwidth}
+\begingroup
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}
+  >{\raggedright\arraybackslash}p{0.36\textwidth}
   r
   r
-  >{\raggedright\arraybackslash}X}
+  >{\raggedright\arraybackslash}X@{}}
 \textbf{Metric} & \textbf{deferred} & \textbf{eager} &
 \textbf{reported ratio}\\
 \hline
@@ -1427,6 +1463,7 @@ intermediate materializations & 0 & 5 & 0\\
 payload bytes & 1,572,864 & 6,815,744 & 0.23077\\
 admitted bytes & 1,572,952 & 6,816,272 & 0.23076\\
 \end{tabularx}
+\endgroup
 \end{table}
 
 The timing comparison in the last column is the median of the twelve paired

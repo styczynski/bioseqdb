@@ -14,17 +14,25 @@ materialize the declared result shape.  Catalog objects, configuration,
 permissions, documentation, and extension dependencies add further copies of
 the same facts.
 
-In the original arrangement these facts were distributed between a
-handwritten installation script, PostgreSQL macros, C++ conversion code,
-catalog constants, PostgreSQL configuration-variable (GUC) registration calls,
-tuple deformation code, and documentation.  Each copy could be locally
-reasonable and still disagree with another.  A function rename, for example,
-could change the SQL name without changing \texttt{prosrc}.  A new nullable
-parameter could be added to SQL while the wrapper continued to call
-\texttt{PG\_GETARG\_*} unconditionally.  A table column could move while an
-\texttt{Anum\_*} constant retained the former ordinal.  These failures are
-difficult to detect by reading one file because the defect is a relationship
-between files.
+In the original arrangement these facts were distributed among:
+
+\begin{itemize}
+  \item a handwritten installation script.
+  \item PostgreSQL macros.
+  \item C++ conversion code.
+  \item catalog constants.
+  \item PostgreSQL configuration-variable (GUC) registration calls.
+  \item tuple deformation code.
+  \item documentation.
+\end{itemize}
+
+Each copy could be locally reasonable and still disagree with another.  A
+function rename, for example, could change the SQL name without changing
+\texttt{prosrc}.  A new nullable parameter could be added to SQL while the
+wrapper continued to call \texttt{PG\_GETARG\_*} unconditionally.  A table
+column could move while an \texttt{Anum\_*} constant retained the former
+ordinal.  These failures are difficult to detect by reading one file because
+the defect is a relationship between files.
 
 The final BioSeqDB design treats the C++ declaration as the semantic owner and
 generates the redundant PostgreSQL surface from compiler-observed facts.  This
@@ -124,7 +132,8 @@ entire analysis on every edit.
     {PREPARE: normalized compile database, module closure,
      content-keyed PCM and provenance manifest};
   \node[data] (ast) at (0,3.10)
-    {Clang structural index: unified symbol resolution (USR) identifiers,
+    {Clang abstract syntax tree (AST) structural index:
+     unified symbol resolution (USR) identifiers,
      declarations, attributes, types, fields, parameters, conditions,
      documentation};
   \node[data] (ir) at (0,1.95)
@@ -165,7 +174,7 @@ handles and proves the descriptor hash common to the production and
 \texttt{BIOSEQ\_TEST\_INDEXES} profiles.  \textsc{Final} scans the remaining
 owners after their support modules are available and emits the complete SQL,
 manifest, and entrypoint set.  The configured profiles have different active
-ASTs, so conditional test declarations cannot leak into production merely
+abstract syntax trees (ASTs), so conditional test declarations cannot leak into production merely
 because both appear in the source text.
 
 Generated production C++ is always a named-module \texttt{.cppm} artifact.
@@ -306,23 +315,39 @@ code described in Chapter~10 implement those semantics.
 
 \subsection{Why text scanning is insufficient}
 
-C++ attributes may span lines, contain nested aggregate initializers, refer to
-constants or types, and appear on functions, parameters, fields, aliases,
-enumerators, or static members.  Comments and raw strings may contain text
-which resembles an attribute.  Conditional compilation can make the same
-source path denote different declarations in the production and test
-profiles.  A line-oriented parser cannot resolve these cases reliably.
+C++ attributes may span lines and contain nested aggregate initializers.  They
+may refer to constants or types.  They may also appear on functions,
+parameters, fields, aliases, enumerators, or static members.  Comments and raw
+strings may contain text which resembles an attribute.  Conditional
+compilation can make the same source path denote different declarations in the
+production and test profiles.  A line-oriented parser cannot resolve these
+cases reliably.
 
 The module
 \path{main/codegen/clang_structural/model.cppm} defines a compiler-independent
 wire model.  Its \texttt{attribute\_record} carries the qualified name,
 argument text, target USR, placement, and source ranges.  A
-\texttt{declaration\_record} adds the stable USR, declaration kind, qualified
-and enclosing names, signature, return type, initializer, active condition,
-owning module, parameter records, documentation, and export state.  Aggregate
-records carry ordered field facts and structural errors.  A translation unit
-also records its source SHA-256, compiler profile, Clang version, and tokens.
-No Clang AST pointer or \texttt{APValue} crosses this boundary.
+\texttt{declaration\_record} adds the following fields:
+
+\begin{description}
+  \item[Stable USR.] The compiler-derived declaration identity.
+  \item[Declaration kind.] The kind assigned to the declaration.
+  \item[Qualified and enclosing names.] The declaration name and its owner
+  context.
+  \item[Signature.] The compiler-observed declaration signature.
+  \item[Return type.] The declared result type.
+  \item[Initializer.] The compiler-observed initializer material.
+  \item[Active condition.] The condition selected by the build profile.
+  \item[Owning module.] The named module which owns the declaration.
+  \item[Parameter records.] The ordered parameter facts.
+  \item[Documentation.] The documentation associated with the declaration.
+  \item[Export state.] Whether the declaration is exported.
+\end{description}
+
+Aggregate records carry ordered field facts and structural errors.  A
+translation unit also records its source Secure Hash Algorithm 256 (SHA-256)
+digest, compiler profile, Clang version, and tokens.  No Clang AST pointer or
+\texttt{APValue} crosses this boundary.
 
 The public functions in
 \path{main/codegen/clang_structural/index.cppm} make the authority distinction
@@ -370,11 +395,12 @@ build trees and both profiles could coexist.
 The structural implementation is isolated in one module implementation unit
 whose global module fragment includes Clang and LLVM headers.  The exported
 model contains only standard-library and project value types.  Consequently a
-generator interface built under the prescribed GCC and libstdc++ configuration
-would not serialize Clang implementation types, while the Clang structural pass
-still has the AST and token information needed for exact collection.  The
-executed local qualification is narrower.  SQL structural collection uses the
-configured, pinned Clang path.  The 23 July 2026 direct-annotation review,
+generator interface built under the prescribed GNU Compiler Collection (GCC)
+and libstdc++ configuration would not serialize Clang implementation types,
+while the Clang structural pass still has the AST and token information needed
+for exact collection.  The executed local qualification is narrower.  SQL
+structural collection uses the configured, pinned Clang path.  The 23 July 2026
+direct-annotation review,
 \texttt{DOC0389}, explicitly records no local GCC compilation
 proof.\footnote{\texttt{DOC0389}, ``DOC0388 direct SQL annotation correction
 review,'' 23 July 2026,
@@ -434,12 +460,21 @@ extension without pretending that one installation schema is universal.
 
 \subsection{Dependencies and deterministic ordering}
 
-Edges arise from explicit \texttt{depends} references, declaration-reference
-options, \texttt{type\_of<T>}, enclosing companions, schema ownership,
-operator and opclass relationships, access-method roles, and parsed checked
-SQL bodies.  Ambiguous references are rejected.  Dependencies are stored as
-stable identities and sorted, making the graph independent of input discovery
-order.
+Edges arise from:
+
+\begin{itemize}
+  \item explicit \texttt{depends} references.
+  \item declaration-reference options.
+  \item \texttt{type\_of<T>}.
+  \item enclosing companions.
+  \item schema ownership.
+  \item operator and opclass relationships.
+  \item access-method roles.
+  \item parsed checked SQL bodies.
+\end{itemize}
+
+Ambiguous references are rejected.  Dependencies are stored as stable
+identities and sorted, making the graph independent of input discovery order.
 
 The graph may contain legitimate strongly connected components, such as
 catalog objects that require shell and definition phases.  Other cycles are
@@ -488,13 +523,31 @@ rule or let a valid graph reorder a reviewed script unnecessarily.
 
 \subsection{SQL and module facets}
 
-The SQL renderer projects the normalized graph into schemas, tables,
-sequences, functions, procedures, types, casts, operators, aggregates,
-operator classes, access methods, views, privileges, comments, configuration
-dumps, and the bounded typed install actions.  Clause spelling and property
-presence remain explicit where PostgreSQL distinguishes omission from a
-specified default.  Checked SQL bodies are parsed in the permitted entity
-contexts.  There is no general raw statement escape hatch.
+The SQL renderer projects the normalized graph into:
+
+\begin{itemize}
+  \item schemas.
+  \item tables.
+  \item sequences.
+  \item functions.
+  \item procedures.
+  \item types.
+  \item casts.
+  \item operators.
+  \item aggregates.
+  \item operator classes.
+  \item access methods.
+  \item views.
+  \item privileges.
+  \item comments.
+  \item configuration dumps.
+  \item bounded typed install actions.
+\end{itemize}
+
+Clause spelling and property presence remain explicit where PostgreSQL
+distinguishes omission from a specified default.  Checked SQL bodies are parsed
+in the permitted entity contexts.  There is no general raw statement escape
+hatch.
 
 One source owner can produce several facets.  A routine may produce an SQL
 statement, a C entrypoint, documentation, and a manifest row.  A table may
@@ -534,7 +587,7 @@ Profile-invariant generated \texttt{.cppm} &
 Resolves declaration-derived relation identities with expected relkind and
 fresh catalog validation. \\
 Audit ledgers &
-Checked JSON, TSV, and generated evidence &
+Checked JSON, tab-separated values (TSV), and generated evidence &
 Joins logical owners to physical statements, C symbols, result rows, GUCs,
 safety sites, and installed catalog objects. \\
 \bottomrule
@@ -654,11 +707,27 @@ to perform the other's task.
 
 \subsection{Manifests as joinable evidence}
 
-The manifest renderer emits repository-normalized paths, source hashes,
-compiler profile and signature, entity options, stable and installed
-identities, dependencies, generated artifacts, fmgr owner and converter keys,
-result rows, and GUC descriptors.  Timestamps, process addresses, and
-machine-specific build paths are excluded from canonical content.
+The manifest renderer emits:
+
+\begin{description}
+  \item[Repository-normalized paths.] Source locations represented relative to
+  the repository.
+  \item[Source hashes.] Content identities for the source inputs.
+  \item[Compiler profile and signature.] The selected compiler configuration
+  and its identity.
+  \item[Entity options.] The normalized options associated with each entity.
+  \item[Stable and installed identities.] The relocation-independent and
+  installation-resolved object identities.
+  \item[Dependencies.] The resolved stable identities required by the entity.
+  \item[Generated artifacts.] The outputs owned by the entity.
+  \item[Fmgr owner and converter keys.] The generated boundary owner and
+  conversion selections.
+  \item[Result rows.] The ordered result-shape records.
+  \item[GUC descriptors.] The generated configuration-variable records.
+\end{description}
+
+Timestamps, process addresses, and machine-specific build paths are excluded
+from canonical content.
 
 These records support checks which a textual SQL diff cannot express:
 
@@ -918,11 +987,20 @@ definitions, and the required nullable \texttt{age interval} output in
 The focused regression selection passed four cases and 121 assertions.  The
 final unfiltered unit and integration qualification executed 1,326 cases:
 1,323 passed, none failed, and three were skipped.  All 4,449,081 executed
-assertions passed.  A disposable PostgreSQL 17 database then proved extension
-creation and removal, absence of PL/pgSQL, the 63 visible GUCs, standardized
-BPCHAR names, scalar/vector comparison parity, selection of
-\texttt{Custom Scan (BioseqScan)}, metadata and shard results, vacuum
-preservation, orphan reaping, and generated routine shapes.
+assertions passed.  A disposable PostgreSQL 17 database then proved:
+
+\begin{enumerate}
+  \item extension creation and removal.
+  \item absence of PL/pgSQL.
+  \item the 63 visible GUCs.
+  \item standardized BPCHAR names.
+  \item scalar/vector comparison parity.
+  \item selection of \texttt{Custom Scan (BioseqScan)}.
+  \item metadata and shard results.
+  \item vacuum preservation.
+  \item orphan reaping.
+  \item generated routine shapes.
+\end{enumerate}
 
 The code-generation sign-off wrote \texttt{report\_192.json} after completing
 13 benchmark groups, 79 execution tuples, and 392 populated cells.  The process

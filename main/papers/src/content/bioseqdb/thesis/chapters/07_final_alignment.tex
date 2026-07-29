@@ -53,6 +53,41 @@ route-admission identity, not evidence that the CPU Block recurrence executed.
 BioSeqDB records execution proofs and fails closed so that these two meanings
 cannot be silently conflated.
 
+\begin{table}[H]
+\centering
+\caption{Current production source map for final alignment.}
+\label{tab:final-alignment-source-map}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.24\linewidth}
+  >{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Responsibility} & \textbf{Current source}\\
+\midrule
+CIGAR representation and replay &
+\path{main/bioseq/backend/sequences/cigar.cppm}\\
+KSW2 implementation &
+\path{main/bioseq/backend/alignment_hwy/ksw2.cppm}\\
+Block Aligner implementation &
+\path{main/bioseq/backend/alignment_hwy/block_aligner.cppm}\\
+Batched KSW2 execution &
+\path{main/bioseq/backend/alignment_hwy/ksw2_batched.cppm}\\
+Region and anchor integration &
+\path{main/bioseq/backend/pipeline/minimap_port.cppm}\\
+Pipeline-stage admission &
+\path{main/bioseq/backend/pipeline/pipe.cppm}\\
+GPU Phase C interface &
+\path{main/bioseq/backend/gpu/vulkan/phase_c_abi.cppm}\\
+GPU shader compilation &
+\path{main/bioseq/backend/gpu/vulkan/shader_compiler.cppm}\\
+GPU execution runtime &
+\path{main/bioseq/backend/gpu/vulkan/runtime.cppm}\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 \section{Affine-gap dynamic programming}
 \label{sec:final-alignment-affine}
 
@@ -289,11 +324,18 @@ Block Aligner to implement different phase contracts.
 \subsection{Where the port intentionally stops matching minimap2}
 
 The inspected minimap2 reference contains more policy than the three boxes in
-Figure~\ref{fig:three-phase-alignment}. It handles ignored and tandem seeds,
-long-join bandwidth expansion, short-read ungapped shortcuts, splice junction
-scores, RNA-specific paths, an approximate first pass followed by
-\texttt{mm\_test\_zdrop}, inversion Z-drop, and region splitting after a
-dropped gap. The current BioSeqDB path implements the ordinary DNA
+Figure~\ref{fig:three-phase-alignment}. It handles:
+\begin{itemize}
+    \item ignored and tandem seeds,
+    \item long-join bandwidth expansion,
+    \item short-read ungapped shortcuts,
+    \item splice-junction scores,
+    \item RNA-specific paths,
+    \item an approximate first pass followed by \texttt{mm\_test\_zdrop},
+    \item inversion Z-drop, and
+    \item region splitting after a dropped gap.
+\end{itemize}
+The current BioSeqDB path implements the ordinary DNA
 seed-to-seed and end-extension core. It does not contain the splice, long-join,
 inversion-retry, or second-pass logic in its alignment modules. Consequently,
 ``minimap2-derived'' is more accurate than ``minimap2-equivalent'' for those
@@ -912,11 +954,16 @@ follows:
     symbols, and constructs the SQL result.
 \end{enumerate}
 
-The selected all-GPU tuple is deliberately narrow. Vulkan must be enabled,
-GPU seed lookup and the fused frontend must be selected, the target index must
-be built on the GPU, minimizer extraction must be the Vulkan minimap-integer
-variant, chaining must be Vulkan tiled DP, and the base-alignment selector
-must be Block Aligner. Divergence, mapping quality, exact edit filtering, and
+The selected all-GPU tuple is deliberately narrow. It requires:
+\begin{enumerate}
+    \item Vulkan to be enabled,
+    \item GPU seed lookup and the fused frontend to be selected,
+    \item the target index to be built on the GPU,
+    \item minimizer extraction to use the Vulkan minimap-integer variant,
+    \item chaining to use Vulkan tiled DP, and
+    \item the base-alignment selector to use Block Aligner.
+\end{enumerate}
+Divergence, mapping quality, exact edit filtering, and
 the prefilter are excluded from this dedicated tuple. CIGAR additionally
 requires \texttt{vulkan\_extend\_enabled}. If any selected component cannot
 execute, the statement errors before entering the generic CPU/SIMD pipeline.
@@ -1147,9 +1194,9 @@ construction remain.
 
 The 300\,Mbp coordinate case gives a different view of amortization. Its GPU
 region time was 3.857821\,s versus 25.612293\,s for the SIMD control, a
-6.639-fold region speedup. Total wall time improved by 2.432-fold because the
-GPU path also spent approximately 12.082\,ms in query sketching,
-1547.931\,ms in target deduplication, 785.808\,ms in index building, and
+6.639-fold region speedup. Total wall time improved by 2.432-fold. The GPU
+path spent approximately 12.082\,ms in query sketching and 1547.931\,ms in
+target deduplication. It spent another 785.808\,ms in index building and
 70.653\,ms in seed/chaining runtime. It processed 608 problems in 38 waves,
 built 38 segment indexes, and reused them 570 times.
 

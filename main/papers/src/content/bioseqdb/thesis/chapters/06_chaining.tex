@@ -22,6 +22,35 @@ increasing instruction-cache pressure.  The GPU path changes the candidate set
 for very long ranges.  BioSeqDB therefore exposes the implementations as
 explicit policies.
 
+\begin{table}[H]
+\centering
+\caption{Current production source map for chaining.}
+\label{tab:chaining-source-map}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.24\linewidth}
+  >{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Responsibility} & \textbf{Current source}\\
+\midrule
+Anchor layout and order &
+\path{main/bioseq/backend/sequences/chaining/chaining_utils.cppm}\\
+Scalar chaining &
+\path{main/bioseq/backend/sequences/chaining/chaining_scalar.cppm}\\
+RMQ chaining &
+\path{main/bioseq/backend/sequences/chaining/chaining_rmq.cppm}\\
+SIMD chaining policies &
+\path{main/bioseq/backend/sequences/chaining/chaining_simd.cppm}\\
+Vulkan chaining &
+\path{main/bioseq/backend/sequences/chaining/chaining_vulkan.cppm}\\
+Region integration &
+\path{main/bioseq/backend/pipeline/minimap_port.cppm}\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 \section{The geometric problem}
 \label{sec:chaining-geometry}
 
@@ -29,10 +58,14 @@ After seed lookup, BioSeqDB represents a hit by an anchor
 \[
   a_i=(r_i,q_i,\sigma_i,\ell_i,g_i,\phi_i),
 \]
-where \(r_i\) and \(q_i\) are the reference and query end coordinates,
-\(\sigma_i\) is the strand, \(\ell_i\) is the query span contributed by the
-seed, \(g_i\) is the query segment identifier, and \(\phi_i\) contains the
-remaining flags.  The current C++ object occupies 24 bytes.  Both positions are
+\begin{description}
+    \item[\(r_i,q_i\)] Reference and query end coordinates.
+    \item[\(\sigma_i\)] Strand.
+    \item[\(\ell_i\)] Query span contributed by the seed.
+    \item[\(g_i\)] Query segment identifier.
+    \item[\(\phi_i\)] Remaining flags.
+\end{description}
+The current C++ object occupies 24 bytes.  Both positions are
 stored as full 64-bit values, the strand has a dedicated 32-bit field, the span
 is an 8-bit value, and the segment and flags occupy the remaining fields.  The
 64-bit physical storage matters for database-resident references because a
@@ -53,7 +86,7 @@ decoys.  A deletion relative to the reference increases \(r\) faster than
 base by base.  It merely pays a gap cost and passes the selected region to the
 final aligner.
 
-\begin{figure}[tb]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[x=0.075cm,y=0.055cm]
   \draw[->] (0,0) -- (78,0) node[right] {reference coordinate \(r\)};
@@ -698,14 +731,17 @@ a signed 16-bit relative distance.  The global predecessor array stores a
 signed 64-bit relative distance.
 
 The copied wrapper compiles the chaining search cap as
-\texttt{MAX\_ITER\_CHAIN=5000}.  Its reference-distance and query-distance
-limits are both 5000.  The bandwidth is zero, and the gap-penalty scale is
-\(0.12\).  The wrapper records \texttt{max\_chain\_skip=0}, while the DP path
-assumes a query span of 15.  No \texttt{max\_chain\_skip} argument reaches the
-kernel.  The kernel therefore does not implement minimap2's visited-generation
-heuristic and instead updates source-to-target scores within the fixed
-iteration cap.  Agreement with minimap2 endpoints is consequently an empirical
-property of an evaluated corpus, not semantic identity.
+\texttt{MAX\_ITER\_CHAIN=5000}. The initial dynamic-programming pass uses
+reference-distance and query-distance limits of 5000. The later RMQ pass uses
+limits of 20000 for both distances, while the compile-time
+\texttt{MAX\_ITER\_CHAIN} cap remains 5000. The bandwidth is zero, and the
+gap-penalty scale is \(0.12\). The wrapper records
+\texttt{max\_chain\_skip=0}, while the initial DP path assumes a query span of
+15. No \texttt{max\_chain\_skip} argument reaches the kernel. The kernel
+therefore does not implement minimap2's visited-generation heuristic and
+instead updates source-to-target scores within the fixed iteration cap.
+Agreement with minimap2 endpoints is consequently an empirical property of an
+evaluated corpus, not semantic identity.
 
 G3SA keeps its bulk RMQ, backtracking, and compaction intermediates on the GPU,
 which reduces round trips through the mapping pipeline.  It does not eliminate
@@ -799,9 +835,7 @@ stale.
 Table~\ref{tab:g3sa-vulkan-comparison} separates the shared research lineage
 from the execution contracts that differ between the two implementations.
 
-\newpage
-\flushbottom
-\begin{table}[H]
+\begin{table}[htbp]
 \centering
 \caption{G3SA and BioSeqDB Vulkan chaining are related designs, not equivalent
 implementations.}
@@ -1059,18 +1093,22 @@ Different endpoint offsets prevent a speed comparison, and no equivalent GPU
 observation exists for the more recent source.}
 \label{tab:historical-gpu-simd-context}
 \footnotesize
-\begin{tabularx}{\linewidth}{p{0.19\linewidth}p{0.31\linewidth}rrX}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.17\linewidth}
+  >{\raggedright\arraybackslash}X
+  >{\raggedleft\arraybackslash}p{0.17\linewidth}
+  >{\raggedleft\arraybackslash}p{0.10\linewidth}@{}}
 \toprule
-Route & Artifact & Wall time & Offset & Status\\
+\textbf{Route} & \textbf{Artifact} & \textbf{Wall time} & \textbf{Offset}\\
 \midrule
 GPU coordinate-only &
 \path{bioseq_bench_e2e_chain_probe_gpu_coord_only/report_7.json} &
-\(4.414989792\) s & \(48\) bp &
-Historical whole-region observation\\
+\(4.414989792\) s & \(48\) bp\\
 SIMD &
 \path{bioseq_bench_e2e_chain_probe_simd_current/report_1.json} &
-\(4.928971958\) s & \(3\) bp &
-Historical whole-region observation\\
+\(4.928971958\) s & \(3\) bp\\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -1101,9 +1139,16 @@ approximate, experimental, or projection-dependent.
 \caption{Chaining modes and their intended roles in the final system.}
 \label{tab:chaining-policy}
 \small
-\begin{tabular}{p{0.14\textwidth}p{0.22\textwidth}p{0.23\textwidth}p{0.25\textwidth}}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.14\linewidth}
+  >{\raggedright\arraybackslash}p{0.20\linewidth}
+  >{\raggedright\arraybackslash}p{0.23\linewidth}
+  >{\raggedright\arraybackslash}X@{}}
 \toprule
-Mode & Contract & Principal advantage & Current boundary\\
+\textbf{Mode} & \textbf{Contract} & \textbf{Principal advantage} &
+\textbf{Current boundary}\\
 \midrule
 Scalar MM2 &
 Default semantic baseline &
@@ -1127,7 +1172,7 @@ Full-width shader checks and standalone or resident coordinate routes &
 Range thinning, 3000 cap, positive max-skip batch stop, no rescue, standalone
 at-most-16 best-unvisited start-probe reducer, no fallback\\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 This separation prevents three category errors.  A benchmark-qualified

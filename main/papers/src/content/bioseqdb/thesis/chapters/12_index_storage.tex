@@ -1,16 +1,67 @@
 % Chapter 12 draft: persistent sequence indexes.
 % Research chronology and mandatory DOC0287--DOC0312 audit:
 %   research_audit/ch12_docs.md
-% Current-source anchors:
-%   backend/sequences/indexing/sequence_index_type.cppm
-%   backend/sequences/indexing/{minimizer_hashmap_index,
-%       minimizer_sequence_index,minimizer_hashmap_format6,mpf5_image_v2}.cppm
-%   backend/pg/storage_pg/indexing/{index_admin_pg,index_chunked_storage_pg,
-%       index_residency_pg,sorted_pair_runs_pg}.cppm
-%   backend/pg/scheduler/dispatch_processor.cppm
 
 \section{An index is derived database state}
 \label{sec:index-storage-role}
+
+Table~\ref{tab:index-storage-source-map} makes the current implementation
+anchors for this chapter explicit. The paths identify the authoritative
+sources rather than historical line numbers.
+
+\begin{table}[!htbp]
+  \centering
+  \scriptsize
+  \setlength{\tabcolsep}{3pt}
+  \renewcommand{\arraystretch}{1.08}
+  \caption{Current implementation reference map for persistent sequence
+  indexes.}
+  \label{tab:index-storage-source-map}
+  \begin{tabularx}{\linewidth}{
+      >{\raggedright\arraybackslash\hspace{0pt}}p{.48\linewidth}
+      >{\raggedright\arraybackslash\hspace{0pt}}X}
+    \toprule
+    File & Principal symbols or responsibility \\
+    \midrule
+    \path{main/bioseq/backend/sequences/indexing/sequence_index_type.cppm} &
+    \texttt{SequenceIndexType}, \texttt{IndexUpdatePolicy}, and
+    \texttt{IndexReadRequirement}: index kinds, mutation policy, and query
+    requirements. \\
+    \path{main/bioseq/backend/sequences/indexing/minimizer_hashmap_index.cppm} &
+    \texttt{MinimizerHashmapFragmentIndex},
+    \texttt{MinimizersPerFragmentIndex}, and the Format~5 compatibility and
+    cold-loading types. \\
+    \path{main/bioseq/backend/sequences/indexing/minimizer_sequence_index.cppm} &
+    \texttt{MinimizerSequenceMergedIndex} and \texttt{MpsSpillAuthority}:
+    sequence-wide construction, bounded spill, and replay. \\
+    \path{main/bioseq/backend/sequences/indexing/minimizer_hashmap_format6.cppm} &
+    \texttt{MinimizerFormat6SelectiveReader} and
+    \texttt{MinimizerFormat6LogicalEncoder}: hash-major selective streams and
+    memory admission. \\
+    \path{main/bioseq/backend/sequences/indexing/mpf5_image_v2.cppm} &
+    \texttt{ValidatedMpf5V2ImageView} and
+    \texttt{validate\_mpf5\_v2\_image}: the fixed-endian sealed-image ABI and
+    validation. \\
+    \path{main/bioseq/backend/pg/storage_pg/indexing/index_admin_pg.cppm} &
+    \texttt{pg\_supported\_indexes} and
+    \texttt{ReadyMinimizerGenerationPublicationPg}: policy, build
+    orchestration, and publication. \\
+    \path{main/bioseq/backend/pg/storage_pg/indexing/index_chunked_storage_pg.cppm} &
+    \texttt{IndexStorageFragmentGenerationRowSinkPg} and
+    \texttt{IndexStorageFragmentGenerationReadSessionPg}: relation schemas,
+    chunked generation I/O, and sealed sidecars. \\
+    \path{main/bioseq/backend/pg/storage_pg/indexing/index_residency_pg.cppm} &
+    \texttt{IndexChunkKey}, \texttt{AssembledIndexKey}, and the backend-local
+    chunk and assembled-index caches. \\
+    \path{main/bioseq/backend/pg/storage_pg/indexing/sorted_pair_runs_pg.cppm} &
+    \texttt{SortedPairRunStore}: admitted in-memory runs, PostgreSQL
+    \texttt{BufFile} spill, and bounded merge. \\
+    \path{main/bioseq/backend/pg/scheduler/dispatch_processor.cppm} &
+    \texttt{BatchProcessor}: effective-index selection and prepared CPU or
+    accelerator dispatch. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 A standalone mapper can treat its index as a file generated from another file.
 The user decides when to rebuild it, gives the resulting pathname to the next
@@ -502,9 +553,17 @@ key
    \texttt{position\_segment},\texttt{chunk\_no})
 \]
 and fill factor 90. Creation uses the source relation's tablespace. The reader
-inspects the relation descriptor and rejects a sidecar whose number, order,
-types, nullability, storage modes, access method, or primary-key definition do
-not match the expected schema.
+inspects the relation descriptor and rejects a sidecar unless all of the
+following properties match the expected schema:
+
+\begin{itemize}
+  \item column count and order,
+  \item column types,
+  \item nullability,
+  \item storage properties,
+  \item access method, and
+  \item primary-key definition.
+\end{itemize}
 
 The choice of an unlogged relation is deliberate. A minimizer index is
 reproducible from durable sequence data, and logging every derived payload byte
@@ -891,11 +950,20 @@ cannot alias the old device allocation.
 \subsection{The useful numerator is admitted memory}
 
 Reporting the serialized index size is not enough to establish that a database
-query is bounded. During a cold read the backend can simultaneously own a
-directory, control rows, postings, decoded occurrence arrays, a transient hash
-lookup, query-occurrence tables, I/O slabs, and accelerator staging. Some
-allocations are visible to PostgreSQL memory contexts, some belong to C++
-containers, and some are device memory. A correct budget must cover the
+query is bounded. During a cold read the backend can simultaneously own:
+
+\begin{itemize}
+  \item directory and control metadata,
+  \item postings,
+  \item decoded occurrence arrays,
+  \item a transient hash lookup,
+  \item query-occurrence tables,
+  \item I/O slabs, and
+  \item accelerator staging buffers.
+\end{itemize}
+
+Some allocations are visible to PostgreSQL memory contexts, some belong to
+C++ containers, and some are device memory. A correct budget must cover the
 high-water overlap, not just the largest final vector.
 
 BioSeqDB uses explicit memory permits for the significant owners. Format~6
@@ -1017,8 +1085,9 @@ persistence throughput.
 
 At execution time the scheduler does not simply ask “does a table named
 \texttt{mpf} exist?” It resolves an effective index policy for each sequence
-column and combines it with the query's read requirement, algorithm
-compatibility, source identity, memory admission, and backend availability.
+column. It then combines that policy with the query's read requirement,
+algorithm compatibility, source identity, memory admission, and backend
+availability.
 Algorithm~\ref{alg:index-runtime-selection} states the main decision shape.
 
 \begin{algorithm}[H]
@@ -1606,10 +1675,18 @@ file.
 BioSeqDB's persistent indexing work began with a conventional idea: serialize
 the target's minimizer hash table so the next query can skip rebuilding it.
 The database setting exposed the missing parts of that idea. A useful index
-must identify the source and algorithm that produced it, publish atomically,
-coexist with readers of an older version, survive errors without appearing
-complete, load under a memory bound, select only query-relevant postings when
-possible, and convert safely into CPU and GPU views.
+must satisfy all of the following requirements:
+
+\begin{enumerate}
+  \item Identify the source and algorithm that produced it.
+  \item Publish atomically.
+  \item Coexist with readers of an older version.
+  \item Survive errors without appearing complete.
+  \item Load under a memory bound.
+  \item Select only query-relevant postings when possible.
+  \item Convert safely into a CPU view.
+  \item Convert safely into a GPU view.
+\end{enumerate}
 
 The final architecture combines several retained decisions:
 

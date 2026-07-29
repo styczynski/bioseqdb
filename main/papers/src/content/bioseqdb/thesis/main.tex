@@ -4,7 +4,6 @@
 %   pl: Zintegrowane i praktyczne rozwiązanie bazodanowe do przechowywania i wydajnego przetwarzania dużych zbiorów danych genomicznych
 %   en: An integrated and practical database solution for storage and efficient processing of large genomic datasets
 % major: Computer Science
-% supervisor: To be supplied by the author
 % subject: !socrateserasmus 11.3
 % classification:
 %   - Applied computing
@@ -125,13 +124,12 @@
     minimap2-derived seeding, chaining, and extension pipeline inside database
     scans.
     The work is both algorithmic and systems-oriented.  It develops
-    alphabet-generic bit-packed sequence views, scalar and
-    single instruction, multiple data (SIMD) minimizer extraction, and
-    implementations for graphics processing units (GPUs) using Vulkan for
-    selected sketching and chaining operations, bounded base-level extension
-    based on
-    established dynamic-programming kernels, and optional SneakySnake and
-    GateKeeper prefilters.  It also develops persistent database-resident
+    alphabet-generic bit-packed sequence views.  It provides scalar and
+    single instruction, multiple data (SIMD) minimizer extraction, plus
+    graphics processing unit (GPU) implementations using Vulkan for selected
+    sketching and chaining operations.  It also provides bounded base-level
+    extension based on established dynamic-programming kernels and optional
+    SneakySnake and GateKeeper prefilters.  It also develops persistent database-resident
     minimizer indexes, bounded sequence ingestion, external sequence
     providers, a cache with request coordination, and structural
     generation of PostgreSQL Structured Query Language (SQL) installation code
@@ -246,7 +244,8 @@
     disagree, the implementation and the most recent dated evidence take
     precedence.  Numerical claims are tied to a named benchmark report
     and its configuration.  Comparisons with minimap2, SIMD-Minimizers,
-    G3SA, Block Aligner, SneakySnake, GateKeeper, ParadeDB, and Citus
+    the G3SA GPU seed--chain--extend system, Block Aligner, SneakySnake,
+    GateKeeper, ParadeDB, and Citus
     Columnar distinguish inherited mechanisms from BioSeqDB-specific
     changes.
 
@@ -311,6 +310,7 @@
 \if\dataeq{hasbibliography}{true}
   \begingroup
     \sloppy
+    \raggedright
     \setlength{\emergencystretch}{3em}
     \printbibliography[heading=bibintoc,title={References}]
   \endgroup
