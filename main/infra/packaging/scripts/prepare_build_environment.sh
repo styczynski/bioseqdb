@@ -249,6 +249,11 @@ install_vcpkg() {
     "${vcpkg_root}/bootstrap-vcpkg.sh" -disableMetrics
   fi
   mkdir -p "${vcpkg_cache}" "${vcpkg_registry_cache}"
+  if [[ ! -d "${vcpkg_registry_cache}/git/.git" ]]; then
+    rm -rf "${vcpkg_registry_cache}/git"
+    git clone --local --no-checkout \
+      "${vcpkg_root}" "${vcpkg_registry_cache}/git"
+  fi
   chmod -R a+rwX \
     "${vcpkg_root}" "${vcpkg_cache}" "${vcpkg_registry_cache}"
 }

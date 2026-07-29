@@ -440,6 +440,7 @@ class StaticContractTests(unittest.TestCase):
             'vcpkg_registry_cache="${tool_root}/vcpkg-registry-cache"',
             preparation,
         )
+        self.assertIn("git clone --local --no-checkout", preparation)
         self.assertGreaterEqual(len([line for line in preparation.splitlines() if "sha256=" in line]), 4)
 
     def test_explicit_package_O0_profile_relaxes_only_the_pipeline_guard(self):
