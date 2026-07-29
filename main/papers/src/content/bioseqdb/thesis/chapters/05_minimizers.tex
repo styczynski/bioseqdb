@@ -1731,7 +1731,9 @@ pipeline comparison \\
 Minimizer extraction began as a familiar rolling-hash loop and became a lesson
 in systems correctness. The observable object is not merely the minimum hash
 of a window. Its identity depends on:
+\noindent\begin{minipage}[t]{0.48\linewidth}
 \begin{itemize}
+  \setlength{\topsep}{2pt}
   \setlength{\itemsep}{0pt}
   \setlength{\parsep}{0pt}
   \item canonicalization,
@@ -1739,11 +1741,19 @@ of a window. Its identity depends on:
   \item tie direction,
   \item equal-hash $K$-mer identity,
   \item palindromes,
+\end{itemize}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\linewidth}
+\begin{itemize}
+  \setlength{\topsep}{2pt}
+  \setlength{\itemsep}{0pt}
+  \setlength{\parsep}{0pt}
   \item ambiguity resets,
   \item fragment ownership,
   \item position width, and
   \item the final flush.
 \end{itemize}
+\end{minipage}
 \end{samepage}
 ExactSimd and the compact Phase C route expose a chronological event stream.
 The PNT1 collector instead leaves cross-stream append order unspecified, while
@@ -1752,17 +1762,15 @@ implementation makes the minimap-compatible rules explicit. The two-stack
 work shows how to remove rescans without changing them, and its failures show
 that SIMD width alone does not provide a speedup.
 
-The current initializer-level CPU default is Scalar. ExactSimd retains the
-minimap-compatible contract as a production-targeted, explicitly selected
-all-SIMD route and fails closed when its execution proof is not accepted. PNT1
-is a separately versioned paper-derived alternative/prototype bound to manifest
-scheme $(1,1)$. Historical report 103 demonstrates a valid configuration, but
-newer evidence does not support presenting it as a wholesale replacement for
-ExactSimd. The GPU solution adopts G3SA's resident-pipeline insight
-\cite{g3sa_paper} and reconstructs the sketch around BioSeqDB's packed
-representations, reset semantics, and replay ownership. Its current oracle
-contract is exact for DNA4 and a bounded conservative superset for DNA5 and
-the tested DNA5/\texttt{u8}-packing route. Its compact route uses deterministic
+The initializer-level CPU default is Scalar. ExactSimd is a production-targeted,
+explicitly selected all-SIMD route with a minimap-compatible contract and
+fail-closed execution proof. PNT1 is a versioned paper-derived prototype bound
+to manifest scheme $(1,1)$. Report 103 validates one configuration, but newer
+evidence does not support replacing ExactSimd. The GPU route adopts G3SA's
+resident-pipeline insight~\cite{g3sa_paper} but reconstructs the sketch around
+BioSeqDB's packed representations, reset semantics, and replay ownership. Its
+oracle is exact for DNA4 and a bounded conservative superset for DNA5 and the
+tested DNA5/\texttt{u8}-packing route. Its compact route uses deterministic
 count/scan/emit allocation. Its sorted-pair persistence route uses atomic
 append followed by a stable device sort. Every route is accepted only when its
 seed scheme, storage proof, ownership, execution evidence, and downstream
