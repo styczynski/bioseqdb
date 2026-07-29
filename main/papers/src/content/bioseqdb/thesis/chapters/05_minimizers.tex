@@ -521,7 +521,7 @@ PNT1 collector.
 \begin{enumerate}
   \item Split \(S\) into eight logical streams. The packed kernel requests
     \(k+w-1\) bases of boundary context and rounds offset planning to
-    storage-unit boundaries; this is one base beyond the \(k+w-2\)
+    storage-unit boundaries. This is one base beyond the \(k+w-2\)
     biological minimum for complete windows.
   \item Initialize vector forward and reverse ntHash states and a
     \(w\)-slot ring.
@@ -808,7 +808,7 @@ For a static $W,K$, \texttt{TwoStackContinuationState} retains:
 \begin{itemize}
   \item at most $K-1$ normalized context codes;
   \item fewer than one SIMD block of pending codes together with their
-    position and valid-run metadata;
+    positions and valid-run lengths;
   \item at most $W-1$ candidate hash/raw/ordinal triplets;
   \item the current minimum;
   \item counters;
@@ -1734,29 +1734,18 @@ pipeline comparison \\
 Minimizer extraction began as a familiar rolling-hash loop and became a lesson
 in systems correctness. The observable object is not merely the minimum hash
 of a window. Its identity depends on:
-\noindent\begin{minipage}[t]{0.48\linewidth}
-\begin{itemize}
-  \setlength{\topsep}{2pt}
-  \setlength{\itemsep}{0pt}
-  \setlength{\parsep}{0pt}
-  \item canonicalization,
-  \item hash width,
-  \item tie direction,
-  \item equal-hash $K$-mer identity,
-  \item palindromes,
-\end{itemize}
-\end{minipage}\hfill
-\begin{minipage}[t]{0.48\linewidth}
-\begin{itemize}
-  \setlength{\topsep}{2pt}
-  \setlength{\itemsep}{0pt}
-  \setlength{\parsep}{0pt}
-  \item ambiguity resets,
-  \item fragment ownership,
-  \item position width, and
-  \item the final flush.
-\end{itemize}
-\end{minipage}
+\par\vspace{2pt}\noindent
+\begingroup
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\linewidth}{@{}r@{\hspace{0.5em}}>{\raggedright\arraybackslash}X
+  @{\hspace{1.2em}}r@{\hspace{0.5em}}>{\raggedright\arraybackslash}X@{}}
+\(\bullet\) & canonicalization & \(\bullet\) & hash width \\
+\(\bullet\) & tie direction & \(\bullet\) & equal-hash \(K\)-mer identity \\
+\(\bullet\) & palindromes & \(\bullet\) & ambiguity resets \\
+\(\bullet\) & fragment ownership & \(\bullet\) & position width \\
+\(\bullet\) & the final flush & & \\
+\end{tabularx}
+\endgroup
 \end{samepage}
 ExactSimd and the compact Phase C route expose a chronological event stream.
 The PNT1 collector instead leaves cross-stream append order unspecified, while

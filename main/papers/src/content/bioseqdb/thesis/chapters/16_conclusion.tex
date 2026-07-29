@@ -45,9 +45,10 @@ These are structural layers, not a second contribution list:
   work.  Admission, batching, resident state, and result proof are part of the
   route rather than hidden behind the same name.
   \item The database layer stores sequence fragments and index generations. It
-  loads packed sequence bodies through bounded streaming paths, with a current
-  record-sized FASTQ quality-scratch exception, and exposes remote providers. It
-  also turns alignment expressions into custom paths, plans, and scans.
+  loads packed sequence bodies through bounded streaming paths and exposes
+  remote providers. The current FASTQ quality scratch buffer remains
+  record-length-dependent. It also turns alignment expressions into custom
+  paths, plans, and scans.
   \item The boundary-generation layer derives SQL installation objects,
   fmgr entrypoints, row codecs, GUC bindings, catalog handles, and validation
   ledgers from structurally analyzed C++ sources.
@@ -627,7 +628,7 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
     Coordinate case \(2.432\times\), many-gap CIGAR case \(2.493\times\) &
     Both are dirty one-sample measurements.  The coordinate case did not
     establish exact row-set parity.  The CIGAR receipt establishes one GPU
-    extension dispatch, host-planned gridded-capacity allocation, accepted
+    extension dispatch, host-planned gridded traceback allocation, accepted
     CIGARs, zero fallback or decline, and host result construction.  It does
     not identify each shader-internal subpath or demonstrate persisted all-GPU
     CIGAR. \\

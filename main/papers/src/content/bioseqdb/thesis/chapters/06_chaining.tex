@@ -51,6 +51,7 @@ Region integration &
 \end{tabularx}
 \end{table}
 
+\begin{samepage}
 \section{The geometric problem}
 \label{sec:chaining-geometry}
 
@@ -65,6 +66,7 @@ After seed lookup, BioSeqDB represents a hit by an anchor
     \item[\(g_i\)] Query segment identifier.
     \item[\(\phi_i\)] Remaining flags.
 \end{description}
+\end{samepage}
 The current C++ object occupies 24 bytes.  Both positions are
 stored as full 64-bit values, the strand has a dedicated 32-bit field, the span
 is an 8-bit value, and the segment and flags occupy the remaining fields.  The

@@ -84,8 +84,8 @@ materialize one record or assembly segment. In contrast,
 multi-megabase record's length.  The current NCBI chunk size is
 \(1\,048\,572\) bases. It is four symbols below one Mi-symbol. Because the
 payload owns one-byte raw letters at this boundary, it is also four bytes below
-one MiB. The size is a multiple of 21, matching the DNA5 geometry with 64-bit
-storage units (21 symbols per unit) for which the default was chosen. Other
+one MiB. The default chunk size is a multiple of 21 because DNA5 in 64-bit
+storage units packs 21 symbols per unit. Other
 compilation profiles may end a chunk with a
 padded storage unit. A one-chunk
 look-ahead keeps the final non-empty chunk pending, so a record whose length is

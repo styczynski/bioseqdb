@@ -972,8 +972,8 @@ follows:
     without running the CPU \texttt{AlignStage}.
     \item If CIGAR is requested, the PostgreSQL scheduler packs only each
     selected query and target window into 32-bit symbol ranks and plans
-    traceback capacity from host-visible bounds. Exact, simple, greedy, and
-    dynamic-programming subpath selection occurs inside the shader.
+    traceback capacity from host-visible bounds. Inside the shader, subpath
+    selection follows an exact, simple, greedy, or dynamic-programming route.
     \item One Vulkan dispatch solves the batch. Results contain score,
     endpoints, a packed-CIGAR slice, and status. The host verifies every
     slice, replays generic \(M\) against the rank buffers to count equal
@@ -1017,11 +1017,16 @@ the shared scratch slice, walks until it crosses a tile boundary, then
 recomputes the next tile. Packed \(M/I/D\) runs are generated backward and
 reversed at completion.
 
-Several constrained scripts avoid DP altogether: exact equal-length spans,
-one-gap scripts, opposing deletion-plus-insertion or insertion-plus-deletion
-two-gap scripts, a bounded unit-gap walk, and a greedy anchored gap walk. Exact
-and recognized unit-gap jobs can reserve zero traceback words. The simple-gap
-search length is capped at 256 symbols, while repeated anchored or unit-gap
+Several constrained scripts avoid DP altogether:
+\begin{itemize}
+  \item exact equal-length spans
+  \item one-gap scripts
+  \item two-gap scripts that pair a deletion with an insertion in either order
+  \item a bounded unit-gap walk
+  \item a greedy anchored gap walk
+\end{itemize}
+Exact and recognized unit-gap jobs can reserve zero traceback words. The
+simple-gap search length is capped at 256 symbols, while repeated anchored or unit-gap
 discovery is capped at 64 operations. Greedy terminal-tail branches may append
 operations after that repeated-discovery check.
 
@@ -1200,7 +1205,7 @@ be treated as one uniform equivalence test.
   \node[align=center] at (2.50,-0.28) {16 queries\\300\,Mbp target};
 \end{tikzpicture}
 \caption{Workload-size pattern in the selected E2E evidence. The dashed line
-is break-even. A 512-job many-gap batch with host-planned gridded-capacity
+is break-even. A 512-job many-gap batch with host-planned gridded traceback
 storage is tied, while the two
 higher-work cases are consistent with amortization of PostgreSQL and Vulkan
 fixed costs. The one-sample cases do not isolate batch size or target size as
@@ -1382,10 +1387,10 @@ solution. The first idea of inter-sequence KSW2 batching stopped at scheduling
 and stitching. A Block interval of 32--256 was too expensive for the measured
 short-fill CPU workload, although it remains the SQL safety-oriented default.
 The first bounded GPU CIGAR route was insufficient for long many-gap cases,
-which motivated gridded-capacity support. After that support was added, the
-512-job many-gap case did not beat SIMD. Measured fixed costs remained. The final system therefore
-retains multiple routes and reports the break-even behavior instead of
-declaring one accelerator universally faster.
+which motivated support for gridded traceback capacity. After that support was
+added, the 512-job many-gap case did not beat SIMD. Measured fixed costs
+remained. The final system therefore retains multiple routes and reports the
+break-even behavior instead of declaring one accelerator universally faster.
 
 \subsection{Open technical limitations}
 
