@@ -83,8 +83,8 @@ install_debian_dependencies() {
 install_fedora_dependencies() {
   dnf install -y --allowerasing \
     autoconf autoconf-archive automake bison binutils ca-certificates cpio curl findutils flex \
-    gcc gcc-c++ gettext git gzip libcap libtool m4 make ninja-build openssl-devel \
-    patch pkgconf-pkg-config python3 rpm-build rsync tar unzip util-linux wget \
+    gcc gcc-c++ gettext git gzip kernel-headers libcap libtool m4 make ninja-build openssl-devel \
+    patch perl-IPC-Cmd pkgconf-pkg-config python3 rpm-build rsync tar unzip util-linux wget \
     xz zip zlib-devel \
     libX11-devel libXext-devel libXrandr-devel libXrender-devel libXi-devel \
     libXfixes-devel libXcursor-devel libXinerama-devel libxcb-devel \
