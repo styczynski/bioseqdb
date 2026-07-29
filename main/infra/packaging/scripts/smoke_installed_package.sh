@@ -95,6 +95,9 @@ install_opensuse_package() {
 }
 
 install_arch_package() {
+  # pacman 7's Landlock downloader sandbox cannot initialize under Docker's
+  # default seccomp profile. The smoke itself is already container-isolated.
+  sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
   pacman -Syu --noconfirm --needed ca-certificates util-linux vulkan-icd-loader postgresql
   if [[ "${postgres_major}" == "17" ]]; then
     pacman -S --noconfirm --needed postgresql-old-upgrade

@@ -33,9 +33,14 @@ debian: &debian
 arch: &arch
   package_type: "pacman"
   setup:
+    # Docker's default seccomp profile does not expose every Landlock syscall
+    # used by pacman 7's downloader sandbox. The build already runs in an
+    # isolated, disposable container, so disable only pacman's nested sandbox.
+    - "sed -i '/^\\[options\\]/a DisableSandbox' /etc/pacman.conf"
     # -Syu, not -Sy: partial upgrades break shared-library sonames on rolling distros.
     - "pacman -Syu --noconfirm --needed base-devel sudo rsync %{build_dependencies}"
   setup_repo:
+    - "sed -i '/^\\[options\\]/a DisableSandbox' /etc/pacman.conf"
     - "pacman -Syu --noconfirm --needed gnupg"
   cleanup:
     - "pacman -Scc --noconfirm"
