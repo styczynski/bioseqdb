@@ -296,11 +296,11 @@ from scalar cost metadata.
                  text width=3.1cm, fill=red!8},
   arrow/.style={-Latex, thick}
 ]
-\node[box] (parse) {Parser creates ordinary\\\texttt{FuncExpr(mmsearch)}};
+\node[box] (parse) {Parser creates ordinary\\{\footnotesize\texttt{FuncExpr(mmsearch)}}};
 \node[decision, right=of parse] (shape) {structural hooks find\\one supported
 semantic call?};
 \node[box, above=of parse] (support) {Independent scalar costing:\\
-\texttt{mmsearch\_support}\\reports startup \(100000\)};
+{\footnotesize\texttt{mmsearch\_support}}\\reports startup \(100000\)};
 \node[owner, below=of shape] (path) {Build honest-cost\\\texttt{CustomPath} and attach\\exact \texttt{RestrictInfo}};
 \node[unsafe, above=of shape] (fallback) {No owner constructed:\\ordinary body fails closed\\if execution reaches it};
 \node[owner, left=of path] (prune) {Finalize the path set:\\prune exact unowned copies};
