@@ -342,6 +342,7 @@ symbols.  These bounds do not imply that a source-backed rank is always
 \(O(1)\) in wall time.  A provider may need a fragment lookup or bounded I/O.
 The facade guarantees that it asks the provider only for the selected window.
 
+\raggedbottom
 \subsection{The bit-casted view}
 
 \texttt{bit\_casted\_view} in \texttt{sequences.cppm}, lines 726--866, is a
@@ -377,7 +378,6 @@ Table~\ref{tab:compact-operation-costs} consolidates the resulting cost and
 ownership boundaries.  It distinguishes constant-time adaptation from
 operations whose work scales with total or selected symbols.
 
-\raggedbottom
 \begin{table}[H]
 \centering
 \caption{Packed-range operations and their data movement.}
