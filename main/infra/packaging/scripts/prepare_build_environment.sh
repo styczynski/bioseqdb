@@ -14,6 +14,7 @@ readonly llvm_root="${tool_root}/llvm-${llvm_major}"
 readonly cmake_root="${tool_root}/cmake"
 readonly vcpkg_root="${tool_root}/vcpkg"
 readonly vcpkg_cache="${tool_root}/vcpkg-binary-cache"
+readonly vcpkg_registry_cache="${tool_root}/vcpkg-registry-cache"
 readonly cmake_cache_root=/opt/bioseq-package-cmake-cache
 
 die() {
@@ -247,8 +248,9 @@ install_vcpkg() {
       || die "vcpkg checkout did not resolve the pinned baseline"
     "${vcpkg_root}/bootstrap-vcpkg.sh" -disableMetrics
   fi
-  mkdir -p "${vcpkg_cache}"
-  chmod -R a+rwX "${vcpkg_root}" "${vcpkg_cache}"
+  mkdir -p "${vcpkg_cache}" "${vcpkg_registry_cache}"
+  chmod -R a+rwX \
+    "${vcpkg_root}" "${vcpkg_cache}" "${vcpkg_registry_cache}"
 }
 
 install_cmake

@@ -436,6 +436,10 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("kernel-headers", preparation)
         self.assertIn("patch perl pkgconf-pkg-config", preparation)
         self.assertIn("setcap cap_sys_nice=ep", preparation)
+        self.assertIn(
+            'vcpkg_registry_cache="${tool_root}/vcpkg-registry-cache"',
+            preparation,
+        )
         self.assertGreaterEqual(len([line for line in preparation.splitlines() if "sha256=" in line]), 4)
 
     def test_explicit_package_O0_profile_relaxes_only_the_pipeline_guard(self):
@@ -471,6 +475,10 @@ class StaticContractTests(unittest.TestCase):
         )
         self.assertIn(
             "reusing existing CMake/Ninja package configuration",
+            build_script,
+        )
+        self.assertIn(
+            "X_VCPKG_REGISTRIES_CACHE=/opt/bioseq-package-toolchain/vcpkg-registry-cache",
             build_script,
         )
         self.assertIn(

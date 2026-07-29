@@ -126,6 +126,7 @@ export BIOSEQ_COMPILER_LAUNCHER="${compiler_launcher}"
 export BIOSEQ_COMPILER_RT_PRIORITY=1
 export VCPKG_ROOT="${vcpkg_root}"
 export VCPKG_DEFAULT_BINARY_CACHE=/opt/bioseq-package-toolchain/vcpkg-binary-cache
+export X_VCPKG_REGISTRIES_CACHE=/opt/bioseq-package-toolchain/vcpkg-registry-cache
 export VCPKG_DISABLE_METRICS=1
 export POSTGRESQL_VERSION="${postgres_major}"
 export PATH="${tool_root}/cmake/bin:${PATH}"
