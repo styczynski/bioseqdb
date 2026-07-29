@@ -1,7 +1,0 @@
-mkdocs
-mkdocs-material
-mkdocs-material[imaging]
-Pygments
-pymdown-extensions>=10.11
-mkdocs-macros-plugin
-mkdocs-llmstxt

@@ -1,6 +1,0 @@
-#!/usr/bin/env ruby
-# frozen_string_literal: true
-
-require_relative "../lib/helloworld_ruby/version"
-
-puts "hello from ruby #{HelloworldRuby::VERSION}"
