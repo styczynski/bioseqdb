@@ -724,9 +724,10 @@ current shader, which uses a different 32-lane subgroup organization.}
 
 \subsection{What the original G3SA implementation did}
 
-The copied G3SA CUDA source divides ranges into short
-(\(\le512\) anchors), medium (\(513\) to \(5120\)), and long
-(\(>5120\)) classes.  The short kernel uses 32 threads.  The medium and long
+The copied G3SA CUDA source classifies the inclusive range by its endpoint span,
+\(end-st\): short (\(\le512\)), medium (\(513\) to \(5120\)), and long
+(\(>5120\)).  Equivalently, these contain at most 513, 514--5121, and more than
+5121 anchors, respectively.  The short kernel uses 32 threads.  The medium and long
 kernels use 512 and 1024 threads respectively, and their tiled path stages
 1024 anchors in shared memory.  It rotates source assignments with a
 modulo-1024 index.  A temporary predecessor within the tile is represented as
