@@ -232,6 +232,7 @@ before a value buffer can approach the roughly 1.024~GiB buffer bound. These
 checks concern one column chunk buffer. They are separate from the fragment
 layout used for very large sequence values.
 
+\raggedbottom
 \subsection{Skip metadata and generated catalogs}
 
 For ordinary columns, the writer finds the B-tree comparison procedure and
@@ -255,7 +256,8 @@ SQL and tuple codecs used by \path{pg/column/metadata/core.cppm}. Chapter~15
 describes this generation system. Table~\ref{tab:column-catalogs} summarizes
 the storage-specific result.
 
-\raggedbottom
+\newpage
+\flushbottom
 \begin{table}[H]
   \centering
   \small
@@ -280,7 +282,6 @@ the storage-specific result.
     \bottomrule
   \end{tabular}
 \end{table}
-\flushbottom
 
 The shard registry key is deliberately wider than a relation OID or
 relfilenode. It contains database OID, tablespace OID, parent relfilenode,
