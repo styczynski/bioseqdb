@@ -227,8 +227,8 @@ still exists.
     \draw[flow] (scan) -- (pack);
     \draw[flow] (pack) -- (meta);
     \draw[flow] (pack) --
-      node[pos=.52,above=2pt,sloped,fill=white,inner sep=1pt]
-      {NCBI accession}
+      node[pos=.38,below=2pt,fill=white,inner sep=1pt,align=center]
+      {NCBI\\accession}
       (stream);
     \draw[flow] (meta) -- (messages1);
     \draw[flow] (stream) -- (messages2);
@@ -795,6 +795,7 @@ relations. Provider-specific HTTP details remain outside SQL. Nucleotide
 chunks enter the same compact sequence type as local data. The direct NCBI
 FASTA path has explicit backpressure and measured memory bounds.
 
+\clearpage
 \section{Implementation reference map}
 \label{sec:external-reference-map}
 
