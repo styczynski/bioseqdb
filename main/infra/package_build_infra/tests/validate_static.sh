@@ -48,6 +48,7 @@ assert_literal "$MAIN_TF" 'block_public_policy     = true'
 assert_literal "$MAIN_TF" 'status = "Enabled"'
 assert_literal "$MAIN_TF" 'sse_algorithm = "AES256"'
 assert_literal "$MAIN_TF" 'resources = ["${aws_s3_bucket.artifacts.arn}/${var.artifact_prefix}/*"]'
+assert_literal "$MAIN_TF" '"s3:GetObjectVersion"'
 assert_literal "$MAIN_TF" 'resource "aws_secretsmanager_secret" "omnipackage_signing_key"'
 if rg --quiet 'resource[[:space:]]+"aws_secretsmanager_secret_version"' "$MAIN_TF"; then
   fail "OpenTofu must not put signing-key values into state"
