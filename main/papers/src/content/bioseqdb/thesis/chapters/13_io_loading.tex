@@ -29,9 +29,10 @@ In this chapter, \emph{reliable loading} has five concrete meanings:
 \begin{enumerate}
     \item a finite input is framed into exactly the intended FASTA or FASTQ
     records, including multiline records and compressed input.
-    \item packed FASTA sequence-body memory is independent of the largest
-    sequence on the path used by \texttt{bioseq.load}; the current FASTQ
-    quality scratch buffer is an explicit record-length-dependent exception.
+    \item memory use for the packed FASTA sequence body is independent of the
+    length of the largest sequence on the path used by \texttt{bioseq.load}.
+    The current FASTQ quality scratch buffer is an explicit
+    record-length-dependent exception.
     \item symbols are packed directly into the alphabet and storage-unit layout
     declared by the destination \texttt{bioseq.seq} typmod.
     \item every diagnostic identifies the earliest terminal failure and, where

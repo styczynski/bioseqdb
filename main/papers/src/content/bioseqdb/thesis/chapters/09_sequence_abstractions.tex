@@ -508,11 +508,11 @@ struct compact_sequence_range<Instance> {
 
 The header records runtime type parameters, logical length, and last-unit
 padding.  The one-byte \texttt{data[1]} member marks the start of the
-trailing payload; it is not a C flexible-array member.  The reserved field
+trailing payload. It is not a C flexible-array member.  The reserved field
 makes the payload offset relative to the object base a multiple of eight.
 That relative offset does not itself guarantee an eight-byte-aligned
 allocation base.  PostgreSQL supplies double-aligned varlena storage on the
-supported ABI; a generic allocator or borrower must separately prove adequate
+supported ABI. A generic allocator or borrower must separately prove adequate
 base alignment before forming typed loads.  The PostgreSQL specialization uses
 a 32-bit base-pair count and a 32-bit varlena header.
 On the target little-endian PostgreSQL ABI the stored header uses the
@@ -1000,7 +1000,7 @@ path.  Payload outside those paths is shared.  This helper-local cost depends
 on tree height and boundary-leaf construction, not on the number of symbols in
 the selected interval.  The SQL wrapper in \texttt{packed\_output.cppm},
 lines 3363--3384, additionally invokes full tree-and-limit validation through
-\texttt{replace\_root\_error\_safe}; a complete SQL slice call is therefore
+\texttt{replace\_root\_error\_safe}. A complete SQL slice call is therefore
 not bounded only by the two boundary paths.  Reading the selected symbols
 later remains \(O(m)\) for an interval of length \(m\), plus
 provider/fragment overhead.

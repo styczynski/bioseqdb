@@ -456,8 +456,8 @@ Equations~\ref{eq:affine-i}--\ref{eq:affine-h}, but it does not fill a static
 band~\cite{block_aligner_paper}. It keeps a square \(B\times B\) block
 positioned over the DP matrix. A
 step computes only a strip of width \(S\) on the right or bottom edge, where
-the paper fixes \(S=8\) for vectors at least 256 bits wide and \(S=4\) for
-128-bit vectors. The next direction is selected by
+the paper's stated AVX setting and the copied reference implementation use
+\(S=8\). The next direction is selected by
 comparing the first \(S\) scores on the two outgoing borders:
 \[
 \operatorname{direction}=
@@ -1022,7 +1022,7 @@ two-gap scripts, a bounded unit-gap walk, and a greedy anchored gap walk. Exact
 and recognized unit-gap jobs can reserve zero traceback words. The simple-gap
 search length is capped at 256 symbols, while repeated anchored or unit-gap
 discovery is capped at 64 operations. Greedy terminal-tail branches may append
-after that repeated-discovery check.
+operations after that repeated-discovery check.
 
 \subsection{What was inherited and what was not}
 
