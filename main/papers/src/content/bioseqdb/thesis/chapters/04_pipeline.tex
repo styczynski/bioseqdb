@@ -1121,10 +1121,11 @@ and the GPU alignment CIGAR wire records.  The route uses Vulkan with shaders
 in Standard Portable Intermediate Representation (SPIR-V) rather than CUDA.
 It therefore also targets MoltenVK and Apple GPUs.
 
-There are also deliberate differences.  G3SA's double-elongation FM-index
-seeding belongs to its BWA-MEM short-read branch, not to its minimap2
-long-read branch, so BioSeqDB does not attribute that technique to minimizer
-lookup.  G3SA uses a large reusable CUDA memory pool and can send exceptional
+There are also deliberate differences.  G3SA's double-elongation seeding
+based on the Ferragina--Manzini index (FM-index) belongs to its BWA-MEM
+short-read branch, not to its minimap2 long-read branch, so BioSeqDB does not
+attribute that technique to minimizer lookup.  G3SA uses a large reusable
+CUDA memory pool and can send exceptional
 reads to CPU.  BioSeqDB uses global admission permits, resident caches and
 bounded waves, and forbids silent CPU fallback for a selected GPU SQL
 statement.  BioSeqDB must also preserve database index generation identity,

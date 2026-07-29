@@ -37,7 +37,7 @@ baseline.  This chapter separates the scientific limitations of
 alignment heuristics from the systems limitations created by storage and
 query integration.  This separation is important because the remedies
 are different.  A missed seed needs an algorithmic remedy.  Repeated
-detosting, cold sidecar reads, or one function call per tuple needs a
+detoasting, cold sidecar reads, or one function call per tuple needs a
 systems remedy.
 
 \section{Scientific limitations do not disappear with optimization}
@@ -541,10 +541,11 @@ Table~\ref{tab:solution-class-gaps} summarizes the roles of the principal
 named systems and database mechanisms.  The comparison uses each source's
 documented task rather than treating a missing claim as evidence of a missing
 capability.  The minimap2 paper establishes a nucleotide
-mapper based on seeding, chaining, and alignment.  BLAST+ documents heuristic
-sequence-database
+mapper based on seeding, chaining, and alignment.  The Basic Local Alignment
+Search Tool (BLAST+) suite documents heuristic sequence-database
 search, persistent BLAST databases, and a modular data-access
-library~\cite{blast_plus_2009}.  MMseqs2 documents
+library~\cite{blast_plus_2009}.  Many-against-Many sequence searching 2
+(MMseqs2) documents
 sensitive protein search over massive data sets and a staged
 prefilter-and-alignment workflow~\cite{mmseqs2_2017}.
 Database-centric work by R\"ohm and Blakeley explored SQL and user-defined
@@ -554,11 +555,13 @@ PostgreSQL~\cite{roehm_blakeley_genomics_2009,bio_strings_2022}.
 Closer database-native precedents narrow the novelty claim further.
 BLASTGRES extends PostgreSQL with location types, indexes, and operators for
 precomputed or curated alignment tables~\cite{parker_alignment_tables_2008}.
-Dorok et al.\ integrate genome-specific compression and analysis into a
-database schema~\cite{dorok_genome_databases_2017}. The Terabase Search Engine
-stores prealigned short reads in distributed relational tables, supports
-location queries, and uses alignment or similarity components for
-query-sequence search~\cite{wilton_terabase_2019}. BioSeqDB therefore does not
+Dorok et al.\ consume already mapped reads and integrate genome-specific
+compression with database-native SNV calling~\cite{dorok_genome_databases_2017}.
+The Terabase Search Engine stores prealigned short reads in distributed
+relational tables. For query-sequence search it first maps the query to GRCh38
+with Bowtie~2 for coordinate retrieval; its separate unmapped-read path uses a
+64-bit signature and Jaccard screening before Smith--Waterman
+alignment~\cite{wilton_terabase_2019}. BioSeqDB therefore does not
 claim priority for storing genomic data, exposing sequence operations in SQL,
 or consulting an aligner from a database-backed system. Its claim is about the
 combined planner-owned, set-valued batched scan, representation boundary,
@@ -566,7 +569,7 @@ execution proof, and persisted-index lifecycle developed in later chapters.
 
 \begin{table}[!htbp]
   \centering
-  \small
+\footnotesize
   \setlength{\tabcolsep}{5pt}
   \renewcommand{\arraystretch}{1.08}
   \begin{tabularx}{\linewidth}{

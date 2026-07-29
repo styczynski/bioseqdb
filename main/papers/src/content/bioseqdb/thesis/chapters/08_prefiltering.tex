@@ -153,7 +153,7 @@ host-side translation whose semantics could drift.
 The minimap2 pipeline supplies the surrounding algorithm but not this
 query-scoped filter.  After chaining and region selection, ordinary minimap2
 invokes its KSW2 extension machinery for the selected candidate gaps and uses
-alignment scores, z-drop, and traceback to decide how the region should be
+alignment scores, Z-drop, and traceback to decide how the region should be
 reported.  It has seed-frequency and chaining heuristics that reduce the
 candidate set, but these are not a proof of the SQL condition
 \(\operatorname{edit}<B\).  The SneakySnake and GateKeeper papers likewise
@@ -164,8 +164,8 @@ BioSeqDB preserves minimap2-derived seeds, chains, region geometry, and the
 chosen final aligner.  It inserts one additional conditional stage after
 divergence estimation and before base alignment.  The stage is enabled only
 when the query requests exact edit accounting and provides a representable
-positive strict bound.  Rejection removes KSW2 or Block-Aligner work.
-Acceptance does not change scoring parameters, z-drop, CIGAR construction, primary versus
+positive strict bound.  Rejection removes KSW2 or Block Aligner work.
+Acceptance does not change scoring parameters, Z-drop, CIGAR construction, primary versus
 secondary classification, or mapping quality.  The exact survivor stage runs
 before the final classification pass so a candidate that violates the SQL
 predicate cannot influence another survivor's metadata.
@@ -653,11 +653,11 @@ GateKeeper-GPU implementation and the BioSeqDB port.}
 \section{Dispatch and integration with the query pipeline}
 \label{sec:prefilter-dispatch}
 
-Algorithm choice and backend choice are related but not identical.  Scalar and
-Highway production always use SneakySnake.  A Vulkan batch is resolved as
-GateKeeper only when \emph{every} job belongs to the measured small-window
-domain.  Those jobs need not share one length or threshold.  Otherwise the
-whole batch uses SneakySnake.  The pure resolver at
+Algorithm choice and backend choice are related but not identical.  The scalar
+and Highway production routes always use SneakySnake.  A Vulkan batch is
+resolved as GateKeeper only when \emph{every} job belongs to the measured
+small-window domain.  Those jobs need not share one length or threshold.
+Otherwise the whole batch uses SneakySnake.  The pure resolver at
 \texttt{pipe.cppm}, lines 7912--7934, is equivalent to:
 
 \begin{verbatim}

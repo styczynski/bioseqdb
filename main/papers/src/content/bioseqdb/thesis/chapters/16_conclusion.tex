@@ -77,8 +77,7 @@ from becoming an additional, unsupported contribution claim.
     packed, fragmented, PostgreSQL-backed, and lazily composed data
     through a common range contract. &
     Chapter 9 defines the representation and access contracts. Chapters 11
-    and 13 connect them to PostgreSQL storage and bounded loading. The
-    rvalue-lifetime limitation stated below remains open. \\
+    and 13 connect them to PostgreSQL storage and bounded loading. \\
     C2 &
     A staged minimap2-derived mapper with scalar, SIMD, and
     Vulkan components, including explicit dispatch and evidence for
@@ -252,7 +251,7 @@ In particular, ExactSimd is a minimizer backend, while
     publication and by compatible MPS fallback profiles. \\
     Format 6 & Specialized hash-major MPS representation admitted for the
     registered DNA4 \(k=15,w=10\) profile when grouped publication is enabled. \\
-    Shape V5 & Resident partition representation consumed by the direct
+    Shape-V5 & Resident partition representation consumed by the direct
     persisted Phase C GPU route. The authenticated current route is
     coordinate-only. Persisted CIGAR is unsupported. \\
     Phase C & Tiled Vulkan front end that can keep packed inputs, minimizers,
@@ -320,7 +319,7 @@ implemented selector is not automatically a qualified final route.
     KSW2 when two-piece-affine and endpoint semantics are needed. Dedicated
     Vulkan is admitted only for its complete statement shape. &
     Descriptor-batched KSW2 without fused inter-sequence SIMD. &
-    Full minimap2 splice and inversion modes, persisted Shape V5 CIGAR, and
+    Full minimap2 splice and inversion modes, persisted Shape-V5 CIGAR, and
     unimplemented GPU band or Z-drop semantics. &
     Chapter 7 selection table and Report 47 boundaries. \\
     Prefiltering &
@@ -336,9 +335,9 @@ implemented selector is not automatically a qualified final route.
     MPF with legacy replace-in-place PostgreSQL relation adapters. &
     Provider 0 grouped publication with authenticated Format 5 or registered
     Format 6. The MPF5 compact-direct reader is explicit. &
-    Authenticated persisted Shape V5 coordinate execution without an accepted
+    Authenticated persisted Shape-V5 coordinate execution without an accepted
     fresh-postmaster ratio. &
-    Provider 1 \texttt{mapped\_file}, persisted Shape V5 CIGAR, and claims that
+    Provider 1 \texttt{mapped\_file}, persisted Shape-V5 CIGAR, and claims that
     immutable generations are the checked-in default. &
     Chapter 12 mode matrix and cold-index evidence. \\
     VectorAgg &
@@ -582,7 +581,7 @@ support a same-work winner.
     versus \(16.487527\) s for minimap2, a route-specific
     \(3.071\times\) ratio. &
     \textbf{Unresolved for the current persisted boundary.} Authenticated
-    Shape V5 coordinate execution exists, but no accepted fresh-postmaster
+    Shape-V5 coordinate execution exists, but no accepted fresh-postmaster
     performance ratio exists and persisted CIGAR is unsupported. &
     Format, shape, sketch scheme, width, checksum, and accelerator attestation
     must match before either host or device execution. &
@@ -627,7 +626,7 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
     establish exact row-set parity.  The CIGAR fixture exercised GPU dynamic
     programming (DP) and traceback followed by host result construction.  It
     does not demonstrate persisted all-GPU CIGAR. \\
-    Current opt-in authenticated persisted-format route (Shape V5) &
+    Current opt-in authenticated persisted-format route (Shape-V5) &
     No accepted performance ratio after a fresh PostgreSQL postmaster start &
     Direct coordinate execution and fail-closed attestation machinery exist.
     Persisted CIGAR is unsupported, and the evidence set does not establish an

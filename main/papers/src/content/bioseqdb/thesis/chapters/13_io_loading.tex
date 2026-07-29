@@ -484,7 +484,7 @@ and fields such as \texttt{OS=}, \texttt{OX=}, and \texttt{GN=}. Treating
 the whole header as one text column preserves bytes but loses the opportunity
 to use PostgreSQL types and indexes for its structured fields.
 
-BioSeqDB's parser recognizes the following 14 modes and dialects:
+BioSeqDB's parser recognizes the following 14 literal mode and dialect names:
 \begin{itemize}
   \item AUTO.
   \item PLAIN.
@@ -492,14 +492,14 @@ BioSeqDB's parser recognizes the following 14 modes and dialects:
   \item UniRef.
   \item UniParc.
   \item UniMes.
-  \item SPD.
+  \item \texttt{SPD}.
   \item National Center for Biotechnology Information (NCBI) generic.
   \item NCBI GenInfo Identifier (GI).
   \item NCBI Protein Data Bank (PDB).
   \item RefSeq.
   \item GenBank.
-  \item GISAID.
-  \item IMGT.
+  \item \texttt{GISAID}.
+  \item \texttt{IMGT}.
 \end{itemize}
 Format definitions are constexpr tables in
 \path{io/identifier_parser/identifier_formats.cppm}.  They state

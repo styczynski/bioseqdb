@@ -1092,8 +1092,9 @@ that workload were short gap fills. A maximum of 256 enlarged eight border and
 checkpoint buffers plus the trace geometry even though growth rarely passed
 32. The in-process parameter default was therefore changed to 16--32. A
 smaller maximum is not universally superior. High-error legacy Oxford
-Nanopore reads and long unseeded gaps are exactly the shapes for which Block
-growth was designed. PostgreSQL's retained 32--256 defaults are conservative
+Nanopore Technologies (ONT) reads and long unseeded gaps are exactly the
+shapes for which Block growth was designed. PostgreSQL's retained 32--256
+defaults are conservative
 for those shapes but forgo the measured short-fill win.
 
 The sweep also does not establish score equivalence with KSW2. KSW2 uses two
