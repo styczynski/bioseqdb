@@ -327,7 +327,7 @@ the memory contract.
 Algorithm~\ref{alg:mps-build} states the bounded builder and distinguishes
 legacy directory-last completion from opt-in generation publication.
 
-\begin{algorithm}[ht]
+\begin{algorithm}[H]
   \caption{Bounded MPS construction and mode-specific publication}
   \label{alg:mps-build}
   \small
@@ -542,8 +542,10 @@ small descriptor only after the new generation has been authenticated.
       {publish only on success}(head.east);
     \draw[->,thick] (old)--(head);
     \draw[->,thick] (head)--(retire);
-    \draw[->,dashed,thick] (retire.south)--++(0,-.55)--
-      node[midway,below=1mm,font=\scriptsize]{bounded reaper}++(8.6,0)
+    \draw[->,dashed,thick] (retire.south)--++(0,-.55)
+      coordinate (reaperbase)--
+      node[midway,below=1mm,font=\scriptsize]{bounded reaper}
+      ([xshift=4mm]validate.east |- reaperbase)
       |-(new.east);
   \end{tikzpicture}
   \caption{Copy-on-publish lifecycle in the opt-in grouped-generation mode. A
