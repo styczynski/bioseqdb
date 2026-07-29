@@ -456,7 +456,8 @@ Equations~\ref{eq:affine-i}--\ref{eq:affine-h}, but it does not fill a static
 band~\cite{block_aligner_paper}. It keeps a square \(B\times B\) block
 positioned over the DP matrix. A
 step computes only a strip of width \(S\) on the right or bottom edge, where
-the reference implementation uses \(S=8\). The next direction is selected by
+the paper fixes \(S=8\) for vectors at least 256 bits wide and \(S=4\) for
+128-bit vectors. The next direction is selected by
 comparing the first \(S\) scores on the two outgoing borders:
 \[
 \operatorname{direction}=
@@ -993,8 +994,9 @@ requires \texttt{vulkan\_extend\_enabled}. If any selected component cannot
 execute, the statement errors before entering the generic CPU/SIMD pipeline.
 
 The CIGAR shader implements a two-piece-affine global recurrence with five
-score states \(H,I_1,I_2,D_1,D_2\). Spans up to 512 symbols use a bounded
-full direction matrix. Longer general spans, up to the current 16,384-symbol
+score states \(H,I_1,I_2,D_1,D_2\). For jobs not solved by a script shortcut,
+spans up to 512 symbols use a bounded full direction matrix. Longer general
+spans, up to the current 16,384-symbol
 admission limit, use a 128-by-128 grid. For a job with tile dimensions
 \(b_q,b_t\), the planned traceback capacity in 32-bit words is
 \begin{equation}
@@ -1212,8 +1214,8 @@ many-gap case sits at break-even, while the two larger-work cases exceed
 scoped cases, but it does not establish that explanation causally because the
 routes and workloads differ and each case has one sample.
 
-For the 4096-job CIGAR case, the host classified and planned all 4096 jobs for
-gridded traceback capacity, reserving 327,069,696 words, and issued one
+For the 4096-job CIGAR case, the host classified all 4096 jobs and planned
+gridded traceback capacity for them, reserving 327,069,696 words, and issued one
 extension dispatch. The receipt does not identify the shader-internal subpath
 used by each job. The case reduced wall time by 59.892\%.
 The 512-job version passed its fixture gate and used 40,883,712 traceback
@@ -1379,8 +1381,8 @@ solution. The first idea of inter-sequence KSW2 batching stopped at scheduling
 and stitching. A Block interval of 32--256 was too expensive for the measured
 short-fill CPU workload, although it remains the SQL safety-oriented default.
 The first bounded GPU CIGAR route was insufficient for long many-gap cases,
-which motivated gridded traceback. Even after gridded traceback, 512 jobs did
-not beat SIMD because fixed costs dominated. The final system therefore
+which motivated gridded-capacity support. After that support was added, the
+512-job many-gap case did not beat SIMD. Measured fixed costs remained. The final system therefore
 retains multiple routes and reports the break-even behavior instead of
 declaring one accelerator universally faster.
 

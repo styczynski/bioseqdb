@@ -92,7 +92,7 @@ disagree.
     \node[cpu] (cpualign) at (-2.4,-9.05)
       {candidate regions\\optional prefilter\\KSW2 or Block Aligner};
     \node[gpu] (gpualign) at (2.4,-9.05)
-      {coordinate projection\\or GPU DP with traceback};
+      {coordinate projection\\or GPU CIGAR extension};
 
     \node[proof,text width=7.6cm] (attest) at (0,-10.75)
       {validate requested and actual backends\\
@@ -522,7 +522,8 @@ CPU choices are KSW2, Block Aligner and an inter-region batched KSW2 path.
 The batched path groups short fill problems into width buckets
 \(\leq 32,\leq 64,\leq 128,\leq 256\), while longer fills use the
 intra-sequence KSW2 kernel.  A selected Vulkan extension route uses GPU job
-records and performs admitted DP and traceback work on the device.  It returns
+records and performs admitted CIGAR extension on the device, selecting script
+shortcuts or bounded/gridded dynamic programming and traceback internally.  It returns
 coordinates or packed CIGAR wire data.  On the recomputed resident route the
 host decodes that packed data and constructs the result and CIGAR objects.
 
@@ -697,8 +698,9 @@ algorithm axes of the generic pipeline.
     scalar minimap2 DP, SIMD minimap2 DP, RMQ, and Vulkan tiled DP \\
     Final alignment &
     KSW2, Block Aligner, and inter-region batched KSW2.  The dedicated Vulkan
-    route admits coordinate reduction or GPU DP and traceback for supported
-    CIGAR shapes, followed by host result-object construction \\
+    route admits coordinate reduction or GPU CIGAR extension for supported
+    shapes; the shader selects script shortcuts or bounded/gridded dynamic
+    programming and traceback, followed by host result-object construction \\
     Prefilter &
     SneakySnake on scalar or SIMD CPU, plus Vulkan SneakySnake or GateKeeper
     in their supported domains \\
@@ -781,7 +783,8 @@ target hydration or CPU/SIMD alignment fallback
 
 This is the most important qualification to the phrase ``all GPU''.  BioSeqDB
 has implemented Vulkan query sketching, seed lookup, tiled chaining,
-coordinate reduction and GPU DP with gridded traceback for admitted in-memory
+coordinate reduction and GPU CIGAR extension with shader-selected script
+shortcuts or bounded/gridded dynamic programming and traceback for admitted in-memory
 or recomputed resident routes.  Packed traceback data is still decoded into
 host result objects.  The statement-level definition in the 9 July 2026
 DOC0371 cold persisted-index specification is stricter than a kernel-only
@@ -1139,8 +1142,8 @@ program.  Its Vulkan route has four resident steps:
   \item build or reuse resident target-segment indexes, emit seed hits and
   construct sorted anchor ranges.
   \item perform tiled chaining and coordinate reduction.
-  \item optionally execute GPU DP with gridded traceback for admitted CIGAR
-  jobs.
+  \item optionally execute GPU CIGAR extension whose shader selects script
+  shortcuts or bounded/gridded dynamic programming and traceback.
 \end{enumerate}
 
 Packed path data is decoded into host CIGAR and result objects on the
@@ -1255,7 +1258,7 @@ rows while the SIMD result set contained 16.  The correctness gate proves at
 least one in-tolerance hit for each of the 16 expected queries, not exact
 row-set parity.  The many-gap case is stronger evidence for final alignment.
 It reported exactly 4,096 matches and 4,096 fixture-accepted CIGARs.  The host
-classified and planned all 4,096 jobs for gridded traceback capacity.  One
+classified all 4,096 jobs and planned gridded traceback capacity for them.  One
 resident index was reused 4,095 times.  The receipt records zero
 CPU fallback rows, zero SIMD fallback rows and zero Vulkan declines.
 

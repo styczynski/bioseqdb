@@ -845,11 +845,12 @@ collection of passing exception tests.
 \section{Deterministic generation and the golden workflow}
 \label{sec:sql-codegen-golden}
 
-Normal builds write SQL and modules to the build tree and compare them with
-checked artifacts.  They never silently rewrite the source tree.  The
+Normal builds write SQL, JSON manifests, and modules to the build tree.  They
+never silently rewrite the source tree.  The
 \texttt{bioseq\_sql\_check\_golden} target regenerates with the current
-PREPARE environment, validates the manifests and physical ledgers, and checks
-byte equality.  An explicit maintainer target,
+PREPARE environment, validates and seals the non-SQL artifacts and physical
+ledgers, and byte-compares installation SQL with its checked source golden.
+An explicit maintainer target,
 \texttt{bioseq\_sql\_update\_golden}, is the only source-update path.  The
 update is disabled when the optional external package is active, which avoids
 accidentally replacing the core golden with a profile overlay.
@@ -865,10 +866,11 @@ A reproducible update follows these steps:
   \item validate SQL parsing, graph completeness, physical order, manifests,
   fmgr ownership, row codecs, and GUC parity, then run the exhaustive safety
   ledger when performing the full qualification path.
-  \item compare the proposed SQL, JSON, and \texttt{.cppm} outputs with their
-  checked counterparts and print the bounded delta.
+  \item compare proposed installation SQL with its checked golden and print the
+  bounded delta; validate and seal generated JSON and \texttt{.cppm} outputs
+  in the isolated build tree.
   \item only under the explicit update target, replace the approved checked
-  artifacts and rerun the ordinary check path.
+  SQL golden and rerun the ordinary check path.
 \end{enumerate}
 
 Generation signatures include:
