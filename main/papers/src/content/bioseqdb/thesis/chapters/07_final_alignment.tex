@@ -235,9 +235,8 @@ in current code.
 
 \begin{figure}[htbp]
 \centering
-\resizebox{\linewidth}{!}{%
 \begin{tikzpicture}[
-    x=0.92cm,y=0.92cm,>=Latex,
+    x=0.92cm,y=0.92cm,scale=0.97,transform shape,>=Latex,
     seed/.style={circle,fill=black,inner sep=1.7pt},
     phase/.style={rounded corners,draw,fill=blue!7,align=center,
                   minimum height=0.65cm,font=\small},
@@ -271,7 +270,6 @@ in current code.
   \node[annotation,anchor=south east] at (11.85,4.20)
         {$\texttt{min\_ksw\_len}=200$ governs fill boundaries};
 \end{tikzpicture}
-}
 \caption{BioSeqDB's three-phase region alignment. The drawing reconstructs
 the implemented control flow. It is not a copy of a minimap2 figure. Exact
 seeds constrain the path, short intervals accumulate, mandatory global fills
@@ -491,8 +489,8 @@ measurements below.
 
 \begin{figure}[htbp]
 \centering
-\resizebox{\linewidth}{!}{%
-\begin{tikzpicture}[x=0.48cm,y=0.48cm,>=Latex,font=\scriptsize]
+\begin{tikzpicture}[
+  x=0.48cm,y=0.48cm,scale=0.91,transform shape,>=Latex,font=\scriptsize]
   \def\gridpanel#1{
     \begin{scope}[xshift=#1]
       \draw[step=1,gray!28,very thin] (0,0) grid (8,8);
@@ -534,7 +532,6 @@ measurements below.
     \node at (3.0,-1.0) {(c) halve and move diagonally};
   \end{scope}
 \end{tikzpicture}
-}
 \caption{Reconstruction of the adaptive-block mechanism described by Liu and
 Steinegger. A step computes an outgoing strip, growth replays from a saved
 checkpoint, and shrinking retains the promising suffix. The orange line
