@@ -23,14 +23,14 @@ exact PostgreSQL {{ postgres_major }} server ABI.
 
 %build
 export BIOSEQ_OPTTIMIZATION_LEVEL=0
-test "${BIOSEQ_OPTTIMIZATION_LEVEL}" = "{{ optimization_level }}"
+test "$BIOSEQ_OPTTIMIZATION_LEVEL" = "{{ optimization_level }}"
 infra/packaging/scripts/build_and_stage.sh build \
   "%{_builddir}/{{ source_folder_name }}/_bioseq-package-build" \
   "{{ postgres_major }}"
 
 %install
 export BIOSEQ_OPTTIMIZATION_LEVEL=0
-test "${BIOSEQ_OPTTIMIZATION_LEVEL}" = "{{ optimization_level }}"
+test "$BIOSEQ_OPTTIMIZATION_LEVEL" = "{{ optimization_level }}"
 infra/packaging/scripts/build_and_stage.sh install \
   "%{_builddir}/{{ source_folder_name }}/_bioseq-package-build" \
   "%{buildroot}" \
