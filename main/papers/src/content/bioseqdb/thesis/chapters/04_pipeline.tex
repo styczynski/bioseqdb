@@ -427,7 +427,8 @@ exactly when index provenance enters the mapper.
 
 \texttt{SeedHitStage} has two current input forms.  On the ordinary route it
 turns each query minimizer into zero or more \texttt{Anchor} records.  The
-scalar operation is implemented by \texttt{collect\_seed\_hits} at
+scalar operation is implemented by
+\texttt{collect\_\allowbreak{}seed\_\allowbreak{}hits} at
 \path{minimap_port.cppm:1109}.  It asks the target index for the global
 occurrence count, discards absent or over-repetitive minimizers using
 \texttt{max\_occ}, rejects incomplete persisted postings, converts positions
@@ -762,7 +763,8 @@ saying only ``the GPU pipeline was enabled''.
 \subsection{The PostgreSQL dispatch buffer}
 
 The custom scan does not call the mapper once per tuple.  During its write
-phase, \texttt{TupleDispatchBuffer} copies eligible scan slots and records
+phase, \texttt{Tuple\allowbreak{}Dispatch\allowbreak{}Buffer} copies eligible
+scan slots and records
 their query and target operands.  Its fixed capacity is 8,192 records.  At
 capacity or end of input,
 \texttt{run\_\allowbreak{}batch\_\allowbreak{}and\_\allowbreak{}build\_%
@@ -820,7 +822,8 @@ When Phase C GPU target-index build is active, the index is built once and
 inserted under the same identity that \texttt{SeedHitStage} will request.
 
 On CPU, a batch of at least four worker-shareable lazy queries may use
-\texttt{parallel\_for\_pipeline}.  A selected Vulkan accelerator disables
+\texttt{parallel\_\allowbreak{}for\_\allowbreak{}pipeline}.  A selected Vulkan
+accelerator disables
 this CPU query fan-out because the GPU scheduler needs to observe and batch
 the whole work set.  Results retain input-query order in both cases.
 
