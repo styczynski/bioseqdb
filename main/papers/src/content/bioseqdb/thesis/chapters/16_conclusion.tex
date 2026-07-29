@@ -63,7 +63,7 @@ evidence in Table~\ref{tab:conclusion-contribution-evidence}.  Repeating the
 same identifiers here prevents a subsystem layer or an experimental backend
 from becoming an additional, unsupported contribution claim.
 
-\begin{table}[p]
+\begin{table}[!htbp]
   \centering
   \scriptsize
   \caption{Canonical contribution claims and the evidence that supports them.}
@@ -230,7 +230,7 @@ Table~\ref{tab:conclusion-glossary} fixes their meaning at the thesis cutoff.
 In particular, ExactSimd is a minimizer backend, while
 \texttt{exact\_visited} and bounded SIMD are chaining policies.
 
-\begin{table}[p]
+\begin{table}[!htbp]
   \centering
   \small
   \caption{Canonical terminology used in the architecture and status tables.}
@@ -418,7 +418,7 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
   \caption{Qualified performance and completion evidence for the final
   architecture.  Ratios are comparator time divided by BioSeqDB time.}
   \label{tab:conclusion-performance-evidence}
-  \begin{tabularx}{\linewidth}{p{0.20\linewidth}p{0.23\linewidth}X}
+  \begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.23\linewidth}p{0.22\linewidth}X}
     \toprule
     Evidence & Measured result & Supported conclusion and qualification \\
     \midrule
@@ -570,7 +570,7 @@ addition to provider-specific capability tests.
 
 Finally, database integration increases the amount of correctness surface.
 PostgreSQL can abort through a non-local jump
-\cite{postgresql17_cpp_extensibility}.  The planner may rewrite expressions, a
+\parencite{postgresql17_cpp_extensibility}.  The planner may rewrite expressions, a
 custom scan may duplicate rows, and cached or persisted state may outlive the
 statement that created it.  Generated fmgr and SQL ownership removes a major
 source of drift, but it does not remove the need for SQL, lifecycle, and
@@ -618,7 +618,7 @@ multiplicity, memory contexts, and schema ownership.
 
 The final system brings these concerns into one inspectable pipeline.  It
 retains minimap2's successful algorithmic decomposition
-\cite{minimap2_paper}, replaces process-local assumptions with explicit
+\parencite{minimap2_paper} and replaces process-local assumptions with explicit
 sequence and index abstractions, and adds measured fragment-native CPU and SIMD
 execution plus bounded heterogeneous routes.  PostgreSQL receives a
 planner-visible batch executor.  The same ownership discipline extends to I/O,
