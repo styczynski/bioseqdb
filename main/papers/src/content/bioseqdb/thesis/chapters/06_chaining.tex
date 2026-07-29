@@ -791,7 +791,7 @@ It is also deliberately approximate.  The device iteration limit is
 \]
 so the standard CPU limit of 5000 is not honored.  When
 \texttt{max\_chain\_skip} is positive, the shader stops after
-\(\lfloor\text{max-skip}/32\rfloor+1\) non-improving predecessor batches
+\(\lfloor\text{max-skip}/32\rfloor+1\) consecutive non-improving predecessor batches
 instead of replaying scalar visited-generation events.  A nonpositive value
 disables this batch cutoff.  The normal default is positive, and the shader has
 no global-best rescue.  A hard range longer than 131072 anchors is thinned

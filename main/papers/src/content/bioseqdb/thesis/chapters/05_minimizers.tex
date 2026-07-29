@@ -1346,7 +1346,7 @@ times in seconds unless marked otherwise. Lower is better.}
 \toprule
 Configuration & Sketch & Target index & Wall & Alignment \\
 \midrule
-ExactSimd + SIMD chain/backtrack + Block & 9.256 & 7.123 & 17.291 &
+ExactSimd + SIMD chain/backtrack + KSW2 & 9.256 & 7.123 & 17.291 &
 not isolated \\
 PNT1 + SIMD chain/backtrack + Block & 2.923 & included in run & 4.046 &
 345.548\,ms \\
@@ -1724,6 +1724,7 @@ pipeline comparison \\
 
 \section{Conclusion}
 
+\begin{samepage}
 Minimizer extraction began as a familiar rolling-hash loop and became a lesson
 in systems correctness. The observable object is not merely the minimum hash
 of a window. Its identity depends on:
@@ -1740,6 +1741,7 @@ of a window. Its identity depends on:
   \item position width, and
   \item the final flush.
 \end{itemize}
+\end{samepage}
 ExactSimd and the compact Phase C route expose a chronological event stream.
 The PNT1 collector instead leaves cross-stream append order unspecified, while
 MPF persistence establishes canonical order through sort/unique. The scalar

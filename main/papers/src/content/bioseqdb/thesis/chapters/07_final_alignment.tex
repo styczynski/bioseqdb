@@ -271,8 +271,8 @@ in current code.
         {$\texttt{min\_ksw\_len}=200$ governs fill boundaries};
 \end{tikzpicture}
 \caption{BioSeqDB's three-phase region alignment. The drawing reconstructs
-the implemented control flow. It is not a copy of a minimap2 figure. Exact
-seeds constrain the path, short intervals accumulate, mandatory global fills
+the implemented control flow. It is not a copy of a minimap2 figure. Seed- or
+hash-supported anchors constrain the path, short intervals accumulate, mandatory global fills
 resolve gaps, and end extensions refine the outer coordinates.}
 \label{fig:three-phase-alignment}
 \end{figure}
@@ -1233,10 +1233,10 @@ the 4096-job CIGAR case's reported 4096-of-4096 fixture acceptance, but it
 prevents using the coordinate benchmark as a blanket equivalence proof.
 
 The CIGAR fixture gate did not compare the literal GPU CIGAR text, traceback
-path, or alignment score with the SIMD result. Its
-\texttt{correct\_cigar\_count} required one returned row per query, the expected
-strand, a target-coordinate offset below 15 bases, a syntactically valid CIGAR,
-and replay that consumed the reported query and target spans. Replay also
+path, or alignment score with the SIMD result. The gate required one returned
+row per query. Its \texttt{correct\_cigar\_count} additionally required the
+expected strand, a target-coordinate offset below 15 bases, a syntactically
+valid CIGAR, and replay that consumed the reported query and target spans. Replay also
 validated explicit \(=\) and \(X\) operations. The many-gap fixtures imposed
 their own operation constraint, including at least 17 deletion operations.
 The table therefore reports fixture-accepted CIGARs, not CIGAR path identity.
