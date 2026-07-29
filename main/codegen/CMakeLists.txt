@@ -73,7 +73,11 @@ if(_bioseq_expected_gcc_identity_count EQUAL
       "${BIOSEQ_EXPECTED_GCC_MODULE_SOURCE_CLOSURE_SHA256}")
 endif()
 
-if(NOT DEFINED CMAKE_EXPERIMENTAL_CXX_IMPORT_STD)
+option(BIOSEQ_CODEGEN_USE_MODULE_STD
+  "Build and expose the selected standard library's named std module" ON)
+
+if(BIOSEQ_CODEGEN_USE_MODULE_STD
+    AND NOT DEFINED CMAKE_EXPERIMENTAL_CXX_IMPORT_STD)
   if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.3")
     set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD
       "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
@@ -119,8 +123,6 @@ endif()
 option(BIOSEQ_CODEGEN_ENABLE_EXTERNAL "Build the external-API-client component" OFF)
 option(BIOSEQ_CODEGEN_ENABLE_WEBSITE "Build the website component" OFF)
 option(BIOSEQ_CODEGEN_ENABLE_SQL "Build the PostgreSQL extension SQL component" OFF)
-option(BIOSEQ_CODEGEN_USE_MODULE_STD
-  "Build and expose the selected standard library's named std module" ON)
 
 if(NOT BIOSEQ_CODEGEN_ENABLE_EXTERNAL
    AND NOT BIOSEQ_CODEGEN_ENABLE_WEBSITE
