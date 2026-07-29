@@ -686,7 +686,7 @@ find_package(Vulkan REQUIRED COMPONENTS glslang)
 
 if(NOT TARGET Vulkan::glslang)
   message(FATAL_ERROR
-    "vulkan-sdk-components must provide Vulkan::glslang; rerun vcpkg install vulkan-sdk-components")
+    "the glslang dependency must provide Vulkan::glslang; rerun vcpkg install glslang")
 endif()
 
 set(BIOSEQ_GLSLANG_STATIC_LIBS
@@ -699,7 +699,7 @@ set(BIOSEQ_GLSLANG_STATIC_LIBS
 foreach(_bioseq_glslang_lib IN LISTS BIOSEQ_GLSLANG_STATIC_LIBS)
   if(NOT _bioseq_glslang_lib OR _bioseq_glslang_lib MATCHES "-NOTFOUND$")
     message(FATAL_ERROR
-      "vulkan-sdk-components did not expose a required static glslang library; rerun vcpkg install vulkan-sdk-components")
+      "glslang did not expose a required static library; rerun vcpkg install glslang")
   endif()
 endforeach()
 
