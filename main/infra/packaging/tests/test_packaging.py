@@ -479,6 +479,10 @@ class StaticContractTests(unittest.TestCase):
             'export PATH="${tool_root}/cmake/bin:${PATH}"',
             build_script,
         )
+        self.assertIn(
+            "unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS",
+            build_script,
+        )
         smoke_script = (SCRIPTS / "smoke_installed_package.sh").read_text()
         self.assertIn(
             "PostgreSQL[^0-9]*${postgres_major}",
