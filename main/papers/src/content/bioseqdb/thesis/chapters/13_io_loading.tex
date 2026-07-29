@@ -161,7 +161,7 @@ map symbols directly to a selected
 alphabet-templated \texttt{encode\_body\_chunk} kernels\\
 delivery &
 compact batches or bounded
-\texttt{packed\_sequence\_chunk<Unit>} events &
+\texttt{packed\_\allowbreak sequence\_\allowbreak chunk<Unit>} events &
 \texttt{\detokenize{io/public_api.cppm}}\\
 database sink &
 append packed bytes, create locator, coerce metadata, and write one tuple &
@@ -309,8 +309,9 @@ multiple physical lines.  BioSeqDB therefore:
 The final count is intentionally \emph{not} the number of accepted packed
 letters.  A byte may be absent from the selected alphabet and be dropped by the
 encoder, but it still occupies one quality position in the source file.
-\texttt{fastq\_parser\_state} therefore tracks
-\texttt{sequence\_byte\_count} separately from the encoder's accepted-letter
+\texttt{fastq\_\allowbreak parser\_\allowbreak state} therefore tracks
+\texttt{sequence\_\allowbreak byte\_\allowbreak count} separately from the
+encoder's accepted-letter
 count.  A truncated quality section and a quality section that overshoots this
 count are terminal data errors.  This distinction prevents alphabet
 normalization from shifting the parser onto a later record boundary.
@@ -318,7 +319,7 @@ normalization from shifting the parser onto a later record boundary.
 \subsection{Alphabet and storage-width dispatch}
 
 The destination table, rather than the input filename, defines the alphabet.
-\texttt{resolve\_load\_columns} requires exactly one
+\texttt{resolve\_\allowbreak load\_\allowbreak columns} requires exactly one
 \texttt{bioseq.seq} column, decodes the alphabet code and byte width from its
 typmod, and rejects an unparameterized sequence type. The loader then performs
 one runtime-to-compile-time fan-out:
@@ -326,7 +327,10 @@ one runtime-to-compile-time fan-out:
 \[
   (\text{alphabet code},\ \text{storage width},\ \text{FASTA/FASTQ})
   \longrightarrow
-  \texttt{stream\_sequences\_file<A,Unit,Format>}.
+  \begin{gathered}
+    \texttt{stream\_sequences\_file}\\[-0.2ex]
+    \texttt{<A,Unit,Format>}
+  \end{gathered}.
 \]
 
 The generic C++ templates are not the same as the compiled PostgreSQL surface.
@@ -544,7 +548,8 @@ instantiated again for every alphabet, storage width, and file format.
 The database implementation, \texttt{pg\_identifier\_writer}, caches each
 destination type's input function and typmod. Plain unconstrained text can use
 a direct text construction. Constrained character types and arbitrary scalar,
-range, or multirange types use \texttt{OidInputFunctionCall}.  A convenient
+range, or multirange types use
+\texttt{Oid\allowbreak Input\allowbreak Function\allowbreak Call}. A convenient
 \texttt{lo..hi} header value is rewritten to PostgreSQL's inclusive range
 syntax before the type input function is invoked.  Date and timestamp
 interpretation consequently follows the session's PostgreSQL

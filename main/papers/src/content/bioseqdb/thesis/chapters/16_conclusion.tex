@@ -197,7 +197,8 @@ to Block Aligner, SneakySnake, and GateKeeper
 
 Several intermediate designs were valuable because they exposed constraints
 that shaped the final architecture.
-Naive SIMD work exposed long dependency chains and data-rearrangement costs.
+Naive SIMD work exposed long dependency chains and
+data-\allowbreak rearrangement costs.
 Per-query GPU submissions lost to command, fence, and allocation overhead.
 GPU chaining without a resident upstream and downstream path moved too little
 work to amortize the boundary.  A gather-heavy SneakySnake port preserved the
@@ -690,7 +691,8 @@ therefore remain route-specific evidence and are not pooled into a system-wide
 speedup estimate.
 
 A full benchmark attempt on 28 July 2026 terminated after writing an incomplete
-\texttt{report\_193.json}.  The repository was dirty and the report was marked
+\texttt{report\_\allowbreak 193.json}.  The repository was dirty and the report
+was marked
 ineligible for historical comparison
 (\texttt{history\_eligible=false}).  Its raw evidence contains 123 records,
 and the incomplete summary lists 40 regressions, 194 rule violations, and 84

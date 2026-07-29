@@ -53,11 +53,11 @@ lessons:
         transfers have been included in the contract.
 \end{enumerate}
 
-The discussion below first defines that contract, reconstructs minimap2 and
-SIMD-Minimizers, then follows the rejected and retained BioSeqDB designs.  Code
-locations refer to the current checkout.  Historical timing claims are tied to
-the archived report that measured them. They are not presented as current
-performance.
+The discussion below first defines that contract.  It then reconstructs
+minimap2 and SIMD-Minimizers before following the rejected and retained
+BioSeqDB designs.  Code locations refer to the current checkout.  Historical
+timing claims are tied to the archived report that measured them. They are not
+presented as current performance.
 
 \subsection{Formal definition}
 \label{sec:minimizer-definition}
@@ -460,10 +460,14 @@ forward and reverse-complement rolling states with the same wrapping sum.
 Their incompatibility instead comes from the compared hash width, endpoint
 selection, orientation evidence, event identity, and persisted scheme.
 
-\begin{table}[H]
+\begin{table}[!htbp]
 \centering
 \small
-\begin{tabularx}{\linewidth}{p{.24\linewidth}XX}
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\linewidth}{
+  >{\raggedright\arraybackslash\hspace{0pt}}p{.18\linewidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}X}
 \toprule
 Contract element & SIMD-Minimizers reference & BioSeqDB PNT1\\
 \midrule
@@ -487,9 +491,9 @@ data-independent minima, but they do not share a seed contract
 \end{table}
 
 The upstream SIMD-Minimizers implementation makes canonical window selection
-reverse-complement invariant by retaining both extreme equal minima and then
-choosing the left or right endpoint according to a canonical orientation of
-the full $(k+w-1)$-base window. Its orientation counter compares the number of
+invariant under reverse complementation.  It retains both extreme equal minima
+and then chooses the left or right endpoint according to a canonical
+orientation of the full $(k+w-1)$-base window. Its orientation counter compares the number of
 $G/T$ symbols with the number of $A/C$ symbols and requires an odd window span
 to avoid a tie. BioSeqDB's packed PNT1 fork makes a different, explicit choice.
 It emits the left endpoint and, when the minimum hash is tied, also the right
@@ -641,7 +645,9 @@ compatibility with minimap2's hash or event stream.}
 \end{table}
 
 The repository-bundled
-\path{RESEARCH/BENCHMARKING_SPEEDUP/simd_minimizers_paper.pdf} is the
+\path{RESEARCH/}\allowbreak
+\path{BENCHMARKING_SPEEDUP/}\allowbreak
+\path{simd_minimizers_paper.pdf} is the
 2025-01-27 bioRxiv full-version preprint.  It reports an earlier measurement
 set, including 4.1\,s forward and 6.0\,s canonical CHM13 times, rather than the
 final SEA values 5.19\,s and 6.71\,s shown above.  Both versions define the
@@ -709,7 +715,7 @@ remain useful:
 \end{itemize}
 
 It also produced an important naming trap.  The public benchmark name
-\texttt{two\_stack\_nthash} was used while some versions ordered canonical
+\texttt{two\_stack}\allowbreak\texttt{\_nthash} was used while some versions ordered canonical
 two-bit words lexicographically, mixed them with a golden-ratio multiplier, or
 deferred the minimap scramble until emission.  A non-order-preserving scramble
 cannot be deferred while retaining the same minimizer set. Later forensic work
@@ -759,27 +765,6 @@ V3 & packed storage, smaller state & conversion removal helped but SIMD still
 lost end-to-end performance & 170.7 vs 158.4 ms at 903 kbp\\
 V4 & first two-stack route & regular control flow is necessary, not sufficient
 & 28.02 vs 14.31 ms sketch\\
-\bottomrule
-\end{tabularx}
-\caption{Selected historical milestones from DOC0107--DOC0120 and DOC0118.
-Rows are deliberately heterogeneous: the table reports what each experiment
-measured, not a fabricated common benchmark series.}
-\label{tab:minimizer-history}
-\end{table}
-
-\begin{table}[htbp]
-\centering
-\footnotesize
-\setlength{\tabcolsep}{3pt}
-\renewcommand{\arraystretch}{1.15}
-\begin{tabularx}{\linewidth}{
-  >{\raggedright\arraybackslash\hspace{0pt}}p{.10\linewidth}
-  >{\raggedright\arraybackslash\hspace{0pt}}p{.22\linewidth}
-  >{\raggedright\arraybackslash\hspace{0pt}}X
-  >{\raggedright\arraybackslash\hspace{0pt}}p{.23\linewidth}}
-\toprule
-Checkpoint & Change & What was learned & Reported evidence\\
-\midrule
 V8--V12 & deferred work, two streams, forced inline & callback shape and
 independent streams materially affect NEON & inner phase $\sim9.23$ ms\\
 V13 & sort-free error estimate & a minimizer project can be dominated by the
@@ -788,6 +773,10 @@ V14 & true ntHash experiment & changing hash has both sketch and lookup costs &
 $+2.0$ ms sketch, $-0.38$ ms lookup\\
 \bottomrule
 \end{tabularx}
+\caption{Selected historical milestones from DOC0107--DOC0120 and DOC0118.
+Rows are deliberately heterogeneous: the table reports what each experiment
+measured, not a fabricated common benchmark series.}
+\label{tab:minimizer-history}
 \end{table}
 
 \section{Current BioSeqDB minimizer backends}
@@ -1318,7 +1307,9 @@ measurements only with their algorithm contract and experiment scope.
 \subsection{Historical controlled CPU checkpoint}
 
 Report 103, recorded on 11 July 2026 in
-\path{main/DOCS/CURRENT/REPORTS/0370_BIOSEQ_SLOWNESS_DEBUGGING_EVENT_LOG.md},
+\path{main/DOCS/CURRENT/REPORTS/}\allowbreak
+\path{0370_BIOSEQ_SLOWNESS_}\allowbreak
+\path{DEBUGGING_EVENT_LOG.md},
 is a useful historical four-configuration checkpoint. It is not the current
 production-backend decision. The local Darwin arm64/NEON run contains 16
 complete raw records, which gives four observations for each configuration.
@@ -1482,7 +1473,7 @@ semantics, and topology-dependent boundaries.  Report 90 restored exactness
 but regressed to 66.273\,s. Later specialization reduced that to 13.413\,s and
 eventually the historical report-103 value of 9.256\,s. Those experiments show
 why performance must be attached to an audited contract, not merely to the class name
-\texttt{TwoStackMinimizerAlgorithm}.
+\texttt{TwoStackMinimizer}\allowbreak\texttt{Algorithm}.
 
 The same caution applies to the SIMD tie path. Report 100 recorded
 40,464,168 candidate batches and 46,654,429 rejected ordinary lanes, with only
@@ -1505,8 +1496,8 @@ compatible sketch/index scheme:
   and semantic oracle. It is the reference for invalid-symbol resets,
   equal-hash identities, duplicate events, position widths, and final flushes.
 
-  \item[\texttt{ExactSimd}.] The production-targeted, explicitly selectable
-  CPU implementation for the minimap-compatible scheme. It uses the K15/W10
+  \item[\texttt{ExactSimd}.] This production-targeted CPU implementation is
+  selected explicitly. It realizes the minimap-compatible scheme and uses the K15/W10
   B8 specialization when that shape is proved and otherwise uses the supported
   generic exact-vector route. The selected backend accepts only a proof with
   zero scalar biological counters. A declined proof is an error, not an

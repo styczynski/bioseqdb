@@ -168,9 +168,10 @@ specific algorithm:
 
 Index traits bind an algorithm to one of these layouts at compile time. The
 PostgreSQL registry currently includes
-\texttt{MinimizersPerFragmentIndex} (MPF),
-\texttt{MinimizerSequenceMergedIndex} (MPS), and
-\texttt{SymbolCountsIndex}. A table-level count index exists only in test
+\texttt{Minimizers\allowbreak Per\allowbreak Fragment\allowbreak Index} (MPF),
+\texttt{Minimizer\allowbreak Sequence\allowbreak Merged\allowbreak Index} (MPS),
+and \texttt{Symbol\allowbreak Counts\allowbreak Index}. A table-level count
+index exists only in test
 builds. Both minimizer implementations use the fragment-chunk storage adapter,
 while symbol counts use the per-sequence adapter. Static assertions verify
 that each registered algorithm and storage class agree about their layout.
@@ -215,7 +216,8 @@ physical granularity and checked-in update policy.
 \end{table}
 
 Update policy and read policy are intentionally distinct. An index may be
-\texttt{UPDATE\_ON\_INSERT} or \texttt{UPDATE\_MANUALLY}. At read time the
+\texttt{UPDATE\_\allowbreak ON\_\allowbreak INSERT} or
+\texttt{UPDATE\_\allowbreak MANUALLY}. At read time the
 query contract can allow a persisted index, require its absence, or require a
 compatible persisted index. The default active minimizer read name is MPF.
 The setting that permits stored-index reads controls whether persistence is
@@ -464,7 +466,8 @@ PostgreSQL capabilities on the thread that owns them.
 \label{sec:index-legacy-sidecar}
 
 The original storage adapters materialize ordinary PostgreSQL relations in the
-\texttt{bioseq\_internal} schema. Their names are derived from the physical
+\texttt{bioseq\_\allowbreak internal} schema. Their names are derived from the
+physical
 identity of the parent relation together with the index name, bucket, and shard.
 This is more robust than deriving a name only from the user-visible table name:
 rename does not change the relation identity, and drop/recreate does not make a
@@ -897,11 +900,13 @@ forming a span, so a corrupt count cannot wrap into an apparently valid
 address.
 
 The consequence for SQL semantics is deliberate. A read policy of
-\texttt{require\_compatible\_persisted} fails closed on absence or mismatch.
+\texttt{require\_\allowbreak compatible\_\allowbreak persisted} fails closed
+on absence or mismatch.
 It may not rebuild an index and continue, because that would invalidate a cold
 load benchmark and can violate a caller's operational requirement. An
 \texttt{allow} policy may fall through to recomputation. A
-\texttt{require\_absent} policy supplies the converse experimental contract:
+\texttt{require\_\allowbreak absent} policy supplies the converse experimental
+contract:
 the query must exercise the no-index route.
 
 Table~\ref{tab:index-mismatch-response} makes the fail-closed response explicit

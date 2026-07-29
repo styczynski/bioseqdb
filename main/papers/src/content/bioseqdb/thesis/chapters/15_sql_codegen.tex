@@ -198,9 +198,11 @@ replaced without changing the external API client's output contract.
 \subsection{A typed vendor namespace}
 
 All SQL annotations use the flat vendor namespace
-\texttt{bioseq\_sql}.  Thus \texttt{[[bioseq\_sql::function(...)]]} is valid,
+\texttt{bioseq\_sql}. Thus
+\texttt{[[bioseq\_sql::\allowbreak function(...)]]} is valid,
 whereas a nested spelling such as
-\texttt{[[bioseq::sql::function(...)]]} is rejected.  The distinction is not
+\texttt{[[bioseq::\allowbreak sql::\allowbreak function(...)]]} is rejected.
+The distinction is not
 cosmetic.  Standard C++ attribute syntax provides one vendor namespace, and a
 compiler may otherwise ignore a misspelled vendor attribute.  The structural
 collector therefore inventories every \texttt{bioseq\_sql} token and fails if
@@ -208,9 +210,11 @@ one is not collected, recognized, placed on a permitted declaration kind, and
 evaluated by the closed model.
 
 The public model uses structural fixed-capacity text values, typed SQL type
-identifiers, concrete option structures, and \texttt{consteval} builders.  A
-builder such as \texttt{function(function\_options)} returns an
-\texttt{annotation\_spec<function\_options>}.  Because the overload accepts a
+identifiers, concrete option structures, and \texttt{consteval} builders. A
+builder such as
+\texttt{function(\allowbreak function\_\allowbreak options)} returns an
+\texttt{annotation\_\allowbreak spec<\allowbreak function\_\allowbreak options>}.
+Because the overload accepts a
 concrete aggregate, short forms such as
 \texttt{column(\{.sql\_type = pg::bigint\})} are checked by C++ rather than by
 an ad-hoc dictionary parser.  The model also provides
@@ -324,7 +328,8 @@ production and test profiles.  A line-oriented parser cannot resolve these
 cases reliably.
 
 The module
-\path{main/codegen/clang_structural/model.cppm} defines a compiler-independent
+\texttt{main/codegen/clang\_\allowbreak structural/model.cppm} defines a
+compiler-independent
 wire model.  Its \texttt{attribute\_record} carries the qualified name,
 argument text, target USR, placement, and source ranges.  A
 \texttt{declaration\_record} adds the following fields:
@@ -385,7 +390,8 @@ corrupt.  The resulting
 \end{itemize}
 
 Before any structural scan, the generator calls
-\texttt{validate\_prepared\_compilation\_environment}.  Validation recomputes
+\texttt{validate\_\allowbreak prepared\_\allowbreak compilation\_\allowbreak
+environment}. Validation recomputes
 the toolchain, profile, authority, source, dependency, provenance, and PCM
 joins.  A cached PCM is therefore a performance optimization only after
 validation shows that it represents the requested source state.  This design
@@ -435,9 +441,10 @@ not an opaque \texttt{Datum} fallback.
 
 \subsection{Stable and installed identities}
 
-Every graph node receives a stable textual identity.  The current
-\texttt{routine\_signature}, \texttt{stable\_identity}, and
-\texttt{installed\_identity} functions are defined in
+Every graph node receives a stable textual identity. The current
+\texttt{routine\_\allowbreak signature},
+\texttt{stable\_\allowbreak identity}, and
+\texttt{installed\_\allowbreak identity} functions are defined in
 \path{main/codegen/sql/graph/index.cppm}.  Routine identities include the
 schema, name, and canonical SQL input types, for example
 \[
@@ -641,7 +648,8 @@ extern "C" PGDLLEXPORT Datum symbol(PG_FUNCTION_ARGS) {
 \end{lstlisting}
 
 The normal generated-routine predicate has one reviewed exception:
-\texttt{bioseq\_external\_handler}, the external table access-method handler,
+\texttt{bioseq\_\allowbreak external\_\allowbreak handler}, the external table
+access-method handler,
 retains its special handwritten boundary.  The exception is encoded by exact
 function identity, source module, schema, and result type in
 \path{main/codegen/sql/renderer/fmgr.cppm}.  It is therefore visible and
@@ -651,10 +659,11 @@ generation.
 \subsection{GUC registration}
 
 Primitive GUCs are generated into calls to
-\texttt{DefineCustomBoolVariable},
-\texttt{DefineCustomIntVariable},
-\texttt{DefineCustomRealVariable}, or
-\texttt{DefineCustomStringVariable}.  The address passed to PostgreSQL is the
+\texttt{Define\allowbreak Custom\allowbreak Bool\allowbreak Variable},
+\texttt{Define\allowbreak Custom\allowbreak Int\allowbreak Variable},
+\texttt{Define\allowbreak Custom\allowbreak Real\allowbreak Variable}, or
+\texttt{Define\allowbreak Custom\allowbreak String\allowbreak Variable}. The
+address passed to PostgreSQL is the
 annotated static storage cell.  Defaults and bounds are authored C++
 expressions.  Context, flags, and optional hooks are typed annotation
 properties.  The generated registration closure is statically required to be
@@ -675,16 +684,18 @@ describe different inventories and are therefore reported independently.
 
 \subsection{A compatibility ledger which owns no SQL}
 
-The checked physical ledger is a three-column TSV.  Its
-\texttt{parse\_physical\_ledger} and \texttt{apply\_physical\_ledger}
-implementations are in
+The checked physical ledger is a three-column TSV. Its
+\texttt{parse\_\allowbreak physical\_\allowbreak ledger} and
+\texttt{apply\_\allowbreak physical\_\allowbreak ledger} implementations are in
 \path{main/codegen/sql/physical_ledger.cppm}:
 \[
   \langle\texttt{PNNN},\ \text{facet},\
   \text{natural owner stable identity}\rangle.
 \]
-The permitted facets are \texttt{primary}, \texttt{catalog\_comment},
-\texttt{base\_type\_shell}, and \texttt{base\_type\_definition}.  Parsing
+The permitted facets are \texttt{primary},
+\texttt{catalog\_\allowbreak comment},
+\texttt{base\_\allowbreak type\_\allowbreak shell}, and
+\texttt{base\_\allowbreak type\_\allowbreak definition}. Parsing
 requires exactly three tab-separated fields and a contiguous sequence from
 \texttt{P001}.  Duplicate or missing owners fail generation.  Crucially, a
 ledger row contains no SQL text and no alternate descriptor.  It can preserve
@@ -757,9 +768,10 @@ generated ownership and rejects a missing, duplicate, or unexpected symbol.
 
 \subsection{Why a wrapper catch is not sufficient}
 
-PostgreSQL's recoverable \texttt{ERROR} mechanism unwinds its own error stack
-with a non-local jump rather than a C++ exception
-\cite{postgresql17_cpp_extensibility}.  It therefore does not automatically
+PostgreSQL documents that its recoverable \texttt{ERROR} mechanism unwinds its
+own error stack with a non-local jump
+\cite{postgresql17_cpp_extensibility}. Unlike a C++ exception, it does not
+automatically
 execute C++ destructors in frames it crosses.  A \texttt{std::string}, detoast
 guard, tuple owner, lock guard, or lambda capture which remains live at such a
 site can leak resources or leave state inconsistent.  Conversely, a C++

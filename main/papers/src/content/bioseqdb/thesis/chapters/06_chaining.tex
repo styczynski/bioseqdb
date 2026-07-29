@@ -182,9 +182,10 @@ maintains the reference-distance condition.  The pair scorer checks the
 remaining conditions.  Writing \(\lambda_g\) and \(\lambda_s\) for the gap
 and skip coefficients, BioSeqDB assigns the edge contribution
 \begin{equation}
-\alpha(i,j)=
-\min\{\ell_j,h(i,j)\}
--
+\begin{aligned}
+\alpha(i,j)
+&=\min\{\ell_j,h(i,j)\}\\
+&\quad-
 \begin{cases}
 0,&\delta(i,j)=0\ \land\ h(i,j)\le \ell_j,\\[2mm]
 \left\lfloor
@@ -192,6 +193,7 @@ and skip coefficients, BioSeqDB assigns the edge contribution
  +\frac{1}{2}\operatorname{fastlog}_2(\delta(i,j)+1)
 \right\rfloor,&\text{otherwise.}
 \end{cases}
+\end{aligned}
 \label{eq:chaining-edge-score}
 \end{equation}
 All terms inside the floor are non-negative, so the conversion in the C++
@@ -338,11 +340,11 @@ affects later candidate endpoints.  The resulting list represents competing
 candidate regions.  Later mapping-region logic decides parent/secondary
 relationships and computes mapping quality.
 
-The shared scalar/RMQ backtracker is intentionally simpler than the complete
-upstream minimap2 \texttt{mg\_chain\_backtrack} plus
-\texttt{compact\_a} sequence.  In particular, the current \mbox{BioSeqDB}
-helper has
-no explicit \texttt{max\_drop} parameter and does not reproduce minimap2's
+The shared scalar/RMQ backtracker is intentionally simpler than upstream
+minimap2.  It does not reproduce the complete
+\path{mg_chain_backtrack}-plus-\path{compact_a} sequence.  In particular, the
+current \mbox{BioSeqDB} helper has no explicit \path{max_drop} parameter and
+does not reproduce minimap2's
 final target-position ordering step byte for byte.  The forward peak-score
 array is passed to the helper but currently unused.  Thus ``minimap2-compatible
 score and predecessor search'' is a more accurate description than
@@ -730,14 +732,14 @@ modulo-1024 index.  A temporary predecessor within the tile is represented as
 a signed 16-bit relative distance.  The global predecessor array stores a
 signed 64-bit relative distance.
 
-The copied wrapper compiles the chaining search cap as
-\texttt{MAX\_ITER\_CHAIN=5000}. The initial dynamic-programming pass uses
+The copied wrapper compiles a chaining search cap of 5000 into
+\path{MAX_ITER_CHAIN}. The initial dynamic-programming pass uses
 reference-distance and query-distance limits of 5000. The later RMQ pass uses
-limits of 20000 for both distances, while the compile-time
-\texttt{MAX\_ITER\_CHAIN} cap remains 5000. The bandwidth is zero, and the
-gap-penalty scale is \(0.12\). The wrapper records
-\texttt{max\_chain\_skip=0}, while the initial DP path assumes a query span of
-15. No \texttt{max\_chain\_skip} argument reaches the kernel. The kernel
+limits of 20000 for both distances. The compile-time
+\path{MAX_ITER_CHAIN} cap remains 5000. The bandwidth is zero, and the
+gap-penalty scale is \(0.12\). The wrapper records zero in
+\path{max_chain_skip}, while the initial DP path assumes a query span of 15.
+No \path{max_chain_skip} argument reaches the kernel. The kernel
 therefore does not implement minimap2's visited-generation heuristic and
 instead updates source-to-target scores within the fixed iteration cap.
 Agreement with minimap2 endpoints is consequently an empirical property of an
@@ -929,19 +931,20 @@ remains an empirical operating point.
 \label{sec:chaining-benchmarks}
 
 Figure~\ref{fig:chaining-report192} reports chaining-focused 50th-percentile
-(P50) measurements from \texttt{report\_192.json}, created on 27 July 2026 from
+(P50) measurements from \path{report_192.json}. The artifact was created on
+27 July 2026 from
 commit \texttt{f9570f4f3da3} with a dirty worktree.  The XXL high-fidelity
 (HiFi) case used a 0.5-gigabase-pair (Gbp) reference and a 5-megabase-pair
 (Mbp) query.  Each displayed region has two samples, and the report defines P50
 as the lower of the two observations.
-Because the report is marked \texttt{history\_eligible=false}, it is a
+Because the report is marked \path{history_eligible=false}, it is a
 reproducible development snapshot, not a promoted release baseline.
-The outer \texttt{mg\_lchain\_dp} and \texttt{mg\_lchain\_simd} scopes include
-the nested \texttt{backtrack\_chains} region.  The left panel is an inclusive
+The outer \path{mg_lchain_dp} and \path{mg_lchain_simd} scopes include
+the nested \path{backtrack_chains} region.  The left panel is an inclusive
 chaining-kernel measurement, while the right panel isolates that nested
 backtracking component.
 
-\begin{figure}[H]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[font=\small]
   % inclusive chaining panel

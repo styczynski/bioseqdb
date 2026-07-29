@@ -42,16 +42,20 @@ to planning, and encourages one remote request per evaluated row.  It also
 makes cancellation and memory bounds accidental properties of the function
 implementation.  The external table instead gives the remote operation a
 PostgreSQL Custom Scan lifecycle~\cite{postgresql17_custom_scan}:
-\texttt{BeginCustomScan}, repeated \texttt{ExecCustomScan},
-\texttt{ReScanCustomScan}, \texttt{EndCustomScan}, and
-\texttt{ExplainCustomScan}.  The scan can defer network access until the first
+\texttt{Begin\allowbreak Custom\allowbreak Scan}, repeated
+\texttt{Exec\allowbreak Custom\allowbreak Scan},
+\texttt{ReScan\allowbreak Custom\allowbreak Scan},
+\texttt{End\allowbreak Custom\allowbreak Scan}, and
+\texttt{Explain\allowbreak Custom\allowbreak Scan}. The scan can defer network
+access until the first
 tuple is requested, retain state between calls, apply backpressure, and cancel
 its producer during rescan or query teardown.
 
 The six relation declarations are not handwritten SQL.  The annotated C++ row
 types in
 \path{main/bioseq/backend/pg/external/sql_catalog.cppm}, namespace
-\texttt{bioseq::external::sql\_rows}, are consumed by the SQL generation
+\texttt{bioseq::\allowbreak external::\allowbreak sql\_\allowbreak rows}, are
+consumed by the SQL generation
 machinery described in the following source-generation chapter. Every type
 specifies \texttt{access\_method = "bioseq\_external"}.  The sequence-bearing
 columns use the real \texttt{bioseq.seq} PostgreSQL type, while provenance and
@@ -208,7 +212,7 @@ still exists.
       flow/.style={->,thick}
     ]
     \node[box,text width=2.5cm] (sql) at (0,0)
-      {SQL over\\\texttt{bioseq\_external.*}};
+      {SQL over\\\texttt{bioseq\_\allowbreak external.*}};
     \node[box,text width=3.05cm] (scan) at (3.35,0)
       {\texttt{BioseqExternalScan}\\qual translation};
     \node[box,text width=2.65cm] (pack) at (6.8,0)
@@ -267,7 +271,8 @@ Source descriptors are the C++ modules
 \path{main/bioseq/external/ebi.cppm},
 \path{main/bioseq/external/uniprot.cppm} and
 \path{main/bioseq/external/swiss_model.cppm}.  They contain the
-\texttt{bioseq::api\_client} annotation and embedded OpenAPI input.  They should
+\texttt{bioseq::\allowbreak api\_\allowbreak client} annotation and embedded
+OpenAPI input. They should
 not be confused with the runtime provider adapters under
 \path{main/bioseq/external/providers/}.
 
@@ -324,7 +329,8 @@ concept external_api_provider_implementation =
 The complete definitions are in
 \path{main/bioseq/external/provider/concepts.cppm}.  There is no virtual
 provider base class.  The template
-\texttt{external\_api\_provider<Providers...>} in
+\texttt{external\_\allowbreak api\_\allowbreak provider<%
+\allowbreak Providers...>} in
 \path{main/bioseq/external/provider/pack.cppm} checks type and stable-ID
 uniqueness at compile time.  At run time it performs one dispatch from the
 provider string to the concrete adapter type.  Dispatch does not occur for each
@@ -348,7 +354,7 @@ semantics.
 
 \subsection{A table access method with no local tuples}
 
-The \texttt{bioseq\_external} table access method is defined in
+The \texttt{bioseq\_\allowbreak external} table access method is defined in
 \path{main/bioseq/backend/pg/external/relation.cppm}.  It does not create a
 physical storage fork and does not contact a provider.  Its ordinary physical
 scan callbacks cannot produce tuples. The custom scan is the legal read path.
@@ -366,8 +372,10 @@ the external custom path is exclusive.
 \texttt{bioseq\_external\_plan\_custom\_path} preserves the real relation OID
 in \texttt{scanrelid}.  PostgreSQL therefore provisions a scan slot with the
 declared table descriptor and applies the plan's projection and residual
-filters normally.  \texttt{BioseqExternalScanState} places
-\texttt{CustomScanState} at offset zero, as required by PostgreSQL's node ABI.
+filters normally.
+\texttt{Bioseq\allowbreak External\allowbreak Scan\allowbreak State} places
+\texttt{Custom\allowbreak Scan\allowbreak State} at offset zero, as required by
+PostgreSQL's node ABI.
 The C++ runtime object is separately allocated and registered with the query
 memory context's reset callback.  This prevents a C++ container from being
 silently abandoned when PostgreSQL exits through its error long jump.
@@ -454,7 +462,8 @@ subsequent row production.
 \section{The NCBI streaming data plane}
 \label{sec:ncbi-streaming}
 
-The streaming path is selected by \texttt{is\_streaming\_query} in
+The streaming path is selected by
+\texttt{is\_\allowbreak streaming\_\allowbreak query} in
 \path{main/bioseq/backend/pg/external/scan.cppm}: the target must be
 \texttt{sequences} or \texttt{sequence\_chunks}, the provider set must contain
 only NCBI, and an equality-constrained accession must be recoverable from the
@@ -504,7 +513,8 @@ second over 120 seconds, and an optional total timeout. It verifies the TLS peer
 and host, enforces a wire-byte cap, and limits each poll interval to one second
 for cooperative stop checks.
 
-The incremental \texttt{fasta\_chunk\_emitter} in
+The incremental
+\texttt{fasta\_\allowbreak chunk\_\allowbreak emitter} in
 \path{main/bioseq/external/io/sequence_stream.cppm} discards headers and
 whitespace while retaining the first header token as the record identifier.
 For \texttt{sequence\_chunks}, it flushes fixed-size base chunks and holds one
@@ -581,7 +591,8 @@ Provider messages remain PostgreSQL-independent.  The current
 \texttt{owning\_sequence\_payload} in
 \path{main/bioseq/external/provider/model.cppm} owns raw base letters in a
 \texttt{std::string}, together with accession, interval, chunk and audit
-metadata.  It is not itself a \texttt{compact\_sequence\_range}.  This is a
+metadata. It is not itself a
+\texttt{compact\_\allowbreak sequence\_\allowbreak range}. This is a
 deliberate boundary: network parsing can be built and tested without PostgreSQL
 headers or memory contexts.
 
@@ -695,7 +706,9 @@ contract that has not yet been fully connected to the scan.
 \label{sec:external-evidence}
 
 The evidence used here is the session-5 update dated 13 July 2026 in
-\path{main/DOCS/CURRENT/REPORTS/0374_DOC0372_NCBI_STREAMING_DATA_PLANE_IMPLEMENTATION_AND_POSTGRES_PROOF.md}.
+\texttt{main/DOCS/CURRENT/REPORTS/0374\_\allowbreak DOC0372\_\allowbreak
+NCBI\_\allowbreak STREAMING\_\allowbreak DATA\_\allowbreak PLANE\_\allowbreak
+IMPLEMENTATION\_\allowbreak AND\_\allowbreak POSTGRES\_\allowbreak PROOF.md}.
 It reports that all six external relations planned as
 \texttt{Custom Scan (BioseqExternalScan)} and that no \texttt{Seq Scan}
 appeared. The Q1--Q8 transcript exercised NCBI, UCSC, and UniProt. EBI was

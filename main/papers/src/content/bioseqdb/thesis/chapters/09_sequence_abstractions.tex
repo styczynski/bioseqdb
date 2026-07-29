@@ -247,8 +247,11 @@ paths do not make whole-sequence conversion their default.  They use the
 interval, but its current forward implementation reaches \texttt{to} by
 logical iteration from the beginning.  Its traversal cost is therefore
 \(O(\mathtt{to})\), and reverse traversal can approach \(O(N)\).
-\texttt{to\_encoded\_into<IsReversed,WriteReversed>} instead seeks to the
-containing unit and decodes only \([from,to)\), giving
+The span-oriented alternative has the signature
+\begin{center}
+\small\texttt{to\_encoded\_into<IsReversed, WriteReversed>}
+\end{center}
+It seeks to the containing unit and decodes only \([from,to)\), giving
 \(O(\mathtt{to}-\mathtt{from})\) resident work.  The two Boolean dimensions are
 independent:
 \texttt{IsReversed} mirrors logical coordinates and applies complement
@@ -393,11 +396,12 @@ operations whose work scales with total or selected symbols.
 \caption{Packed-range operations and their data movement.}
 \label{tab:compact-operation-costs}
 \begingroup
-\setlength{\tabcolsep}{5pt}
+\small
+\setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.08}
 \begin{tabularx}{\textwidth}{@{}
-  >{\raggedright\arraybackslash}p{0.25\textwidth}
-  >{\raggedright\arraybackslash}p{0.15\textwidth}
+  >{\raggedright\arraybackslash}p{0.30\textwidth}
+  >{\raggedright\arraybackslash}p{0.18\textwidth}
   >{\raggedright\arraybackslash}X@{}}
 \textbf{Operation} & \textbf{Cost} & \textbf{Ownership/copy behavior}\\
 \hline
@@ -409,10 +413,12 @@ the aligned, previously validated payload with zero copy\\
 read one resident rank & \(O(1)\) & one unit load and bit extraction\\
 iterate ranks or symbols & \(O(N)\) & no payload copy.  Symbols may be
 constructed on demand\\
-direct \texttt{to\_encoded\_into([a,b))} & \(O(b-a)\) & seeks to the first
+direct\newline\texttt{to\_encoded\_into}\newline\texttt{([a,b))} &
+\(O(b-a)\) & seeks to the first
 containing unit and writes exactly the selected ranks\\
-allocating \texttt{to\_encoded\_vector(a,b)} & forward \(O(b)\), reverse up to
-\(O(N)\) & writes \(b-a\) ranks after iterator traversal\\
+allocating\newline\texttt{to\_encoded\_vector}\newline\texttt{(a,b)} &
+forward \(O(b)\),\newline reverse up to \(O(N)\) &
+writes \(b-a\) ranks after iterator traversal\\
 unit-aligned \texttt{split\_units} & \(O(k)\) metadata & records unit offsets.
 Only aligned boundaries are zero-copy\\
 construct legacy \texttt{bit\_casted\_view} & \(O(1)\) & borrows its base.

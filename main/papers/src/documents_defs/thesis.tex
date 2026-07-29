@@ -15,7 +15,11 @@
 \titleen{\data{title.en}}
 \titlepl{\data{title.pl}}
 \kierunek{\data{major}}
-\opiekun{\data{supervisor}}
+\if\dataeq{supervisor}{??}
+    \opiekun{}
+\else
+    \opiekun{\data{supervisor}}
+\fi
 \date{\data{created}}
 \dziedzina{\data{subject.text}}
 \klasyfikacja{

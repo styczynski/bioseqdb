@@ -235,6 +235,7 @@ in current code.
 
 \begin{figure}[htbp]
 \centering
+\resizebox{\linewidth}{!}{%
 \begin{tikzpicture}[
     x=0.92cm,y=0.92cm,>=Latex,
     seed/.style={circle,fill=black,inner sep=1.7pt},
@@ -270,6 +271,7 @@ in current code.
   \node[annotation,anchor=south east] at (11.85,4.20)
         {$\texttt{min\_ksw\_len}=200$ governs fill boundaries};
 \end{tikzpicture}
+}
 \caption{BioSeqDB's three-phase region alignment. The drawing reconstructs
 the implemented control flow. It is not a copy of a minimap2 figure. Exact
 seeds constrain the path, short intervals accumulate, mandatory global fills
@@ -489,6 +491,7 @@ measurements below.
 
 \begin{figure}[htbp]
 \centering
+\resizebox{\linewidth}{!}{%
 \begin{tikzpicture}[x=0.48cm,y=0.48cm,>=Latex,font=\scriptsize]
   \def\gridpanel#1{
     \begin{scope}[xshift=#1]
@@ -531,6 +534,7 @@ measurements below.
     \node at (3.0,-1.0) {(c) halve and move diagonally};
   \end{scope}
 \end{tikzpicture}
+}
 \caption{Reconstruction of the adaptive-block mechanism described by Liu and
 Steinegger. A step computes an outgoing strip, growth replays from a saved
 checkpoint, and shrinking retains the promising suffix. The orange line
@@ -1106,8 +1110,8 @@ The newest authoritative final-alignment discussion in DOC0356/DOC0357 is the
 2026-06-28 signoff addendum over
 \path{main/reporting/bioseq_bench_e2e_batch_gpu_proof/report_47.json}.  The
 artifact was created at 2026-06-28T00:55:32Z from commit
-\texttt{ac58f88500d4ad8652e2}\allowbreak
-\texttt{6e163d2840e5713346b4}. Its metadata records
+\texttt{ac58f88500}\allowbreak\texttt{d4ad8652e2}\allowbreak
+\texttt{6e163d2840}\allowbreak\texttt{e5713346b4}. Its metadata records
 \texttt{dirty=true} and \texttt{fast=false}. Each displayed tuple and case had
 one sample, so the timings are scoped signoff observations rather than
 variability estimates. The report recorded no rule violations or regressions
@@ -1287,8 +1291,9 @@ rather than one kernel forced onto every query:
     deterministic restitching as an internal experiment. It is not exposed as
     a generated PostgreSQL GUC because its arithmetic remains lane-by-lane.
     \item The optional dedicated GPU tuple uses resident Vulkan seeding and
-    chaining. Its CIGAR route applies a G3SA-inspired 128-cell border/recompute
-    scheme with a BioSeqDB-specific two-piece-affine shader and SQL evidence.
+    chaining. Its CIGAR route applies a 128-cell border/recompute scheme
+    inspired by G3SA. The two-piece-affine shader and its SQL evidence are
+    BioSeqDB-specific.
 \end{enumerate}
 
 \begin{table}[htbp]

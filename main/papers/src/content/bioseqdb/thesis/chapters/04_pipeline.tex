@@ -35,11 +35,14 @@ map of logical stages, physical backends, and execution evidence.
 
 The implementation described in this chapter is grounded in four source
 surfaces.  The minimap2-derived algorithms and result structures are in
-\path{main/bioseq/backend/pipeline/minimap_port.cppm}.  The typed stage
+\path{main/bioseq/backend/pipeline/}\allowbreak
+\path{minimap_port.cppm}.  The typed stage
 composition and runtime-to-template dispatcher are in
-\path{main/bioseq/backend/pipeline/pipe.cppm}.  PostgreSQL batching and typed
+\path{main/bioseq/backend/pipeline/}\allowbreak
+\path{pipe.cppm}.  PostgreSQL batching and typed
 dispatch are in
-\path{main/bioseq/backend/pg/scheduler/dispatch_buffer.cppm} and
+\path{main/bioseq/backend/pg/scheduler/}\allowbreak
+\path{dispatch_buffer.cppm} and
 \path{main/bioseq/backend/pg/scheduler/}\allowbreak
 \path{dispatch_processor_typed_impl.inc}.
 Finally, memory admission and task scheduling are in
@@ -260,9 +263,12 @@ together.  The 9 July 2026 report \emph{Bioseq Slowness Debugging Event Log}
 \path{0370_BIOSEQ_SLOWNESS_DEBUGGING_EVENT_LOG.md})
 and the 9 July 2026 specification \emph{Cold Persisted Minimizer Index And
 Accelerator Attestation Optimization}
-(\path{main/DOCS/CURRENT/TECH_SPECS/}\allowbreak
-\path{0371_COLD_PERSISTED_MINIMIZER_INDEX_AND_}\allowbreak
-\path{ACCELERATOR_ATTESTATION_OPTIMIZATION.md})
+(\path{main/DOCS/CURRENT/}\allowbreak
+\path{TECH_SPECS/}\allowbreak
+\path{0371_COLD_PERSISTED_}\allowbreak
+\path{MINIMIZER_INDEX_AND_}\allowbreak
+\path{ACCELERATOR_ATTESTATION_}\allowbreak
+\path{OPTIMIZATION.md})
 hardened cold persisted-index identity, format compatibility and execution
 attestation.  The current direct persisted-index Shape-V5 coordinate route,
 where Shape-V5 denotes the resident partition representation consumed by the
@@ -274,9 +280,12 @@ or completing biological work on the CPU.
 
 The 17 July 2026 implementation handoff \emph{DOC0383 final implementation
 summary: fragment-native MPF pipeline and mapped generation storage}
-(\path{main/DOCS/CURRENT/BENCHMARK_FRAMEWORK/}\allowbreak
-\path{0384_DOC0383_IMPLEMENTATION_HANDOFF_}\allowbreak
-\path{FRAGMENT_NATIVE_MPF_PIPELINE_AND_}\allowbreak
+(\path{main/DOCS/CURRENT/}\allowbreak
+\path{BENCHMARK_FRAMEWORK/}\allowbreak
+\path{0384_DOC0383_}\allowbreak
+\path{IMPLEMENTATION_HANDOFF_}\allowbreak
+\path{FRAGMENT_NATIVE_}\allowbreak
+\path{MPF_PIPELINE_AND_}\allowbreak
 \path{MAPPED_GENERATION_STORAGE.md})
 then established the later fragment-native CPU and SIMD route.  A mapped
 generation provider exposes persisted postings without first rebuilding the
@@ -532,7 +541,7 @@ Tables~\ref{tab:pipeline-stage-contracts-a}
 and~\ref{tab:pipeline-stage-contracts-b} make the input, output, and invariant
 of each logical stage explicit.
 
-\begin{table}[p]
+\begin{table}[!bp]
   \centering
   \scriptsize
   \caption{Contracts of the current logical stage chain.  ``Pass'' means the
@@ -583,7 +592,7 @@ of each logical stage explicit.
   \end{tabular}
 \end{table}
 
-\begin{table}[p]
+\begin{table}[!tp]
   \centering
   \scriptsize
   \caption{Contracts of the final half of the current logical stage chain.}
@@ -624,8 +633,6 @@ of each logical stage explicit.
     \bottomrule
   \end{tabular}
 \end{table}
-
-\clearpage
 
 \section{Compile-time algorithm selection and runtime routing}
 \label{sec:pipeline-dispatch}
@@ -714,11 +721,13 @@ multiplying the effective worker count.
 
 \subsection{The mandatory Vulkan route}
 
-Vulkan selection uses two predicates with deliberately different meanings.
-\texttt{vulkan\_\allowbreak{}components\_\allowbreak{}requested} asks whether
+Vulkan selection distinguishes two predicates with deliberately different
+meanings.  The first,
+\texttt{vulkan\_components}\allowbreak\texttt{\_requested}, asks whether
 a full biological GPU component, such as Vulkan sketching, seed lookup, tiled
 chaining or extension, was selected.
-\texttt{vulkan\_\allowbreak{}accelerator\_\allowbreak{}requested} also
+The second,
+\texttt{vulkan\_accelerator}\allowbreak\texttt{\_requested}, also
 includes an independent Vulkan prefilter.  The independent prefilter can
 accelerate one conservative test inside a CPU pipeline, so it must not
 relabel the entire statement as an all-GPU mapper.
@@ -1150,7 +1159,8 @@ route.  It does not prove persisted all-GPU CIGAR.
     16/16 expected queries had an in-tolerance hit. Exact row-set parity was
     not tested. \\
     4,096 many-gap CIGAR queries &
-    1.809 & 4.512 & \(2.493\times\) & 4,096/4,096 CIGARs were correct. \\
+    1.809 & 4.512 & \(2.493\times\) &
+    4,096/4,096 CIGARs passed the report's acceptance gate. \\
     \bottomrule
   \end{tabularx}
 \end{table}
@@ -1206,8 +1216,8 @@ The 300 Mbp case executed 608 query-segment problems in 38 waves.  It built
 rows while the SIMD result set contained 16.  The correctness gate proves at
 least one in-tolerance hit for each of the 16 expected queries, not exact
 row-set parity.  The many-gap case is stronger evidence for final alignment.
-It reported exactly 4,096 matches, 4,096 correct CIGARs and 4,096 gridded
-jobs.  One resident index was reused 4,095 times.  The receipt records zero
+It reported exactly 4,096 matches, 4,096 fixture-accepted CIGARs and 4,096
+gridded jobs.  One resident index was reused 4,095 times.  The receipt records zero
 CPU fallback rows, zero SIMD fallback rows and zero Vulkan declines.
 
 These historical results support the architectural story rather than an
@@ -1241,7 +1251,8 @@ The final pipeline is best summarized by its invariants.
   \item \textbf{Target work has an explicit reuse scope.}  Prepared CPU or GPU
   targets, persisted readers and resident indexes can be reused across
   compatible query waves.  A
-  \texttt{PreparedFragment\allowbreak{}Anchor\allowbreak{}Batch} belongs to one
+  \texttt{PreparedFragment}\allowbreak\texttt{Anchor}\allowbreak
+  \texttt{Batch} belongs to one
   query wave and shares its per-query views only within that wave.
   \item \textbf{Parallelism is bounded twice.}  A single TBB arena controls
   worker concurrency, while memory admission controls the number and size of

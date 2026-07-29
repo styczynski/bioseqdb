@@ -118,7 +118,8 @@ mechanisms from BioSeqDB's sequence-specific extensions.
 \subsection{Pages, logical offsets, and reservations}
 
 The main relation fork begins with two non-data blocks. Block~0 contains
-\texttt{BioseqColumnMetapage}. Block~1 is reserved and empty. Logical data
+\texttt{Bioseq\allowbreak Column\allowbreak Metapage}. Block~1 is reserved and
+empty. Logical data
 starts after the PostgreSQL page header in block~2. If
 \[
   P = \mathrm{BLCKSZ} - \mathrm{SizeOfPageHeaderData}
@@ -144,8 +145,10 @@ The metapage records:
 Reservations modify the allocation counters in this metadata while holding
 the relation extension lock. Initialization and truncation require an
 access-exclusive relation lock. Metapage changes use
-PostgreSQL generic WAL through \texttt{GenericXLogStart},
-\texttt{GenericXLogRegisterBuffer}, and \texttt{GenericXLogFinish}. Thus the
+PostgreSQL generic WAL through
+\texttt{Generic\allowbreak XLog\allowbreak Start},
+\texttt{Generic\allowbreak XLog\allowbreak Register\allowbreak Buffer}, and
+\texttt{Generic\allowbreak XLog\allowbreak Finish}. Thus the
 column format does not replace PostgreSQL's page, buffer, lock, or recovery
 machinery. It builds a logical append space on top of it.
 
@@ -396,7 +399,8 @@ invitation to read whatever rows follow its address.
 \subsection{Length buckets, shards, and fragment rows}
 
 The production storage manager is instantiated as
-\texttt{sequence\_storage\_manager<uint64\_t,8,42>}. It generates 35 length
+\texttt{sequence\_\allowbreak storage\_\allowbreak manager<%
+\allowbreak uint64\_t,8,42>}. It generates 35 length
 buckets. The first contains bit widths up to~8. Bit widths 9 through 41 each
 receive one bucket. The final bucket covers the remaining widths through~64.
 For an insertion whose final size is known, the bucket is selected from the
@@ -861,8 +865,8 @@ load-bearing ways.
   address is insufficient.
   \item C++ objects with constructors are not placed directly in raw
   zero-initialized PostgreSQL memory. Cache ownership is explicit, snapshots
-  are registered, and relation/resource-owner discipline differs between
-  readers and writers.
+  are registered, and relation ownership and resource-owner discipline differ
+  between readers and writers.
   \item The Citus-derived column engine remains responsible for ordinary
   scalar streams, stripes, pruning, compression, deletion masks, and TableAM
   behavior. Sequence fragment indirection is an added layer, not a wholesale

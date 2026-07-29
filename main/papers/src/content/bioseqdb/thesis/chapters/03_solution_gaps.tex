@@ -190,7 +190,7 @@ belong to one database query.
 PostgreSQL makes it straightforward to expose C or C++ code as a typed
 function.  It also supports set-returning functions that emit zero or more
 rows, and a \texttt{LATERAL} item can correlate such a function with an input
-row~\cite{postgresql17_set_returning_functions,postgresql17_sql_functions}.
+row \cite{postgresql17_set_returning_functions,postgresql17_sql_functions}.
 Standard SQL can
 therefore express result multiplicity.  Those mechanisms do not by themselves
 allow one alignment scan to own cross-tuple batching, shared
@@ -702,7 +702,7 @@ behavior.
 
 \begin{enumerate}
   \item[\textbf{C1.}] An alphabet-generic sequence representation that supports
-  packed, fragmented, PostgreSQL-backed, and lazily composed data
+  packed, fragmented, lazily composed, and PostgreSQL-backed data
   through a common range contract.
 
   \item[\textbf{C2.}] A staged minimap2-derived mapper with scalar, SIMD, and
@@ -875,7 +875,8 @@ The evaluation uses one canonical protocol so that a source audit, a
 microbenchmark, and an end-to-end SQL run are not treated as interchangeable
 evidence.  Statements about the current implementation are pinned to code
 snapshot
-\path{2c6dd51a2bd36dce613f58c1578227de9fcea4d5}, dated 28 July 2026.
+\texttt{2c6dd51a2bd36dce613f58c}\allowbreak
+\texttt{1578227de9fcea4d5}, dated 28 July 2026.
 The document corpus has the same cutoff date.  Later repository changes and
 later documents are outside the evidentiary scope of this draft.
 Table~\ref{tab:solution-evaluation-protocol} defines the remaining rules.
