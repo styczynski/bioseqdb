@@ -929,7 +929,7 @@ reversed edge, logical child order is reversed during traversal.  For a
 literal or source leaf, coordinate mirroring, output order, and complementation
 are applied at the facade callback.  Adding this transform metadata is
 \(O(1)\) in payload length and never decodes or repacks ranks.  The complete SQL
-operation remains \(O(P)\) in the number of lazy-tree pieces because
+operation remains \(O(\text{piece count})\) because
 \texttt{transform\_pg\_sequence} validates the resulting tree.  A flat or
 TOASTed input must first be acquired as a writable expanded value.  That first
 expansion copies its packed literal payload once in \(O(\text{payload bytes})\)
