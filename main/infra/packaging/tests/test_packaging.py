@@ -842,6 +842,48 @@ class PublishingContractTests(unittest.TestCase):
 
 
 class RepositoryContractTests(unittest.TestCase):
+    def test_pacman_alias_materialization_is_readable_atomic_and_clean(self) -> None:
+        script = pacman_repository.PACMAN_REPOSITORY_SCRIPT
+        function_start = script.index("materialize_alias() {")
+        function_end = script.index('\ndatabase="${BIOSEQ_REPOSITORY_NAME}', function_start)
+        function = script[function_start:function_end]
+        harness = "\n".join(
+            (
+                "set -Eeuo pipefail",
+                function,
+                'materialize_alias "$1" "$2"',
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            canonical = root / "repository.db.tar.gz"
+            alias = root / "repository.db"
+            canonical.write_bytes(b"repository-metadata")
+
+            subprocess.run(
+                ["bash", "-c", harness, "pacman-alias-test", canonical, alias],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(alias.read_bytes(), canonical.read_bytes())
+            self.assertEqual(stat.S_IMODE(alias.stat().st_mode), 0o644)
+            self.assertTrue(alias.is_file())
+            self.assertFalse(alias.is_symlink())
+            self.assertEqual(list(root.glob("repository.db.tmp.*")), [])
+
+            alias.unlink()
+            alias.mkdir()
+            failed = subprocess.run(
+                ["bash", "-c", harness, "pacman-alias-test", canonical, alias],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(list(root.glob("repository.db.tmp.*")), [])
+
     def test_rpm_repository_plan_is_pinned_secret_scoped_and_exact(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -1087,6 +1129,7 @@ test-only-private-key-material
                 self.assertEqual(str(plan.mounts[0].target), "/repo")
                 self.assertIn("repo-add --sign --verify", plan.argv[-1])
                 self.assertIn("materialize_alias", plan.argv[-1])
+                self.assertIn('chmod 0644 "${temporary_alias}"', plan.argv[-1])
                 self.assertEqual(
                     set(plan.environment_names),
                     {
@@ -1132,6 +1175,12 @@ test-only-private-key-material
                 )
                 self.assertEqual(len(runner.calls), 1)
                 self.assertIn("GPG_PRIVATE_KEY", runner.calls[0][1])
+                for path in (
+                    result.package_path,
+                    *result.signature_paths,
+                    *result.metadata_paths,
+                ):
+                    self.assertEqual(path.stat().st_mode & 0o444, 0o444)
 
                 retained_environment: dict[str, str] | None = None
                 with pacman_repository.repository_environment(

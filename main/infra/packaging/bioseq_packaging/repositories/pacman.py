@@ -145,15 +145,20 @@ repo-add --sign --verify --key "${BIOSEQ_SIGNING_FINGERPRINT}" \
   "${BIOSEQ_REPOSITORY_NAME}.db.tar.gz" *.pkg.tar.zst
 
 materialize_alias() {
-  canonical_path="$1"
-  alias_path="$2"
+  local canonical_path="$1"
+  local alias_path="$2"
+  local temporary_alias
   if [[ ! -f "${canonical_path}" || -L "${canonical_path}" ]]; then
     printf 'PACMAN canonical repository object is missing or a symlink\n' >&2
     return 1
   fi
   temporary_alias="$(mktemp "${alias_path}.tmp.XXXXXXXX")"
-  cp -- "${canonical_path}" "${temporary_alias}"
-  mv -fT -- "${temporary_alias}" "${alias_path}"
+  if ! cp -- "${canonical_path}" "${temporary_alias}" \
+      || ! chmod 0644 "${temporary_alias}" \
+      || ! mv -fT -- "${temporary_alias}" "${alias_path}"; then
+    rm -f -- "${temporary_alias}"
+    return 1
+  fi
   if [[ ! -f "${alias_path}" || -L "${alias_path}" ]]; then
     printf 'PACMAN consumer alias was not materialized as a regular file\n' >&2
     return 1
@@ -168,6 +173,21 @@ materialize_alias "${database}" "${BIOSEQ_REPOSITORY_NAME}.db"
 materialize_alias "${database_signature}" "${BIOSEQ_REPOSITORY_NAME}.db.sig"
 materialize_alias "${files}" "${BIOSEQ_REPOSITORY_NAME}.files"
 materialize_alias "${files_signature}" "${BIOSEQ_REPOSITORY_NAME}.files.sig"
+
+# The signing container runs as root while the worker and repository consumers
+# do not.  Normalize every retained object to an explicitly readable mode.
+chmod 0644 -- \
+  "${BIOSEQ_PACKAGE_FILENAME}" \
+  "${BIOSEQ_PACKAGE_FILENAME}.sig" \
+  public.key \
+  "${database}" \
+  "${database_signature}" \
+  "${files}" \
+  "${files_signature}" \
+  "${BIOSEQ_REPOSITORY_NAME}.db" \
+  "${BIOSEQ_REPOSITORY_NAME}.db.sig" \
+  "${BIOSEQ_REPOSITORY_NAME}.files" \
+  "${BIOSEQ_REPOSITORY_NAME}.files.sig"
 """
 
 
@@ -393,6 +413,10 @@ def _repository_result(cell: CellContext, package_path: Path) -> RepositoryBuild
         if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
             raise RepositoryBuildError(
                 f"PACMAN repository object is invalid: {path.name}"
+            )
+        if path.stat().st_mode & 0o444 != 0o444:
+            raise RepositoryBuildError(
+                f"PACMAN repository object is not consumer-readable: {path.name}"
             )
     alias_pairs = (
         (database, aliases[0]),
