@@ -1227,14 +1227,11 @@ are separate events.
   \draw[->,thick] (expr) -- (tree);
   \draw[->,thick] (tree) -- (facade);
   \draw[->,thick] (facade) --
-    node[pos=.68,above,sloped,fill=white,inner sep=.5pt,font=\scriptsize]
-    {sequential} (stream);
+    node[midway,below,inner sep=1pt] {sequential} (stream);
   \draw[->,thick] (facade) --
-    node[pos=.42,left=2mm,fill=white,inner sep=.5pt,font=\scriptsize]
-    {resident probe} (borrow);
+    node[midway,right,align=center,inner sep=1pt] {resident\\probe} (borrow);
   \draw[->,thick] (facade) --
-    node[pos=.68,above,sloped,fill=white,inner sep=.5pt,font=\scriptsize]
-    {fallback} (pack);
+    node[midway,below,inner sep=1pt,xshift=3mm] {fallback} (pack);
   \draw[->,thick,dashed] (stream) -- (durable);
   \draw[->,thick,dashed] (borrow) -- (durable);
   \draw[->,thick,dashed] (pack) -- (durable);
