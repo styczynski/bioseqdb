@@ -479,6 +479,11 @@ class StaticContractTests(unittest.TestCase):
             'export PATH="${tool_root}/cmake/bin:${PATH}"',
             build_script,
         )
+        smoke_script = (SCRIPTS / "smoke_installed_package.sh").read_text()
+        self.assertIn(
+            "PostgreSQL[^0-9]*${postgres_major}",
+            smoke_script,
+        )
         self.assertIn(
             "-DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF",
             build_script,

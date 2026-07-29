@@ -129,7 +129,7 @@ for candidate in "${pg_bindir_candidates[@]}"; do
   [[ -x "${candidate}/postgres" && -x "${candidate}/initdb" \
       && -x "${candidate}/pg_ctl" ]] || continue
   candidate_version="$("${candidate}/postgres" --version 2>/dev/null || true)"
-  if [[ "${candidate_version}" =~ PostgreSQL[[:space:]]+${postgres_major}([^0-9]|$) ]]; then
+  if [[ "${candidate_version}" =~ PostgreSQL[^0-9]*${postgres_major}([^0-9]|$) ]]; then
     pg_bindir="${candidate}"
     break
   fi
