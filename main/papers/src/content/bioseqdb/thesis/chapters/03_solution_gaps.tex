@@ -551,6 +551,18 @@ Database-centric work by R\"ohm and Blakeley explored SQL and user-defined
 functions for high-throughput genomics, while Bio-Strings prototyped
 semantically meaningful biological string types and stored operations in
 PostgreSQL~\cite{roehm_blakeley_genomics_2009,bio_strings_2022}.
+Closer database-native precedents narrow the novelty claim further.
+BLASTGRES extends PostgreSQL with location types, indexes, and operators for
+precomputed or curated alignment tables~\cite{parker_alignment_tables_2008}.
+Dorok et al.\ integrate genome-specific compression and analysis into a
+database schema~\cite{dorok_genome_databases_2017}. The Terabase Search Engine
+stores prealigned short reads in distributed relational tables, supports
+location queries, and uses alignment or similarity components for
+query-sequence search~\cite{wilton_terabase_2019}. BioSeqDB therefore does not
+claim priority for storing genomic data, exposing sequence operations in SQL,
+or consulting an aligner from a database-backed system. Its claim is about the
+combined planner-owned, set-valued batched scan, representation boundary,
+execution proof, and persisted-index lifecycle developed in later chapters.
 
 \begin{table}[!htbp]
   \centering
@@ -599,6 +611,19 @@ PostgreSQL~\cite{roehm_blakeley_genomics_2009,bio_strings_2022}.
     end-to-end minimap2-derived mapper.
     \par\textbf{Requirement.} Combine typed relational storage with an
     auditable batch mapping path. \\
+    \addlinespace
+    BLASTGRES, Dorok et al., and the Terabase Search Engine &
+    \textbf{Scope.} PostgreSQL alignment tables and genomic-location
+    operators; compressed database-native genome storage and analysis; and a
+    distributed relational repository of prealigned short reads with
+    sequence-query support.
+    \par\textbf{Boundary.} These systems establish close database-native
+    precedent. Their cited architectures do not expose the same
+    planner-owned, set-valued batched minimap2 scan together with execution
+    proofs and a persisted minimizer-index lifecycle.
+    \par\textbf{Requirement.} Locate the contribution at that combined
+    planning, representation, execution, and lifecycle boundary rather than
+    claiming database-sequence priority. \\
     \addlinespace
     PostgreSQL set-returning functions, \texttt{LATERAL}, and Custom Scan &
     \textbf{Scope.} Standard multiplicity and correlation, plus an extension

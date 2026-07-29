@@ -26,7 +26,7 @@ is compared. They can represent several reference alternatives at once, but
 they do not remove the need to define alignment scores and paths.
 
 Let \(X=x_1x_2\ldots x_n\) and \(Y=y_1y_2\ldots y_m\) be strings over an
-alphabet \(\Sigma\). A pairwise alignment is a sequence of columns
+alphabet \(\Sigma\). A global pairwise alignment is a sequence of columns
 \[
   A=((a_1,b_1),\ldots,(a_L,b_L)),
   \qquad
@@ -41,6 +41,12 @@ correspondence under a scoring and boundary model, not merely a visual
 formatting of two strings. When evolutionary homology is the scientific
 question, an alignment can contribute evidence to a homology hypothesis, but
 an alignment score alone does not establish common ancestry.
+
+Local and semi-global objectives use the same column representation after
+selecting intervals \(X[i{:}j]\) and \(Y[k{:}\ell]\). Their boundary model
+determines which intervals may be selected and which terminal omissions are
+free. Global alignment is the special case in which both selected intervals
+are the complete input strings.
 
 A scoring model turns that hypothesis into an optimization problem. Let
 \(s(a,b)\) denote a substitution score and let \(g(\ell)\) be the cost of a
@@ -441,7 +447,8 @@ deletions change the diagonal by a bounded amount. Random matches are scattered.
 Chaining is therefore a sparse path problem in this two-dimensional plane.
 
 In minimap2 notation, an anchor has span \(w_i\). After sorting anchors by
-reference and query order, a chaining score can be written
+ending reference coordinate, with implementation-specific tie keys, a
+chaining score can be written
 \begin{equation}
  f(i)=\max\left(
      w_i,\ 
@@ -457,10 +464,17 @@ large gaps and diagonal changes. A representative minimap2 reward is
     \min(y_i-y_j,\ x_i-x_j),\ w_i
   \bigr).
 \]
-Pairs with reversed order, excessive distance, or excessive diagonal
-deviation are invalid. The gap penalty combines a linear component with a
-small logarithmic component. Backtracking predecessor pointers from high
-scoring endpoints yields ordered anchor chains.
+The 2018 paper caps this reward by the current-anchor span \(w_i\). Current
+minimap2 \path{lchain.c}, and BioSeqDB following that executable contract,
+instead use the predecessor span \(w_j\), denoted \(\ell_j\) in
+Section~\ref{sec:chaining-scalar}. The forms coincide for fixed-length seeds but
+can differ for variable-span or homopolymer-compressed anchors. Query
+monotonicity is not a second global sort key: chaining admits a predecessor
+only when its query coordinate increases and the gap constraints hold. Pairs
+with reversed order, excessive distance, or excessive diagonal deviation are
+invalid. The gap penalty combines a linear component with a small logarithmic
+component. Backtracking predecessor pointers from high-scoring endpoints
+yields ordered anchor chains.
 
 The recurrence is exact only relative to its candidate predecessor set and
 its scoring function. Testing every \(j<i\) is \(O(A^2)\) for \(A\) anchors.

@@ -87,9 +87,14 @@ tables report false rejects separately from throughput.
 \subsection{The safe rejection domain in BioSeqDB}
 
 The mapper does not globally align an entire chained region in one rectangular
-problem.  Seeds already account for exact anchored pieces, while alignment
+problem. Seeds define seed- or hash-supported anchored pieces, while alignment
 fills the gaps between successive seeds and may extend locally at the left and
-right ends.  A lower bound for a mandatory seed-to-seed gap is composable:
+right ends. A minimizer-key hit is not proof that the underlying sequence
+ranks are equal. The prefilter therefore omits anchor spans from its gap lower
+bound; a hash collision can only make that bound looser. Where exact accounting
+is required, \texttt{exact\_edit\_distance\_for\_implicit\_seed} materializes
+and validates the implicit seed spans, and the exact post-alignment predicate
+remains authoritative. A lower bound for a mandatory seed-to-seed gap is composable:
 disjoint mandatory gaps require disjoint edits, so their lower bounds may be
 summed for a region.  A bound derived from a local extension window is not
 composable in the same way.  X-drop or local alignment may legitimately omit
@@ -167,7 +172,7 @@ predicate cannot influence another survivor's metadata.
 
 This placement also explains why the implementation filters seed-to-seed gaps
 rather than the raw pair used by the standalone paper tools.  Minimap2 has
-already fixed exact seed anchors and may use local end extension.  BioSeqDB
+already fixed seed-supported anchors and may use local end extension.  BioSeqDB
 adapts each underlying algorithm to that decomposition instead of changing the
 decomposition to resemble the paper benchmark.  The whole-pipeline evidence in
 Section~\ref{sec:prefilter-results} therefore reports avoided KSW2 calls and
