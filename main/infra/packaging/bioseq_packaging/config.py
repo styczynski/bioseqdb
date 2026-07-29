@@ -220,6 +220,12 @@ def build_cells(request: WorkerRequest) -> tuple[CellSpec, ...]:
             raise PackageBuildError("PostgreSQL majors below 17 are unsupported")
         for distro_id in request.distro_ids:
             spec = distro_spec(distro_id)
+            cell_prefix = (
+                f"{prefix}/{request.architecture.value}/postgresql{postgres_major}/"
+                f"{spec.distro_id.value}/"
+            )
+            if spec.package_format is PackageFormat.DEB:
+                cell_prefix += "stable/"
             cells.append(
                 CellSpec(
                     request=request,
@@ -227,9 +233,7 @@ def build_cells(request: WorkerRequest) -> tuple[CellSpec, ...]:
                     postgres_major=postgres_major,
                     package_name=f"{PACKAGE_NAME_PREFIX}{postgres_major}",
                     package_version=PACKAGE_VERSION,
-                    s3_cell_prefix=(
-                        f"{prefix}/{request.architecture.value}/postgresql{postgres_major}"
-                    ),
+                    s3_cell_prefix=cell_prefix,
                 )
             )
     expected = len(request.postgres_majors) * len(request.distro_ids)
