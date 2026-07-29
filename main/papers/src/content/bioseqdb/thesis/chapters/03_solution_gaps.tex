@@ -571,8 +571,9 @@ Dorok et al.\ consume already mapped reads and integrate genome-specific
 compression with database-native single-nucleotide variant
 calling~\cite{dorok_genome_databases_2017}.
 The Terabase Search Engine stores prealigned short reads in distributed
-relational tables. For query-sequence search it first maps the query to GRCh38
-with Bowtie~2 for coordinate retrieval; its separate unmapped-read path uses a
+relational tables. For query-sequence search it first maps the query to the
+GRCh38 human reference assembly with Bowtie~2 for coordinate retrieval. Its
+separate unmapped-read path uses a
 64-bit signature and Jaccard screening before Smith--Waterman
 alignment~\cite{wilton_terabase_2019}. BioSeqDB therefore does not
 claim priority for storing genomic data, exposing sequence operations in SQL,

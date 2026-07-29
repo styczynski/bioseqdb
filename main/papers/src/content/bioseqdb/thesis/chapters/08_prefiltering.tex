@@ -91,7 +91,7 @@ problem. Seeds define seed- or hash-supported anchored pieces, while alignment
 fills the gaps between successive seeds and may extend locally at the left and
 right ends. A minimizer-key hit is not proof that the underlying sequence
 ranks are equal. The prefilter therefore omits anchor spans from its gap lower
-bound; a hash collision can only make that bound looser. Where exact accounting
+bound. A hash collision can only make that bound looser. Where exact accounting
 is required, \texttt{exact\_edit\_distance\_for\_implicit\_seed} materializes
 and validates the implicit seed spans, and the exact post-alignment predicate
 remains authoritative. A lower bound for a mandatory seed-to-seed gap is composable:

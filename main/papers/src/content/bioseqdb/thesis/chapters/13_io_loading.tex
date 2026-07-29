@@ -29,8 +29,9 @@ In this chapter, \emph{reliable loading} has five concrete meanings:
 \begin{enumerate}
     \item a finite input is framed into exactly the intended FASTA or FASTQ
     records, including multiline records and compressed input.
-    \item memory use is independent of the length of the largest sequence on
-    the path used by \texttt{bioseq.load}.
+    \item packed FASTA sequence-body memory is independent of the largest
+    sequence on the path used by \texttt{bioseq.load}; the current FASTQ
+    quality scratch buffer is an explicit record-length-dependent exception.
     \item symbols are packed directly into the alphabet and storage-unit layout
     declared by the destination \texttt{bioseq.seq} typmod.
     \item every diagnostic identifies the earliest terminal failure and, where
@@ -128,7 +129,7 @@ The principal reader layers and their ownership are summarized in
 Table~\ref{tab:io-layer-contracts}.  This decomposition arose from several
 earlier designs that coupled reading, record objects, and consumers too
 tightly.  In the current version the same source and FSM can feed a compact
-batch for general computation, a bounded packed stream for PostgreSQL, or a
+batch for general computation, a bounded packed-sequence stream for PostgreSQL, or a
 small decompressed prefix for header-format sampling.
 
 \begin{table}[htbp]
@@ -315,6 +316,11 @@ encoder's accepted-letter
 count.  A truncated quality section and a quality section that overshoots this
 count are terminal data errors.  This distinction prevents alphabet
 normalization from shifting the parser onto a later record boundary.
+The current stream adapter retains the quality bytes in
+\texttt{quality\_scratch} until the record is complete.  Consequently, unlike
+the packed sequence-body chunks, FASTQ quality storage grows as
+\(O(\text{record length})\).  The SQL FASTQ path is therefore not a
+whole-record constant-memory path.
 
 \subsection{Alphabet and storage-width dispatch}
 
@@ -391,7 +397,9 @@ slab and batch targets. No currently wired ring-capacity backpressure &
 producer/parser on caller, handlers in the global task pool\\
 PostgreSQL stream &
 header plus native packed windows &
-one slab, one header, one bounded packed window. No whole-sequence materialization &
+one slab, one header, and one bounded packed sequence window. FASTQ quality
+scratch may grow to the record length; no whole-sequence packed-body
+materialization &
 single parser by contract. Writes on backend thread\\
 optional load overlap &
 owned begin/chunk/end events &
@@ -825,8 +833,8 @@ The development sequence behind these results is itself informative:
 
 The current implementation is therefore not simply the fastest intermediate
 prototype. It selects the paths whose guarantees compose at the SQL boundary:
-single-backend database writes, bounded packed streaming, deterministic mapping
-setup, explicit publication order, and PostgreSQL-managed rollback. At the
+single-backend database writes, bounded packed-sequence streaming, deterministic
+mapping setup, explicit publication order, and PostgreSQL-managed rollback. At the
 same time, the evidence boundary must remain explicit. In the source snapshot
 reviewed on 28 July 2026, the
 \path{bioseq/io/io_test.cpp} unit suite exercises small FASTQ records,
@@ -835,11 +843,15 @@ PostgreSQL \path{bioseq/integration_tests/test_load.cpp} suite is FASTA-centric
 and does not currently prove a FASTQ or gzip
 \texttt{bioseq.load} end-to-end case. Custom parallel-gzip comparisons are
 hidden diagnostics that require an external corpus.
+Current \texttt{quality\_scratch} also makes FASTQ loading
+record-length-dependent in memory even though its packed sequence body is
+emitted in bounded chunks.
 
 These implementation boundaries do not alter the central
 SQL-loading contract. They concern format discovery, strict-symbol policy,
-optional parallel-gzip integrity and construction behavior, generic
-asynchronous backpressure, and missing SQL FASTQ/gzip integration coverage.
+record-length FASTQ quality buffering, optional parallel-gzip integrity and
+construction behavior, generic asynchronous backpressure, and missing SQL
+FASTQ/gzip integration coverage.
 Each can be addressed locally without changing locator publication or
 transaction semantics.
 
@@ -847,7 +859,8 @@ transaction semantics.
 
 BioSeqDB's ingestion path turns a textual archive record into two coordinated
 database objects: compact sequence fragments and a typed parent row carrying
-their locator. It does so without assembling a whole large sequence, without
+their locator. It does so without assembling a whole large packed sequence
+body, while retaining the current FASTQ quality-buffer limitation, and without
 letting worker threads enter PostgreSQL, and while dispatching through a
 compile-time registry of supported layouts. The reader's reusable concepts
 isolate byte sources, incremental grammars, and compact packing. The identifier

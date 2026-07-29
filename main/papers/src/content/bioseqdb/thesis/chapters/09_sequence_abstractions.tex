@@ -409,7 +409,7 @@ operations whose work scales with total or selected symbols.
 construct owning range from symbols & \(O(N)\) & packs into an owned vector\\
 construct proper-container adapter & \(O(1)\) & borrows an unpacked lvalue.
 The caller supplies lifetime\\
-construct range over standard C object & \(O(1)\) & stores a reference to
+construct range over standard-layout trailing-payload object & \(O(1)\) & stores a reference to
 the aligned, previously validated payload with zero copy\\
 read one resident rank & \(O(1)\) & one unit load and bit extraction\\
 iterate ranks or symbols & \(O(N)\) & no payload copy.  Symbols may be
@@ -429,7 +429,7 @@ preconditions\\
 \endgroup
 \end{table}
 
-\section{A C-compatible packed object}
+\section{A standard-layout trailing-payload object}
 \label{sec:sequence-stdc}
 
 \subsection{Standard layout and a zero-copy adapter}
@@ -437,8 +437,9 @@ preconditions\\
 An owning C++ range is unsuitable as a PostgreSQL datum because
 \texttt{std::vector} is neither a C application binary interface (ABI) object
 nor a PostgreSQL variable-length (varlena) payload.  The
-\texttt{compact\_sequence\_stdc} family, introduced in the DOC0258 work and
-subsequently revised, provides the shared flat representation.  Its current
+\texttt{compact\_sequence\_stdc} C++ class-template family, introduced in the
+DOC0258 work and subsequently revised, provides a shared standard-layout
+representation with a C-style trailing-payload convention.  Its current
 symbols are in \texttt{sequences.cppm}: type parameters at lines 1995--2027,
 the standard-layout object at lines 2094--2255, its typed instance at lines
 2299--2332, and the range adapter at lines 2340--2436.  Listing
@@ -506,10 +507,14 @@ struct compact_sequence_range<Instance> {
 \end{lstlisting}
 
 The header records runtime type parameters, logical length, and last-unit
-padding.  \texttt{data[]} contains the packed payload.  The reserved field makes
-the payload offset a multiple of eight, allowing every enabled 1-, 2-, 4-, or
-8-byte instance to form naturally aligned typed loads.  The PostgreSQL
-specialization uses a 32-bit base-pair count and a 32-bit varlena header.
+padding.  The one-byte \texttt{data[1]} member marks the start of the
+trailing payload; it is not a C flexible-array member.  The reserved field
+makes the payload offset relative to the object base a multiple of eight.
+That relative offset does not itself guarantee an eight-byte-aligned
+allocation base.  PostgreSQL supplies double-aligned varlena storage on the
+supported ABI; a generic allocator or borrower must separately prove adequate
+base alignment before forming typed loads.  The PostgreSQL specialization uses
+a 32-bit base-pair count and a 32-bit varlena header.
 On the target little-endian PostgreSQL ABI the stored header uses the
 four-byte uncompressed varlena encoding, rather than a raw byte count.  A raw
 count would make PostgreSQL interpret only one quarter of the object and
@@ -610,15 +615,16 @@ boundary dispatch:
 #if BIOSEQ_OPTTIMIZATION_LEVEL == 0
 using pgseq_supported_alphabets =
     supported_alphabets<
-        alphabet_entry<seq::dna4, "dna4">>;
+        alphabet_entry<seqan3::dna4, "dna4">>;
 #else
 using pgseq_supported_alphabets =
     supported_alphabets<
-        alphabet_entry<seq::dna4, "dna4">,
-        alphabet_entry<seq::dna5, "dna5">>;
+        alphabet_entry<seqan3::dna4, "dna4">,
+        alphabet_entry<seqan3::dna5, "dna5">>;
 #endif
 
-seq::dispatch_instance(runtime_alphabet_code, runtime_width,
+bioseq::pg_types::seq::dispatch_instance(
+    runtime_alphabet_code, runtime_width,
     [&]<class Instance>() {
         using range_type = compact_sequence_range<Instance>;
         using alphabet_type = typename Instance::alphabet_type;
@@ -921,12 +927,14 @@ Reverse and complement state is attached to an edge.  Composing a transform
 changes metadata and preserves the subtree.  For a branch reached through a
 reversed edge, logical child order is reversed during traversal.  For a
 literal or source leaf, coordinate mirroring, output order, and complementation
-are applied at the facade callback.  For an already expanded value, this makes
-a reverse or reverse-complement operation \(O(1)\) in payload size.  A flat or
+are applied at the facade callback.  Adding this transform metadata is
+\(O(1)\) in payload length and never decodes or repacks ranks.  The complete SQL
+operation remains \(O(P)\) in the number of lazy-tree pieces because
+\texttt{transform\_pg\_sequence} validates the resulting tree.  A flat or
 TOASTed input must first be acquired as a writable expanded value.  That first
 expansion copies its packed literal payload once in \(O(\text{payload bytes})\)
-without decoding and repacking individual ranks.  Later transforms of the
-expanded value change only metadata.
+without decoding and repacking individual ranks.  Later transforms of an
+expanded value still avoid rank decoding and repacking.
 
 The current node kinds deserve emphasis.  Design documents sometimes use
 ``slice piece'' and ``transform piece'' as conceptual terms, but the source
@@ -987,11 +995,15 @@ transform operations avoid rank decoding and repacking after that acquisition.
 
 \texttt{slice\_tree} at lines 1887--1911 splits first at the upper and then at
 the lower coordinate, releases the two discarded sides, and returns the
-middle.  In a balanced tree, each split follows a boundary path.  Payload
-outside those paths is shared.  The cost depends on tree height and boundary
-leaf construction, not on the number of symbols in the selected interval.
-Reading the selected symbols later remains \(O(m)\) for an interval of length
-\(m\), plus provider/fragment overhead.
+middle.  In a balanced, already validated tree, each split follows a boundary
+path.  Payload outside those paths is shared.  This helper-local cost depends
+on tree height and boundary-leaf construction, not on the number of symbols in
+the selected interval.  The SQL wrapper in \texttt{packed\_output.cppm},
+lines 3363--3384, additionally invokes full tree-and-limit validation through
+\texttt{replace\_root\_error\_safe}; a complete SQL slice call is therefore
+not bounded only by the two boundary paths.  Reading the selected symbols
+later remains \(O(m)\) for an interval of length \(m\), plus
+provider/fragment overhead.
 
 The arenas make persistent sharing compatible with PostgreSQL memory
 contexts.  They reference older arenas and source dependencies, keep
@@ -1321,7 +1333,7 @@ approaches superseded by later implementation.
 May 7, 2026, DOC0215 & owning packed inputs plus reference-tool ASCII conversion &
 exposed the cost and benchmark bias of decoding a 500 Mbp target at the wrong
 boundary\\
-May 22, 2026, DOC0258 & standard C-compatible packed object &
+May 22, 2026, DOC0258 & standard-layout C++ object with a C-style trailing payload &
 introduced \texttt{compact\_sequence\_stdc} and an in-place typed range rather
 than duplicating PostgreSQL and standalone layouts\\
 May 24, 2026, DOC0261 & type-level alphabet names and packs &
