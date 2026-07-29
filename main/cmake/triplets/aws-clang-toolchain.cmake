@@ -1,7 +1,6 @@
-# Chainloaded by x64-linux-libcxx.cmake for every vcpkg port build on the AWS
-# x86_64 Linux box. Pins clang-22 to the same root selected by bootstrap.sh
-# (apt.llvm.org under /usr/lib/llvm-22, or the official tarball fallback under
-# /opt/llvm-22), then delegates to vcpkg's Linux toolchain so
+# Chainloaded by the native x64/arm64 libc++ triplets for every vcpkg port
+# build. Pins clang-22 to the same complete LLVM root selected by the caller,
+# then delegates to vcpkg's Linux toolchain so
 # VCPKG_CXX_FLAGS/VCPKG_LINKER_FLAGS from the triplet become CMake init flags for
 # every port build.
 if(DEFINED ENV{BIOSEQ_LLVM_ROOT})
@@ -11,6 +10,18 @@ else()
 endif()
 set(CMAKE_C_COMPILER "${_BIOSEQ_AWS_LLVM_ROOT}/bin/clang" CACHE STRING "" FORCE)
 set(CMAKE_CXX_COMPILER "${_BIOSEQ_AWS_LLVM_ROOT}/bin/clang++" CACHE STRING "" FORCE)
+
+if(DEFINED ENV{BIOSEQ_COMPILER_LAUNCHER})
+  if(NOT IS_ABSOLUTE "$ENV{BIOSEQ_COMPILER_LAUNCHER}"
+      OR NOT EXISTS "$ENV{BIOSEQ_COMPILER_LAUNCHER}")
+    message(FATAL_ERROR
+      "BIOSEQ_COMPILER_LAUNCHER must be an existing absolute path")
+  endif()
+  set(CMAKE_C_COMPILER_LAUNCHER "$ENV{BIOSEQ_COMPILER_LAUNCHER}"
+    CACHE FILEPATH "Bioseq package compiler priority launcher" FORCE)
+  set(CMAKE_CXX_COMPILER_LAUNCHER "$ENV{BIOSEQ_COMPILER_LAUNCHER}"
+    CACHE FILEPATH "Bioseq package compiler priority launcher" FORCE)
+endif()
 
 if(DEFINED Z_VCPKG_ROOT_DIR)
   set(_BIOSEQ_VCPKG_SCRIPTS_DIR "${Z_VCPKG_ROOT_DIR}/scripts")

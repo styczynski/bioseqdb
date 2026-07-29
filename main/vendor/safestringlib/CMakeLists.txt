@@ -157,8 +157,13 @@ target_compile_options(${PROJECT_NAME}_objlib
                        PRIVATE -Wall -Wextra -Wsign-compare -Wformat-security)
 target_compile_options(${PROJECT_NAME}_objlib
                        PRIVATE  -Wstack-protector -Winit-self)
-target_compile_options(${PROJECT_NAME}_objlib
-                       PRIVATE -D_FORTIFY_SOURCE=2 -O2)
+if(BIOSEQ_PACKAGE_BUILD)
+  target_compile_options(${PROJECT_NAME}_objlib
+                         PRIVATE -D_FORTIFY_SOURCE=2 -O0)
+else()
+  target_compile_options(${PROJECT_NAME}_objlib
+                         PRIVATE -D_FORTIFY_SOURCE=2 -O2)
+endif()
 target_compile_options(${PROJECT_NAME}_objlib
                        PRIVATE -fstack-protector-all)
 target_compile_options(${PROJECT_NAME}_objlib
@@ -191,4 +196,3 @@ target_include_directories(${PROJECT_NAME}_static PUBLIC include)
 if(BUILD_UNITTESTS)
   add_subdirectory(unittests)
 endif()
-

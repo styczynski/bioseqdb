@@ -39,13 +39,18 @@ module;
 // Build configs that compile this module without optimisation produce
 // stack-spilled adaptor frames that defeat the point of the cascade; refuse
 // to compile in that mode.
-#if !defined(__OPTIMIZE__)
+#if !defined(__OPTIMIZE__) && !defined(BIOSEQ_PACKAGE_O0_PROFILE)
 # error "DOC0256 chain primitive requires -O1 or higher (see DOC0256 §R17). " \
-        "Use -Og or -O1 -g for debug builds of pipe.cppm."
+        "Use -Og or -O1 -g for debug builds of pipe.cppm; only the explicit " \
+        "distribution package O0 profile may disable this guard."
 #endif
 
 #ifndef BIOSEQ_PIPELINE_FORCE_INLINE
 #define BIOSEQ_PIPELINE_FORCE_INLINE 1
+#endif
+
+#if defined(BIOSEQ_PACKAGE_O0_PROFILE) && BIOSEQ_PIPELINE_FORCE_INLINE
+# error "BIOSEQ_PACKAGE_O0_PROFILE requires BIOSEQ_PIPELINE_FORCE_INLINE=0"
 #endif
 
 #if BIOSEQ_PIPELINE_FORCE_INLINE

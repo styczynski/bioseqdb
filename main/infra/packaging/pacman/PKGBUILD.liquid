@@ -1,0 +1,31 @@
+# Maintainer: {{ maintainer }}
+pkgname={{ package_name }}
+pkgver={{ version }}
+pkgrel=1
+pkgdesc="{{ description }}"
+arch=("$(uname -m)")
+url="{{ homepage }}"
+license=('Apache-2.0')
+depends=({% for dependency in runtime_dependencies %}'{{ dependency }}' {% endfor %})
+options=('!debug' '!lto' 'strip')
+source=("{{ source_folder_name }}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/{{ source_folder_name }}"
+  export BIOSEQ_OPTTIMIZATION_LEVEL=0
+  test "$BIOSEQ_OPTTIMIZATION_LEVEL" = "{{ optimization_level }}"
+  infra/packaging/scripts/build_and_stage.sh build \
+    "$srcdir/{{ source_folder_name }}/_bioseq-package-build" \
+    "{{ postgres_major }}"
+}
+
+package() {
+  cd "$srcdir/{{ source_folder_name }}"
+  export BIOSEQ_OPTTIMIZATION_LEVEL=0
+  test "$BIOSEQ_OPTTIMIZATION_LEVEL" = "{{ optimization_level }}"
+  infra/packaging/scripts/build_and_stage.sh install \
+    "$srcdir/{{ source_folder_name }}/_bioseq-package-build" \
+    "$pkgdir" \
+    "{{ postgres_major }}"
+}

@@ -1,0 +1,24 @@
+#!/usr/bin/make -f
+
+export BIOSEQ_OPTTIMIZATION_LEVEL=0
+export DEB_BUILD_MAINT_OPTIONS=hardening=+all
+
+BUILD_DIR := $(CURDIR)/_bioseq-package-build
+DESTROOT := $(CURDIR)/debian/{{ package_name }}
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	test "$(BIOSEQ_OPTTIMIZATION_LEVEL)" = "{{ optimization_level }}"
+
+override_dh_auto_build:
+	test "$(BIOSEQ_OPTTIMIZATION_LEVEL)" = "{{ optimization_level }}"
+	infra/packaging/scripts/build_and_stage.sh build "$(BUILD_DIR)" "{{ postgres_major }}"
+
+override_dh_auto_test:
+	# Installed-package SQL acceptance runs after the artifact is produced.
+
+override_dh_auto_install:
+	test "$(BIOSEQ_OPTTIMIZATION_LEVEL)" = "{{ optimization_level }}"
+	infra/packaging/scripts/build_and_stage.sh install "$(BUILD_DIR)" "$(DESTROOT)" "{{ postgres_major }}"

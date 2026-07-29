@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "bioseq-packaging"
+version = "4.2.3"
+description = "Native BioSeq package and repository builder"
+authors = ["Bioseq Packaging <packages@bioseq.dev>"]
+license = "Apache-2.0"
+package-mode = true
+packages = [{ include = "bioseq_packaging" }]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.14"
+python-liquid = "2.3.0"
+
+[tool.poetry.scripts]
+bioseq-build-packages = "bioseq_packaging.cli:main"
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"

@@ -67,7 +67,18 @@ function(bioseq_add_codegen)
     endif()
   endforeach()
 
-  get_filename_component(_bioseq_repo_root "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+  if(BIOSEQ_PACKAGE_BUILD)
+    # Native packages carry the contents of main/ as their source root. Rebuild
+    # the repository-shaped path expected by the isolated codegen project
+    # without copying the source tree into the package build directory.
+    set(_bioseq_repo_root "${CMAKE_BINARY_DIR}/package-repository")
+    file(MAKE_DIRECTORY "${_bioseq_repo_root}")
+    if(NOT EXISTS "${_bioseq_repo_root}/main")
+      file(CREATE_LINK "${CMAKE_SOURCE_DIR}" "${_bioseq_repo_root}/main" SYMBOLIC)
+    endif()
+  else()
+    get_filename_component(_bioseq_repo_root "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+  endif()
 
   # ---- toolchain discovery (moved from bioseq/external/CMakeLists.txt:17-97) --
   set(_bioseq_codegen_gcc_only OFF)
@@ -441,8 +452,10 @@ function(bioseq_add_codegen)
     foreach(_clang_modules_json IN ITEMS
         "${_llvm_library_dir}/c++/libc++.modules.json"
         "${_llvm_library_dir}/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+        "${_llvm_library_dir}/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+        "${_llvm_prefix}/lib/aarch64-unknown-linux-gnu/c++/libc++.modules.json"
         "${_llvm_prefix}/lib/libc++.modules.json")
       if(_clang_modules_json
           AND EXISTS "${_clang_modules_json}")
@@ -522,23 +535,33 @@ function(bioseq_add_codegen)
     "${_bioseq_codegen_cxx_version_output}\n${_bioseq_codegen_cxx_version_error}"
     _bioseq_codegen_cxx_version_identity)
   set(_bioseq_codegen_host_stdlib_modules "")
+  set(_bioseq_codegen_use_module_std ON)
   if(_bioseq_codegen_cxx_version_identity MATCHES "clang")
-    file(REAL_PATH "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
-      _bioseq_codegen_expected_clang_modules)
-    if(_bioseq_codegen_configured_stdlib_modules
-        AND EXISTS "${_bioseq_codegen_configured_stdlib_modules}")
-      file(REAL_PATH "${_bioseq_codegen_configured_stdlib_modules}"
-        _bioseq_codegen_configured_stdlib_modules_real)
-      if(NOT "${_bioseq_codegen_configured_stdlib_modules_real}"
-          STREQUAL "${_bioseq_codegen_expected_clang_modules}")
-        set(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON "")
-        set(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON "" CACHE FILEPATH
-          "standard-library module metadata used by the isolated generator"
-          FORCE)
+    if(BIOSEQ_PACKAGE_BUILD)
+      # The official LLVM release archives ship libclang-cpp with the host
+      # libstdc++ ABI. Keep the package-only host generator on that ABI while
+      # the extension itself remains Clang/libc++. The generator sources do
+      # not import std, so disabling CMake's synthetic standard-library module
+      # avoids depending on a distro-specific GCC module inventory.
+      set(_bioseq_codegen_use_module_std OFF)
+    else()
+      file(REAL_PATH "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
+        _bioseq_codegen_expected_clang_modules)
+      if(_bioseq_codegen_configured_stdlib_modules
+          AND EXISTS "${_bioseq_codegen_configured_stdlib_modules}")
+        file(REAL_PATH "${_bioseq_codegen_configured_stdlib_modules}"
+          _bioseq_codegen_configured_stdlib_modules_real)
+        if(NOT "${_bioseq_codegen_configured_stdlib_modules_real}"
+            STREQUAL "${_bioseq_codegen_expected_clang_modules}")
+          set(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON "")
+          set(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON "" CACHE FILEPATH
+            "standard-library module metadata used by the isolated generator"
+            FORCE)
+        endif()
       endif()
+      set(_bioseq_codegen_host_stdlib_modules
+        "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}")
     endif()
-    set(_bioseq_codegen_host_stdlib_modules
-      "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}")
   elseif(_bioseq_codegen_cxx_version_identity
       MATCHES "gcc|g\\+\\+|free software foundation")
     execute_process(
@@ -621,7 +644,8 @@ function(bioseq_add_codegen)
       "isolated generator compiler is neither supported GCC nor Clang: "
       "${BIOSEQ_CODEGEN_CXX_COMPILER}")
   endif()
-  if(NOT EXISTS "${_bioseq_codegen_host_stdlib_modules}")
+  if(_bioseq_codegen_use_module_std
+      AND NOT EXISTS "${_bioseq_codegen_host_stdlib_modules}")
     set(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON "" CACHE FILEPATH
       "standard-library module metadata used by the isolated generator"
       FORCE)
@@ -629,8 +653,12 @@ function(bioseq_add_codegen)
       "standard-library module metadata matching the selected isolated "
       "generator compiler was not found")
   endif()
-  get_filename_component(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON
-    "${_bioseq_codegen_host_stdlib_modules}" ABSOLUTE)
+  if(_bioseq_codegen_use_module_std)
+    get_filename_component(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON
+      "${_bioseq_codegen_host_stdlib_modules}" ABSOLUTE)
+  else()
+    set(BIOSEQ_CODEGEN_STDLIB_MODULES_JSON "")
+  endif()
   if(_bioseq_codegen_gcc_only)
     file(REAL_PATH "${BIOSEQ_CODEGEN_STDLIB_MODULES_JSON}"
       _bioseq_codegen_selected_modules_real)
@@ -652,6 +680,13 @@ function(bioseq_add_codegen)
 
   set(_runtime_dir "${ARG_BINARY_DIR}/generator-bin")
   set(_executable "${_runtime_dir}/bioseq_codegen")
+  # CMake persists import-std target definitions in its generated compiler
+  # metadata. Keep module-std-disabled package configurations in a distinct
+  # nested cache so switching this contract cannot reuse incompatible files.
+  set(_bioseq_codegen_nested_cache_suffix "")
+  if(NOT _bioseq_codegen_use_module_std)
+    set(_bioseq_codegen_nested_cache_suffix "-no-module-std")
+  endif()
   set(_bioseq_codegen_gcc_cmake_args)
   if(_bioseq_codegen_gcc_only)
     string(REPLACE ";" "|"
@@ -674,10 +709,38 @@ function(bioseq_add_codegen)
       "-DBIOSEQ_EXPECTED_GCC_MODULE_SOURCE_CLOSURE_SHA256:STRING=${_bioseq_codegen_authenticated_module_source_closure_sha256}")
   endif()
 
+  set(_bioseq_codegen_package_cmake_args)
+  if(BIOSEQ_PACKAGE_BUILD)
+    if(NOT CMAKE_C_COMPILER_LAUNCHER OR NOT CMAKE_CXX_COMPILER_LAUNCHER)
+      message(FATAL_ERROR
+        "BIOSEQ_PACKAGE_BUILD requires compiler priority launchers for the isolated code generator")
+    endif()
+    string(REPLACE ";" "|"
+      _bioseq_codegen_package_c_launcher_argument
+      "${CMAKE_C_COMPILER_LAUNCHER}")
+    string(REPLACE ";" "|"
+      _bioseq_codegen_package_cxx_launcher_argument
+      "${CMAKE_CXX_COMPILER_LAUNCHER}")
+    list(APPEND _bioseq_codegen_package_cmake_args
+      "-DCMAKE_C_COMPILER_LAUNCHER:STRING=${_bioseq_codegen_package_c_launcher_argument}"
+      "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING=${_bioseq_codegen_package_cxx_launcher_argument}"
+      "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON"
+      # The extension link proof runs the same SQL/safety suite after the
+      # generated closure is ready. Avoid repeating it as a generator
+      # POST_BUILD hook in every package cell.
+      "-DBIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS:BOOL=OFF"
+      "-DCMAKE_C_FLAGS:STRING="
+      "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++ -fno-rtti"
+      "-DCMAKE_C_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer"
+      "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer")
+  endif()
+
   ExternalProject_Add(${ARG_PROJECT_TARGET}
-    PREFIX "${ARG_BINARY_DIR}/generator-project"
+    PREFIX
+      "${ARG_BINARY_DIR}/generator-project${_bioseq_codegen_nested_cache_suffix}"
     SOURCE_DIR "${_bioseq_repo_root}/main/codegen"
-    BINARY_DIR "${ARG_BINARY_DIR}/generator-build"
+    BINARY_DIR
+      "${ARG_BINARY_DIR}/generator-build${_bioseq_codegen_nested_cache_suffix}"
     EXCLUDE_FROM_ALL TRUE
     LIST_SEPARATOR "|"
     CMAKE_ARGS
@@ -687,6 +750,7 @@ function(bioseq_add_codegen)
       "-DCMAKE_CXX_COMPILER:FILEPATH=${BIOSEQ_CODEGEN_CXX_COMPILER}"
       "-DCMAKE_POLICY_VERSION_MINIMUM:STRING=3.5"
       "-DCMAKE_CXX_STDLIB_MODULES_JSON:FILEPATH=${BIOSEQ_CODEGEN_STDLIB_MODULES_JSON}"
+      "-DBIOSEQ_CODEGEN_USE_MODULE_STD:BOOL=${_bioseq_codegen_use_module_std}"
       "-DBIOSEQ_REPOSITORY_ROOT:PATH=${_bioseq_repo_root}"
       "-DBIOSEQ_CODEGEN_RUNTIME_OUTPUT_DIRECTORY:PATH=${_runtime_dir}"
       "-DBIOSEQ_CODEGEN_ENABLE_EXTERNAL:BOOL=${_enable_external}"
@@ -698,6 +762,7 @@ function(bioseq_add_codegen)
       "-DLIBCLANG_INCLUDE_DIR:PATH=${_llvm_include_dir}"
       "-DLIBCLANG_LIBRARY:FILEPATH=${_bioseq_codegen_libclang}"
       ${_bioseq_codegen_gcc_cmake_args}
+      ${_bioseq_codegen_package_cmake_args}
     BUILD_COMMAND
       "${CMAKE_COMMAND}" --build <BINARY_DIR> --target bioseq_codegen
     INSTALL_COMMAND ""

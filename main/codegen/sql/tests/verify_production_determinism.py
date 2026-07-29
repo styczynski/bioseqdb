@@ -1003,6 +1003,29 @@ def _with_support_fmgr_from_ordinary_manifest(
 
 def _repository_path_identity(path: Path, label: str) -> PurePosixPath:
     resolved = path.resolve(strict=True)
+    reviewed_root_raw = os.environ.get("BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT", "")
+    if reviewed_root_raw:
+        reviewed_root = Path(reviewed_root_raw).resolve(strict=True)
+        if not reviewed_root.is_dir():
+            raise DeterminismError(
+                "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT is not a directory: "
+                f"{reviewed_root}"
+            )
+        try:
+            relative = resolved.relative_to(reviewed_root)
+        except ValueError:
+            # Self-tests also exercise independently relocated /main trees;
+            # retain the structural normalization below for those paths.
+            pass
+        else:
+            if not relative.parts:
+                return PurePosixPath("main")
+            if relative.parts[0] not in REPOSITORY_MAIN_ROOTS:
+                raise DeterminismError(
+                    f"{label} is outside the reviewed main source closure: "
+                    f"{resolved}"
+                )
+            return PurePosixPath("main", *relative.parts)
     parts = resolved.parts
     if parts and parts[-1] == "main":
         return PurePosixPath("main")

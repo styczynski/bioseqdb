@@ -73,7 +73,11 @@ if(_bioseq_expected_gcc_identity_count EQUAL
       "${BIOSEQ_EXPECTED_GCC_MODULE_SOURCE_CLOSURE_SHA256}")
 endif()
 
-if(NOT DEFINED CMAKE_EXPERIMENTAL_CXX_IMPORT_STD)
+option(BIOSEQ_CODEGEN_USE_MODULE_STD
+  "Build and expose the selected standard library's named std module" ON)
+
+if(BIOSEQ_CODEGEN_USE_MODULE_STD
+    AND NOT DEFINED CMAKE_EXPERIMENTAL_CXX_IMPORT_STD)
   if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.3")
     set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD
       "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
@@ -84,6 +88,9 @@ if(NOT DEFINED CMAKE_EXPERIMENTAL_CXX_IMPORT_STD)
 endif()
 
 project(bioseq_codegen LANGUAGES C CXX)
+
+option(BIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS
+  "Run generator contracts immediately after linking the host tool" ON)
 
 if(_bioseq_codegen_gcc_only
     AND (NOT CMAKE_C_COMPILER_ID STREQUAL "GNU"
@@ -182,8 +189,13 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL OR BIOSEQ_CODEGEN_ENABLE_WEBSITE)
   endif()
   find_library(BIOSEQ_CODEGEN_CLANG_CPP_LIB NAMES clang-cpp
     PATHS "${_bioseq_llvm_libdir}" NO_DEFAULT_PATH REQUIRED)
-  find_library(BIOSEQ_CODEGEN_LLVM_LIB NAMES LLVM
-    PATHS "${_bioseq_llvm_libdir}" NO_DEFAULT_PATH REQUIRED)
+  find_library(BIOSEQ_CODEGEN_LLVM_LIB NAMES LLVM LLVM-22
+    PATHS "${_bioseq_llvm_libdir}" NO_DEFAULT_PATH)
+  if(NOT BIOSEQ_CODEGEN_LLVM_LIB)
+    # LLVM's official Linux release archive links the LLVM components into
+    # libclang-cpp itself and does not ship a separate monolithic libLLVM.
+    set(BIOSEQ_CODEGEN_LLVM_LIB "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
+  endif()
   file(SHA256 "${LLVM_CONFIG_BINARY}" _bioseq_llvm_config_sha256)
   file(SHA256 "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}"
     _bioseq_clang_cpp_sha256)
@@ -202,8 +214,11 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL OR BIOSEQ_CODEGEN_ENABLE_WEBSITE)
     "${_codegen_src}/clang_structural/implementation.cppm"
     "${_codegen_src}/safety/fact_producer_implementation.cppm"
     PROPERTIES COMPILE_OPTIONS "-x;c++")
-  list(APPEND _codegen_link_libs
-    "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}" "${BIOSEQ_CODEGEN_LLVM_LIB}")
+  list(APPEND _codegen_link_libs "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
+  if(NOT "${BIOSEQ_CODEGEN_LLVM_LIB}" STREQUAL
+      "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
+    list(APPEND _codegen_link_libs "${BIOSEQ_CODEGEN_LLVM_LIB}")
+  endif()
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_SQL)
@@ -239,9 +254,11 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
   endif()
   set(_bioseq_prepare_test_compiler_inventory "")
   file(GLOB _bioseq_prepare_test_multiarch_inventories
-    "${_bioseq_llvm_prefix}/lib/*/c++/libc++.modules.json")
+    "${_bioseq_llvm_prefix}/lib/*/c++/libc++.modules.json"
+    "${_bioseq_llvm_prefix}/lib/*/libc++.modules.json")
   list(SORT _bioseq_prepare_test_multiarch_inventories)
   foreach(_bioseq_prepare_test_inventory_candidate IN ITEMS
+      "${CMAKE_CXX_STDLIB_MODULES_JSON}"
       "${_bioseq_llvm_libdir}/c++/libc++.modules.json"
       "${_bioseq_llvm_prefix}/lib/c++/libc++.modules.json"
       ${_bioseq_prepare_test_multiarch_inventories}
@@ -512,7 +529,7 @@ set_target_properties(bioseq_codegen PROPERTIES
   CXX_STANDARD 26
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS ON
-  CXX_MODULE_STD ON
+  CXX_MODULE_STD "${BIOSEQ_CODEGEN_USE_MODULE_STD}"
   RUNTIME_OUTPUT_DIRECTORY "${BIOSEQ_CODEGEN_RUNTIME_OUTPUT_DIRECTORY}")
 
 if(BIOSEQ_CODEGEN_ENABLE_SQL)
@@ -521,9 +538,11 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
     "${_codegen_src}/sql/tests/annotation_probe.cpp"
     PROPERTIES COMPILE_OPTIONS
       "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>;$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
-  add_custom_command(TARGET bioseq_codegen POST_BUILD
-    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql
-    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test safety
-    COMMENT "Running SQL and PostgreSQL safety code-generator contracts"
-    VERBATIM)
+  if(BIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS)
+    add_custom_command(TARGET bioseq_codegen POST_BUILD
+      COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql
+      COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test safety
+      COMMENT "Running SQL and PostgreSQL safety code-generator contracts"
+      VERBATIM)
+  endif()
 endif()

@@ -5,6 +5,12 @@ set(VCPKG_CMAKE_CONFIGURE_OPTIONS ${VCPKG_CMAKE_CONFIGURE_OPTIONS} -DSQLGEN_POST
 
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
+option(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST
+  "Run the maintainer PREPARE incremental Ninja contract during the build" ON)
+option(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST
+  "Run the maintainer SQL negative/provenance fixture suite during the build" ON)
+option(BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK
+  "Run the Git-history-backed DOC0388 ledger maintainer check during the build" ON)
 
 set(BIOSEQ_PG_BUILD_CONFIG_HEADER
   "${CMAKE_CURRENT_LIST_DIR}/include2/headers/pg_build_config.h")
@@ -680,7 +686,7 @@ find_package(Vulkan REQUIRED COMPONENTS glslang)
 
 if(NOT TARGET Vulkan::glslang)
   message(FATAL_ERROR
-    "vulkan-sdk-components must provide Vulkan::glslang; rerun vcpkg install vulkan-sdk-components")
+    "the glslang dependency must provide Vulkan::glslang; rerun vcpkg install glslang")
 endif()
 
 set(BIOSEQ_GLSLANG_STATIC_LIBS
@@ -693,7 +699,7 @@ set(BIOSEQ_GLSLANG_STATIC_LIBS
 foreach(_bioseq_glslang_lib IN LISTS BIOSEQ_GLSLANG_STATIC_LIBS)
   if(NOT _bioseq_glslang_lib OR _bioseq_glslang_lib MATCHES "-NOTFOUND$")
     message(FATAL_ERROR
-      "vulkan-sdk-components did not expose a required static glslang library; rerun vcpkg install vulkan-sdk-components")
+      "glslang did not expose a required static library; rerun vcpkg install glslang")
   endif()
 endforeach()
 
@@ -934,6 +940,11 @@ endif()
 # POSTGRESQL_VERSION_MAJOR define stays PUBLIC because both Domain N and
 # Domain P consumers care about the major-version-conditional code paths.
 target_compile_definitions(bioseq_modules_nopg PRIVATE NO_POSTGRES=1)
+if(BIOSEQ_PACKAGE_BUILD)
+  target_compile_definitions(bioseq_modules_nopg PRIVATE
+    BIOSEQ_PACKAGE_O0_PROFILE=1
+    BIOSEQ_PIPELINE_FORCE_INLINE=0)
+endif()
 target_compile_definitions(bioseq_modules_nopg PUBLIC
   POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 target_compile_options(bioseq_modules_nopg PRIVATE
@@ -1565,16 +1576,18 @@ if(NOT EXISTS "${BIOSEQ_SQL_VALIDATOR}")
   message(FATAL_ERROR
     "Missing PostgreSQL safety evidence validator: ${BIOSEQ_SQL_VALIDATOR}")
 endif()
-if(NOT EXISTS "${BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE}")
-  message(FATAL_ERROR
-    "Missing PREPARE incremental fixture: "
-    "${BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE}")
-endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-find_program(BIOSEQ_SQL_PREPARE_NINJA
-  NAMES ninja ninja-build
-  REQUIRED)
-mark_as_advanced(BIOSEQ_SQL_PREPARE_NINJA)
+if(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST)
+  if(NOT EXISTS "${BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE}")
+    message(FATAL_ERROR
+      "Missing PREPARE incremental fixture: "
+      "${BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE}")
+  endif()
+  find_program(BIOSEQ_SQL_PREPARE_NINJA
+    NAMES ninja ninja-build
+    REQUIRED)
+  mark_as_advanced(BIOSEQ_SQL_PREPARE_NINJA)
+endif()
 add_custom_command(
   OUTPUT "${BIOSEQ_SQL_VALIDATOR_SELF_TEST_STAMP}"
   COMMAND "${CMAKE_COMMAND}" -E make_directory
@@ -1604,57 +1617,79 @@ set(BIOSEQ_SQL_NEGATIVE_FIXTURES
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_guc_registration_type_alias.cppm")
 set(BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP
   "${BIOSEQ_SQL_CODEGEN_DIR}/negative-contracts.stamp")
-add_custom_command(
-  OUTPUT "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
-  COMMAND "${CMAKE_COMMAND}" -E make_directory
-    "${BIOSEQ_SQL_CODEGEN_DIR}"
-  COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql
-  COMMAND "${CMAKE_COMMAND}" -E touch
-    "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
-  DEPENDS
-    bioseq_codegen_project
-    "${BIOSEQ_CODEGEN_EXECUTABLE}"
-    ${BIOSEQ_SQL_NEGATIVE_FIXTURES}
-    "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/options.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/contract_tests.cppm"
-  COMMENT
-    "Running real structural SQL negative/provenance contract fixtures"
-  VERBATIM)
+if(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST)
+  add_custom_command(
+    OUTPUT "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+      "${BIOSEQ_SQL_CODEGEN_DIR}"
+    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql
+    COMMAND "${CMAKE_COMMAND}" -E touch
+      "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
+    DEPENDS
+      bioseq_codegen_project
+      "${BIOSEQ_CODEGEN_EXECUTABLE}"
+      ${BIOSEQ_SQL_NEGATIVE_FIXTURES}
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/options.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/contract_tests.cppm"
+    COMMENT
+      "Running real structural SQL negative/provenance contract fixtures"
+    VERBATIM)
+else()
+  add_custom_command(
+    OUTPUT "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+      "${BIOSEQ_SQL_CODEGEN_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E touch
+      "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
+    COMMENT "Skipping disabled maintainer SQL negative/provenance fixtures"
+    VERBATIM)
+endif()
 add_custom_target(bioseq_sql_negative_contracts
   DEPENDS "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}")
-add_custom_command(
-  OUTPUT "${BIOSEQ_SQL_PREPARE_INCREMENTAL_STAMP}"
-  COMMAND "${CMAKE_COMMAND}" -E make_directory
-    "${BIOSEQ_SQL_CODEGEN_DIR}"
-  COMMAND "${Python3_EXECUTABLE}"
-    "${BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE}" run
-    --codegen "$<TARGET_FILE:bioseq_codegen>"
-    --ninja "${BIOSEQ_SQL_PREPARE_NINJA}"
-    --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
-    --clang-scan-deps "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
-    --llvm-config "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
-    --compiler-inventory
+if(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST)
+  add_custom_command(
+    OUTPUT "${BIOSEQ_SQL_PREPARE_INCREMENTAL_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+      "${BIOSEQ_SQL_CODEGEN_DIR}"
+    COMMAND "${Python3_EXECUTABLE}"
+      "${BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE}" run
+      --codegen "$<TARGET_FILE:bioseq_codegen>"
+      --ninja "${BIOSEQ_SQL_PREPARE_NINJA}"
+      --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
+      --clang-scan-deps "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
+      --llvm-config "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
+      --compiler-inventory
+        "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
+      --clang-sha256 "${BIOSEQ_CODEGEN_CLANG_SHA256}"
+      --clang-scan-deps-sha256
+        "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS_SHA256}"
+      --llvm-config-sha256
+        "${BIOSEQ_CODEGEN_LLVM_CONFIG_SHA256}"
+      --compiler-inventory-sha256
+        "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_SHA256}"
+    COMMAND "${CMAKE_COMMAND}" -E touch
+      "${BIOSEQ_SQL_PREPARE_INCREMENTAL_STAMP}"
+    DEPENDS
+      bioseq_codegen_project
+      "${BIOSEQ_CODEGEN_EXECUTABLE}"
+      "${BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE}"
+      "${BIOSEQ_CODEGEN_CLANG_BINARY}"
+      "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
+      "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
       "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
-    --clang-sha256 "${BIOSEQ_CODEGEN_CLANG_SHA256}"
-    --clang-scan-deps-sha256
-      "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS_SHA256}"
-    --llvm-config-sha256
-      "${BIOSEQ_CODEGEN_LLVM_CONFIG_SHA256}"
-    --compiler-inventory-sha256
-      "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_SHA256}"
-  COMMAND "${CMAKE_COMMAND}" -E touch
-    "${BIOSEQ_SQL_PREPARE_INCREMENTAL_STAMP}"
-  DEPENDS
-    bioseq_codegen_project
-    "${BIOSEQ_CODEGEN_EXECUTABLE}"
-    "${BIOSEQ_SQL_PREPARE_INCREMENTAL_FIXTURE}"
-    "${BIOSEQ_CODEGEN_CLANG_BINARY}"
-    "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
-    "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
-    "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
-  COMMENT "Running bounded Ninja PREPARE incremental contract"
-  VERBATIM)
+    COMMENT "Running bounded Ninja PREPARE incremental contract"
+    VERBATIM)
+else()
+  add_custom_command(
+    OUTPUT "${BIOSEQ_SQL_PREPARE_INCREMENTAL_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+      "${BIOSEQ_SQL_CODEGEN_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E touch
+      "${BIOSEQ_SQL_PREPARE_INCREMENTAL_STAMP}"
+    COMMENT "Skipping disabled maintainer PREPARE incremental contract"
+    VERBATIM)
+endif()
 add_custom_target(bioseq_sql_prepare_incremental_self_test
   DEPENDS "${BIOSEQ_SQL_PREPARE_INCREMENTAL_STAMP}")
 set(BIOSEQ_SQL_ENTITY_HANDLES_DIR
@@ -2210,7 +2245,8 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       ${_bioseq_sql_row_codec_modules}
       ${_bioseq_sql_guc_modules}
       ${_bioseq_sql_support_vector_registry_modules}
-    COMMAND
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
       "$<TARGET_FILE:bioseq_codegen>" sql generate
       --stage support
       --profile "${_bioseq_sql_profile}"
@@ -2335,7 +2371,8 @@ add_custom_command(
     "${BIOSEQ_SQL_CORE_DESCRIPTOR_HASH}"
     "${BIOSEQ_SQL_CORE_MANIFEST}"
     ${BIOSEQ_SQL_ENTITY_HANDLE_MODULES}
-  COMMAND
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
     "$<TARGET_FILE:bioseq_codegen>" sql generate
     --stage core
     --profile production
@@ -2483,7 +2520,8 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "${_bioseq_sql_generated_install}"
       "${_bioseq_sql_generated_manifest}"
       ${_bioseq_sql_fmgr_modules}
-    COMMAND
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
       "$<TARGET_FILE:bioseq_codegen>" sql generate
       --stage final
       --profile "${_bioseq_sql_profile}"
@@ -2722,6 +2760,7 @@ add_custom_command(
   OUTPUT "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SELF_TEST_STAMP}"
   COMMAND "${CMAKE_COMMAND}" -E env
     "PYTHONDONTWRITEBYTECODE=1"
+    "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
     "${Python3_EXECUTABLE}"
     "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT}" self-test
   COMMAND "${CMAKE_COMMAND}" -E touch
@@ -2735,7 +2774,10 @@ add_custom_target(bioseq_sql_production_determinism_self_test
 
 add_custom_command(
   OUTPUT "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_REPORT}"
-  COMMAND "${Python3_EXECUTABLE}"
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "PYTHONDONTWRITEBYTECODE=1"
+    "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
+    "${Python3_EXECUTABLE}"
     "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_SCRIPT}" run
     --codegen "$<TARGET_FILE:bioseq_codegen>"
     --owner-registry-metadata
@@ -3280,7 +3322,8 @@ add_dependencies(
   bioseq_sql_external_feature_contract
   bioseq_sql_production_determinism_self_test)
 
-if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
+if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
+    AND BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK)
   set(BIOSEQ_DOC0388_LEDGER_SCRIPT
     "${CMAKE_CURRENT_LIST_DIR}/../cmake/doc0388_ledgers.py")
   set(BIOSEQ_DOC0388_LEDGER_FIXTURES
