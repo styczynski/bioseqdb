@@ -112,8 +112,9 @@ plus a precompiled-module (PCM) manifest.  Only then may the structural pass
 visit declarations.
 The exhaustive post-FINAL compiler-facts and PostgreSQL-ERROR closure is an
 explicit qualification target.  Ordinary builds retain cheaper ledger,
-determinism, static-contract, and runtime checks rather than rerunning that
-entire analysis on every edit.
+determinism, static-contract, and link checks rather than rerunning that
+entire analysis on every edit. PostgreSQL runtime checks remain in explicit
+qualification and test paths.
 
 \begin{figure}[H]
 \centering
@@ -708,7 +709,8 @@ The permitted facets are \texttt{primary},
 \texttt{base\_\allowbreak type\_\allowbreak shell}, and
 \texttt{base\_\allowbreak type\_\allowbreak definition}. Parsing
 requires exactly three tab-separated fields and a contiguous sequence from
-\texttt{P001}.  Duplicate or missing owners fail generation.  Crucially, a
+\texttt{P001}.  Duplicate physical IDs or missing natural owners fail
+generation.  Repeated logical owner identities are permitted.  Crucially, a
 ledger row contains no SQL text and no alternate descriptor.  It can preserve
 reviewed physical order without becoming a disguised second implementation.
 
