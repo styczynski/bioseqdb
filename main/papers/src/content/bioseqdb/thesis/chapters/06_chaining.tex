@@ -758,6 +758,7 @@ an adaptive stride.  Experiments with targets of 16384, 32768, and 49152 moved
 endpoints beyond the accepted tolerance.  The 65536 target was the last focused
 configuration to pass, not a proof that it preserves every input.
 
+\raggedbottom
 \subsection{Standalone and resident completion routes}
 
 The standalone rich-projection route allocates \(f\) and \(p\) in
@@ -797,6 +798,8 @@ stale.
 Table~\ref{tab:g3sa-vulkan-comparison} separates the shared research lineage
 from the execution contracts that differ between the two implementations.
 
+\newpage
+\flushbottom
 \begin{table}[H]
 \centering
 \caption{G3SA and BioSeqDB Vulkan chaining are related designs, not equivalent
@@ -1071,7 +1074,7 @@ explicit choices, and selected backends fail instead of falling back silently.
 Table~\ref{tab:chaining-policy} summarizes where each policy is exact,
 approximate, experimental, or projection-dependent.
 
-\begin{table}[tb]
+\begin{table}[H]
 \centering
 \caption{Chaining modes and their intended roles in the final system.}
 \label{tab:chaining-policy}

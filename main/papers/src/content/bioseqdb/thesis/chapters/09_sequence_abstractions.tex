@@ -1226,10 +1226,14 @@ are separate events.
     {declared flat boundary\\text/binary/array/heap/index/client};
   \draw[->,thick] (expr) -- (tree);
   \draw[->,thick] (tree) -- (facade);
-  \draw[->,thick] (facade) -- node[midway,below,inner sep=1pt]
+  \draw[->,thick] (facade) --
+    node[pos=.68,above,sloped,fill=white,inner sep=.5pt,font=\scriptsize]
     {sequential} (stream);
-  \draw[->,thick] (facade) -- node[right] {resident probe} (borrow);
-  \draw[->,thick] (facade) -- node[midway,below,inner sep=1pt]
+  \draw[->,thick] (facade) --
+    node[pos=.42,left=2mm,fill=white,inner sep=.5pt,font=\scriptsize]
+    {resident probe} (borrow);
+  \draw[->,thick] (facade) --
+    node[pos=.68,above,sloped,fill=white,inner sep=.5pt,font=\scriptsize]
     {fallback} (pack);
   \draw[->,thick,dashed] (stream) -- (durable);
   \draw[->,thick,dashed] (borrow) -- (durable);
