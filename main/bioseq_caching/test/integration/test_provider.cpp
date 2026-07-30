@@ -38,6 +38,18 @@ constexpr std::string_view late_fetch_consumer_query{
     "WHERE nullable_value BETWEEN 5 AND 20 "
     "ORDER BY row_id"};
 
+constexpr std::string_view late_fetch_text_source_query{
+    "SELECT row_id "
+    "FROM cache_provider_rows "
+    "WHERE row_id <= 5 "
+    "ORDER BY row_id"};
+
+constexpr std::string_view late_fetch_text_consumer_query{
+    "SELECT row_id "
+    "FROM cache_provider_rows "
+    "WHERE payload IN ('first match', 'second match') "
+    "ORDER BY row_id"};
+
 void create_provider_fixture(bioseq::libpq::connection& connection) {
     bioseq::cache_test::exec(
         connection,
@@ -360,20 +372,95 @@ TEST_CASE("late fetch status failure discards staged sink output",
           >= 1);
     require_provider_references_drained(connection);
 
-    bioseq::cache_test::exec(
-        connection,
-        "SELECT bioseq_cache_test.provider_set_mapping_fault('none')");
     const auto warm =
         connection.exec(late_fetch_consumer_query, 30s);
     CHECK(bioseq::postgres_test::exact_row_hash(warm)
           == oracle_digest);
+    CHECK(bioseq::cache_test::integer(
+              connection,
+              "SELECT (bioseq_cache_test.provider_stats()"
+              "->>'late_fetch_errors')::bigint")
+          == 1);
     require_provider_references_drained(connection);
     bioseq::postgres_test::record_migration_probe(
         "provider.v2.staged_sink_discards_partial_output");
     bioseq::postgres_test::record_migration_probe(
         "provider.v2.finish_abort_cleanup_drains_references");
     bioseq::postgres_test::record_migration_probe(
+        "provider.v2.partial_sink_fault_resets_automatically");
+    bioseq::postgres_test::record_migration_probe(
         "regress.cache_reuse_provider.source_error");
+    bioseq::cache_test::exec(
+        connection, "SELECT bioseq_cache_test.provider_shutdown()");
+}
+
+TEST_CASE("successful late fetch preserves missing text datums",
+          "[cache][integration][provider][reuse][late-fetch][varlena]") {
+    bioseq::postgres_test::migration_probe_scope probes{
+        "successful late fetch preserves missing text datums"};
+    bioseq::postgres_test::postgres_fixture fixture{
+        bioseq::cache_test::cluster_options(
+            false, bioseq::cache_test::preload_order::cache_only)};
+    auto& connection = fixture.admin();
+    create_provider_fixture(connection);
+
+    bioseq::cache_test::exec(
+        connection,
+        "SET bioseq.query_cache_optimisation_mode = 'disabled'");
+    const auto oracle =
+        connection.exec(late_fetch_text_consumer_query, 30s);
+    REQUIRE(oracle.rows() == 2);
+    REQUIRE(oracle.value(0, 0) == "3");
+    REQUIRE(oracle.value(1, 0) == "4");
+    const auto oracle_digest =
+        bioseq::postgres_test::exact_row_hash(oracle);
+
+    bioseq::cache_test::exec(
+        connection,
+        "SET bioseq.query_cache_optimisation_mode = 'reuse'; "
+        "SELECT bioseq_cache.invalidate_all(); "
+        "SELECT bioseq_cache_test.request_janitor_sweep(); "
+        "SELECT bioseq_cache_test.provider_set_mapping_fault('none')");
+    static_cast<void>(
+        connection.exec(late_fetch_text_source_query, 30s));
+    bioseq::cache_test::exec(
+        connection,
+        "SELECT bioseq_cache_test.provider_reset(); "
+        "SELECT bioseq_cache.reset_stats(); "
+        "DISCARD PLANS");
+
+    const auto fetched =
+        connection.exec(late_fetch_text_consumer_query, 30s);
+    REQUIRE(fetched.rows() == 2);
+    CHECK(fetched.value(0, 0) == "3");
+    CHECK(fetched.value(1, 0) == "4");
+    CHECK(bioseq::postgres_test::exact_row_hash(fetched)
+          == oracle_digest);
+    CHECK(bioseq::cache_test::integer(
+              connection,
+              "SELECT (bioseq_cache_test.provider_stats()"
+              "->>'late_fetch_batch')::bigint")
+          == 1);
+    CHECK(bioseq::cache_test::integer(
+              connection,
+              "SELECT (bioseq_cache_test.provider_stats()"
+              "->>'late_fetch_references')::bigint")
+          == 5);
+    CHECK(bioseq::cache_test::integer(
+              connection,
+              "SELECT (bioseq_cache_test.provider_stats()"
+              "->>'late_fetch_values')::bigint")
+          == 5);
+    require_provider_references_drained(connection);
+
+    const auto warm =
+        connection.exec(late_fetch_text_consumer_query, 30s);
+    CHECK(bioseq::postgres_test::exact_row_hash(warm)
+          == oracle_digest);
+    CHECK(warm.value(0, 0) == "3");
+    CHECK(warm.value(1, 0) == "4");
+    bioseq::postgres_test::record_migration_probe(
+        "provider.v2.late_fetch_varlena_lifetime");
     bioseq::cache_test::exec(
         connection, "SELECT bioseq_cache_test.provider_shutdown()");
 }
