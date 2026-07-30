@@ -60,6 +60,14 @@ using bioseq::postgres_test::json_value;
     return *integer;
 }
 
+[[nodiscard]] bool required_bool(const json_value& value) {
+    const bool* boolean = value.as_bool();
+    if (boolean == nullptr) {
+        throw std::runtime_error("report value is not a Boolean");
+    }
+    return *boolean;
+}
+
 [[nodiscard]] std::uint64_t nearest_rank(
     std::vector<std::uint64_t> values,
     std::uint64_t numerator, std::uint64_t denominator) {
@@ -84,7 +92,7 @@ TEST_CASE(
 
     CHECK(
         required_string(required_property(root, "schema_version"))
-        == "bioseq-cache-benchmark-v1");
+        == "bioseq-cache-benchmark-v2");
     const json_value& metadata = required_property(root, "metadata");
     static_cast<void>(required_object(metadata));
     CHECK(
@@ -104,6 +112,10 @@ TEST_CASE(
     CHECK_FALSE(
         required_string(
             required_property(host_identity, "machine")).empty());
+    CHECK(
+        required_string(
+            required_property(host_identity, "identity_sha256")).size()
+        == 64);
     const json_value& resource_sampling =
         required_property(metadata, "resource_sampling");
     CHECK(
@@ -124,6 +136,16 @@ TEST_CASE(
         required_integer(
             required_property(resource_sampling, "temp_samples"))
         == 3);
+    CHECK(
+        required_integer(
+            required_property(
+                resource_sampling, "rss_sampling_failures"))
+        == 0);
+    CHECK(
+        required_integer(
+            required_property(
+                resource_sampling, "temp_sampling_failures"))
+        == 0);
 
     const json_value::array& artifacts =
         required_array(required_property(metadata, "artifacts"));
@@ -174,6 +196,96 @@ TEST_CASE(
         required_integer(
             required_property(fixture, "aggregate_input_bases"))
         == 0);
+    CHECK(
+        required_string(
+            required_property(root, "measurement_cohort"))
+        == "standalone-sql");
+    const json_value& qualification =
+        required_property(root, "exact_2gbp_host_qualification");
+    CHECK_FALSE(
+        required_bool(required_property(qualification, "required")));
+    CHECK(
+        required_string(required_property(qualification, "status"))
+        == "not-required");
+
+    const json_value& migration =
+        required_property(root, "migration_evidence");
+    CHECK(
+        required_string(required_property(
+            migration, "migration_evidence_harness"))
+        == "cache-bench");
+    CHECK(
+        required_string(required_property(
+            migration, "migration_report_role"))
+        == "cache-bench");
+    CHECK(
+        required_string(required_property(migration, "coverage"))
+        == "full-role");
+    CHECK(
+        required_string(
+            required_property(migration, "migration_phase"))
+        == "mapped");
+    CHECK(
+        required_string(
+            required_property(migration, "ledger_sha256")).size()
+        == 64);
+    CHECK(
+        required_string(required_property(
+            migration, "evidence_contract_sha256")).size()
+        == 64);
+    CHECK(
+        required_integer(required_property(migration, "mapped_rows"))
+        == 5);
+    const json_value::array& migration_probes =
+        required_array(required_property(migration, "probes"));
+    REQUIRE(migration_probes.size() == 5);
+    std::vector<std::string_view> migration_ids;
+    std::vector<std::string_view> migration_origins;
+    for (std::size_t index = 0;
+         index < migration_probes.size(); ++index) {
+        const json_value& probe = migration_probes[index];
+        CHECK(
+            required_string(required_property(probe, "owner"))
+            == "cache-bench");
+        CHECK(
+            required_string(required_property(probe, "role"))
+            == "cache-bench");
+        CHECK(
+            required_string(
+                required_property(probe, "origin_kind"))
+            == "benchmark-phase");
+        CHECK_FALSE(
+            required_string(
+                required_property(probe, "origin")).empty());
+        CHECK(
+            required_string(
+                required_property(probe, "permutation"))
+            == "standalone");
+        CHECK(
+            required_integer(required_property(probe, "ordinal"))
+            == static_cast<std::int64_t>(index));
+        CHECK(required_bool(required_property(probe, "passed")));
+        migration_ids.push_back(required_string(
+            required_property(probe, "stable_id")));
+        migration_origins.push_back(required_string(
+            required_property(probe, "origin")));
+    }
+    CHECK(
+        migration_ids
+        == std::vector<std::string_view>{
+            "python.benchmark.input_validation",
+            "python.benchmark.sample_contract",
+            "python.benchmark.correctness_digest",
+            "python.benchmark.counter_deltas",
+            "python.benchmark.resource_sampling"});
+    CHECK(
+        migration_origins
+        == std::vector<std::string_view>{
+            "native-parser-rejection-contract",
+            "measured-warm-cache-hit-cohort",
+            "disabled-producer-warm-digest-equivalence",
+            "aggregate-cache-counter-deltas",
+            "terminal-zero-failure-resource-sampling"});
 
     const json_value& producer =
         required_property(root, "cold_producer");
@@ -192,6 +304,10 @@ TEST_CASE(
         CHECK(
             required_string(required_property(sample, "phase"))
             == "warm");
+        CHECK(
+            required_string(
+                required_property(sample, "measurement_cohort"))
+            == "standalone-sql");
         const std::int64_t wall_time =
             required_integer(required_property(sample, "wall_time_ns"));
         REQUIRE(wall_time >= 0);
@@ -205,6 +321,10 @@ TEST_CASE(
     CHECK(
         required_string(required_property(summary, "population"))
         == "warm samples only");
+    CHECK(
+        required_string(
+            required_property(summary, "measurement_cohort"))
+        == "standalone-sql");
     CHECK(
         required_integer(required_property(summary, "sample_count"))
         == static_cast<std::int64_t>(wall_times.size()));
@@ -230,11 +350,171 @@ TEST_CASE(
     CHECK(
         required_integer(required_property(root, "peak_temp_bytes"))
         == 16384);
+    const json_value& cleanup = required_property(root, "cleanup");
+    CHECK(required_bool(required_property(cleanup, "attempted")));
+    CHECK(required_bool(required_property(cleanup, "succeeded")));
+    CHECK(
+        required_bool(
+            required_property(cleanup, "private_root_removed")));
+    CHECK(
+        required_string(
+            required_property(cleanup, "verdict_source"))
+        == "private_cluster::cleanup");
+    CHECK(
+        required_string(
+            required_property(cleanup, "external_watchdog_scope"))
+        .find("not claimed")
+        != std::string_view::npos);
 }
 
 TEST_CASE(
-    "cache benchmark build identity includes the stage manifest digest "
-    "but excludes host stage paths",
+    "combined cache benchmark report ties exact 2 Gbp qualification and one warm cohort to the same host",
+    "[cache][benchmark][report-contract][bioseq][2gbp]") {
+    const std::string document =
+        bioseq::cache_benchmark::render_bioseq_report_contract_probe();
+    const bioseq::postgres_test::explain_document parsed =
+        bioseq::postgres_test::explain_document::parse(document);
+    const json_value& root = parsed.root();
+    CHECK(
+        required_string(required_property(root, "scenario"))
+        == "bioseq-2gbp");
+    CHECK(
+        required_string(
+            required_property(root, "measurement_cohort"))
+        == "bioseq-cpu-column-cache-on");
+
+    const json_value& metadata = required_property(root, "metadata");
+    const json_value& host_identity =
+        required_property(metadata, "host_identity");
+    const std::string_view host_digest =
+        required_string(
+            required_property(host_identity, "identity_sha256"));
+    const json_value& qualification =
+        required_property(root, "exact_2gbp_host_qualification");
+    CHECK(required_bool(required_property(qualification, "required")));
+    CHECK(required_bool(required_property(qualification, "performed")));
+    CHECK(
+        required_bool(
+            required_property(qualification, "same_execution_host")));
+    CHECK(
+        required_string(required_property(qualification, "status"))
+        == "passed");
+    CHECK(
+        required_string(
+            required_property(
+                qualification, "host_identity_sha256"))
+        == host_digest);
+    CHECK(
+        required_integer(required_property(
+            qualification, "effective_total_ram_bytes"))
+        >= required_integer(required_property(
+            qualification, "required_total_ram_bytes")));
+    CHECK(
+        required_integer(required_property(
+            qualification, "required_total_ram_bytes"))
+        == 17'179'869'184LL);
+    CHECK(
+        required_integer(required_property(
+            qualification, "effective_available_ram_bytes"))
+        >= required_integer(required_property(
+            qualification, "required_available_ram_bytes")));
+    CHECK(
+        required_integer(required_property(
+            qualification, "required_available_ram_bytes"))
+        == 8'589'934'592LL);
+    CHECK(
+        required_integer(required_property(
+            qualification, "data_filesystem_available_bytes"))
+        >= required_integer(required_property(
+            qualification,
+            "required_data_filesystem_available_bytes")));
+    CHECK(
+        required_integer(required_property(
+            qualification,
+            "required_data_filesystem_available_bytes"))
+        == 34'359'738'368LL);
+    CHECK(
+        required_integer(required_property(
+            qualification, "required_logical_cores"))
+        == 8);
+    CHECK(
+        required_integer(
+            required_property(qualification, "io_probe_bytes"))
+        == 1'073'741'824LL);
+    CHECK(
+        required_integer(required_property(
+            qualification, "required_io_mib_per_second"))
+        == 150);
+
+    const json_value& fixture = required_property(root, "fixture");
+    CHECK(
+        required_integer(
+            required_property(fixture, "aggregate_input_bases"))
+        == 2'000'000'000LL);
+    const json_value::array& samples =
+        required_array(required_property(root, "samples"));
+    REQUIRE(samples.size() == 3);
+    for (const json_value& sample : samples) {
+        CHECK(
+            required_string(
+                required_property(sample, "measurement_cohort"))
+            == "bioseq-cpu-column-cache-on");
+    }
+    const json_value& summary = required_property(root, "summary");
+    CHECK(
+        required_string(
+            required_property(summary, "measurement_cohort"))
+        == "bioseq-cpu-column-cache-on");
+    const json_value& migration =
+        required_property(root, "migration_evidence");
+    CHECK(
+        required_string(required_property(
+            migration, "migration_evidence_harness"))
+        == "cache-bioseq-bench");
+    CHECK(
+        required_string(required_property(
+            migration, "migration_report_role"))
+        == "cache-bioseq-bench");
+    CHECK(
+        required_string(required_property(migration, "coverage"))
+        == "full-role");
+    CHECK(
+        required_array(required_property(migration, "probes")).empty());
+}
+
+TEST_CASE(
+    "cache benchmark rejects mixed percentile cohorts and any sampling failure",
+    "[cache][benchmark][report-contract][fail-closed]") {
+    CHECK_THROWS_AS(
+        bioseq::cache_benchmark::
+            render_mixed_cohort_contract_probe(),
+        std::runtime_error);
+
+    CHECK(
+        bioseq::cache_benchmark::
+            resource_sampling_contract_satisfied(
+                2, 0, 4096, 2, 0, 8192));
+    CHECK_FALSE(
+        bioseq::cache_benchmark::
+            resource_sampling_contract_satisfied(
+                2, 1, 4096, 2, 0, 8192));
+    CHECK_FALSE(
+        bioseq::cache_benchmark::
+            resource_sampling_contract_satisfied(
+                2, 0, 4096, 2, 1, 8192));
+    CHECK_FALSE(
+        bioseq::cache_benchmark::
+            resource_sampling_contract_satisfied(
+                1, 0, 4096, 2, 0, 8192));
+    CHECK_FALSE(
+        bioseq::cache_benchmark::
+            resource_sampling_contract_satisfied(
+                2, 0, 0, 2, 0, 8192));
+    CHECK(bioseq::cache_benchmark::native_parser_contract_satisfied());
+}
+
+TEST_CASE(
+    "cache benchmark build identity includes the stage manifest digest but excludes host stage paths",
     "[cache][benchmark][report-contract][build-identity]") {
     const auto build_identity_sha256 =
         [](const std::string& document) {
@@ -300,4 +580,24 @@ TEST_CASE(
         == 16384);
     CHECK(required_property(root, "cold_producer").is_null());
     CHECK(required_array(required_property(root, "samples")).empty());
+    const json_value& migration =
+        required_property(root, "migration_evidence");
+    CHECK(
+        required_string(
+            required_property(migration, "migration_phase"))
+        == "not-sealed");
+    CHECK(
+        required_string(
+            required_property(migration, "ledger")).empty());
+    CHECK(
+        required_array(
+            required_property(migration, "probes")).empty());
+    const json_value& cleanup = required_property(root, "cleanup");
+    CHECK_FALSE(
+        required_bool(required_property(cleanup, "attempted")));
+    CHECK_FALSE(
+        required_bool(required_property(cleanup, "succeeded")));
+    CHECK_FALSE(
+        required_bool(
+            required_property(cleanup, "private_root_removed")));
 }
