@@ -6,6 +6,7 @@ module;
 
 extern "C" {
 #include "postgres.h"
+#include "common/hashfn.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
 }
