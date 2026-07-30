@@ -1,210 +1,271 @@
 option(BIOSEQ_CACHE_BUILD_TESTS
-  "Build standalone bioseq_cache unit and private-cluster test targets" OFF)
+  "Build bioseq_cache Catch2 and private-cluster tests" OFF)
 option(BIOSEQ_CACHE_TESTING
-  "Compile deterministic bioseq_cache fault-injection hooks" OFF)
+  "Build the noninstalled bioseq_cache test-support DSO" OFF)
 
 add_subdirectory(core)
 
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+include("${CMAKE_CURRENT_LIST_DIR}/../cmake/BioseqSqlCodegen.cmake")
 
-add_library(postgresql_bioseq_cache MODULE)
-set_target_properties(postgresql_bioseq_cache PROPERTIES
+# Cache-only builds still require the shared SQL generator. The top-level
+# project already creates it when the Bioseq extension is enabled.
+if(NOT TARGET bioseq_codegen)
+  bioseq_add_codegen(
+    TARGET bioseq_codegen
+    PROJECT_TARGET bioseq_codegen_project
+    BINARY_DIR "${CMAKE_BINARY_DIR}/codegen"
+    COMPONENTS sql)
+endif()
+
+# The cache is configured before main/bioseq, so it owns a small, cache-local
+# BMI provider for the authored SQL annotation model.
+set(BIOSEQ_CACHE_SQL_ANNOTATION_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/entities.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/migration.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/options.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/validation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/index.cppm")
+add_library(bioseq_cache_sql_annotation_model STATIC)
+target_sources(bioseq_cache_sql_annotation_model
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../codegen"
+    FILES ${BIOSEQ_CACHE_SQL_ANNOTATION_MODULES})
+set_target_properties(bioseq_cache_sql_annotation_model PROPERTIES
   CXX_STANDARD 26
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS ON
   CXX_MODULE_STD ON
   POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+
+set(BIOSEQ_CACHE_PRODUCTION_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/pg/provider_registry.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/shared_registry.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/dependency_runtime.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/object_dependency_hooks.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/reusable_adapter.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/reusable_planning.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/diagnostics.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/admin.cppm")
+set(BIOSEQ_CACHE_TEST_SUPPORT_MODULES
+  ${BIOSEQ_CACHE_PRODUCTION_MODULES}
+  "${CMAKE_CURRENT_LIST_DIR}/pg/test_provider.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/test_controls.cppm")
+
+# SQL ownership is explicit and profile-complete. Production remains the
+# independently installable sibling extension; test_support is its strict
+# noninstalled superset.
+bioseq_sql_begin_owner_registry(
+  EXTENSION bioseq_cache
+  ROOT "${CMAKE_CURRENT_LIST_DIR}"
+  PROFILES production test_support
+  AUDIT_ROOTS pg)
+bioseq_register_sql_owner(
+  EXTENSION bioseq_cache
+  OWNER_KEY cache_sql_rows
+  MODULE bioseq.cache.pg.sql.rows
+  SOURCES pg/sql/rows.cppm
+  PROFILES production test_support
+  AUTHORITIES SUPPORT)
+bioseq_register_sql_owner(
+  EXTENSION bioseq_cache
+  OWNER_KEY cache_sql_catalog
+  MODULE bioseq.cache.pg.sql
+  SOURCES pg/sql/index.cppm
+  PROFILES production test_support
+  AUTHORITIES FINAL)
+bioseq_register_sql_owner(
+  EXTENSION bioseq_cache
+  OWNER_KEY cache_diagnostics
+  MODULE bioseq.cache.pg.sql:diagnostics
+  SOURCES pg/sql/diagnostics.cppm
+  PROFILES production test_support
+  AUTHORITIES FINAL
+  FMGR_ENTRYPOINTS cache_diagnostics)
+bioseq_register_sql_owner(
+  EXTENSION bioseq_cache
+  OWNER_KEY cache_admin
+  MODULE bioseq.cache.pg.sql:admin
+  SOURCES pg/sql/admin.cppm
+  PROFILES production test_support
+  AUTHORITIES FINAL
+  FMGR_ENTRYPOINTS cache_admin)
+bioseq_register_sql_owner(
+  EXTENSION bioseq_cache
+  OWNER_KEY cache_test_controls
+  MODULE bioseq.cache.pg.sql:test_controls
+  SOURCES pg/sql/test_controls.cppm
+  PROFILES test_support
+  AUTHORITIES FINAL
+  FMGR_ENTRYPOINTS cache_test_controls)
+bioseq_finalize_sql_owner_registry(
+  EXTENSION bioseq_cache
+  OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/registries"
+  INSTALL_PROFILE production
+  TEST_PROFILE test_support
+  EXPECTED_FMGR_ENTRYPOINTS
+    cache_admin
+    cache_diagnostics
+    cache_test_controls)
+bioseq_add_sql_codegen_context(
+  EXTENSION bioseq_cache
+  EXTENSION_NAME bioseq_cache
+  EXTENSION_SCHEMA bioseq_cache
+  GENERATED_MODULE_PREFIX bioseq.cache.sql.generated
+  FMGR_BOUNDARY_MODULE bioseq.pg_sql_boundary
+  OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/sql"
+  GENERATED_CPP_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/bioseq_cache/sql"
+  VERSION 1.0
+  PROFILES production test_support
+  REQUIRE_COMPLETE_CODEGEN)
+# The legacy Bioseq registration call is still implicit; restore its context
+# before main/bioseq is configured later by the top-level project.
+set_property(GLOBAL PROPERTY BIOSEQ_SQL_ACTIVE_CONTEXT bioseq)
+
+set(BIOSEQ_CACHE_PRODUCTION_GENERATED_MODULES
+  ${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_GENERATED_MODULES})
+set(BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MODULES
+  ${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MODULES})
+set_source_files_properties(
+  ${BIOSEQ_CACHE_PRODUCTION_GENERATED_MODULES}
+  ${BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MODULES}
+  PROPERTIES GENERATED TRUE)
+
+AddCommonTargetX(
+  postgresql_bioseq_cache
+  TYPE POSTGRES_EXTENSION
+  CXX 26
+  NAME bioseq_cache
+  SCHEMA bioseq_cache
+  COMMENT "Shared SQL request locking and reusable columnar result cache"
+  VERSION 1.0
+  COMPONENT "${PROJECT_NAME}"
+  SUPPORT_CXX_MODULES
+  CXX_MOD_BASE_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
+  CXX_MOD_FILES
+    ${BIOSEQ_CACHE_PRODUCTION_MODULES}
+    ${BIOSEQ_CACHE_PRODUCTION_GENERATED_MODULES}
+  SHARED_MODULE_LIBS
+    bioseq_cache_core
+    bioseq_cache_provider_api
+    bioseq_pg_support
+    bioseq_pg_sql_boundary
+    bioseq_cache_sql_annotation_model
+  LINKS PostgreSQL::ServerHeaders bioseq_memory_budget
+  GENERATED_INSTALL
+    "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_GENERATED_INSTALL}"
+  SQL_MANIFEST
+    "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_GENERATED_MANIFEST}"
+  REQUIRE_COMPLETE_CODEGEN
+  PG_ENTRYPOINT_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm")
+set_target_properties(postgresql_bioseq_cache PROPERTIES
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE
-  PREFIX ""
-  OUTPUT_NAME "bioseq_cache")
-target_sources(postgresql_bioseq_cache
-  PRIVATE FILE_SET CXX_MODULES
-    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-    FILES
-      "${CMAKE_CURRENT_LIST_DIR}/pg/provider_registry.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/pg/shared_registry.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/pg/dependency_runtime.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/pg/object_dependency_hooks.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/pg/reusable_adapter.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm")
-target_include_directories(postgresql_bioseq_cache PRIVATE
-  ${PostgreSQL_INCLUDE_DIRS})
-# Backend modules resolve server APIs from the hosting `postgres` executable;
-# keep static libpq and its frontend pgcommon/pgport archives out of this DSO.
-target_link_libraries(postgresql_bioseq_cache PRIVATE
-  PostgreSQL::ServerHeaders
-  bioseq_cache_core
-  bioseq_cache_provider_api
-  bioseq_pg_support
-  bioseq_memory_budget)
-if(WIN32)
-  # FindPostgreSQL selects the postgres import library on Windows.
-  target_link_libraries(postgresql_bioseq_cache PRIVATE
-    PostgreSQL::PostgreSQL)
-endif()
+  LIBRARY_OUTPUT_DIRECTORY
+    "${CMAKE_CURRENT_BINARY_DIR}/artifacts/production")
+target_compile_options(postgresql_bioseq_cache PRIVATE
+  "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>"
+  "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
+add_dependencies(
+  postgresql_bioseq_cache
+  "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_TARGET}")
+set_target_properties(postgresql_bioseq_cache PROPERTIES
+  BIOSEQ_EXTENSION_DSO
+    "$<TARGET_FILE:postgresql_bioseq_cache>"
+  BIOSEQ_TEST_BOOTSTRAP_SQL
+    "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_GENERATED_INSTALL}")
+
 if(BIOSEQ_CACHE_TESTING)
-  target_sources(postgresql_bioseq_cache
+  add_library(postgresql_bioseq_cache_test_support MODULE)
+  target_sources(postgresql_bioseq_cache_test_support
     PRIVATE FILE_SET CXX_MODULES
-      BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+      BASE_DIRS
+        "${CMAKE_CURRENT_LIST_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated"
       FILES
-        "${CMAKE_CURRENT_LIST_DIR}/pg/test_provider.cppm")
-  target_compile_definitions(postgresql_bioseq_cache PRIVATE
-    BIOSEQ_CACHE_TESTING=1)
-endif()
-if(APPLE)
-  set_target_properties(postgresql_bioseq_cache PROPERTIES
-    LINK_FLAGS "${PostgreSQL_LINK_FLAGS}")
-  if(PostgreSQL_VERSION_MAJOR VERSION_GREATER_EQUAL 16)
-    set_target_properties(postgresql_bioseq_cache PROPERTIES SUFFIX ".dylib")
+        ${BIOSEQ_CACHE_TEST_SUPPORT_MODULES}
+        ${BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MODULES})
+  target_link_libraries(postgresql_bioseq_cache_test_support PRIVATE
+    PostgreSQL::ServerHeaders
+    bioseq_cache_core
+    bioseq_cache_provider_api
+    bioseq_pg_support
+    bioseq_pg_sql_boundary
+    bioseq_cache_sql_annotation_model
+    bioseq_memory_budget)
+  if(WIN32)
+    target_link_libraries(
+      postgresql_bioseq_cache_test_support PRIVATE
+      PostgreSQL::PostgreSQL)
+  endif()
+  target_include_directories(postgresql_bioseq_cache_test_support PRIVATE
+    ${PostgreSQL_INCLUDE_DIRS})
+  target_compile_definitions(postgresql_bioseq_cache_test_support PRIVATE
+    BIOSEQ_CACHE_TESTING=1
+    POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
+  target_compile_options(postgresql_bioseq_cache_test_support PRIVATE
+    "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>"
+    "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
+  set_target_properties(postgresql_bioseq_cache_test_support PROPERTIES
+    CXX_STANDARD 26
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS ON
+    CXX_MODULE_STD ON
+    POSITION_INDEPENDENT_CODE ON
+    INTERPROCEDURAL_OPTIMIZATION FALSE
+    PREFIX ""
+    OUTPUT_NAME "bioseq_cache"
+    LIBRARY_OUTPUT_DIRECTORY
+      "${CMAKE_CURRENT_BINARY_DIR}/artifacts/test_support"
+    BIOSEQ_EXTENSION_CONTROL_FILE
+      "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
+    BIOSEQ_EXTENSION_DSO
+      "$<TARGET_FILE:postgresql_bioseq_cache_test_support>"
+    BIOSEQ_EXTENSION_TEST_INSTALL_SQL
+      "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_INSTALL}"
+    BIOSEQ_TEST_BOOTSTRAP_SQL
+      "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_INSTALL}"
+    BIOSEQ_EXTENSION_INSTALL_SQL
+      "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_INSTALL}"
+    BIOSEQ_EXTENSION_SQL_MANIFEST
+      "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MANIFEST}")
+  add_dependencies(
+    postgresql_bioseq_cache_test_support
+    "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_TARGET}")
+  if(APPLE)
+    set_target_properties(postgresql_bioseq_cache_test_support PROPERTIES
+      LINK_FLAGS "${PostgreSQL_LINK_FLAGS}")
+    if(PostgreSQL_VERSION_MAJOR VERSION_GREATER_EQUAL 16)
+      set_target_properties(
+        postgresql_bioseq_cache_test_support PROPERTIES SUFFIX ".dylib")
+    endif()
   endif()
 endif()
 
-set(BIOSEQ_CACHE_MODULE_PATH "MODULE_PATHNAME")
-configure_file(
-  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq_cache_objects.sql.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_objects.install.sql"
-  @ONLY)
-file(READ
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_objects.install.sql"
-  BIOSEQ_CACHE_INSTALL_OBJECTS)
-configure_file(
-  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq_cache_extension.sql.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
-  @ONLY)
-
-set(EXTENSION_COMMENT
-  "Shared SQL request locking and reusable columnar result cache")
-set(EXTENSION_VERSION "1.0")
-set(EXTENSION_RELOCATABLE "false")
-set(EXTENSION_REQUIRES_CONTROL_LINE "")
-set(EXTENSION_SCHEMA_CONTROL_LINE "schema = 'bioseq_cache'")
-set(EXTENSION_NAME "bioseq_cache")
-configure_file(
-  "${CMAKE_CURRENT_LIST_DIR}/../cmake/control.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
-  @ONLY)
-
-install(TARGETS postgresql_bioseq_cache
-  LIBRARY DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
-  COMPONENT "${PROJECT_NAME}")
-install(FILES
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
-  DESTINATION "${PostgreSQL_SHARE_DIR}/extension"
-  COMPONENT "${PROJECT_NAME}")
-
-set(BIOSEQ_CACHE_MODULE_PATH "__BIOSEQ_CACHE_BUILD_DSO__")
-configure_file(
-  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq_cache_objects.sql.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_objects.build.sql.in"
-  @ONLY)
-configure_file(
-  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq_cache_test_objects.sql.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_objects.build.sql.in"
-  @ONLY)
-file(READ
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_objects.build.sql.in"
-  BIOSEQ_CACHE_PUBLIC_OBJECTS)
-file(READ
-  "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_objects.build.sql.in"
-  BIOSEQ_CACHE_TEST_OBJECTS)
-string(REPLACE "__BIOSEQ_CACHE_BUILD_DSO__"
-  "$<TARGET_FILE:postgresql_bioseq_cache>"
-  BIOSEQ_CACHE_PUBLIC_OBJECTS "${BIOSEQ_CACHE_PUBLIC_OBJECTS}")
-string(REPLACE "__BIOSEQ_CACHE_BUILD_DSO__"
-  "$<TARGET_FILE:postgresql_bioseq_cache>"
-  BIOSEQ_CACHE_TEST_OBJECTS "${BIOSEQ_CACHE_TEST_OBJECTS}")
-file(GENERATE
-  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-  CONTENT
-"CREATE SCHEMA IF NOT EXISTS bioseq_cache;
-CREATE SCHEMA IF NOT EXISTS bioseq_cache_test;
-${BIOSEQ_CACHE_PUBLIC_OBJECTS}
-${BIOSEQ_CACHE_TEST_OBJECTS}")
-set_target_properties(postgresql_bioseq_cache PROPERTIES
-  BIOSEQ_TEST_BOOTSTRAP_SQL
-    "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql")
-
 if(BIOSEQ_CACHE_BUILD_TESTS)
+  if(NOT TARGET bioseq_postgres_test_support)
+    add_subdirectory(
+      "${CMAKE_CURRENT_LIST_DIR}/../common/postgres_test_support"
+      "${CMAKE_CURRENT_BINARY_DIR}/postgres_test_support")
+  endif()
   add_subdirectory(test/unit)
   add_subdirectory(bench)
-endif()
-
-if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
-  find_package(Perl REQUIRED)
-  find_program(BIOSEQ_CACHE_PG_REGRESS pg_regress REQUIRED
-    HINTS "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/regress"
-          "${PostgreSQL_BIN_DIR}")
-  find_program(BIOSEQ_CACHE_PG_ISOLATION_REGRESS pg_isolation_regress REQUIRED
-    HINTS "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/isolation"
-          "${PostgreSQL_BIN_DIR}")
-  find_program(BIOSEQ_CACHE_PROVE prove REQUIRED)
-  execute_process(
-    COMMAND "${PERL_EXECUTABLE}" -MIPC::Run -MIO::Pty -e "exit 0"
-    RESULT_VARIABLE BIOSEQ_CACHE_PERL_TAP_MODULES_RESULT
-    OUTPUT_QUIET
-    ERROR_QUIET)
-  if(NOT BIOSEQ_CACHE_PERL_TAP_MODULES_RESULT EQUAL 0)
-    message(FATAL_ERROR
-      "bioseq_cache TAP tests require Perl IPC::Run and IO::Pty "
-      "(Ubuntu: libipc-run-perl and libio-pty-perl)")
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/test/integration/CMakeLists.txt")
+    add_subdirectory(test/integration)
   endif()
-
-  add_custom_target(test_bioseq_cache_regress
-    COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
-      --kind regress
-      --runner "${BIOSEQ_CACHE_PG_REGRESS}"
-      --bindir "${PostgreSQL_BIN_DIR}"
-      --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
-      --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-      --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/regress"
-      --schedule "${CMAKE_CURRENT_LIST_DIR}/test/regress/parallel_schedule"
-      --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_regress"
-    DEPENDS postgresql_bioseq_cache
-    USES_TERMINAL)
-
-  add_custom_target(test_bioseq_cache_isolation
-    COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
-      --kind isolation
-      --runner "${BIOSEQ_CACHE_PG_ISOLATION_REGRESS}"
-      --bindir "${PostgreSQL_BIN_DIR}"
-      --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
-      --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-      --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/isolation"
-      --schedule "${CMAKE_CURRENT_LIST_DIR}/test/isolation/isolation_schedule"
-      --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_isolation"
-    DEPENDS postgresql_bioseq_cache
-    USES_TERMINAL)
-
-  add_custom_target(test_bioseq_cache_tap
-    COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
-      --kind tap
-      --bindir "${PostgreSQL_BIN_DIR}"
-      --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
-      --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-      --prove "${BIOSEQ_CACHE_PROVE}"
-      --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/tap"
-      --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_tap"
-    DEPENDS postgresql_bioseq_cache
-    USES_TERMINAL)
-endif()
-
-if(BIOSEQ_CACHE_BUILD_TESTS)
-  add_custom_target(run_bioseq_cache_bench
-    COMMAND "${CMAKE_COMMAND}" -E env
-      "BIOSEQ_CACHE_DSO=$<TARGET_FILE:postgresql_bioseq_cache>"
-      "BIOSEQ_CACHE_BOOTSTRAP_SQL=${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-      "BIOSEQ_CACHE_CORE_BENCH=$<TARGET_FILE:bioseq_cache_bench>"
-      "BIOSEQ_CACHE_REPORT_DIR=${CMAKE_SOURCE_DIR}/reporting/bioseq_cache_bench"
-      "POSTGRESQL_BINDIR=${PostgreSQL_BIN_DIR}"
-      "CMAKE_PRESET_NAME=${CMAKE_PRESET_NAME}"
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/bench/run_private_cluster_bench.py"
-    DEPENDS postgresql_bioseq_cache bioseq_cache_bench
-    USES_TERMINAL)
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/test/bioseq/CMakeLists.txt")
+    add_subdirectory(test/bioseq)
+  endif()
 endif()

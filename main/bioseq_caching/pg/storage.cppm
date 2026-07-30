@@ -49,6 +49,8 @@ extern "C" {
 #include <fcntl.h>
 #include <limits>
 #include <span>
+#include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <type_traits>
@@ -61,6 +63,7 @@ export module bioseq.cache.pg.storage;
 import bioseq.cache.core;
 import bioseq.cache.pg.shared_registry;
 import bioseq.common.memory_budget;
+import bioseq.pg_sql_boundary;
 
 export namespace bioseq::cache::pg::storage {
 
@@ -4513,167 +4516,223 @@ StorageTierTestSnapshot test_storage_tier_snapshot() noexcept {
 
 } // namespace bioseq::cache::pg::storage
 
-namespace bioseq::cache::pg::storage::bootstrap_test_api {
+export namespace bioseq::cache::pg::storage::bootstrap_test_api {
 
 /** Test controls are private-cluster superuser operations only. */
 inline void require_superuser() {
     if (!superuser()) {
-        ereport(ERROR,
-            (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-             errmsg("bioseq_cache bootstrap test controls require superuser")));
+        bioseq::pg_utils::raise_sql_error(
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+            {
+                .message =
+                    "bioseq_cache bootstrap test controls require superuser",
+            });
     }
 }
 
-/** Convert one owned StringInfo JSON object to PostgreSQL jsonb. */
-[[nodiscard]] inline Datum finish_json(StringInfoData& json) {
-    const Datum result = DirectFunctionCall1(
-        jsonb_in, CStringGetDatum(json.data));
-    pfree(json.data);
-    return result;
+inline void append_json_member(
+        std::string& json,
+        std::string_view key,
+        std::string_view encoded_value) {
+    if (json.size() != 1) {
+        json.push_back(',');
+    }
+    json.push_back('"');
+    json.append(key);
+    json.append("\":");
+    json.append(encoded_value);
+}
+
+template<class Integer>
+    requires std::is_integral_v<Integer>
+inline void append_json_integer(
+        std::string& json,
+        std::string_view key,
+        Integer value) {
+    append_json_member(json, key, std::to_string(value));
+}
+
+inline void append_json_boolean(
+        std::string& json,
+        std::string_view key,
+        bool value) {
+    append_json_member(json, key, value ? "true" : "false");
+}
+
+/** Return one owning snapshot of shared bootstrap state. */
+[[nodiscard]] inline bioseq::pg_utils::sql_jsonb bootstrap_status() {
+    require_superuser();
+    const StorageBootstrapTestSnapshot snapshot =
+        test_storage_bootstrap_snapshot();
+    std::string json{"{"};
+    json.reserve(1'024);
+    append_json_integer(
+        json, "state", static_cast<std::uint32_t>(snapshot.state));
+    append_json_integer(
+        json, "failure", static_cast<std::uint32_t>(snapshot.failure));
+    append_json_integer(json, "boot_nonce", snapshot.boot_nonce);
+    append_json_integer(
+        json,
+        "initialization_attempts",
+        snapshot.initialization_attempt_count);
+    append_json_integer(json, "takeovers", snapshot.takeover_count);
+    append_json_integer(json, "cleanups", snapshot.cleanup_count);
+    append_json_integer(json, "attaches", snapshot.attach_count);
+    append_json_integer(
+        json,
+        "validation_failures",
+        snapshot.validation_failure_count);
+    append_json_integer(
+        json, "takeover_used", snapshot.takeover_used);
+    append_json_integer(
+        json,
+        "live_unpublished_areas",
+        snapshot.live_unpublished_area_count);
+    append_json_integer(
+        json,
+        "cleanup_handle_pinned",
+        snapshot.cleanup_handle_pinned);
+    append_json_boolean(
+        json,
+        "cleanup_handle_published",
+        snapshot.cleanup_handle_published);
+    append_json_boolean(
+        json,
+        "ready_handle_published",
+        snapshot.ready_handle_published);
+    append_json_boolean(
+        json, "root_published", snapshot.root_published);
+    append_json_boolean(
+        json, "storage_attached", snapshot.storage_attached);
+    append_json_boolean(
+        json, "mapping_pinned", snapshot.mapping_pinned);
+    append_json_boolean(
+        json,
+        "storage_metadata_in_dsa",
+        snapshot.storage_metadata_in_dsa);
+    append_json_boolean(
+        json,
+        "reusable_wait_cvs_in_dsa",
+        snapshot.reusable_wait_cvs_in_dsa);
+    append_json_integer(
+        json,
+        "reusable_wait_cv_count",
+        snapshot.reusable_wait_cv_count);
+    append_json_boolean(
+        json, "pause_reached", snapshot.pause_reached);
+    append_json_boolean(
+        json,
+        "defer_background_initializer",
+        snapshot.defer_background_initializer);
+    append_json_integer(
+        json,
+        "last_cleanup_handle",
+        snapshot.last_cleanup_handle);
+    append_json_boolean(
+        json,
+        "last_cleanup_was_pinned",
+        snapshot.last_cleanup_handle_was_pinned);
+    append_json_boolean(
+        json,
+        "last_cleanup_release_verified",
+        snapshot.last_cleanup_release_verified);
+    append_json_integer(
+        json,
+        "initializer_proc",
+        static_cast<std::uint32_t>(
+            snapshot.initializer.owner.proc_number));
+    append_json_integer(
+        json, "initializer_pid", snapshot.initializer.owner.pid);
+    append_json_integer(
+        json,
+        "initializer_nonce",
+        snapshot.initializer.owner.backend_nonce);
+    append_json_integer(
+        json,
+        "initializer_started_at",
+        snapshot.initializer.owner.backend_started_at_us);
+    append_json_integer(
+        json,
+        "initializer_claim",
+        snapshot.initializer.claim_sequence);
+    append_json_integer(
+        json,
+        "last_initializer_proc",
+        static_cast<std::uint32_t>(
+            snapshot.last_initializer.owner.proc_number));
+    append_json_integer(
+        json,
+        "last_initializer_pid",
+        snapshot.last_initializer.owner.pid);
+    append_json_integer(
+        json,
+        "last_initializer_nonce",
+        snapshot.last_initializer.owner.backend_nonce);
+    append_json_integer(
+        json,
+        "last_initializer_started_at",
+        snapshot.last_initializer.owner.backend_started_at_us);
+    append_json_integer(
+        json,
+        "last_initializer_claim",
+        snapshot.last_initializer.claim_sequence);
+    json.push_back('}');
+    return bioseq::pg_utils::sql_jsonb{std::move(json)};
+}
+
+/** Prove that repeated attachment selects one shared area and root. */
+[[nodiscard]] inline bioseq::pg_utils::sql_jsonb
+bootstrap_attach_twice() {
+    require_superuser();
+    const StorageBootstrapAttachTwiceSnapshot snapshot =
+        test_attach_storage_twice();
+    std::string json{"{"};
+    json.reserve(384);
+    append_json_boolean(
+        json, "first_attached", snapshot.first_attached);
+    append_json_boolean(
+        json, "second_attached", snapshot.second_attached);
+    append_json_boolean(json, "same_area", snapshot.same_area);
+    append_json_boolean(json, "same_root", snapshot.same_root);
+    append_json_boolean(
+        json, "mapping_pinned", snapshot.mapping_pinned);
+    append_json_integer(
+        json, "attempts_before", snapshot.attempts_before);
+    append_json_integer(
+        json, "attempts_after", snapshot.attempts_after);
+    append_json_integer(
+        json, "attaches_before", snapshot.attaches_before);
+    append_json_integer(
+        json, "attaches_after", snapshot.attaches_after);
+    json.push_back('}');
+    return bioseq::pg_utils::sql_jsonb{std::move(json)};
+}
+
+/** Corrupt one named bootstrap-manifest field for recovery testing. */
+[[nodiscard]] inline bool corrupt_bootstrap_manifest(
+        const std::string& name) {
+    require_superuser();
+    shared_registry::SharedRegistryTestManifestCorruptionV1 corruption{};
+    if (name == "magic") {
+        corruption =
+            shared_registry::SharedRegistryTestManifestCorruptionV1::Magic;
+    } else if (name == "abi") {
+        corruption = shared_registry::
+            SharedRegistryTestManifestCorruptionV1::AbiVersion;
+    } else if (name == "boot_nonce") {
+        corruption = shared_registry::
+            SharedRegistryTestManifestCorruptionV1::BootNonce;
+    } else {
+        bioseq::pg_utils::raise_sql_error(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            {
+                .message =
+                    "unknown bootstrap manifest corruption: " + name,
+            });
+    }
+    return test_corrupt_storage_bootstrap_manifest(corruption);
 }
 
 } // namespace bioseq::cache::pg::storage::bootstrap_test_api
 
-extern "C" {
-
-PGDLLEXPORT Datum bioseq_cache_test_bootstrap_status(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_bootstrap_status);
-Datum bioseq_cache_test_bootstrap_status(PG_FUNCTION_ARGS) {
-    using namespace bioseq::cache::pg::storage;
-    using namespace bioseq::cache::pg::storage::bootstrap_test_api;
-    require_superuser();
-    const StorageBootstrapTestSnapshot snapshot =
-        test_storage_bootstrap_snapshot();
-    StringInfoData json{};
-    initStringInfo(&json);
-    appendStringInfo(
-        &json,
-        "{\"state\":%u,\"failure\":%u,\"boot_nonce\":%llu,"
-        "\"initialization_attempts\":%llu,\"takeovers\":%llu,"
-        "\"cleanups\":%llu,\"attaches\":%llu,"
-        "\"validation_failures\":%llu,\"takeover_used\":%u,"
-        "\"live_unpublished_areas\":%u,"
-        "\"cleanup_handle_pinned\":%u,"
-        "\"cleanup_handle_published\":%s,"
-        "\"ready_handle_published\":%s,\"root_published\":%s,"
-        "\"storage_attached\":%s,\"mapping_pinned\":%s,"
-        "\"storage_metadata_in_dsa\":%s,"
-        "\"reusable_wait_cvs_in_dsa\":%s,"
-        "\"reusable_wait_cv_count\":%u,"
-        "\"pause_reached\":%s,"
-        "\"defer_background_initializer\":%s,"
-        "\"last_cleanup_handle\":%u,"
-        "\"last_cleanup_was_pinned\":%s,"
-        "\"last_cleanup_release_verified\":%s,"
-        "\"initializer_proc\":%u,\"initializer_pid\":%d,"
-        "\"initializer_nonce\":%llu,"
-        "\"initializer_started_at\":%lld,"
-        "\"initializer_claim\":%llu,"
-        "\"last_initializer_proc\":%u,"
-        "\"last_initializer_pid\":%d,"
-        "\"last_initializer_nonce\":%llu,"
-        "\"last_initializer_started_at\":%lld,"
-        "\"last_initializer_claim\":%llu}",
-        static_cast<std::uint32_t>(snapshot.state),
-        static_cast<std::uint32_t>(snapshot.failure),
-        static_cast<unsigned long long>(snapshot.boot_nonce),
-        static_cast<unsigned long long>(
-            snapshot.initialization_attempt_count),
-        static_cast<unsigned long long>(snapshot.takeover_count),
-        static_cast<unsigned long long>(snapshot.cleanup_count),
-        static_cast<unsigned long long>(snapshot.attach_count),
-        static_cast<unsigned long long>(snapshot.validation_failure_count),
-        snapshot.takeover_used,
-        snapshot.live_unpublished_area_count,
-        snapshot.cleanup_handle_pinned,
-        snapshot.cleanup_handle_published ? "true" : "false",
-        snapshot.ready_handle_published ? "true" : "false",
-        snapshot.root_published ? "true" : "false",
-        snapshot.storage_attached ? "true" : "false",
-        snapshot.mapping_pinned ? "true" : "false",
-        snapshot.storage_metadata_in_dsa ? "true" : "false",
-        snapshot.reusable_wait_cvs_in_dsa ? "true" : "false",
-        snapshot.reusable_wait_cv_count,
-        snapshot.pause_reached ? "true" : "false",
-        snapshot.defer_background_initializer ? "true" : "false",
-        snapshot.last_cleanup_handle,
-        snapshot.last_cleanup_handle_was_pinned ? "true" : "false",
-        snapshot.last_cleanup_release_verified ? "true" : "false",
-        snapshot.initializer.owner.proc_number,
-        snapshot.initializer.owner.pid,
-        static_cast<unsigned long long>(
-            snapshot.initializer.owner.backend_nonce),
-        static_cast<long long>(
-            snapshot.initializer.owner.backend_started_at_us),
-        static_cast<unsigned long long>(snapshot.initializer.claim_sequence),
-        snapshot.last_initializer.owner.proc_number,
-        snapshot.last_initializer.owner.pid,
-        static_cast<unsigned long long>(
-            snapshot.last_initializer.owner.backend_nonce),
-        static_cast<long long>(
-            snapshot.last_initializer.owner.backend_started_at_us),
-        static_cast<unsigned long long>(
-            snapshot.last_initializer.claim_sequence));
-    PG_RETURN_DATUM(finish_json(json));
-}
-
-PGDLLEXPORT Datum bioseq_cache_test_bootstrap_attach_twice(
-    PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_bootstrap_attach_twice);
-Datum bioseq_cache_test_bootstrap_attach_twice(PG_FUNCTION_ARGS) {
-    using namespace bioseq::cache::pg::storage;
-    using namespace bioseq::cache::pg::storage::bootstrap_test_api;
-    require_superuser();
-    const StorageBootstrapAttachTwiceSnapshot snapshot =
-        test_attach_storage_twice();
-    StringInfoData json{};
-    initStringInfo(&json);
-    appendStringInfo(
-        &json,
-        "{\"first_attached\":%s,\"second_attached\":%s,"
-        "\"same_area\":%s,\"same_root\":%s,"
-        "\"mapping_pinned\":%s,\"attempts_before\":%llu,"
-        "\"attempts_after\":%llu,\"attaches_before\":%llu,"
-        "\"attaches_after\":%llu}",
-        snapshot.first_attached ? "true" : "false",
-        snapshot.second_attached ? "true" : "false",
-        snapshot.same_area ? "true" : "false",
-        snapshot.same_root ? "true" : "false",
-        snapshot.mapping_pinned ? "true" : "false",
-        static_cast<unsigned long long>(snapshot.attempts_before),
-        static_cast<unsigned long long>(snapshot.attempts_after),
-        static_cast<unsigned long long>(snapshot.attaches_before),
-        static_cast<unsigned long long>(snapshot.attaches_after));
-    PG_RETURN_DATUM(finish_json(json));
-}
-
-PGDLLEXPORT Datum bioseq_cache_test_corrupt_bootstrap_manifest(
-    PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_corrupt_bootstrap_manifest);
-Datum bioseq_cache_test_corrupt_bootstrap_manifest(PG_FUNCTION_ARGS) {
-    using namespace bioseq::cache::pg;
-    using namespace bioseq::cache::pg::storage;
-    using namespace bioseq::cache::pg::storage::bootstrap_test_api;
-    require_superuser();
-    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    shared_registry::SharedRegistryTestManifestCorruptionV1 corruption{};
-    if (std::strcmp(name, "magic") == 0) {
-        corruption =
-            shared_registry::SharedRegistryTestManifestCorruptionV1::Magic;
-    } else if (std::strcmp(name, "abi") == 0) {
-        corruption = shared_registry::
-            SharedRegistryTestManifestCorruptionV1::AbiVersion;
-    } else if (std::strcmp(name, "boot_nonce") == 0) {
-        corruption = shared_registry::
-            SharedRegistryTestManifestCorruptionV1::BootNonce;
-    } else {
-        ereport(ERROR,
-            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-             errmsg("unknown bootstrap manifest corruption: %s", name)));
-    }
-    pfree(name);
-    PG_RETURN_BOOL(test_corrupt_storage_bootstrap_manifest(corruption));
-}
-
-} // extern "C"
 #endif
