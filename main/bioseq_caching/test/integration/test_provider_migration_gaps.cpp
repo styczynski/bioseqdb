@@ -795,7 +795,6 @@ void require_losing_reusable_alternative_preserves_exact(
             SELECT bioseq_cache.invalidate_all();
             SELECT bioseq_cache_test.request_janitor_sweep();
             SELECT bioseq_cache_test.provider_reset();
-            SELECT bioseq_cache.reset_stats();
             SET random_page_cost = 100;
             SET enable_sort = off;
             DO $$
@@ -836,28 +835,21 @@ void require_losing_reusable_alternative_preserves_exact(
                 END IF;
             END
             $$;
+        )SQL",
+        30s);
 
-            SELECT
-                row_id,
-                base_id,
-                occurrence_no,
-                nullable_value,
-                payload,
-                capability_mask
-            FROM cache_provider_rows
-            WHERE row_id > 0
-            ORDER BY row_id;
-            SELECT
-                row_id,
-                base_id,
-                occurrence_no,
-                nullable_value,
-                payload,
-                capability_mask
-            FROM cache_provider_rows
-            WHERE row_id > 0
-            ORDER BY row_id;
+    bioseq::cache_test::exec(
+        connection, "SELECT bioseq_cache.reset_stats()");
+    constexpr std::string_view exact_query{
+        "SELECT row_id, base_id, occurrence_no, nullable_value, payload, "
+        "capability_mask FROM cache_provider_rows "
+        "WHERE row_id > 0 ORDER BY row_id"};
+    static_cast<void>(connection.exec(exact_query, 30s));
+    static_cast<void>(connection.exec(exact_query, 30s));
 
+    bioseq::cache_test::exec(
+        connection,
+        R"SQL(
             DO $$
             DECLARE
                 cache_stats record;
