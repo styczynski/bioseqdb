@@ -9,6 +9,7 @@ endif()
 add_executable(bioseq_cache_bioseq_integration_tests
   "${CMAKE_CURRENT_LIST_DIR}/../support/cache_catch_runner.cpp"
   test_coexistence.cpp
+  test_coexistence_acceptance.cpp
   test_exact_provider.cpp
   test_bioseq_2gbp_cache.cpp)
 set_target_properties(bioseq_cache_bioseq_integration_tests PROPERTIES
@@ -53,3 +54,26 @@ set_tests_properties(bioseq_cache_bioseq_integration_tests PROPERTIES
   LABELS "cache;integration;bioseq;2gbp"
   RESOURCE_LOCK "bioseq_private_postgres"
   TIMEOUT 7200)
+
+include(
+  "${CMAKE_CURRENT_LIST_DIR}/../support/LegacyMigrationContract.cmake")
+bioseq_cache_add_legacy_migration_contract(
+  LEDGER
+    "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
+  LEGACY_ROOT
+    "${CMAKE_CURRENT_LIST_DIR}/../.."
+  TARGETS
+    bioseq_cache_unit_tests
+    bioseq_cache_integration_tests
+    bioseq_cache_bioseq_integration_tests
+  LEGACY_ASSETS
+    bench/run_private_cluster_bench.py
+    bench/sql_cases.json
+    bench/test_run_private_cluster_bench.py
+    sql/bioseq_cache_extension.sql.in
+    sql/bioseq_cache_objects.sql.in
+    sql/bioseq_cache_test_objects.sql.in
+    test/run_private_provider_tests.py
+    test/regress
+    test/isolation
+    test/tap)

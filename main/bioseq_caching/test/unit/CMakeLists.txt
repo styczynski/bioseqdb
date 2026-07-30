@@ -11,6 +11,7 @@ add_executable(bioseq_cache_unit_tests
   test_reusable_registry.cpp
   test_write_observation.cpp
   test_object_definition_dependencies.cpp
+  test_legacy_migration_ledger.cpp
   test_transition_ledger.cpp
   test_dependency_directory.cpp
   test_dependency_vector.cpp)
@@ -27,5 +28,8 @@ target_link_libraries(bioseq_cache_unit_tests
   PRIVATE
     bioseq_cache_core
     Catch2::Catch2WithMain)
+target_include_directories(
+  bioseq_cache_unit_tests
+  PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../support")
 
 add_test(NAME bioseq_cache_unit_tests COMMAND bioseq_cache_unit_tests)

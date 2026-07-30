@@ -17,3 +17,18 @@ target_sources(bioseq_cache_test_context
       "${CMAKE_CURRENT_LIST_DIR}/cache_test_context.cppm")
 target_link_libraries(bioseq_cache_test_context
   PUBLIC bioseq_postgres_test_support)
+
+add_executable(
+  bioseq_cache_legacy_migration_contract
+  "${CMAKE_CURRENT_LIST_DIR}/legacy_migration_contract.cpp")
+set_target_properties(
+  bioseq_cache_legacy_migration_contract
+  PROPERTIES
+    CXX_STANDARD 26
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS ON
+    INTERPROCEDURAL_OPTIMIZATION FALSE
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bioseq_caching")
+target_include_directories(
+  bioseq_cache_legacy_migration_contract
+  PRIVATE "${CMAKE_CURRENT_LIST_DIR}")

@@ -4,21 +4,20 @@
 #include <catch2/reporters/catch_reporter_event_listener.hpp>
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 
+#include "legacy_migration_ledger.hpp"
+
 #include <algorithm>
-#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -196,8 +195,12 @@ public:
         const Catch::TestCaseStats& test_stats) override {
         auto& evidence = catch_evidence();
         evidence.watchdog.reset();
-        const std::string outcome =
+        std::string outcome =
             test_case_status(test_stats.totals, test_stats.aborting);
+        if (bioseq::postgres_test::infrastructure_inconclusive_for_case(
+                test_stats.testInfo->name)) {
+            outcome = "infrastructure-inconclusive";
+        }
         evidence.cases.push_back(
             bioseq::postgres_test::test_case_report{
                 .test_case = test_stats.testInfo->name,
@@ -278,42 +281,6 @@ void reconcile_migration_probes(
     }
 }
 
-[[nodiscard]] std::vector<std::string> split_tsv(
-    const std::string& line) {
-    std::vector<std::string> fields;
-    std::size_t begin = 0;
-    for (;;) {
-        const std::size_t tab = line.find('\t', begin);
-        fields.push_back(line.substr(
-            begin, tab == std::string::npos
-                ? std::string::npos : tab - begin));
-        if (tab == std::string::npos) {
-            return fields;
-        }
-        begin = tab + 1;
-    }
-}
-
-[[nodiscard]] std::size_t ledger_expected_count(
-    std::string_view scenario) {
-    constexpr std::string_view marker{"expected_count="};
-    const std::size_t marker_position = scenario.find(marker);
-    if (marker_position == std::string_view::npos) {
-        return 1;
-    }
-    const std::string_view count_text =
-        scenario.substr(marker_position + marker.size());
-    std::size_t count{};
-    const auto [end, error] = std::from_chars(
-        count_text.data(), count_text.data() + count_text.size(), count);
-    if (error != std::errc{} || count == 0
-        || end == count_text.data()) {
-        throw std::runtime_error(
-            "invalid migration-ledger expected_count");
-    }
-    return count;
-}
-
 [[nodiscard]] std::vector<bioseq::postgres_test::expected_migration_probe>
 expected_migration_probes(
     const std::filesystem::path& ledger,
@@ -326,68 +293,36 @@ expected_migration_probes(
         }
     }
 
-    std::ifstream input(ledger);
-    if (!input) {
-        throw std::runtime_error(
-            "cannot read migration ledger: " + ledger.string());
-    }
-    std::string line;
-    if (!std::getline(input, line)) {
-        throw std::runtime_error("migration ledger is empty");
-    }
-    if (!line.empty() && line.back() == '\r') {
-        line.pop_back();
-    }
-    if (line !=
-            "legacy_path\tlegacy_line_or_assertion\tstable_id\t"
-            "source_kind\tscenario_or_permutation\t"
-            "expected_sqlstate_or_result\texpected_state_invariant\t"
-            "catch2_case\tcatch2_section\tcatch2_tags\tmigration_status") {
-        throw std::runtime_error(
-            "migration ledger has an unexpected header");
-    }
-
+    const bioseq::cache_test::migration::ledger parsed =
+        bioseq::cache_test::migration::load_ledger(ledger);
     std::vector<bioseq::postgres_test::expected_migration_probe> expected;
-    std::size_t line_number = 1;
-    while (std::getline(input, line)) {
-        ++line_number;
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        const std::vector<std::string> fields = split_tsv(line);
-        if (fields.size() != 11) {
-            throw std::runtime_error(
-                "migration ledger line " + std::to_string(line_number)
-                + " does not have 11 fields");
-        }
-        if (fields[10] == "retired"
-            || !executed_cases.contains(fields[7])) {
+    for (const auto& row : parsed.rows) {
+        if (row.migration_status
+                == bioseq::cache_test::migration::status::retired_with_proof
+            || !executed_cases.contains(row.catch2_case)) {
             continue;
         }
         const bool case_has_explicit_sections = std::any_of(
             cases.begin(), cases.end(),
-            [&fields](const auto& test_case) {
-                return test_case.test_case == fields[7]
+            [&row](const auto& test_case) {
+                return test_case.test_case == row.catch2_case
                     && !test_case.section.empty();
             });
         const bool ledger_section_executed = std::any_of(
             cases.begin(), cases.end(),
-            [&fields](const auto& test_case) {
-                return test_case.test_case == fields[7]
-                    && test_case.section == fields[8];
+            [&row](const auto& test_case) {
+                return test_case.test_case == row.catch2_case
+                    && test_case.section == row.catch2_section;
             });
-        if (case_has_explicit_sections && !fields[8].empty()
+        if (case_has_explicit_sections && !row.catch2_section.empty()
             && !ledger_section_executed) {
             continue;
         }
         expected.push_back(
             bioseq::postgres_test::expected_migration_probe{
-                .stable_id = fields[2],
-                .expected_count = ledger_expected_count(fields[4])});
-    }
-    if (!input.eof()) {
-        throw std::runtime_error(
-            "failed while reading migration ledger: " + ledger.string());
+                .stable_id = row.stable_id,
+                .expected_count =
+                    bioseq::cache_test::migration::expected_probe_count(row)});
     }
     return expected;
 }
@@ -414,6 +349,10 @@ void write_report(
             {"transport", "Unix socket only"},
             {"authentication", "local trust in private PGDATA"}},
         .cases = catch_evidence().cases,
+        .phase_durations =
+            bioseq::postgres_test::phase_duration_reports(),
+        .host_qualifications =
+            bioseq::postgres_test::host_qualification_reports(),
         .sql_transcripts =
             bioseq::postgres_test::process_sql_transcript_entries(),
         .migration_probes =
@@ -540,6 +479,8 @@ int main(int argc, char* argv[]) {
     bioseq::postgres_test::clear_process_sql_transcript();
     bioseq::postgres_test::clear_cleanup_observations();
     bioseq::postgres_test::clear_artifact_stage_reports();
+    bioseq::postgres_test::clear_phase_duration_reports();
+    bioseq::postgres_test::clear_host_qualification_reports();
     bioseq::postgres_test::clear_report_case_context();
     bioseq::postgres_test::set_automatic_report_collection_enabled(true);
 
