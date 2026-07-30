@@ -41,7 +41,7 @@ constexpr std::string_view late_fetch_consumer_query{
 constexpr std::string_view late_fetch_text_source_query{
     "SELECT row_id "
     "FROM cache_provider_rows "
-    "WHERE row_id <= 5 "
+    "WHERE payload <> 'twenty' "
     "ORDER BY row_id"};
 
 constexpr std::string_view late_fetch_text_consumer_query{
@@ -430,8 +430,30 @@ TEST_CASE("successful late fetch preserves missing text datums",
         "SELECT bioseq_cache.invalidate_all(); "
         "SELECT bioseq_cache_test.request_janitor_sweep(); "
         "SELECT bioseq_cache_test.provider_set_mapping_fault('none')");
-    static_cast<void>(
-        connection.exec(late_fetch_text_source_query, 30s));
+    const auto source_plan = bioseq::postgres_test::run_explain(
+        connection, late_fetch_text_source_query, false, 30s);
+    REQUIRE_FALSE(source_plan
+                      .find_plan_nodes(
+                          "Custom Plan Provider",
+                          "BioseqCacheGenericTestProvider")
+                      .empty());
+    REQUIRE_FALSE(source_plan
+                      .find_plan_nodes(
+                          "Cache Entry Kind", "ReusableCoverage")
+                      .empty());
+    const auto source =
+        connection.exec(late_fetch_text_source_query, 30s);
+    REQUIRE(source.rows() == 5);
+    for (int row = 0; row < source.rows(); ++row) {
+        CHECK(source.value(row, 0) == std::to_string(row + 1));
+    }
+    CHECK(bioseq::cache_test::integer(
+              connection,
+              "SELECT count(*) "
+              "FROM bioseq_cache.entries() "
+              "WHERE kind = 'ReusableCoverage' "
+              "  AND state = 'COMPLETE'")
+          == 1);
     bioseq::cache_test::exec(
         connection,
         "SELECT bioseq_cache_test.provider_reset(); "
