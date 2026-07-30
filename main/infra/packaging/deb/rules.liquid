@@ -19,6 +19,11 @@ override_dh_auto_build:
 override_dh_auto_test:
 	# Installed-package SQL acceptance runs after the artifact is produced.
 
+# The distribution contract is exactly two DSOs, two controls, and two install
+# scripts. Debian control metadata remains in the control archive; do not add a
+# changelog file to the installed data payload.
+override_dh_installchangelogs:
+
 override_dh_auto_install:
 	test "$(BIOSEQ_OPTTIMIZATION_LEVEL)" = "{{ optimization_level }}"
 	infra/packaging/scripts/build_and_stage.sh install "$(BUILD_DIR)" "$(DESTROOT)" "{{ postgres_major }}"

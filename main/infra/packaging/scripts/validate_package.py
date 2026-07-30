@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import asdict, dataclass
 import json
 import os
@@ -29,6 +30,14 @@ REQUIRED_BASENAMES = frozenset(
         "bioseq_cache.control",
     }
 )
+PACKAGE_METADATA_PATHS = {
+    "deb": frozenset(),
+    "rpm": frozenset(),
+    # makepkg stores these package-manager records in the archive root. They
+    # are not installed payload and therefore do not count toward the six
+    # extension artifacts.
+    "pacman": frozenset({".BUILDINFO", ".MTREE", ".PKGINFO"}),
+}
 COMPILER_RUNTIME_SONAMES = (
     "libc++.so",
     "libc++abi.so",
@@ -205,6 +214,75 @@ def package_paths(path: Path, fmt: str) -> list[str]:
     return safe_package_paths(run(["tar", "-tf", str(path)]).splitlines())
 
 
+def exact_package_payload_paths(paths: Sequence[str], fmt: str) -> tuple[str, ...]:
+    """Return the canonical six installed payload paths or fail closed."""
+    try:
+        metadata_paths = PACKAGE_METADATA_PATHS[fmt]
+    except KeyError as error:
+        raise ValidationError(f"unsupported package payload format: {fmt}") from error
+
+    payload = tuple(value for value in paths if value not in metadata_paths)
+    unexpected_metadata = [
+        value
+        for value in paths
+        if PurePosixPath(value).name.startswith(".")
+        and value not in metadata_paths
+    ]
+    if unexpected_metadata:
+        raise ValidationError(
+            "package contains unreviewed package-manager metadata: "
+            + ", ".join(unexpected_metadata)
+        )
+
+    basename_counts = Counter(PurePosixPath(value).name for value in payload)
+    if len(payload) != 6 or set(basename_counts) != REQUIRED_BASENAMES:
+        raise ValidationError(
+            "package must contain exactly the six extension payload artifacts; "
+            f"found {list(payload)}"
+        )
+    duplicate_basenames = sorted(
+        basename for basename, count in basename_counts.items() if count != 1
+    )
+    if duplicate_basenames:
+        raise ValidationError(
+            "package contains duplicate extension artifact basenames: "
+            + ", ".join(duplicate_basenames)
+        )
+
+    by_basename = {
+        PurePosixPath(value).name: PurePosixPath(value) for value in payload
+    }
+    dso_parents = {
+        by_basename["bioseq.so"].parent,
+        by_basename["bioseq_cache.so"].parent,
+    }
+    extension_parents = {
+        by_basename[f"bioseq--{EXTENSION_VERSION}.sql"].parent,
+        by_basename[f"bioseq_cache--{EXTENSION_VERSION}.sql"].parent,
+        by_basename["bioseq.control"].parent,
+        by_basename["bioseq_cache.control"].parent,
+    }
+    if len(dso_parents) != 1:
+        raise ValidationError("extension DSOs are not installed in one directory")
+    if len(extension_parents) != 1:
+        raise ValidationError(
+            "extension control and SQL files are not installed together"
+        )
+    dso_parent = next(iter(dso_parents))
+    extension_parent = next(iter(extension_parents))
+    if (
+        not dso_parent.parts
+        or dso_parent.parts[0] != "usr"
+        or not extension_parent.parts
+        or extension_parent.parts[0] != "usr"
+        or extension_parent.name != "extension"
+    ):
+        raise ValidationError(
+            "extension payload is outside canonical PostgreSQL /usr install directories"
+        )
+    return payload
+
+
 def extract_package(path: Path, fmt: str, destination: Path) -> None:
     if fmt == "deb":
         run(["dpkg-deb", "-x", str(path), str(destination)])
@@ -302,10 +380,7 @@ def validate_artifact(
             f"artifact filename must contain PostgreSQL package marker {expected_name}"
         )
     listed_paths = package_paths(path, fmt)
-    listed_basenames = {PurePosixPath(value).name for value in listed_paths}
-    missing = REQUIRED_BASENAMES - listed_basenames
-    if missing:
-        raise ValidationError(f"package is missing extension artifacts: {sorted(missing)}")
+    payload_paths = exact_package_payload_paths(listed_paths, fmt)
 
     name, version, package_arch, dependencies = package_metadata(path, fmt)
     if name != expected_name:
@@ -324,10 +399,35 @@ def validate_artifact(
     with tempfile.TemporaryDirectory(prefix="bioseq-package-validate-") as temporary:
         extracted = Path(temporary)
         extract_package(path, fmt, extracted)
-        dsos = [candidate for candidate in extracted.rglob("*.so") if candidate.name in REQUIRED_BASENAMES]
-        if {candidate.name for candidate in dsos} != {"bioseq.so", "bioseq_cache.so"}:
-            raise ValidationError("extracted package does not contain exactly both extension DSOs")
-        binaries = [asdict(validate_dso(candidate, architecture)) for candidate in sorted(dsos)]
+        extracted_payload_paths = []
+        for candidate in extracted.rglob("*"):
+            if not candidate.is_file() and not candidate.is_symlink():
+                continue
+            relative = candidate.relative_to(extracted).as_posix()
+            if relative in PACKAGE_METADATA_PATHS[fmt]:
+                continue
+            extracted_payload_paths.append(relative)
+        if (
+            len(extracted_payload_paths) != 6
+            or set(extracted_payload_paths) != set(payload_paths)
+        ):
+            raise ValidationError(
+                "extracted package payload differs from the exact six listed "
+                f"artifacts: {sorted(extracted_payload_paths)}"
+            )
+        dsos = [
+            extracted / value
+            for value in payload_paths
+            if PurePosixPath(value).name in {"bioseq.so", "bioseq_cache.so"}
+        ]
+        if len(dsos) != 2 or not all(candidate.is_file() for candidate in dsos):
+            raise ValidationError(
+                "extracted package does not contain exactly both extension DSOs"
+            )
+        binaries = [
+            asdict(validate_dso(candidate, architecture))
+            for candidate in sorted(dsos)
+        ]
 
     return {
         "passed": True,

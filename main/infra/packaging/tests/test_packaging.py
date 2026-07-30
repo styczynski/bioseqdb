@@ -1436,6 +1436,39 @@ class PipelineOrchestrationTests(unittest.TestCase):
 
 
 class BuildAndStageContractTests(unittest.TestCase):
+    def test_build_revalidates_complete_package_cmake_profile(self) -> None:
+        build_script = (
+            PACKAGING_ROOT / "scripts" / "build_and_stage.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("cmake_cache_matches_package_profile", build_script)
+        self.assertIn("require_package_cmake_profile", build_script)
+        for key, value in (
+            ("BIOSEQ_PACKAGE_BUILD", "ON"),
+            ("BIOSEQ_BUILD_CORE", "ON"),
+            ("BIOSEQ_BUILD_CACHE", "ON"),
+            ("BIOSEQ_TEST_INDEXES", "OFF"),
+            ("BIOSEQ_CACHE_BUILD_TESTS", "OFF"),
+            ("BIOSEQ_CACHE_TESTING", "OFF"),
+        ):
+            with self.subTest(key=key):
+                self.assertRegex(
+                    build_script,
+                    rf"(?m)^\s*{key}\s+{value}\s*\\?$",
+                )
+
+        profile_check = build_script.index(
+            "\n  require_package_cmake_profile\n",
+            build_script.index(
+                'if [[ "${action}" == "build" ]]',
+                build_script.index("require_package_cmake_profile()"),
+            ),
+        )
+        build_targets = build_script.index(
+            "--target postgresql_bioseq postgresql_bioseq_cache",
+        )
+        self.assertLess(profile_check, build_targets)
+
     def test_build_consumes_exact_generated_production_dso_inventory(self) -> None:
         manifest_name = "bioseq-package-target-artifacts.tsv"
         build_script = (
@@ -1469,6 +1502,31 @@ class BuildAndStageContractTests(unittest.TestCase):
         )
         self.assertNotIn("-name bioseq.so", build_script)
         self.assertNotIn("-name bioseq_cache.so", build_script)
+
+    def test_test_support_dso_uses_shared_manifest_closure_validator(
+            self) -> None:
+        helper = (
+            MAIN_ROOT / "cmake" / "AddPostgreSQLExtension.cmake"
+        ).read_text(encoding="utf-8")
+        cache_cmake = (
+            MAIN_ROOT / "bioseq_caching" / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "function(bioseq_attach_extension_dso_closure TARGET_NAME)",
+            helper,
+        )
+        self.assertIn("--dso-only", helper)
+        self.assertIn("--require-complete-codegen", helper)
+        self.assertRegex(
+            cache_cmake,
+            (
+                r"bioseq_attach_extension_dso_closure\(\s*"
+                r"postgresql_bioseq_cache_test_support[\s\S]*?"
+                r"BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MANIFEST"
+                r"[\s\S]*?REQUIRE_COMPLETE_CODEGEN\)"
+            ),
+        )
 
     def test_install_enforces_cache_inclusive_exact_six_artifact_gate(self) -> None:
         build_script = (

@@ -24,6 +24,8 @@ readonly cmake_cache_root=/opt/bioseq-package-cmake-cache
 readonly persistent_source_dir="${cmake_cache_root}/source"
 readonly repository_main_dir="${cmake_cache_root}/main"
 readonly build_dir="${cmake_cache_root}/build-rooted"
+readonly cmake_cache_file="${build_dir}/CMakeCache.txt"
+readonly target_artifact_inventory="${build_dir}/bioseq-package-target-artifacts.tsv"
 [[ "${action}" == "build" || "${action}" == "install" ]] \
   || die "usage: build_and_stage.sh {build BUILD_DIR PG_MAJOR|install BUILD_DIR DESTDIR PG_MAJOR}"
 [[ -n "${package_metadata_dir}" ]] || die "package metadata directory is required"
@@ -131,6 +133,79 @@ export VCPKG_DISABLE_METRICS=1
 export POSTGRESQL_VERSION="${postgres_major}"
 export PATH="${tool_root}/cmake/bin:${PATH}"
 
+cmake_cache_value() {
+  local key="$1"
+  awk -v requested="${key}" '
+    index($0, requested ":") == 1 {
+      separator = index($0, "=")
+      if (separator == 0) {
+        exit 2
+      }
+      print substr($0, separator + 1)
+      matches += 1
+    }
+    END {
+      if (matches != 1) {
+        exit 3
+      }
+    }
+  ' "${cmake_cache_file}"
+}
+
+package_cmake_invariants() {
+  printf '%s\t%s\n' \
+    CMAKE_HOME_DIRECTORY "${persistent_source_dir}" \
+    CMAKE_GENERATOR Ninja \
+    CMAKE_BUILD_TYPE Release \
+    CMAKE_TOOLCHAIN_FILE "${vcpkg_root}/scripts/buildsystems/vcpkg.cmake" \
+    PostgreSQL_CONFIG "${pg_config}" \
+    BIOSEQ_PACKAGE_BUILD ON \
+    BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE 0 \
+    BIOSEQ_BUILD_CORE ON \
+    BIOSEQ_BUILD_CACHE ON \
+    BIOSEQ_BUILD_PAPERS OFF \
+    BIOSEQ_BUILD_EXTERNAL_API_CLIENTS OFF \
+    BIOSEQ_BUILD_WEBSITE OFF \
+    BIOSEQ_TEST_INDEXES OFF \
+    BIOSEQ_CACHE_BUILD_TESTS OFF \
+    BIOSEQ_CACHE_TESTING OFF \
+    BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK OFF \
+    BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST OFF \
+    BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST OFF \
+    BIOSEQ_HEAVY_JOBS 1 \
+    VCPKG_TARGET_TRIPLET "${vcpkg_triplet}" \
+    VCPKG_TARGET_ARCHITECTURE "${vcpkg_arch}" \
+    VCPKG_OVERLAY_TRIPLETS "${persistent_source_dir}/cmake/triplets" \
+    VCPKG_OVERLAY_PORTS "${persistent_source_dir}/cmake/ports"
+}
+
+cmake_cache_matches_package_profile() {
+  local key=
+  local expected=
+  local observed=
+  [[ -f "${cmake_cache_file}" && -f "${build_dir}/build.ninja" ]] \
+    || return 1
+  while IFS=$'\t' read -r key expected; do
+    if ! observed="$(cmake_cache_value "${key}")" \
+        || [[ "${observed}" != "${expected}" ]]; then
+      return 1
+    fi
+  done < <(package_cmake_invariants)
+}
+
+require_package_cmake_profile() {
+  local key=
+  local expected=
+  local observed=
+  while IFS=$'\t' read -r key expected; do
+    if ! observed="$(cmake_cache_value "${key}")"; then
+      die "configured build is missing unique CMake cache key ${key}"
+    fi
+    [[ "${observed}" == "${expected}" ]] \
+      || die "configured ${key}=${observed@Q}, expected ${expected@Q}"
+  done < <(package_cmake_invariants)
+}
+
 if [[ "${action}" == "build" ]]; then
   python3 "${persistent_source_dir}/infra/packaging/scripts/prove_static_runtime.py" \
     --cxx "${llvm_root}/bin/clang++" \
@@ -139,14 +214,8 @@ if [[ "${action}" == "build" ]]; then
     --libunwind "${libunwind_archive}" \
     --architecture "${expected_arch}"
 
-  if [[ -f "${build_dir}/CMakeCache.txt" \
-      && -f "${build_dir}/build.ninja" ]] \
-      && grep -Fqx \
-        "CMAKE_HOME_DIRECTORY:INTERNAL=${persistent_source_dir}" \
-        "${build_dir}/CMakeCache.txt" \
-      && grep -Fqx 'CMAKE_GENERATOR:INTERNAL=Ninja' \
-        "${build_dir}/CMakeCache.txt"; then
-    echo "reusing existing CMake/Ninja package configuration"
+  if cmake_cache_matches_package_profile; then
+    echo "reusing exact CMake/Ninja package configuration"
   else
     "${cmake_bin}" -S "${persistent_source_dir}" -B "${build_dir}" -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
@@ -184,15 +253,9 @@ if [[ "${action}" == "build" ]]; then
       -DVCPKG_OVERLAY_PORTS="${persistent_source_dir}/cmake/ports"
   fi
 
+  require_package_cmake_profile
   python3 "${persistent_source_dir}/infra/packaging/scripts/verify_compile_optimization.py" \
     "${build_dir}/compile_commands.json"
-
-  grep -Fqx 'BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE:STRING=0' "${build_dir}/CMakeCache.txt" \
-    || die "configured build did not preserve BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE=0"
-  grep -Fqx "PostgreSQL_CONFIG:FILEPATH=${pg_config}" "${build_dir}/CMakeCache.txt" \
-    || die "configured build did not preserve exact PostgreSQL_CONFIG"
-  grep -Fqx 'BIOSEQ_PACKAGE_BUILD:BOOL=ON' "${build_dir}/CMakeCache.txt" \
-    || die "configured build is not marked as a package build"
 
   readonly parallelism="${BIOSEQ_PACKAGE_PARALLELISM:-$(nproc)}"
   [[ "${parallelism}" =~ ^[1-9][0-9]*$ ]] || die "invalid package parallelism"
@@ -206,21 +269,44 @@ if [[ "${action}" == "build" ]]; then
   python3 "${persistent_source_dir}/infra/packaging/scripts/verify_compile_optimization.py" \
     "${compile_databases[@]}"
 
-  mapfile -t built_dsos < <(find "${build_dir}" -type f \
-    \( -name bioseq.so -o -name bioseq_cache.so \) -print)
-  [[ "${#built_dsos[@]}" == "2" ]] \
-    || die "expected exactly two built extension DSOs, found ${#built_dsos[@]}"
-  for dso in "${built_dsos[@]}"; do
+  [[ -f "${target_artifact_inventory}" ]] \
+    || die "CMake did not generate ${target_artifact_inventory}"
+  declare -A production_dsos=()
+  while IFS=$'\t' read -r target dso extra; do
+    [[ -n "${target}" && -n "${dso}" && -z "${extra:-}" ]] \
+      || die "malformed production DSO inventory row"
+    case "${target}" in
+      postgresql_bioseq|postgresql_bioseq_cache) ;;
+      *) die "unexpected production DSO target ${target}" ;;
+    esac
+    [[ -z "${production_dsos[${target}]:-}" ]] \
+      || die "duplicate production DSO target ${target}"
+    production_dsos["${target}"]="${dso}"
+  done < "${target_artifact_inventory}"
+  [[ "${#production_dsos[@]}" == "2" ]] \
+    || die "production DSO inventory must contain exactly two target artifacts"
+
+  validate_production_dso() {
+    local target="$1"
+    local expected_basename="$2"
+    local dso="${production_dsos[${target}]:-}"
+    [[ -n "${dso}" && -f "${dso}" ]] \
+      || die "production DSO for ${target} is missing: ${dso:-<unset>}"
+    [[ "$(basename -- "${dso}")" == "${expected_basename}" ]] \
+      || die "${target} resolved unexpected DSO basename ${dso}"
+    case "${dso}" in
+      "${build_dir}"/*) ;;
+      *) die "${target} DSO escapes the package build tree: ${dso}" ;;
+    esac
     python3 "${persistent_source_dir}/infra/packaging/scripts/validate_package.py" \
       --dso "${dso}" --architecture "${expected_arch}"
-  done
+  }
+  validate_production_dso postgresql_bioseq bioseq.so
+  validate_production_dso postgresql_bioseq_cache bioseq_cache.so
   exit 0
 fi
 
-grep -Fqx 'BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE:STRING=0' "${build_dir}/CMakeCache.txt" \
-  || die "install attempted from a build without optimization level 0"
-grep -Fqx "PostgreSQL_CONFIG:FILEPATH=${pg_config}" "${build_dir}/CMakeCache.txt" \
-  || die "install attempted from the wrong PostgreSQL build"
+require_package_cmake_profile
 
 mkdir -p "${destdir}"
 DESTDIR="${destdir}" "${cmake_bin}" --install "${build_dir}" --component bioseq
