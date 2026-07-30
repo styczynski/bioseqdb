@@ -54,6 +54,11 @@ function(bioseq_add_private_postgres_stage)
     message(FATAL_ERROR
       "bioseq_add_private_postgres_stage: TARGET is required")
   endif()
+  if(NOT BIOSEQ_STAGE_TARGET MATCHES "^[A-Za-z0-9_.+-]+$")
+    message(FATAL_ERROR
+      "bioseq_add_private_postgres_stage: TARGET must be a path-safe "
+      "CMake target name: ${BIOSEQ_STAGE_TARGET}")
+  endif()
   if(TARGET "${BIOSEQ_STAGE_TARGET}")
     message(FATAL_ERROR
       "bioseq_add_private_postgres_stage: target already exists: "
@@ -127,23 +132,35 @@ function(bioseq_add_private_postgres_stage)
       "return an absolute path")
   endif()
 
+  set(_safe_stage_parent
+    "${CMAKE_CURRENT_BINARY_DIR}/private_postgres")
+  cmake_path(
+    ABSOLUTE_PATH _safe_stage_parent
+    NORMALIZE
+    OUTPUT_VARIABLE _safe_stage_parent)
   if(BIOSEQ_STAGE_STAGE_ROOT)
+    cmake_path(
+      ABSOLUTE_PATH BIOSEQ_STAGE_STAGE_ROOT
+      BASE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+      NORMALIZE
+      OUTPUT_VARIABLE _stage_root_base)
     get_filename_component(
-      _stage_root_base
-      "${BIOSEQ_STAGE_STAGE_ROOT}"
-      ABSOLUTE
-      BASE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+      _requested_stage_parent "${_stage_root_base}" DIRECTORY)
+    if(NOT _requested_stage_parent STREQUAL _safe_stage_parent)
+      message(FATAL_ERROR
+        "bioseq_add_private_postgres_stage: STAGE_ROOT must be a direct "
+        "child of ${_safe_stage_parent}: ${_stage_root_base}")
+    endif()
   else()
     set(_stage_root_base
-      "${CMAKE_CURRENT_BINARY_DIR}/private_postgres/${BIOSEQ_STAGE_TARGET}")
+      "${_safe_stage_parent}/${BIOSEQ_STAGE_TARGET}")
   endif()
-  cmake_path(NORMAL_PATH _stage_root_base)
   if(CMAKE_CONFIGURATION_TYPES)
     set(_stage_parent "${_stage_root_base}")
     set(_stage_root "${_stage_root_base}/$<CONFIG>")
   else()
     set(_stage_root "${_stage_root_base}")
-    get_filename_component(_stage_parent "${_stage_root}" DIRECTORY)
+    set(_stage_parent "${_safe_stage_parent}")
   endif()
   file(MAKE_DIRECTORY "${_stage_parent}")
 
