@@ -3,8 +3,6 @@ if(NOT TARGET PostgreSQL::PostgreSQL)
     "bioseq_postgres_test_support requires PostgreSQL::PostgreSQL")
 endif()
 
-find_package(TBB REQUIRED tbb)
-
 # The shared libpq client is a standalone module target for native PostgreSQL
 # tests. Codegen may compile the same source into its isolated executable, so
 # guard the target name for combined trees without changing that source owner.
@@ -50,9 +48,7 @@ target_sources(bioseq_postgres_test_support
       "${CMAKE_CURRENT_LIST_DIR}/report.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/index.cppm")
 target_link_libraries(bioseq_postgres_test_support
-  PUBLIC
-    bioseq_libpq_client
-    TBB::tbb)
+  PUBLIC bioseq_libpq_client)
 
 if(BUILD_TESTING)
   find_package(Catch2 3 REQUIRED)

@@ -1,7 +1,5 @@
 module;
 
-#include <oneapi/tbb/task_group.h>
-
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -658,7 +656,7 @@ private:
     state state_{state::open};
 };
 
-/// @brief Deadline-aware typed session passed to each independent TBB task.
+/// @brief Deadline-aware typed session passed to each independent thread.
 class session_context {
 public:
     /// @brief Constructs a task context from one independent typed connection.
@@ -745,10 +743,10 @@ struct session_task_outcome {
     std::chrono::milliseconds duration{};
 };
 
-/// @brief Runs independent sessions on TBB under one shared absolute deadline.
+/// @brief Runs each independent session on one dedicated operating-system thread.
 ///
 /// Task bodies must perform all SQL and waits through `session_context` and the
-/// bounded `wait_until` helper so cancellation reaches a terminal state.
+/// bounded `wait_until` helper so every joined thread reaches a terminal state.
 [[nodiscard]] inline std::vector<session_task_outcome>
 run_independent_session_tasks(
     const private_cluster& cluster,
@@ -769,67 +767,76 @@ run_independent_session_tasks(
     std::atomic<std::size_t> remaining{tasks.size()};
     std::mutex completion_mutex;
     std::condition_variable completion;
-    oneapi::tbb::task_group_context group_context;
-    oneapi::tbb::task_group group(group_context);
+    std::vector<std::jthread> session_threads;
+    session_threads.reserve(tasks.size());
     for (std::size_t index = 0; index < tasks.size(); ++index) {
-        group.run([&cluster, &tasks, &outcomes, &remaining, &completion,
-                   transcript, index, finish]() {
-            const auto started = std::chrono::steady_clock::now();
-            session_task_outcome outcome{.name = tasks[index].name};
-            try {
-                const auto now = std::chrono::steady_clock::now();
-                if (now >= finish) {
-                    throw fixture_error(
-                        "session task started after overall deadline");
+        session_threads.emplace_back(
+            [&cluster, &tasks, &outcomes, &remaining, &completion,
+             transcript, index, finish]() {
+                const auto started = std::chrono::steady_clock::now();
+                session_task_outcome outcome{.name = tasks[index].name};
+                try {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now >= finish) {
+                        throw fixture_error(
+                            "session task started after overall deadline");
+                    }
+                    const auto connection_budget = std::max(
+                        std::chrono::milliseconds(1),
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            finish - now));
+                    bioseq::libpq::connection connection =
+                        cluster.connect(connection_budget);
+                    attach_process_sql_transcript(
+                        connection, tasks[index].name);
+                    session_context context(
+                        std::move(connection), finish,
+                        transcript, tasks[index].name);
+                    tasks[index].body(context);
+                    outcome.passed = true;
+                } catch (const std::exception& error) {
+                    outcome.error = error.what();
+                    outcome.timed_out =
+                        std::chrono::steady_clock::now() >= finish;
+                } catch (...) {
+                    outcome.error = "non-standard session task exception";
+                    outcome.timed_out =
+                        std::chrono::steady_clock::now() >= finish;
                 }
-                const auto connection_budget = std::max(
-                    std::chrono::milliseconds(1),
+                const auto completed = std::chrono::steady_clock::now();
+                outcome.duration =
                     std::chrono::duration_cast<std::chrono::milliseconds>(
-                        finish - now));
-                bioseq::libpq::connection connection =
-                    cluster.connect(connection_budget);
-                attach_process_sql_transcript(
-                    connection, tasks[index].name);
-                session_context context(
-                    std::move(connection), finish,
-                    transcript, tasks[index].name);
-                tasks[index].body(context);
-                outcome.passed = true;
-            } catch (const std::exception& error) {
-                outcome.error = error.what();
-                outcome.timed_out =
-                    std::chrono::steady_clock::now() >= finish;
-            } catch (...) {
-                outcome.error = "non-standard session task exception";
-                outcome.timed_out =
-                    std::chrono::steady_clock::now() >= finish;
-            }
-            outcome.duration =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - started);
-            outcomes[index] = std::move(outcome);
-            remaining.fetch_sub(1, std::memory_order_release);
-            completion.notify_all();
-        });
+                        completed - started);
+                if (outcome.passed && completed >= finish) {
+                    outcome.passed = false;
+                    outcome.timed_out = true;
+                    outcome.error =
+                        "session task exceeded overall deadline";
+                }
+                outcomes[index] = std::move(outcome);
+                remaining.fetch_sub(1, std::memory_order_release);
+                completion.notify_all();
+            });
     }
     {
         std::unique_lock lock(completion_mutex);
-        if (!completion.wait_until(
-                lock, finish,
-                [&remaining]() {
-                    return remaining.load(std::memory_order_acquire) == 0;
-                })) {
-            group_context.cancel_group_execution();
-        }
+        static_cast<void>(completion.wait_until(
+            lock, finish,
+            [&remaining]() {
+                return remaining.load(std::memory_order_acquire) == 0;
+            }));
     }
-    group.wait();
+    for (std::jthread& session_thread : session_threads) {
+        session_thread.join();
+    }
     for (std::size_t index = 0; index < outcomes.size(); ++index) {
         if (outcomes[index].name.empty()) {
             outcomes[index] = session_task_outcome{
                 .name = tasks[index].name,
                 .passed = false,
                 .timed_out = true,
-                .error = "session task cancelled at overall deadline",
+                .error =
+                    "session thread did not publish a terminal outcome",
                 .duration = deadline};
         }
     }
