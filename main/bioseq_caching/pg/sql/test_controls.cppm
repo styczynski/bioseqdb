@@ -702,8 +702,8 @@ inline void provider_clear_security_digest() {
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-inline void provider_set_projection_order(std::string order) {
-    test_provider::provider_set_projection_order(order);
+inline void provider_set_projection_order(std::string name) {
+    test_provider::provider_set_projection_order(name);
 }
 
 [[bioseq_sql::function({
