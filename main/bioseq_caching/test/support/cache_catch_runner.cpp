@@ -42,6 +42,8 @@ namespace {
 
 struct catch_report_evidence {
     std::vector<bioseq::postgres_test::test_case_report> cases;
+    std::vector<bioseq::postgres_test::artifact_report>
+        attested_artifacts;
     std::string current_case;
     std::vector<std::string> section_stack;
     std::vector<std::size_t> section_failure_offsets;
@@ -57,6 +59,58 @@ struct catch_report_evidence {
 [[nodiscard]] catch_report_evidence& catch_evidence() {
     static catch_report_evidence evidence;
     return evidence;
+}
+
+[[nodiscard]] bool same_artifact_identity(
+    const bioseq::postgres_test::artifact_report& left,
+    const bioseq::postgres_test::artifact_report& right) {
+    return left.name == right.name
+        && left.preinstalled_stage_root
+            == right.preinstalled_stage_root
+        && left.stage_manifest == right.stage_manifest
+        && left.stage_manifest_sha256
+            == right.stage_manifest_sha256
+        && left.control_file == right.control_file
+        && left.install_sql == right.install_sql
+        && left.dso == right.dso
+        && left.staged_control_file == right.staged_control_file
+        && left.staged_install_sql == right.staged_install_sql
+        && left.staged_dso == right.staged_dso
+        && left.control_sha256 == right.control_sha256
+        && left.install_sql_sha256 == right.install_sql_sha256
+        && left.dso_sha256 == right.dso_sha256
+        && left.staged_control_sha256
+            == right.staged_control_sha256;
+}
+
+void retain_attested_artifacts(catch_report_evidence& evidence) {
+    for (const auto& artifact :
+         bioseq::postgres_test::artifact_stage_reports()) {
+        const bool already_retained = std::ranges::any_of(
+            evidence.attested_artifacts,
+            [&artifact](
+                const bioseq::postgres_test::artifact_report& retained) {
+                return same_artifact_identity(retained, artifact);
+            });
+        if (!already_retained) {
+            evidence.attested_artifacts.push_back(artifact);
+        }
+    }
+}
+
+void begin_unattested_artifact_scope(
+    catch_report_evidence& evidence,
+    bool publish_empty_snapshot) {
+    retain_attested_artifacts(evidence);
+    bioseq::postgres_test::clear_artifact_stage_reports();
+    if (publish_empty_snapshot) {
+        const std::vector<bioseq::postgres_test::artifact_report> empty;
+        if (!bioseq::postgres_test::
+                publish_supervision_artifact_reports(empty)) {
+            throw std::runtime_error(
+                "cannot clear crash-resilient artifact evidence");
+        }
+    }
 }
 
 struct watchdog_launch_configuration {
@@ -433,6 +487,9 @@ public:
                 "prior external-watchdog supervision failure is still "
                 "active");
         }
+        // A case that fails before stage attestation must not inherit
+        // manifest provenance from a previous fixture.
+        begin_unattested_artifact_scope(evidence, false);
         evidence.watchdog_state = make_watchdog_state();
         try {
             bioseq::postgres_test::configure_supervision_state(
@@ -471,6 +528,12 @@ public:
     void sectionStarting(
         const Catch::SectionInfo& section_info) override {
         auto& evidence = catch_evidence();
+        if (evidence.section_stack.empty()) {
+            // Each outer section may own a different immutable stage.
+            // Until that section attests one, the watchdog must see no
+            // provenance inherited from an earlier section.
+            begin_unattested_artifact_scope(evidence, true);
+        }
         evidence.section_stack.push_back(section_info.name);
         evidence.section_failure_offsets.push_back(
             evidence.failure_message.size());
@@ -566,6 +629,7 @@ public:
         static_cast<void>(
             bioseq::postgres_test::
                 publish_supervision_test_case_reports(evidence.cases));
+        retain_attested_artifacts(evidence);
         const bool watchdog_protocol_failed_before =
             evidence.watchdog_protocol_failed;
         stop_watchdog(evidence);
@@ -751,6 +815,7 @@ void write_report(
     std::string_view executable,
     std::vector<bioseq::postgres_test::report_argument> arguments,
     const bioseq::cache_test::runner_configuration& configuration) {
+    retain_attested_artifacts(catch_evidence());
     bioseq::postgres_test::cleanup_report cleanup =
         bioseq::postgres_test::aggregate_cleanup_report();
     std::string retained_supervision_states;
@@ -814,8 +879,7 @@ void write_report(
             bioseq::postgres_test::process_sql_transcript_entries(),
         .migration_probes =
             bioseq::postgres_test::migration_probe_records(),
-        .artifacts =
-            bioseq::postgres_test::artifact_stage_reports(),
+        .artifacts = catch_evidence().attested_artifacts,
         .cleanup_observations =
             bioseq::postgres_test::cleanup_observations(),
         .resources =
@@ -1808,6 +1872,11 @@ int main(int argc, char* argv[]) {
     Catch::Session session;
 
     std::string postgres_bin_dir;
+    std::string postgres_stage_root;
+    std::string postgres_stage_manifest;
+    std::string bioseq_only_postgres_bin_dir;
+    std::string bioseq_only_postgres_stage_root;
+    std::string bioseq_only_postgres_stage_manifest;
     std::string cache_control;
     std::string cache_install_sql;
     std::string cache_dso;
@@ -1823,6 +1892,22 @@ int main(int argc, char* argv[]) {
     auto cli = session.cli()
         | Catch::Clara::Opt(postgres_bin_dir, "PATH")
               ["--postgres-bin-dir"]("PostgreSQL executable directory")
+        | Catch::Clara::Opt(postgres_stage_root, "PATH")
+              ["--postgres-stage-root"](
+                  "preinstalled PostgreSQL stage root")
+        | Catch::Clara::Opt(postgres_stage_manifest, "PATH")
+              ["--postgres-stage-manifest"](
+                  "preinstalled PostgreSQL stage manifest")
+        | Catch::Clara::Opt(bioseq_only_postgres_bin_dir, "PATH")
+              ["--bioseq-only-postgres-bin-dir"](
+                  "Bioseq-only PostgreSQL executable directory")
+        | Catch::Clara::Opt(bioseq_only_postgres_stage_root, "PATH")
+              ["--bioseq-only-postgres-stage-root"](
+                  "cache-free Bioseq-only PostgreSQL stage root")
+        | Catch::Clara::Opt(
+              bioseq_only_postgres_stage_manifest, "PATH")
+              ["--bioseq-only-postgres-stage-manifest"](
+                  "cache-free Bioseq-only PostgreSQL stage manifest")
         | Catch::Clara::Opt(cache_control, "PATH")
               ["--cache-control"]("bioseq_cache control file")
         | Catch::Clara::Opt(cache_install_sql, "PATH")
@@ -1868,7 +1953,8 @@ int main(int argc, char* argv[]) {
             return 3;
         }
     }
-    if (postgres_bin_dir.empty() || cache_control.empty()
+    if (postgres_bin_dir.empty() || postgres_stage_root.empty()
+        || postgres_stage_manifest.empty() || cache_control.empty()
         || cache_install_sql.empty() || cache_dso.empty()
         || migration_ledger.empty()
         || report.empty()
@@ -1885,9 +1971,23 @@ int main(int argc, char* argv[]) {
     if (any_bioseq != all_bioseq) {
         return 2;
     }
+    const bool any_bioseq_only_stage =
+        !bioseq_only_postgres_bin_dir.empty()
+        || !bioseq_only_postgres_stage_root.empty()
+        || !bioseq_only_postgres_stage_manifest.empty();
+    const bool all_bioseq_only_stage =
+        !bioseq_only_postgres_bin_dir.empty()
+        && !bioseq_only_postgres_stage_root.empty()
+        && !bioseq_only_postgres_stage_manifest.empty();
+    if (any_bioseq_only_stage != all_bioseq_only_stage
+        || (all_bioseq_only_stage && !all_bioseq)) {
+        return 2;
+    }
 
     bioseq::cache_test::runner_configuration configuration{
         .postgres_bin_dir = postgres_bin_dir,
+        .postgres_stage_root = postgres_stage_root,
+        .postgres_stage_manifest = postgres_stage_manifest,
         .cache_control = cache_control,
         .cache_install_sql = cache_install_sql,
         .cache_dso = cache_dso,
@@ -1899,6 +1999,14 @@ int main(int argc, char* argv[]) {
         configuration.bioseq_control = bioseq_control;
         configuration.bioseq_install_sql = bioseq_install_sql;
         configuration.bioseq_dso = bioseq_dso;
+    }
+    if (all_bioseq_only_stage) {
+        configuration.bioseq_only_postgres_bin_dir =
+            bioseq_only_postgres_bin_dir;
+        configuration.bioseq_only_postgres_stage_root =
+            bioseq_only_postgres_stage_root;
+        configuration.bioseq_only_postgres_stage_manifest =
+            bioseq_only_postgres_stage_manifest;
     }
     if (!provider_peer_test_dso.empty()) {
         if (!all_bioseq) {

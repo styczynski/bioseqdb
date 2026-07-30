@@ -35,6 +35,7 @@ provider_peer_options(std::string mode) {
     }
     options.extensions.front().dso =
         *configuration.provider_peer_test_dso;
+    options.allowed_runtime_dso_overrides.insert("bioseq_cache");
     options.startup_gucs.emplace_back(
         "bioseq_cache_peer_test.mode",
         std::move(mode));

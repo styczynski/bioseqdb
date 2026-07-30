@@ -61,7 +61,8 @@ add_dependencies(
   bioseq_cache_provider_peer_test
   postgresql_bioseq_cache_test_support
   postgresql_bioseq
-  bioseq_cache_bioseq_support_postgres_stage)
+  bioseq_cache_bioseq_support_postgres_stage
+  bioseq_cache_bioseq_only_postgres_stage)
 
 add_executable(bioseq_cache_bioseq_production_integration_tests
   "${CMAKE_CURRENT_LIST_DIR}/../support/cache_catch_runner.cpp"
@@ -99,6 +100,16 @@ add_test(
   COMMAND bioseq_cache_bioseq_support_integration_tests
     --postgres-bin-dir
       "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_support_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_support_postgres_stage,BIOSEQ_POSTGRES_BIN_DIR>>"
+    --postgres-stage-root
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_support_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_support_postgres_stage,BIOSEQ_POSTGRES_STAGE_ROOT>>"
+    --postgres-stage-manifest
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_support_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_support_postgres_stage,BIOSEQ_POSTGRES_STAGE_MANIFEST>>"
+    --bioseq-only-postgres-bin-dir
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_only_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_only_postgres_stage,BIOSEQ_POSTGRES_BIN_DIR>>"
+    --bioseq-only-postgres-stage-root
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_only_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_only_postgres_stage,BIOSEQ_POSTGRES_STAGE_ROOT>>"
+    --bioseq-only-postgres-stage-manifest
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_only_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_only_postgres_stage,BIOSEQ_POSTGRES_STAGE_MANIFEST>>"
     --cache-control
       "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_CONTROL_FILE>"
     --cache-install-sql
@@ -130,6 +141,10 @@ add_test(
   COMMAND bioseq_cache_bioseq_production_integration_tests
     --postgres-bin-dir
       "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_production_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_production_postgres_stage,BIOSEQ_POSTGRES_BIN_DIR>>"
+    --postgres-stage-root
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_production_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_production_postgres_stage,BIOSEQ_POSTGRES_STAGE_ROOT>>"
+    --postgres-stage-manifest
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_production_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_production_postgres_stage,BIOSEQ_POSTGRES_STAGE_MANIFEST>>"
     --cache-control
       "$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_CONTROL_FILE>"
     --cache-install-sql

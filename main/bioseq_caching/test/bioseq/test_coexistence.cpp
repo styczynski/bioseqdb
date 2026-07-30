@@ -116,19 +116,25 @@ TEST_CASE("Bioseq-only server does not require the cache DSO",
     REQUIRE(configuration.bioseq_control.has_value());
     REQUIRE(configuration.bioseq_install_sql.has_value());
     REQUIRE(configuration.bioseq_dso.has_value());
-    bioseq::postgres_test::cluster_options options{
-        .postgres_bin_dir = configuration.postgres_bin_dir,
-        .extensions = {
-            bioseq::postgres_test::extension_artifact{
-                .name = "bioseq",
-                .control_file = *configuration.bioseq_control,
-                .install_sql = *configuration.bioseq_install_sql,
-                .dso = *configuration.bioseq_dso}},
-        .preload_libraries = {"bioseq"},
-        .startup_gucs = {},
-        .startup_timeout = 60s,
-        .stop_timeout = 30s};
+    auto options =
+        bioseq::cache_test::bioseq_only_cluster_options();
+    REQUIRE(options.extensions.size() == 1);
+    CHECK(options.extensions.front().name == "bioseq");
+    REQUIRE(options.preload_libraries.size() == 1);
+    CHECK(options.preload_libraries.front() == "bioseq");
+    CHECK(options.allowed_runtime_dso_overrides.empty());
     bioseq::postgres_test::postgres_fixture fixture{std::move(options)};
+    const auto& stage = fixture.cluster().staged_artifacts();
+    REQUIRE(stage.extensions.size() == 1);
+    CHECK(stage.extensions.front().name == "bioseq");
+    const auto cache_paths =
+        bioseq::cache_test::canonical_cache_stage_artifact_paths(stage);
+    CHECK_FALSE(std::filesystem::exists(cache_paths[0]));
+    CHECK_FALSE(std::filesystem::is_symlink(cache_paths[0]));
+    CHECK_FALSE(std::filesystem::exists(cache_paths[1]));
+    CHECK_FALSE(std::filesystem::is_symlink(cache_paths[1]));
+    CHECK_FALSE(std::filesystem::exists(cache_paths[2]));
+    CHECK_FALSE(std::filesystem::is_symlink(cache_paths[2]));
     auto& connection = fixture.admin();
     CHECK(bioseq::cache_test::integer(
               connection,

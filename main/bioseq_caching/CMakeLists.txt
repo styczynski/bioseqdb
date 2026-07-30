@@ -302,9 +302,7 @@ if(BIOSEQ_CACHE_BUILD_TESTS)
     CONTROL_PROPERTIES
       BIOSEQ_EXTENSION_CONTROL_FILE
     INSTALL_SQL_PROPERTIES
-      BIOSEQ_EXTENSION_INSTALL_SQL
-    MODULE_PATHNAME_OVERRIDES
-      bioseq_cache)
+      BIOSEQ_EXTENSION_INSTALL_SQL)
   if(TARGET postgresql_bioseq_cache_test_support)
     bioseq_add_private_postgres_stage(
       TARGET bioseq_cache_test_support_postgres_stage
@@ -316,9 +314,7 @@ if(BIOSEQ_CACHE_BUILD_TESTS)
       CONTROL_PROPERTIES
         BIOSEQ_EXTENSION_CONTROL_FILE
       INSTALL_SQL_PROPERTIES
-        BIOSEQ_EXTENSION_TEST_INSTALL_SQL
-      MODULE_PATHNAME_OVERRIDES
-        bioseq_cache)
+        BIOSEQ_EXTENSION_TEST_INSTALL_SQL)
   endif()
 
   if(NOT TARGET bioseq_postgres_test_support)

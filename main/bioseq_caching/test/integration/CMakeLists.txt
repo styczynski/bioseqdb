@@ -60,6 +60,10 @@ if(TARGET postgresql_bioseq_cache_test_support)
     COMMAND bioseq_cache_integration_tests
       --postgres-bin-dir
         "$<TARGET_GENEX_EVAL:bioseq_cache_test_support_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_test_support_postgres_stage,BIOSEQ_POSTGRES_BIN_DIR>>"
+      --postgres-stage-root
+        "$<TARGET_GENEX_EVAL:bioseq_cache_test_support_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_test_support_postgres_stage,BIOSEQ_POSTGRES_STAGE_ROOT>>"
+      --postgres-stage-manifest
+        "$<TARGET_GENEX_EVAL:bioseq_cache_test_support_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_test_support_postgres_stage,BIOSEQ_POSTGRES_STAGE_MANIFEST>>"
       --cache-control
         "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_CONTROL_FILE>"
       --cache-install-sql

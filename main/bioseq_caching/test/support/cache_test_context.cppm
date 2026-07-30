@@ -1,5 +1,6 @@
 module;
 
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -23,6 +24,12 @@ using namespace std::chrono_literals;
 /// @brief Build artifacts and watchdogs supplied by the native Catch2 runner.
 struct runner_configuration {
     std::filesystem::path postgres_bin_dir;
+    std::filesystem::path postgres_stage_root;
+    std::filesystem::path postgres_stage_manifest;
+    std::optional<std::filesystem::path> bioseq_only_postgres_bin_dir;
+    std::optional<std::filesystem::path> bioseq_only_postgres_stage_root;
+    std::optional<std::filesystem::path>
+        bioseq_only_postgres_stage_manifest;
     std::filesystem::path cache_control;
     std::filesystem::path cache_install_sql;
     std::filesystem::path cache_dso;
@@ -96,11 +103,54 @@ export namespace bioseq::cache_test {
 inline void set_runner_configuration(runner_configuration configuration) {
     detail::require_artifact(configuration.postgres_bin_dir,
                              "PostgreSQL bin directory");
+    detail::require_artifact(configuration.postgres_stage_root,
+                             "PostgreSQL stage root");
+    detail::require_artifact(configuration.postgres_stage_manifest,
+                             "PostgreSQL stage manifest");
     detail::require_artifact(configuration.cache_control,
                              "cache control file");
     detail::require_artifact(configuration.cache_install_sql,
                              "cache install SQL");
     detail::require_artifact(configuration.cache_dso, "cache DSO");
+    const bool any_bioseq =
+        configuration.bioseq_control.has_value()
+        || configuration.bioseq_install_sql.has_value()
+        || configuration.bioseq_dso.has_value();
+    const bool all_bioseq =
+        configuration.bioseq_control.has_value()
+        && configuration.bioseq_install_sql.has_value()
+        && configuration.bioseq_dso.has_value();
+    if (any_bioseq != all_bioseq) {
+        throw std::invalid_argument(
+            "Bioseq source artifact paths must be supplied together");
+    }
+    const bool any_bioseq_only_stage =
+        configuration.bioseq_only_postgres_bin_dir.has_value()
+        || configuration.bioseq_only_postgres_stage_root.has_value()
+        || configuration.bioseq_only_postgres_stage_manifest.has_value();
+    const bool all_bioseq_only_stage =
+        configuration.bioseq_only_postgres_bin_dir.has_value()
+        && configuration.bioseq_only_postgres_stage_root.has_value()
+        && configuration.bioseq_only_postgres_stage_manifest.has_value();
+    if (any_bioseq_only_stage != all_bioseq_only_stage) {
+        throw std::invalid_argument(
+            "Bioseq-only PostgreSQL stage paths must be supplied together");
+    }
+    if (all_bioseq_only_stage) {
+        if (!all_bioseq) {
+            throw std::invalid_argument(
+                "Bioseq-only PostgreSQL stage requires Bioseq artifacts");
+        }
+        detail::require_artifact(
+            *configuration.bioseq_only_postgres_bin_dir,
+            "Bioseq-only PostgreSQL bin directory");
+        detail::require_artifact(
+            *configuration.bioseq_only_postgres_stage_root,
+            "Bioseq-only PostgreSQL stage root");
+        detail::require_artifact(
+            *configuration.bioseq_only_postgres_stage_manifest,
+            "Bioseq-only PostgreSQL stage manifest");
+    }
     if (configuration.case_timeout <= std::chrono::seconds::zero()
         || configuration.large_case_timeout
             <= std::chrono::seconds::zero()) {
@@ -120,6 +170,54 @@ inline void set_runner_configuration(runner_configuration configuration) {
     return value.bioseq_control.has_value()
         && value.bioseq_install_sql.has_value()
         && value.bioseq_dso.has_value();
+}
+
+/// @brief Returns true when a complete Bioseq-only PostgreSQL stage was supplied.
+[[nodiscard]] inline bool has_bioseq_only_postgres_stage() {
+    const runner_configuration& value = configuration();
+    return value.bioseq_only_postgres_bin_dir.has_value()
+        && value.bioseq_only_postgres_stage_root.has_value()
+        && value.bioseq_only_postgres_stage_manifest.has_value();
+}
+
+/// @brief Selects only the shipping Bioseq artifact from its cache-free stage.
+[[nodiscard]] inline postgres_test::cluster_options
+bioseq_only_cluster_options() {
+    const runner_configuration& value = configuration();
+    if (!has_bioseq_artifact()
+        || !has_bioseq_only_postgres_stage()) {
+        throw std::logic_error(
+            "Bioseq-only test requires its complete artifact and stage");
+    }
+    return postgres_test::cluster_options{
+        .postgres_bin_dir = *value.bioseq_only_postgres_bin_dir,
+        .preinstalled_stage_root =
+            *value.bioseq_only_postgres_stage_root,
+        .preinstalled_stage_manifest =
+            *value.bioseq_only_postgres_stage_manifest,
+        .extensions = {
+            postgres_test::extension_artifact{
+                .name = "bioseq",
+                .control_file = *value.bioseq_control,
+                .install_sql = *value.bioseq_install_sql,
+                .dso = *value.bioseq_dso}},
+        .allowed_runtime_dso_overrides = {},
+        .preload_libraries = {"bioseq"},
+        .startup_gucs = {},
+        .process_environment = {},
+        .pre_initdb = {},
+        .startup_timeout = 60s,
+        .stop_timeout = 30s};
+}
+
+/// @brief Returns canonical cache artifact paths in an attested stage.
+[[nodiscard]] inline std::array<std::filesystem::path, 3>
+canonical_cache_stage_artifact_paths(
+    const postgres_test::extension_stage& stage) {
+    return {
+        stage.control_directory / "bioseq_cache.control",
+        stage.control_directory / "bioseq_cache--1.0.sql",
+        stage.library_directory / configuration().cache_dso.filename()};
 }
 
 /// @brief Constructs a private-cluster configuration for one scenario.
@@ -179,7 +277,10 @@ inline void set_runner_configuration(runner_configuration configuration) {
 
     return postgres_test::cluster_options{
         .postgres_bin_dir = value.postgres_bin_dir,
+        .preinstalled_stage_root = value.postgres_stage_root,
+        .preinstalled_stage_manifest = value.postgres_stage_manifest,
         .extensions = std::move(artifacts),
+        .allowed_runtime_dso_overrides = {},
         .preload_libraries = std::move(preload_libraries),
         .startup_gucs = std::move(startup_gucs),
         .process_environment = {},

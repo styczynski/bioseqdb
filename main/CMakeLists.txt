@@ -719,10 +719,7 @@ if(BIOSEQ_BUILD_CORE)
         BIOSEQ_EXTENSION_CONTROL_FILE
       INSTALL_SQL_PROPERTIES
         BIOSEQ_EXTENSION_INSTALL_SQL
-        BIOSEQ_EXTENSION_INSTALL_SQL
-      MODULE_PATHNAME_OVERRIDES
-        bioseq_cache
-        bioseq)
+        BIOSEQ_EXTENSION_INSTALL_SQL)
     add_dependencies(
       bioseq_cache_bioseq_bench
       bioseq_cache_bioseq_production_postgres_stage)
@@ -742,10 +739,21 @@ if(BIOSEQ_BUILD_CORE)
           BIOSEQ_EXTENSION_CONTROL_FILE
         INSTALL_SQL_PROPERTIES
           BIOSEQ_EXTENSION_TEST_INSTALL_SQL
-          BIOSEQ_EXTENSION_INSTALL_SQL
-        MODULE_PATHNAME_OVERRIDES
-          bioseq_cache
-          bioseq)
+          BIOSEQ_EXTENSION_INSTALL_SQL)
+
+      # The Bioseq-only acceptance cases must prove the cache artifacts are
+      # physically absent, not merely unselected from a combined stage.
+      bioseq_add_private_postgres_stage(
+        TARGET bioseq_cache_bioseq_only_postgres_stage
+        PG_CONFIG "${PostgreSQL_CONFIG}"
+        EXTENSION_NAMES
+          bioseq
+        EXTENSION_TARGETS
+          postgresql_bioseq
+        CONTROL_PROPERTIES
+          BIOSEQ_EXTENSION_CONTROL_FILE
+        INSTALL_SQL_PROPERTIES
+          BIOSEQ_EXTENSION_INSTALL_SQL)
     endif()
   endif()
   include(BioseqExternalPostgresAcceptance)
