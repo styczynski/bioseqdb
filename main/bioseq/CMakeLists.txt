@@ -769,11 +769,11 @@ list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_RUNTIME_CORE_MODULES})
 # stay in BIOSEQ_NOPG_MODULES (so the PG glob still excludes them) but leave
 # BIOSEQ_NOPG_OWNED_MODULES so they are compiled exactly once, here, with no
 # runtime/TBB/logging/IO/PG edge. Isolated generated + provider metadata targets
-# link these leaves without inheriting the sequence graph.
+# link these leaves without inheriting the sequence graph. Checked arithmetic
+# is owned tree-wide by common/checked_arithmetic and is therefore not part of
+# the Bioseq source glob.
 set(BIOSEQ_SINK_CONTROL_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/sink_control.cppm")
-set(BIOSEQ_CHECKED_ARITHMETIC_MODULE
-  "${CMAKE_CURRENT_LIST_DIR}/backend/common/checked_arithmetic.cppm")
 # DOC0372 §369-374 — read_result + io_source protocol as a lightweight leaf so
 # external transfer / generated clients depend on the byte-source protocol
 # without the sequences/alphabets graph. The io/*.cppm glob captures it, so it
@@ -782,7 +782,6 @@ set(BIOSEQ_IO_SOURCE_CORE_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/io/source_core.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
   "${BIOSEQ_SINK_CONTROL_MODULE}"
-  "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}"
   "${BIOSEQ_IO_SOURCE_CORE_MODULE}")
 
 add_library(bioseq_sink_control_core STATIC)
@@ -794,16 +793,6 @@ target_compile_definitions(bioseq_sink_control_core PRIVATE NO_POSTGRES=1)
 target_sources(bioseq_sink_control_core
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES "${BIOSEQ_SINK_CONTROL_MODULE}")
-
-add_library(bioseq_checked_arithmetic_core STATIC)
-set_target_properties(bioseq_checked_arithmetic_core PROPERTIES
-  CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
-  CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
-  INTERPROCEDURAL_OPTIMIZATION FALSE)
-target_compile_definitions(bioseq_checked_arithmetic_core PRIVATE NO_POSTGRES=1)
-target_sources(bioseq_checked_arithmetic_core
-  PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-    FILES "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}")
 
 add_library(bioseq_io_source_core STATIC)
 set_target_properties(bioseq_io_source_core PROPERTIES

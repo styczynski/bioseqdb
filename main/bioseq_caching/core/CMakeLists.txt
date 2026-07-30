@@ -11,6 +11,7 @@ set_target_properties(bioseq_cache_core PROPERTIES
 target_link_libraries(bioseq_cache_core
   PUBLIC
     bioseq_cache_provider_api
+    bioseq_checked_arithmetic_core
     bioseq_memory_budget)
 
 target_sources(bioseq_cache_core

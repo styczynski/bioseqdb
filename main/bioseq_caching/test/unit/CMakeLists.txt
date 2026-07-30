@@ -7,6 +7,7 @@ add_executable(bioseq_cache_unit_tests
   test_admission_provider.cpp
   test_provider_api_abi.cpp
   test_column_format.cpp
+  test_checked_math_compatibility.cpp
   test_reusable_planning.cpp
   test_reusable_registry.cpp
   test_write_observation.cpp

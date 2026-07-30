@@ -8,7 +8,6 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <limits>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -16,6 +15,8 @@ module;
 #include <vector>
 
 export module bioseq.cache.core:checked_math;
+
+export import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::cache {
 
@@ -36,64 +37,11 @@ using wire_integer_type_t = typename wire_integer_type<Integer>::type;
 
 } // namespace detail
 
-enum class MathError : std::uint8_t {
-    Overflow,
-    OutOfBounds,
-    InvalidAlignment,
-    Truncated,
-};
-
-/** Add two unsigned integers without wrapping. */
-template <class Integer>
-    requires(std::is_unsigned_v<Integer>)
-[[nodiscard]] constexpr std::optional<Integer> checked_add(
-    Integer left,
-    Integer right) noexcept {
-    const Integer maximum = (std::numeric_limits<Integer>::max)();
-    if (left > maximum - right) {
-        return std::nullopt;
-    }
-    return left + right;
-}
-
-/** Multiply two unsigned integers without wrapping. */
-template <class Integer>
-    requires(std::is_unsigned_v<Integer>)
-[[nodiscard]] constexpr std::optional<Integer> checked_mul(
-    Integer left,
-    Integer right) noexcept {
-    if (left == 0 || right == 0) {
-        return Integer{0};
-    }
-    const Integer maximum = (std::numeric_limits<Integer>::max)();
-    if (left > maximum / right) {
-        return std::nullopt;
-    }
-    return left * right;
-}
-
-/** Round a byte offset up to a power-of-two alignment without wrapping. */
-[[nodiscard]] constexpr std::expected<std::uint64_t, MathError> checked_align_up(
-    std::uint64_t value,
-    std::uint64_t alignment) noexcept {
-    if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
-        return std::unexpected(MathError::InvalidAlignment);
-    }
-    const auto adjusted = checked_add(value, alignment - 1);
-    if (!adjusted.has_value()) {
-        return std::unexpected(MathError::Overflow);
-    }
-    return *adjusted & ~(alignment - 1);
-}
-
-/** Validate a half-open byte range against a containing size. */
-[[nodiscard]] constexpr bool checked_range(
-    std::uint64_t offset,
-    std::uint64_t length,
-    std::uint64_t total) noexcept {
-    const auto end = checked_add(offset, length);
-    return end.has_value() && *end <= total;
-}
+using MathError = bioseq::common::CheckedArithmeticError;
+using bioseq::common::checked_add;
+using bioseq::common::checked_align_up;
+using bioseq::common::checked_mul;
+using bioseq::common::checked_range;
 
 /** Convert an integer only when its value fits the destination type. */
 template <class Destination, class Source>
