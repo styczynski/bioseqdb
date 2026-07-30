@@ -22,6 +22,7 @@ module;
 #include <functional>
 #include <iterator>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -53,7 +54,10 @@ struct pre_initdb_context {
 /// @brief Complete source-neutral configuration for one private PostgreSQL node.
 struct cluster_options {
     std::filesystem::path postgres_bin_dir;
+    std::filesystem::path preinstalled_stage_root;
+    std::filesystem::path preinstalled_stage_manifest;
     std::vector<extension_artifact> extensions;
+    std::set<std::string> allowed_runtime_dso_overrides;
     std::vector<std::string> preload_libraries;
     std::vector<std::pair<std::string, std::string>> startup_gucs;
     std::vector<std::pair<std::string, std::string>> process_environment;
@@ -86,6 +90,12 @@ namespace bioseq::postgres_test::cluster_detail {
         || options.stop_timeout <= std::chrono::seconds::zero()) {
         throw std::invalid_argument("cluster deadlines must be positive");
     }
+    if (options.preinstalled_stage_root.empty()
+        || options.preinstalled_stage_manifest.empty()) {
+        throw std::invalid_argument(
+            "private PostgreSQL requires an explicit preinstalled stage "
+            "root and v2 completion manifest");
+    }
     std::error_code error;
     const auto bin_status =
         std::filesystem::symlink_status(options.postgres_bin_dir, error);
@@ -101,9 +111,12 @@ namespace bioseq::postgres_test::cluster_detail {
         const std::filesystem::path candidate =
             options.postgres_bin_dir / executable;
         error.clear();
-        if (!std::filesystem::is_regular_file(candidate, error) || error) {
+        const auto executable_status =
+            std::filesystem::symlink_status(candidate, error);
+        if (error || !std::filesystem::is_regular_file(executable_status)
+            || std::filesystem::is_symlink(executable_status)) {
             throw std::invalid_argument(
-                "PostgreSQL lifecycle executable is missing: "
+                "PostgreSQL lifecycle executable is missing or a symlink: "
                 + candidate.string());
         }
     }
@@ -577,16 +590,20 @@ export namespace bioseq::postgres_test {
 /// @brief Renders version-portable settings for one staged private cluster.
 /// @param port Private postmaster port paired with its Unix socket directory.
 /// @param socket_directory Private Unix-domain socket directory.
-/// @param staged_library_directory Per-case DSO directory searched first.
+/// @param runtime_library_directory Authorized per-case DSO directory, if any.
 /// @param preload_libraries Validated shared-preload library names.
 /// @param startup_gucs Additional validated startup settings.
 /// @return Complete configuration text appended after initdb.
 [[nodiscard]] inline std::string render_private_cluster_configuration(
     int port,
     const std::filesystem::path& socket_directory,
-    const std::filesystem::path& staged_library_directory,
+    const std::optional<std::filesystem::path>& runtime_library_directory,
     std::span<const std::string> preload_libraries,
     std::span<const std::pair<std::string, std::string>> startup_gucs) {
+    const std::string dynamic_library_path =
+        runtime_library_directory
+        ? runtime_library_directory->string() + ":$libdir"
+        : "$libdir";
     std::string configuration =
         "\n# Appended by bioseq.test.postgres\n"
         "listen_addresses = ''\n"
@@ -596,7 +613,7 @@ export namespace bioseq::postgres_test {
         + cluster_detail::configuration_literal(socket_directory.string())
         + "\ndynamic_library_path = "
         + cluster_detail::configuration_literal(
-            staged_library_directory.string() + ":$libdir")
+            dynamic_library_path)
         + '\n';
     if (!preload_libraries.empty()) {
         std::string preloads;
@@ -653,7 +670,7 @@ public:
     private_cluster(const private_cluster&) = delete;
     private_cluster& operator=(const private_cluster&) = delete;
 
-    /// @brief Stages artifacts, initializes PGDATA, and writes private settings.
+    /// @brief Attests the suite stage, initializes PGDATA, and writes settings.
     void initialize() {
         if (cleanup_attempted_) {
             throw std::logic_error(
@@ -663,7 +680,13 @@ public:
         std::filesystem::create_directories(data_directory_);
         std::filesystem::create_directories(socket_directory_);
         std::filesystem::create_directories(log_directory_);
-        stage_ = stage_extension_artifacts(root_ / "stage", options_.extensions);
+        stage_ = attest_preinstalled_extension_stage(
+            options_.preinstalled_stage_root,
+            options_.preinstalled_stage_manifest,
+            options_.postgres_bin_dir,
+            root_ / "runtime-library",
+            options_.extensions,
+            options_.allowed_runtime_dso_overrides);
         if (automatic_report_collection_enabled()) {
             record_artifact_stage(*stage_);
         }
@@ -1118,7 +1141,7 @@ private:
             throw std::runtime_error("cannot open private postgresql.conf");
         }
         configuration << render_private_cluster_configuration(
-            port_, socket_directory_, stage_->library_directory,
+            port_, socket_directory_, stage_->runtime_library_directory,
             options_.preload_libraries, options_.startup_gucs);
         configuration.close();
         if (!configuration) {

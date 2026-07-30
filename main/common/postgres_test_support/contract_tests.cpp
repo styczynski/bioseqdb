@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <array>
 #include <cerrno>
@@ -6,13 +7,17 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -129,6 +134,457 @@ private:
     std::filesystem::path root_;
 };
 
+class temporary_preinstalled_stage_tree {
+public:
+    temporary_preinstalled_stage_tree()
+        : root_(
+              std::filesystem::temp_directory_path()
+              / ("bioseq-stage-contract-"
+                 + std::to_string(::getpid()) + "-"
+                 + std::to_string(
+                     std::chrono::steady_clock::now()
+                         .time_since_epoch()
+                         .count()))),
+          stage_root_(root_ / "stage"),
+          case_root_(
+              root_ / ("bioseq-pg-test-contract-"
+                       + std::to_string(::getpid()))),
+          source_root_(root_ / "source"),
+          bin_directory_(stage_root_ / "pg" / "bin"),
+          shared_directory_(stage_root_ / "pg" / "share"),
+          library_directory_(stage_root_ / "pg" / "lib"),
+          control_file_(source_root_ / "bioseq_cache.control"),
+          install_sql_(source_root_ / "bioseq_cache--1.0.sql"),
+          normal_dso_(source_root_ / "bioseq_cache.so"),
+          override_dso_(source_root_ / "peer.so"),
+          bioseq_control_(source_root_ / "bioseq.control"),
+          bioseq_install_sql_(source_root_ / "bioseq--1.0.sql"),
+          bioseq_dso_(source_root_ / "bioseq.so"),
+          manifest_(root_ / "stage-manifest.json") {
+        std::filesystem::create_directories(bin_directory_);
+        std::filesystem::create_directories(
+            shared_directory_ / "extension");
+        std::filesystem::create_directories(library_directory_);
+        std::filesystem::create_directories(source_root_);
+        std::filesystem::create_directories(case_root_);
+        write(case_root_ / ".bioseq-private-cluster",
+              case_root_.filename().string() + "\n");
+        for (const std::string_view tool :
+             {"postgres", "initdb", "pg_ctl",
+              "createdb", "dropdb", "psql"}) {
+            write(bin_directory_ / tool, std::string(tool) + "\n");
+        }
+        write(
+            control_file_,
+            "comment = 'stage contract'\n"
+            "default_version = '1.0'\n"
+            "module_pathname = '$libdir/bioseq_cache'\n");
+        write(install_sql_, "SELECT 1;\n");
+        write(normal_dso_, "normal cache DSO\n");
+        write(override_dso_, "provider-peer DSO\n");
+        write(
+            bioseq_control_,
+            "comment = 'Bioseq stage contract'\n"
+            "default_version = '1.0'\n"
+            "module_pathname = '$libdir/bioseq'\n");
+        write(bioseq_install_sql_, "SELECT 2;\n");
+        write(bioseq_dso_, "normal Bioseq DSO\n");
+        std::filesystem::copy_file(
+            control_file_,
+            shared_directory_ / "extension" / control_file_.filename());
+        std::filesystem::copy_file(
+            install_sql_,
+            shared_directory_ / "extension" / install_sql_.filename());
+        std::filesystem::copy_file(
+            normal_dso_,
+            library_directory_ / normal_dso_.filename());
+        std::filesystem::copy_file(
+            bioseq_control_,
+            shared_directory_ / "extension"
+                / bioseq_control_.filename());
+        std::filesystem::copy_file(
+            bioseq_install_sql_,
+            shared_directory_ / "extension"
+                / bioseq_install_sql_.filename());
+        std::filesystem::copy_file(
+            bioseq_dso_,
+            library_directory_ / bioseq_dso_.filename());
+        write_manifest();
+    }
+
+    temporary_preinstalled_stage_tree(
+        const temporary_preinstalled_stage_tree&) = delete;
+    temporary_preinstalled_stage_tree& operator=(
+        const temporary_preinstalled_stage_tree&) = delete;
+
+    ~temporary_preinstalled_stage_tree() noexcept {
+        std::error_code error;
+        std::filesystem::remove_all(root_, error);
+    }
+
+    [[nodiscard]] extension_artifact normal_artifact() const {
+        return {
+            .name = "bioseq_cache",
+            .control_file = control_file_,
+            .install_sql = install_sql_,
+            .dso = normal_dso_};
+    }
+
+    [[nodiscard]] extension_artifact override_artifact() const {
+        extension_artifact artifact = normal_artifact();
+        artifact.dso = override_dso_;
+        return artifact;
+    }
+
+    [[nodiscard]] extension_artifact bioseq_artifact() const {
+        return {
+            .name = "bioseq",
+            .control_file = bioseq_control_,
+            .install_sql = bioseq_install_sql_,
+            .dso = bioseq_dso_};
+    }
+
+    [[nodiscard]] const std::filesystem::path& stage_root() const noexcept {
+        return stage_root_;
+    }
+
+    [[nodiscard]] const std::filesystem::path& manifest() const noexcept {
+        return manifest_;
+    }
+
+    [[nodiscard]] const std::filesystem::path& bin_directory() const noexcept {
+        return bin_directory_;
+    }
+
+    [[nodiscard]] std::filesystem::path control_directory() const {
+        return shared_directory_ / "extension";
+    }
+
+    [[nodiscard]] const std::filesystem::path& library_directory()
+        const noexcept {
+        return library_directory_;
+    }
+
+    [[nodiscard]] std::filesystem::path runtime_library_directory() const {
+        return case_root_ / "runtime-library";
+    }
+
+    [[nodiscard]] const std::filesystem::path& override_dso() const noexcept {
+        return override_dso_;
+    }
+
+    void corrupt_manifest() {
+        write(manifest_, "{");
+    }
+
+    void replace_manifest_once(
+        std::string_view needle,
+        std::string_view replacement) {
+        std::string contents = read(manifest_);
+        const std::size_t position = contents.find(needle);
+        if (position == std::string::npos
+            || contents.find(needle, position + needle.size())
+                != std::string::npos) {
+            throw std::runtime_error(
+                "stage contract manifest replacement is not unique");
+        }
+        contents.replace(position, needle.size(), replacement);
+        write(manifest_, contents);
+    }
+
+    void replace_tool_with_symlink(std::string_view tool) {
+        const std::filesystem::path staged_tool =
+            bin_directory_ / tool;
+        const std::filesystem::path target =
+            source_root_ / (std::string(tool) + "-symlink-target");
+        write(target, "symlink target\n");
+        std::filesystem::remove(staged_tool);
+        std::filesystem::create_symlink(target, staged_tool);
+    }
+
+    void reseal_mismatched_cache_control() {
+        write(
+            shared_directory_ / "extension"
+                / control_file_.filename(),
+            "comment = 'mutated staged control'\n"
+            "default_version = '1.0'\n"
+            "module_pathname = '$libdir/bioseq_cache'\n");
+        write_manifest();
+    }
+
+    void use_distinct_cache_module_name() {
+        write(
+            control_file_,
+            "comment = 'stage contract'\n"
+            "default_version = '1.0'\n"
+            "module_pathname = '$libdir/cache_module'\n");
+        write(
+            shared_directory_ / "extension"
+                / control_file_.filename(),
+            read(control_file_));
+        const std::filesystem::path renamed_source =
+            source_root_ / "cache_module.so";
+        std::filesystem::rename(normal_dso_, renamed_source);
+        std::filesystem::rename(
+            library_directory_ / normal_dso_.filename(),
+            library_directory_ / renamed_source.filename());
+        normal_dso_ = renamed_source;
+        write_manifest();
+    }
+
+    void write_manifest_with_reordered_tools() {
+        write_manifest(
+            {"initdb", "postgres", "pg_ctl",
+             "createdb", "dropdb", "psql"});
+    }
+
+    void write_manifest_with_duplicate_tools() {
+        write_manifest(
+            {"postgres", "postgres", "pg_ctl",
+             "createdb", "dropdb", "psql"});
+    }
+
+    void write_manifest_with_duplicate_artifact() {
+        write_manifest(
+            {"postgres", "initdb", "pg_ctl",
+             "createdb", "dropdb", "psql"},
+            true);
+    }
+
+    void corrupt_aggregate_hash() {
+        corrupt_hash_after("\"aggregate_sha256\": \"");
+    }
+
+    void corrupt_tool_hash(std::string_view tool) {
+        corrupt_hash_after(
+            "\"tool\": \"" + std::string(tool) + "\"",
+            "\"sha256\": \"");
+    }
+
+private:
+    static void write(
+        const std::filesystem::path& path,
+        std::string_view contents) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << contents;
+        output.close();
+        if (!output) {
+            throw std::runtime_error(
+                "cannot write stage contract fixture: " + path.string());
+        }
+    }
+
+    [[nodiscard]] static std::string read(
+        const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            throw std::runtime_error(
+                "cannot read stage contract fixture: " + path.string());
+        }
+        std::string result{
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
+        if (input.bad()) {
+            throw std::runtime_error(
+                "failed reading stage contract fixture: "
+                + path.string());
+        }
+        return result;
+    }
+
+    [[nodiscard]] static std::string json_string(
+        const std::filesystem::path& path) {
+        std::string result;
+        for (const char character : path.string()) {
+            if (character == '\\' || character == '"') {
+                result.push_back('\\');
+            }
+            result.push_back(character);
+        }
+        return result;
+    }
+
+    void corrupt_hash_after(
+        std::string_view anchor,
+        std::string_view hash_label = {}) {
+        std::string contents = read(manifest_);
+        const std::size_t anchor_position = contents.find(anchor);
+        if (anchor_position == std::string::npos) {
+            throw std::runtime_error(
+                "stage contract hash anchor is absent");
+        }
+        std::size_t hash_position = anchor_position;
+        if (!hash_label.empty()) {
+            hash_position = contents.find(hash_label, anchor_position);
+            if (hash_position == std::string::npos) {
+                throw std::runtime_error(
+                    "stage contract hash label is absent");
+            }
+            hash_position += hash_label.size();
+        } else {
+            hash_position += anchor.size();
+        }
+        contents.replace(hash_position, 64U, 64U, '0');
+        write(manifest_, contents);
+    }
+
+    [[nodiscard]] std::string artifact_json(
+        std::string_view name,
+        const std::filesystem::path& source_control,
+        const std::filesystem::path& source_sql,
+        const std::filesystem::path& source_dso) const {
+        const std::filesystem::path staged_control =
+            shared_directory_ / "extension"
+            / source_control.filename();
+        const std::string source_control_digest =
+            sha256_file(source_control).hex();
+        const std::string staged_control_digest =
+            sha256_file(staged_control).hex();
+        const std::string sql_digest = sha256_file(source_sql).hex();
+        const std::string dso_digest = sha256_file(source_dso).hex();
+        std::string result;
+        result += "    {\n";
+        result += "      \"name\": \"" + std::string(name) + "\",\n";
+        result += "      \"module_pathname_override\": null,\n";
+        result += "      \"effective_module_name\": \""
+            + source_dso.stem().string() + "\",\n";
+        result += "      \"control\": {\"source\": \""
+            + json_string(source_control)
+            + "\", \"filename\": \""
+            + source_control.filename().string()
+            + "\", \"staged\": \"pg/share/extension/"
+            + source_control.filename().string()
+            + "\", \"source_sha256\": \"" + source_control_digest
+            + "\", \"sha256\": \"" + staged_control_digest + "\"},\n";
+        result += "      \"install_sql\": {\"source\": \""
+            + json_string(source_sql)
+            + "\", \"filename\": \"" + source_sql.filename().string()
+            + "\", \"staged\": \"pg/share/extension/"
+            + source_sql.filename().string()
+            + "\", \"version\": \"1.0\", \"sha256\": \""
+            + sql_digest + "\"},\n";
+        result += "      \"library\": {\"source\": \""
+            + json_string(source_dso)
+            + "\", \"filename\": \"" + source_dso.filename().string()
+            + "\", \"staged\": \"pg/lib/"
+            + source_dso.filename().string()
+            + "\", \"sha256\": \"" + dso_digest + "\"}\n";
+        result += "    }";
+        return result;
+    }
+
+    [[nodiscard]] std::string aggregate_record() const {
+        const auto append =
+            [](std::string& record,
+               std::string_view name,
+               const std::filesystem::path& control,
+               const std::filesystem::path& sql,
+               const std::filesystem::path& dso,
+               const std::filesystem::path& staged_control) {
+                record += "artifact:" + std::string(name) + '\n';
+                record += "module_pathname_override:\n";
+                record += "control:" + control.filename().string()
+                    + ':' + sha256_file(staged_control).hex() + '\n';
+                record += "install_sql:" + sql.filename().string()
+                    + ':' + sha256_file(sql).hex() + '\n';
+                record += "library:" + dso.filename().string()
+                    + ':' + sha256_file(dso).hex() + '\n';
+            };
+        std::string record;
+        append(
+            record, "bioseq", bioseq_control_, bioseq_install_sql_,
+            bioseq_dso_,
+            shared_directory_ / "extension"
+                / bioseq_control_.filename());
+        append(
+            record, "bioseq_cache", control_file_, install_sql_,
+            normal_dso_,
+            shared_directory_ / "extension"
+                / control_file_.filename());
+        return record;
+    }
+
+    void write_manifest(
+        std::array<std::string_view, 6> tool_order = {
+            "postgres", "initdb", "pg_ctl",
+            "createdb", "dropdb", "psql"},
+        bool duplicate_cache_artifact = false) {
+        const std::string cache_json = artifact_json(
+            "bioseq_cache", control_file_, install_sql_, normal_dso_);
+        const std::string bioseq_json = artifact_json(
+            "bioseq", bioseq_control_, bioseq_install_sql_, bioseq_dso_);
+        std::string signatures;
+        for (std::size_t index = 0; index != tool_order.size(); ++index) {
+            const std::string tool{tool_order[index]};
+            if (index != 0U) {
+                signatures += ",\n";
+            }
+            signatures +=
+                "    {\"tool\": \"" + tool
+                + "\", \"staged_path\": \"pg/bin/" + tool
+                + "\", \"version\": \"" + tool
+                + " (PostgreSQL) 17.0-contract\", \"sha256\": \""
+                + sha256_file(bin_directory_ / tool).hex() + "\"}";
+        }
+
+        std::string contents;
+        contents += "{\n";
+        contents += "  \"schema\": \"stage_manifest/v2\",\n";
+        contents +=
+            "  \"postgresql_version\": "
+            "\"PostgreSQL 17.0-contract\",\n";
+        contents +=
+            "  \"postgresql_configure\": \"--prefix=/pg\",\n";
+        contents +=
+            "  \"source\": {\"bindir\": \"/pg/bin\", "
+            "\"sharedir\": \"/pg/share\", "
+            "\"pkglibdir\": \"/pg/lib\"},\n";
+        contents +=
+            "  \"staged\": {\"bindir\": \"pg/bin\", "
+            "\"sharedir\": \"pg/share\", "
+            "\"pkglibdir\": \"pg/lib\"},\n";
+        contents += "  \"extension_artifacts\": {\n";
+        contents += "    \"aggregate_sha256\": \""
+            + sha256(aggregate_record()).hex() + "\",\n";
+        contents += "    \"artifacts\": [\n";
+        contents += cache_json + ",\n" + bioseq_json;
+        if (duplicate_cache_artifact) {
+            contents += ",\n" + cache_json;
+        }
+        contents += "\n    ]\n";
+        contents += "  },\n";
+        contents +=
+            "  \"expected_tool_paths\": {"
+            "\"postgres\": \"pg/bin/postgres\", "
+            "\"initdb\": \"pg/bin/initdb\", "
+            "\"pg_ctl\": \"pg/bin/pg_ctl\", "
+            "\"createdb\": \"pg/bin/createdb\", "
+            "\"dropdb\": \"pg/bin/dropdb\", "
+            "\"psql\": \"pg/bin/psql\"},\n";
+        contents += "  \"tool_signatures\": [\n";
+        contents += signatures + "\n";
+        contents += "  ]\n";
+        contents += "}\n";
+        write(manifest_, contents);
+    }
+
+    std::filesystem::path root_;
+    std::filesystem::path stage_root_;
+    std::filesystem::path case_root_;
+    std::filesystem::path source_root_;
+    std::filesystem::path bin_directory_;
+    std::filesystem::path shared_directory_;
+    std::filesystem::path library_directory_;
+    std::filesystem::path control_file_;
+    std::filesystem::path install_sql_;
+    std::filesystem::path normal_dso_;
+    std::filesystem::path override_dso_;
+    std::filesystem::path bioseq_control_;
+    std::filesystem::path bioseq_install_sql_;
+    std::filesystem::path bioseq_dso_;
+    std::filesystem::path manifest_;
+};
+
 }  // namespace
 
 TEST_CASE("libpq first-row observation has explicit empty-result semantics",
@@ -142,30 +598,361 @@ TEST_CASE("libpq first-row observation has explicit empty-result semantics",
 TEST_CASE("private cluster configuration is portable and stage-first",
           "[postgres-test-support][unit][cluster][configuration]") {
     const std::filesystem::path socket_directory{"/private/socket"};
-    const std::filesystem::path staged_library_directory{
-        "/private/stage/lib/postgresql"};
     const std::array<std::string, 1> preload_libraries{"bioseq_cache"};
     const std::array<std::pair<std::string, std::string>, 1> startup_gucs{{
         {"bioseq.query_cache_optimisation_mode", "on"},
     }};
 
     const std::string configuration = render_private_cluster_configuration(
-        54321, socket_directory, staged_library_directory,
+        54321, socket_directory, std::nullopt,
         preload_libraries, startup_gucs);
 
     CHECK(configuration.find("extension_control_path")
           == std::string::npos);
     CHECK(configuration.find(
-              "dynamic_library_path = "
-              "'/private/stage/lib/postgresql:$libdir'\n")
+              "dynamic_library_path = '$libdir'\n")
           != std::string::npos);
-    const std::size_t staged_directory_position =
-        configuration.find(staged_library_directory.string());
-    REQUIRE(staged_directory_position != std::string::npos);
-    const std::size_t system_library_position =
-        configuration.find("$libdir", staged_directory_position);
-    REQUIRE(system_library_position != std::string::npos);
-    CHECK(staged_directory_position < system_library_position);
+    CHECK(configuration.find("/private/stage") == std::string::npos);
+
+    const std::filesystem::path runtime_library_directory{
+        "/private/case/runtime-library"};
+    const std::string override_configuration =
+        render_private_cluster_configuration(
+            54321, socket_directory, runtime_library_directory,
+            preload_libraries, startup_gucs);
+    CHECK(override_configuration.find(
+              "dynamic_library_path = "
+              "'/private/case/runtime-library:$libdir'\n")
+          != std::string::npos);
+}
+
+TEST_CASE("preinstalled stage attestation consumes suite artifacts in place",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+
+    const extension_stage stage = attest_preinstalled_extension_stage(
+        tree.stage_root(),
+        tree.manifest(),
+        tree.bin_directory(),
+        tree.runtime_library_directory(),
+        artifacts,
+        {});
+
+    CHECK(stage.stage_root
+          == std::filesystem::canonical(tree.stage_root()));
+    REQUIRE(stage.manifest_file.has_value());
+    CHECK(*stage.manifest_file
+          == std::filesystem::canonical(tree.manifest()));
+    REQUIRE(stage.manifest_digest.has_value());
+    CHECK(*stage.manifest_digest == sha256_file(tree.manifest()));
+    CHECK(stage.control_directory
+          == std::filesystem::canonical(tree.control_directory()));
+    CHECK(stage.library_directory
+          == std::filesystem::canonical(tree.library_directory()));
+    CHECK_FALSE(stage.runtime_library_directory.has_value());
+    CHECK_FALSE(std::filesystem::exists(
+        tree.runtime_library_directory()));
+    REQUIRE(stage.extensions.size() == 1);
+    CHECK(stage.extensions.front().staged_control_file.parent_path()
+          == stage.control_directory);
+    CHECK(stage.extensions.front().staged_install_sql.parent_path()
+          == stage.control_directory);
+    CHECK(stage.extensions.front().staged_dso.parent_path()
+          == stage.library_directory);
+}
+
+TEST_CASE("preinstalled stage permits only an exact named runtime DSO override",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.override_artifact()};
+    const std::set<std::string> allowed{"bioseq_cache"};
+
+    const extension_stage stage = attest_preinstalled_extension_stage(
+        tree.stage_root(),
+        tree.manifest(),
+        tree.bin_directory(),
+        tree.runtime_library_directory(),
+        artifacts,
+        allowed);
+
+    REQUIRE(stage.runtime_library_directory.has_value());
+    CHECK(*stage.runtime_library_directory
+          == std::filesystem::canonical(
+              tree.runtime_library_directory()));
+    REQUIRE(stage.extensions.size() == 1);
+    const staged_extension_artifact& artifact = stage.extensions.front();
+    CHECK(artifact.staged_control_file.parent_path()
+          == std::filesystem::canonical(tree.control_directory()));
+    CHECK(artifact.staged_install_sql.parent_path()
+          == std::filesystem::canonical(tree.control_directory()));
+    CHECK(artifact.staged_dso.parent_path()
+          == *stage.runtime_library_directory);
+    CHECK(artifact.staged_dso.filename() == "bioseq_cache.so");
+    CHECK(sha256_file(artifact.staged_dso)
+          == sha256_file(tree.override_dso()));
+    CHECK(std::distance(
+              std::filesystem::directory_iterator(
+                  *stage.runtime_library_directory),
+              std::filesystem::directory_iterator{})
+          == 1);
+}
+
+TEST_CASE("runtime DSO override preserves the attested module identity",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[override][module-name]") {
+    temporary_preinstalled_stage_tree tree;
+    tree.use_distinct_cache_module_name();
+    const std::array artifacts{tree.override_artifact()};
+    const extension_stage stage = attest_preinstalled_extension_stage(
+        tree.stage_root(), tree.manifest(), tree.bin_directory(),
+        tree.runtime_library_directory(), artifacts,
+        std::set<std::string>{"bioseq_cache"});
+
+    REQUIRE(stage.extensions.size() == 1);
+    CHECK(
+        stage.extensions.front().staged_dso.filename()
+        == "cache_module.so");
+    REQUIRE(stage.runtime_library_directory.has_value());
+    CHECK(
+        stage.extensions.front().staged_dso.parent_path()
+        == *stage.runtime_library_directory);
+    CHECK(
+        sha256_file(stage.extensions.front().staged_dso)
+        == sha256_file(tree.override_dso()));
+    const std::array<std::string, 1> preloads{"cache_module"};
+    const std::array<std::pair<std::string, std::string>, 0> gucs{};
+    const std::string configuration =
+        render_private_cluster_configuration(
+            54321, std::filesystem::path{"/private/socket"},
+            stage.runtime_library_directory, preloads, gucs);
+    CHECK(
+        configuration.find(
+            stage.runtime_library_directory->string()
+            + ":$libdir")
+        != std::string::npos);
+}
+
+TEST_CASE("preinstalled stage rejects an unauthorized runtime DSO mismatch",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.override_artifact()};
+
+    CHECK_THROWS_WITH(
+        attest_preinstalled_extension_stage(
+            tree.stage_root(),
+            tree.manifest(),
+            tree.bin_directory(),
+            tree.runtime_library_directory(),
+            artifacts,
+            {}),
+        Catch::Matchers::ContainsSubstring(
+            "without explicit authorization"));
+    CHECK_FALSE(std::filesystem::exists(
+        tree.runtime_library_directory()));
+}
+
+TEST_CASE("preinstalled stage binds the configured PostgreSQL bin coordinate",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+
+    CHECK_THROWS_WITH(
+        attest_preinstalled_extension_stage(
+            tree.stage_root(),
+            tree.manifest(),
+            tree.library_directory(),
+            tree.runtime_library_directory(),
+            artifacts,
+            {}),
+        Catch::Matchers::ContainsSubstring(
+            "bindir does not belong"));
+}
+
+TEST_CASE("preinstalled stage accepts caller-ordered manifest subsets",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[subset][order]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array subset{tree.bioseq_artifact()};
+    const extension_stage selected =
+        attest_preinstalled_extension_stage(
+            tree.stage_root(),
+            tree.manifest(),
+            tree.bin_directory(),
+            tree.runtime_library_directory(),
+            subset,
+            {});
+    REQUIRE(selected.extensions.size() == 1);
+    CHECK(selected.extensions.front().name == "bioseq");
+
+    const std::array reversed{
+        tree.bioseq_artifact(), tree.normal_artifact()};
+    const extension_stage ordered =
+        attest_preinstalled_extension_stage(
+            tree.stage_root(),
+            tree.manifest(),
+            tree.bin_directory(),
+            tree.runtime_library_directory(),
+            reversed,
+            {});
+    REQUIRE(ordered.extensions.size() == 2);
+    CHECK(ordered.extensions[0].name == "bioseq");
+    CHECK(ordered.extensions[1].name == "bioseq_cache");
+}
+
+TEST_CASE("preinstalled stage rejects corrupt closed-schema manifests",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[corrupt][schema]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+    tree.corrupt_manifest();
+    CHECK_THROWS_WITH(
+        attest_preinstalled_extension_stage(
+            tree.stage_root(), tree.manifest(), tree.bin_directory(),
+            tree.runtime_library_directory(), artifacts, {}),
+        Catch::Matchers::ContainsSubstring(
+            "invalid preinstalled PostgreSQL stage manifest"));
+}
+
+TEST_CASE("preinstalled stage rejects missing unknown and duplicate members",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[missing][unknown][duplicate]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+
+    SECTION("missing required member") {
+        tree.replace_manifest_once(
+            "  \"postgresql_configure\": \"--prefix=/pg\",\n", "");
+        CHECK_THROWS_WITH(
+            attest_preinstalled_extension_stage(
+                tree.stage_root(), tree.manifest(),
+                tree.bin_directory(),
+                tree.runtime_library_directory(), artifacts, {}),
+            Catch::Matchers::ContainsSubstring(
+                "missing or unknown members"));
+    }
+
+    SECTION("unknown member") {
+        tree.replace_manifest_once(
+            "  \"schema\": \"stage_manifest/v2\",\n",
+            "  \"schema\": \"stage_manifest/v2\",\n"
+            "  \"unknown\": \"forbidden\",\n");
+        CHECK_THROWS_WITH(
+            attest_preinstalled_extension_stage(
+                tree.stage_root(), tree.manifest(),
+                tree.bin_directory(),
+                tree.runtime_library_directory(), artifacts, {}),
+            Catch::Matchers::ContainsSubstring(
+                "missing or unknown members"));
+    }
+
+    SECTION("duplicate JSON member") {
+        tree.replace_manifest_once(
+            "  \"schema\": \"stage_manifest/v2\",\n",
+            "  \"schema\": \"stage_manifest/v2\",\n"
+            "  \"schema\": \"stage_manifest/v2\",\n");
+        CHECK_THROWS_WITH(
+            attest_preinstalled_extension_stage(
+                tree.stage_root(), tree.manifest(),
+                tree.bin_directory(),
+                tree.runtime_library_directory(), artifacts, {}),
+            Catch::Matchers::ContainsSubstring(
+                "duplicate object member"));
+    }
+
+    SECTION("duplicate extension artifact") {
+        tree.write_manifest_with_duplicate_artifact();
+        CHECK_THROWS_WITH(
+            attest_preinstalled_extension_stage(
+                tree.stage_root(), tree.manifest(),
+                tree.bin_directory(),
+                tree.runtime_library_directory(), artifacts, {}),
+            Catch::Matchers::ContainsSubstring(
+                "duplicate extension"));
+    }
+}
+
+TEST_CASE("preinstalled stage rejects symlinked staged tools",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[symlink][tools]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+    tree.replace_tool_with_symlink("psql");
+    CHECK_THROWS_WITH(
+        attest_preinstalled_extension_stage(
+            tree.stage_root(), tree.manifest(), tree.bin_directory(),
+            tree.runtime_library_directory(), artifacts, {}),
+        Catch::Matchers::ContainsSubstring(
+            "missing or symlink stage component"));
+}
+
+TEST_CASE("preinstalled stage rejects reordered tool signatures",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[order][tools]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+    SECTION("reordered") {
+        tree.write_manifest_with_reordered_tools();
+        CHECK_THROWS_WITH(
+            attest_preinstalled_extension_stage(
+                tree.stage_root(), tree.manifest(),
+                tree.bin_directory(),
+                tree.runtime_library_directory(), artifacts, {}),
+            Catch::Matchers::ContainsSubstring(
+                "wrong order or duplicate tools"));
+    }
+    SECTION("duplicate") {
+        tree.write_manifest_with_duplicate_tools();
+        CHECK_THROWS_WITH(
+            attest_preinstalled_extension_stage(
+                tree.stage_root(), tree.manifest(),
+                tree.bin_directory(),
+                tree.runtime_library_directory(), artifacts, {}),
+            Catch::Matchers::ContainsSubstring(
+                "wrong order or duplicate tools"));
+    }
+}
+
+TEST_CASE("preinstalled stage rejects a resealed null-override control mismatch",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[control-mismatch]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+    tree.reseal_mismatched_cache_control();
+    CHECK_THROWS_WITH(
+        attest_preinstalled_extension_stage(
+            tree.stage_root(), tree.manifest(), tree.bin_directory(),
+            tree.runtime_library_directory(), artifacts, {}),
+        Catch::Matchers::ContainsSubstring(
+            "null module_pathname_override requires identical"));
+}
+
+TEST_CASE("preinstalled stage rejects a staged PostgreSQL tool hash mismatch",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[tool-hash]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+    tree.corrupt_tool_hash("psql");
+    CHECK_THROWS_WITH(
+        attest_preinstalled_extension_stage(
+            tree.stage_root(), tree.manifest(), tree.bin_directory(),
+            tree.runtime_library_directory(), artifacts, {}),
+        Catch::Matchers::ContainsSubstring(
+            "staged PostgreSQL tool SHA-256 mismatch"));
+}
+
+TEST_CASE("preinstalled stage rejects an extension aggregate mismatch",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[aggregate]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+    tree.corrupt_aggregate_hash();
+    CHECK_THROWS_WITH(
+        attest_preinstalled_extension_stage(
+            tree.stage_root(), tree.manifest(), tree.bin_directory(),
+            tree.runtime_library_directory(), artifacts, {}),
+        Catch::Matchers::ContainsSubstring(
+            "extension aggregate SHA-256 mismatch"));
 }
 
 TEST_CASE("process report collectors preserve case SQL and cleanup evidence",
@@ -645,6 +1432,9 @@ TEST_CASE("typed watchdog snapshots preserve prior report evidence",
     const std::array artifacts{
         artifact_report{
             .name = "bioseq_cache",
+            .preinstalled_stage_root = "/suite/stage",
+            .stage_manifest = "/metadata/stage-manifest.json",
+            .stage_manifest_sha256 = "manifest-digest",
             .control_file = "/source/cache.control",
             .install_sql = "/source/cache.sql",
             .dso = "/source/cache.so",
@@ -694,6 +1484,15 @@ TEST_CASE("typed watchdog snapshots preserve prior report evidence",
     CHECK(
         recovered_artifacts->front().staged_dso
         == artifacts.front().staged_dso);
+    CHECK(
+        recovered_artifacts->front().preinstalled_stage_root
+        == artifacts.front().preinstalled_stage_root);
+    CHECK(
+        recovered_artifacts->front().stage_manifest
+        == artifacts.front().stage_manifest);
+    CHECK(
+        recovered_artifacts->front().stage_manifest_sha256
+        == artifacts.front().stage_manifest_sha256);
     CHECK(
         recovered_artifacts->front().install_sql_sha256
         == artifacts.front().install_sql_sha256);

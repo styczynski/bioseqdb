@@ -511,6 +511,9 @@ struct phase_duration_report {
 /// @brief Artifact digest/path evidence embedded in the native report.
 struct artifact_report {
     std::string name;
+    std::filesystem::path preinstalled_stage_root;
+    std::filesystem::path stage_manifest;
+    std::string stage_manifest_sha256;
     std::filesystem::path control_file;
     std::filesystem::path install_sql;
     std::filesystem::path dso;
@@ -573,6 +576,16 @@ struct integration_test_report {
     for (const staged_extension_artifact& artifact : stage.extensions) {
         reports.push_back(artifact_report{
             .name = artifact.name,
+            .preinstalled_stage_root =
+                stage.manifest_file
+                    ? stage.stage_root
+                    : std::filesystem::path{},
+            .stage_manifest =
+                stage.manifest_file.value_or(std::filesystem::path{}),
+            .stage_manifest_sha256 =
+                stage.manifest_digest
+                    ? stage.manifest_digest->hex()
+                    : std::string{},
             .control_file = artifact.source_control_file,
             .install_sql = artifact.source_install_sql,
             .dso = artifact.source_dso,
@@ -804,6 +817,12 @@ load_supervision_phase_duration_reports(
         [](std::ostream& output, const artifact_report& report) {
             output << supervision_hex_encode(report.name) << '\t'
                    << supervision_hex_encode(
+                          report.preinstalled_stage_root.string()) << '\t'
+                   << supervision_hex_encode(
+                          report.stage_manifest.string()) << '\t'
+                   << supervision_hex_encode(
+                          report.stage_manifest_sha256) << '\t'
+                   << supervision_hex_encode(
                           report.control_file.string()) << '\t'
                    << supervision_hex_encode(
                           report.install_sql.string()) << '\t'
@@ -846,7 +865,7 @@ load_supervision_artifact_reports(
                 return std::nullopt;
             }
             const auto values = report_snapshot_detail::fields(line);
-            if (values.size() != 11U) {
+            if (values.size() != 14U) {
                 return std::nullopt;
             }
             std::vector<std::string> decoded;
@@ -860,16 +879,19 @@ load_supervision_artifact_reports(
             }
             reports.push_back(artifact_report{
                 .name = std::move(decoded[0]),
-                .control_file = std::move(decoded[1]),
-                .install_sql = std::move(decoded[2]),
-                .dso = std::move(decoded[3]),
-                .staged_control_file = std::move(decoded[4]),
-                .staged_install_sql = std::move(decoded[5]),
-                .staged_dso = std::move(decoded[6]),
-                .control_sha256 = std::move(decoded[7]),
-                .install_sql_sha256 = std::move(decoded[8]),
-                .dso_sha256 = std::move(decoded[9]),
-                .staged_control_sha256 = std::move(decoded[10])});
+                .preinstalled_stage_root = std::move(decoded[1]),
+                .stage_manifest = std::move(decoded[2]),
+                .stage_manifest_sha256 = std::move(decoded[3]),
+                .control_file = std::move(decoded[4]),
+                .install_sql = std::move(decoded[5]),
+                .dso = std::move(decoded[6]),
+                .staged_control_file = std::move(decoded[7]),
+                .staged_install_sql = std::move(decoded[8]),
+                .staged_dso = std::move(decoded[9]),
+                .control_sha256 = std::move(decoded[10]),
+                .install_sql_sha256 = std::move(decoded[11]),
+                .dso_sha256 = std::move(decoded[12]),
+                .staged_control_sha256 = std::move(decoded[13])});
         }
         if (std::getline(input, line)) {
             return std::nullopt;
@@ -1696,6 +1718,13 @@ inline void write_integration_test_report(
                 report_detail::write_string(output, value);
             };
         artifact_field("name", artifact.name);
+        artifact_field(
+            "preinstalled_stage_root",
+            artifact.preinstalled_stage_root.string());
+        artifact_field(
+            "stage_manifest", artifact.stage_manifest.string());
+        artifact_field(
+            "stage_manifest_sha256", artifact.stage_manifest_sha256);
         artifact_field("control_file", artifact.control_file.string());
         artifact_field("install_sql", artifact.install_sql.string());
         artifact_field("dso", artifact.dso.string());
