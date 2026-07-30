@@ -588,7 +588,11 @@ TEST_CASE("overlapping relation transitions advance epochs independently",
         "SET bioseq.query_cache_optimisation_mode = 'same'");
     CHECK(bioseq::cache_test::scalar(
               admin,
-              "SELECT array_agg(value ORDER BY id)::text "
+              // Keep the cacheable expression identical to the legacy spec.
+              // Libpq already exposes the text[] value as wire text; an
+              // explicit ::text adds stable array_out() and fails the exact
+              // cache's immutable-expression admission gate.
+              "SELECT array_agg(value ORDER BY id) "
               "FROM cache_overlapping_transition_rows")
           == "{one,two}");
     bioseq::cache_test::exec(
@@ -671,7 +675,7 @@ TEST_CASE("overlapping relation transitions advance epochs independently",
             static_cast<void>(session.exec(
                 "SET bioseq.query_cache_optimisation_mode = 'same'"));
             during_transition = single_value(session.exec(
-                "SELECT array_agg(value ORDER BY id)::text "
+                "SELECT array_agg(value ORDER BY id) "
                 "FROM cache_overlapping_transition_rows"));
             const auto interim = session.exec(
                 "SELECT (SELECT count(*) "
@@ -701,10 +705,10 @@ TEST_CASE("overlapping relation transitions advance epochs independently",
             finished = read_relation_state(
                 session, "cache_overlapping_transition_rows");
             after_transitions = single_value(session.exec(
-                "SELECT array_agg(value ORDER BY id)::text "
+                "SELECT array_agg(value ORDER BY id) "
                 "FROM cache_overlapping_transition_rows"));
             warm_hit = single_value(session.exec(
-                "SELECT array_agg(value ORDER BY id)::text "
+                "SELECT array_agg(value ORDER BY id) "
                 "FROM cache_overlapping_transition_rows"));
             const auto final = session.exec(
                 "SELECT produced, completed_hits, fallbacks "
