@@ -9723,6 +9723,7 @@ def validate_dso_closure(
     inventory: list[DynamicSymbol],
     *,
     contract: str = "bioseq",
+    allowed_dso_exports: tuple[str, ...] = (),
     expected_main_identity_count: int = 270,
     expected_main_symbol_count: int = 268,
     expected_retired_symbol_count: int = 117,
@@ -9740,7 +9741,8 @@ def validate_dso_closure(
     source-macro owner. Final evidence additionally requires every owner to
     be generated. The Bioseq contract retains its reviewed fixed inventory;
     the manifest contract derives extension-specific counts and ownership
-    partitions from the authenticated generated manifest.
+    partitions from the authenticated generated manifest and closes the
+    entire export surface over its explicit non-fmgr ABI allowlist.
     """
 
     if _integer(
@@ -9751,6 +9753,20 @@ def validate_dso_closure(
     if contract not in DSO_CLOSURE_CONTRACTS:
         _fail("DSO", f"unknown closure contract {contract!r}")
     manifest_contract = contract == "manifest"
+    normalized_allowed_dso_exports: set[str] = set()
+    for index, raw_export in enumerate(allowed_dso_exports):
+        export = _string(
+            raw_export,
+            f"DSO.allowed_dso_exports[{index}]",
+        )
+        if export in normalized_allowed_dso_exports:
+            _fail(export, "DSO ABI allowlist contains a duplicate")
+        normalized_allowed_dso_exports.add(export)
+    if not manifest_contract and normalized_allowed_dso_exports:
+        _fail(
+            "DSO",
+            "explicit non-fmgr ABI exports require the manifest contract",
+        )
     if manifest_contract:
         expected_main_identity_count = _integer(
             _field(
@@ -10112,6 +10128,40 @@ def validate_dso_closure(
     for symbol in expected_fmgr_symbols:
         _one_dynamic_export(visible_symbols, symbol)
         _one_dynamic_export(visible_symbols, f"pg_finfo_{symbol}")
+    expected_fmgr_exports = expected_fmgr_symbols | {
+        f"pg_finfo_{symbol}" for symbol in expected_fmgr_symbols
+    }
+    reserved_abi_exports = (
+        normalized_allowed_dso_exports & expected_fmgr_exports
+    )
+    if reserved_abi_exports:
+        _fail(
+            sorted(reserved_abi_exports)[0],
+            "non-fmgr ABI allowlist overlaps the fmgr export inventory",
+        )
+    if manifest_contract:
+        expected_dynamic_exports = (
+            expected_fmgr_exports | normalized_allowed_dso_exports
+        )
+        actual_dynamic_exports = set(visible_symbols)
+        if actual_dynamic_exports != expected_dynamic_exports:
+            missing_exports = sorted(
+                expected_dynamic_exports - actual_dynamic_exports
+            )
+            unexpected_exports = sorted(
+                actual_dynamic_exports - expected_dynamic_exports
+            )
+            missing_sample = ", ".join(missing_exports[:8])
+            unexpected_sample = ", ".join(unexpected_exports[:8])
+            _fail(
+                "DSO",
+                "defined dynamic export surface is not exact: "
+                f"missing={len(missing_exports)} [{missing_sample}]; "
+                f"unexpected={len(unexpected_exports)} "
+                f"[{unexpected_sample}]",
+            )
+        for symbol in normalized_allowed_dso_exports:
+            _one_dynamic_export(visible_symbols, symbol)
 
     for symbol in retired_symbols | set(required_absent_symbols):
         if symbol in visible_symbols or f"pg_finfo_{symbol}" in visible_symbols:
@@ -10134,6 +10184,10 @@ def validate_dso_closure(
         "generated_wrapper_symbol_count": len(generated_wrapper_symbols),
         "legacy_macro_symbol_count": len(legacy_macro_symbols),
         "dynamic_fmgr_symbol_count": len(actual_fmgr_symbols),
+        "allowed_dso_export_count": len(
+            normalized_allowed_dso_exports
+        ),
+        "dynamic_export_count": len(visible_symbols),
     }
 
 
@@ -10339,6 +10393,7 @@ ACTIVE_DSO_VALIDATOR_ARGUMENTS = (
     ("--dso", "dso"),
     ("--symbol-dump", "symbol_dump"),
     ("--dso-contract", "dso_contract"),
+    ("--allowed-dso-export", "allowed_dso_export"),
 )
 
 
@@ -10415,6 +10470,14 @@ def _validate_command_line(arguments: argparse.Namespace) -> str:
         )
         if arguments.sql_manifest is None:
             _fail("command-line", "missing --sql-manifest")
+        if (
+            arguments.allowed_dso_export is not None
+            and arguments.dso_contract != "manifest"
+        ):
+            _fail(
+                "command-line",
+                "--allowed-dso-export requires --dso-contract manifest",
+            )
         _require_dynamic_symbol_source(arguments)
         return "dso"
 
@@ -10455,6 +10518,11 @@ def _validate_command_line(arguments: argparse.Namespace) -> str:
         _fail(
             "command-line",
             "--dso-contract is valid only with --dso-only",
+        )
+    if arguments.allowed_dso_export is not None:
+        _fail(
+            "command-line",
+            "--allowed-dso-export is valid only with --dso-only",
         )
     return "full"
 
@@ -14300,9 +14368,20 @@ def run_python_self_tests() -> None:
         sql_manifest=Path("/self-test/cache-manifest"),
         dso=Path("/self-test/cache-dso"),
         dso_contract="manifest",
+        allowed_dso_export=["Pg_magic_func", "_PG_init"],
     )
     if _validate_command_line(manifest_dso_arguments) != "dso":
         _fail("self-test", "manifest DSO contract mode changed")
+    require_command_line_failure(
+        validator_arguments(
+            dso_only=True,
+            sql_manifest=Path("/self-test/cache-manifest"),
+            dso=Path("/self-test/cache-dso"),
+            allowed_dso_export=["Pg_magic_func"],
+        ),
+        "requires --dso-contract manifest",
+        "Bioseq DSO contract accepted a non-fmgr ABI allowlist",
+    )
     require_command_line_failure(
         validator_arguments(
             dso_only=True,
@@ -15218,22 +15297,36 @@ def run_python_self_tests() -> None:
     inventory = parse_nm_symbols(nm_text, source_tool="self-test-nm")
     readelf_fixture = "\n".join(
         [
-            "Symbol table '.dynsym' contains 3 entries:",
+            "Symbol table '.dynsym' contains 5 entries:",
             "   Num: Value Size Type Bind Vis Ndx Name",
             "     1: 0000000000001000 16 FUNC GLOBAL DEFAULT 12 seq_concat",
             "     2: 0000000000001010 16 FUNC GLOBAL DEFAULT 12 pg_finfo_seq_concat",
+            "     3: 0000000000001020 16 FUNC GLOBAL DEFAULT 12 Pg_magic_func",
+            "     4: 0000000000001030 16 FUNC GLOBAL DEFAULT 12 _PG_init",
         ]
     )
     if [symbol.name for symbol in parse_readelf_symbols(readelf_fixture)] != [
         "seq_concat",
         "pg_finfo_seq_concat",
+        "Pg_magic_func",
+        "_PG_init",
     ]:
         _fail("self-test", "readelf parser changed symbol identity")
-    darwin_fixture = "_seq_concat\n_pg_finfo_seq_concat\n"
+    darwin_fixture = (
+        "_seq_concat\n"
+        "_pg_finfo_seq_concat\n"
+        "_Pg_magic_func\n"
+        "__PG_init\n"
+    )
     if [
         symbol.name
         for symbol in parse_darwin_nm_symbols(darwin_fixture)
-    ] != ["seq_concat", "pg_finfo_seq_concat"]:
+    ] != [
+        "seq_concat",
+        "pg_finfo_seq_concat",
+        "Pg_magic_func",
+        "_PG_init",
+    ]:
         _fail("self-test", "Darwin nm parser changed symbol identity")
     coff_fixture = "\n".join(
         [
@@ -15247,24 +15340,46 @@ def run_python_self_tests() -> None:
             "  Name: pg_finfo_seq_concat",
             "  RVA: 0x1010",
             "}",
+            "Export {",
+            "  Ordinal: 3",
+            "  Name: Pg_magic_func",
+            "  RVA: 0x1020",
+            "}",
+            "Export {",
+            "  Ordinal: 4",
+            "  Name: _PG_init",
+            "  RVA: 0x1030",
+            "}",
         ]
     )
     if [
         symbol.name
         for symbol in parse_llvm_coff_exports(coff_fixture)
-    ] != ["seq_concat", "pg_finfo_seq_concat"]:
+    ] != [
+        "seq_concat",
+        "pg_finfo_seq_concat",
+        "Pg_magic_func",
+        "_PG_init",
+    ]:
         _fail("self-test", "COFF export parser changed symbol identity")
     dumpbin_fixture = "\n".join(
         [
             "    ordinal hint RVA      name",
             "          1    0 00001000 seq_concat",
             "          2    1 00001010 pg_finfo_seq_concat",
+            "          3    2 00001020 Pg_magic_func",
+            "          4    3 00001030 _PG_init",
         ]
     )
     if [
         symbol.name
         for symbol in parse_dumpbin_exports(dumpbin_fixture)
-    ] != ["seq_concat", "pg_finfo_seq_concat"]:
+    ] != [
+        "seq_concat",
+        "pg_finfo_seq_concat",
+        "Pg_magic_func",
+        "_PG_init",
+    ]:
         _fail("self-test", "dumpbin parser changed symbol identity")
     validate_dso_closure(
         manifest,
@@ -15314,11 +15429,19 @@ def run_python_self_tests() -> None:
         "external_legacy_macro_symbols": [],
         "legacy_fmgr_macro_owners": [],
     }
+    cache_abi_exports = (
+        "Pg_magic_func",
+        "_PG_init",
+        "bioseq_cache_storage_janitor_main",
+    )
     cache_inventory = parse_nm_symbols(
         "\n".join(
             (
                 f"{cache_symbol} T 1 1",
                 f"pg_finfo_{cache_symbol} T 2 1",
+                "Pg_magic_func T 3 1",
+                "_PG_init T 4 1",
+                "bioseq_cache_storage_janitor_main T 5 1",
             )
         ),
         source_tool="self-test-cache-nm",
@@ -15327,6 +15450,7 @@ def run_python_self_tests() -> None:
         cache_manifest,
         cache_inventory,
         contract="manifest",
+        allowed_dso_exports=cache_abi_exports,
     )
     try:
         validate_dso_closure(cache_manifest, cache_inventory)
@@ -15359,8 +15483,11 @@ def run_python_self_tests() -> None:
             (
                 f"{cache_symbol} T 1 1",
                 f"pg_finfo_{cache_symbol} T 2 1",
-                "unowned T 3 1",
-                "pg_finfo_unowned T 4 1",
+                "Pg_magic_func T 3 1",
+                "_PG_init T 4 1",
+                "bioseq_cache_storage_janitor_main T 5 1",
+                "unowned T 6 1",
+                "pg_finfo_unowned T 7 1",
             )
         ),
         source_tool="self-test-cache-extra-nm",
@@ -15370,6 +15497,7 @@ def run_python_self_tests() -> None:
             cache_manifest,
             cache_inventory_with_unowned_finfo,
             contract="manifest",
+            allowed_dso_exports=cache_abi_exports,
         )
     except EvidenceError as error:
         if "manifest-owned symbols" not in str(error):
@@ -15378,6 +15506,34 @@ def run_python_self_tests() -> None:
         _fail(
             "self-test",
             "manifest DSO contract accepted an unowned fmgr export",
+        )
+    cache_inventory_with_cpp_leak = parse_nm_symbols(
+        "\n".join(
+            (
+                f"{cache_symbol} T 1 1",
+                f"pg_finfo_{cache_symbol} T 2 1",
+                "Pg_magic_func T 3 1",
+                "_PG_init T 4 1",
+                "bioseq_cache_storage_janitor_main T 5 1",
+                "_ZN6bioseq5cache19accidental_exportEv T 6 1",
+            )
+        ),
+        source_tool="self-test-cache-leak-nm",
+    )
+    try:
+        validate_dso_closure(
+            cache_manifest,
+            cache_inventory_with_cpp_leak,
+            contract="manifest",
+            allowed_dso_exports=cache_abi_exports,
+        )
+    except EvidenceError as error:
+        if "defined dynamic export surface is not exact" not in str(error):
+            raise
+    else:
+        _fail(
+            "self-test",
+            "manifest DSO contract accepted a leaked non-fmgr symbol",
         )
 
     incremental_manifest = json.loads(json.dumps(manifest))
@@ -15592,6 +15748,14 @@ def main(argv: list[str] | None = None) -> int:
             "an extension's exact generated fmgr inventory"
         ),
     )
+    parser.add_argument(
+        "--allowed-dso-export",
+        action="append",
+        help=(
+            "repeatable explicit non-fmgr ABI export; valid only for "
+            "--dso-only --dso-contract manifest"
+        ),
+    )
     dso_source = parser.add_mutually_exclusive_group()
     dso_source.add_argument("--dso", type=Path)
     dso_source.add_argument("--symbol-dump", type=Path)
@@ -15629,6 +15793,9 @@ def main(argv: list[str] | None = None) -> int:
                 sql_manifest,
                 dynamic_symbols,
                 contract=dso_contract,
+                allowed_dso_exports=tuple(
+                    args.allowed_dso_export or ()
+                ),
                 require_complete_codegen=args.require_complete_codegen,
             )
             _write_report(

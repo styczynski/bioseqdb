@@ -126,6 +126,6 @@ void direct_heap_insert(
 } // namespace bioseq::cache::pg::test_sql_backend
 #endif
 
-extern "C" void _PG_init() {
+extern "C" PGDLLEXPORT void _PG_init() {
     bioseq::cache::pg::detail::initialize_extension();
 }

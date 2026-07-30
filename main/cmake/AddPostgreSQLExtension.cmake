@@ -29,7 +29,7 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
     ARG
     "REQUIRE_COMPLETE_CODEGEN"
     "EXTENSION_NAME;SQL_MANIFEST;REPORT_PATH;CONTRACT"
-    ""
+    "ABI_EXPORTS"
     ${ARGN})
   if(ARG_UNPARSED_ARGUMENTS)
     message(FATAL_ERROR
@@ -82,6 +82,11 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
     list(APPEND _bioseq_dso_completion_args
       --require-complete-codegen)
   endif()
+  set(_bioseq_dso_abi_export_args)
+  foreach(_bioseq_dso_abi_export IN LISTS ARG_ABI_EXPORTS)
+    list(APPEND _bioseq_dso_abi_export_args
+      --allowed-dso-export "${_bioseq_dso_abi_export}")
+  endforeach()
 
   set_property(TARGET ${TARGET_NAME} APPEND PROPERTY LINK_DEPENDS
     "${ARG_SQL_MANIFEST}"
@@ -97,6 +102,7 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
       --sql-manifest "${ARG_SQL_MANIFEST}"
       --dso "$<TARGET_FILE:${TARGET_NAME}>"
       ${_bioseq_dso_completion_args}
+      ${_bioseq_dso_abi_export_args}
       --report "${_bioseq_dso_report}"
     COMMENT
       "Validating ${ARG_EXTENSION_NAME} fmgr ownership against the linked DSO"
@@ -109,6 +115,7 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
       --sql-manifest "${ARG_SQL_MANIFEST}"
       --dso "$<TARGET_FILE:${TARGET_NAME}>"
       ${_bioseq_dso_completion_args}
+      ${_bioseq_dso_abi_export_args}
       --report "${_bioseq_dso_report}"
     DEPENDS
       ${TARGET_NAME}
@@ -119,7 +126,8 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
     VERBATIM)
   set_target_properties(${TARGET_NAME} PROPERTIES
     BIOSEQ_EXTENSION_DSO_CLOSURE_REPORT "${_bioseq_dso_report}"
-    BIOSEQ_EXTENSION_DSO_CLOSURE_CONTRACT "${ARG_CONTRACT}")
+    BIOSEQ_EXTENSION_DSO_CLOSURE_CONTRACT "${ARG_CONTRACT}"
+    BIOSEQ_EXTENSION_DSO_ABI_EXPORTS "${ARG_ABI_EXPORTS}")
 endfunction()
 
 # Helper command to add extensions
@@ -136,7 +144,12 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   # CXX_MODULES PUBLIC. Linking them into the consumer makes the BMIs they
   # produced visible without rebuilding the module sources for every target —
   # see main/DOCS/IMPL_PLANS/BUILD_TIME_REDUCTION_..._DOC0269.md §5.
-  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS_MAIN TESTS INTEGRATION_TESTS INTEGRATION_TESTS_LINKS INTEGRATION_TESTS_MODULES SHARED_MODULE_LIBS PG_ENTRYPOINT_SOURCES)
+  set(multiValueArgs
+    REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS
+    CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS_MAIN TESTS
+    INTEGRATION_TESTS INTEGRATION_TESTS_LINKS
+    INTEGRATION_TESTS_MODULES SHARED_MODULE_LIBS
+    PG_ENTRYPOINT_SOURCES DSO_ABI_EXPORTS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
   message("%%%% POSTPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}> <${EXTENSION_TESTS}> <${EXTENSION_INTEGRATION_TESTS}>")
 
@@ -499,6 +512,7 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
         EXTENSION_NAME "${EXTENSION_NAME}"
         SQL_MANIFEST "${EXTENSION_SQL_MANIFEST}"
         CONTRACT "${EXTENSION_DSO_CLOSURE_CONTRACT}"
+        ABI_EXPORTS ${EXTENSION_DSO_ABI_EXPORTS}
         ${_extension_dso_closure_options})
     endif()
 

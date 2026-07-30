@@ -194,6 +194,10 @@ AddCommonTargetX(
   SQL_MANIFEST
     "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_GENERATED_MANIFEST}"
   DSO_CLOSURE_CONTRACT manifest
+  DSO_ABI_EXPORTS
+    Pg_magic_func
+    _PG_init
+    bioseq_cache_storage_janitor_main
   REQUIRE_COMPLETE_CODEGEN
   PG_ENTRYPOINT_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm")
@@ -203,6 +207,8 @@ set_target_properties(postgresql_bioseq_cache PROPERTIES
   CXX_MODULE_STD ON
   POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN YES
   LIBRARY_OUTPUT_DIRECTORY
     "${CMAKE_CURRENT_BINARY_DIR}/artifacts/cache_production/$<CONFIG>"
   RUNTIME_OUTPUT_DIRECTORY
@@ -253,6 +259,8 @@ if(BIOSEQ_CACHE_TESTING)
     CXX_MODULE_STD ON
     POSITION_INDEPENDENT_CODE ON
     INTERPROCEDURAL_OPTIMIZATION FALSE
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
     PREFIX ""
     OUTPUT_NAME "bioseq_cache"
     LIBRARY_OUTPUT_DIRECTORY
@@ -282,6 +290,10 @@ if(BIOSEQ_CACHE_TESTING)
     REPORT_PATH
       "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/bioseq_cache-test-support-dso-closure.json"
     CONTRACT manifest
+    ABI_EXPORTS
+      Pg_magic_func
+      _PG_init
+      bioseq_cache_storage_janitor_main
     REQUIRE_COMPLETE_CODEGEN)
   if(APPLE)
     set_target_properties(postgresql_bioseq_cache_test_support PROPERTIES
