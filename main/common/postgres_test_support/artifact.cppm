@@ -1084,7 +1084,7 @@ inspect_regular_file_no_follow(
             + " without following links: " + path.string());
     }
 
-    const auto close_descriptor = [&]() noexcept {
+    const auto close_descriptor = [descriptor]() noexcept {
         static_cast<void>(::close(descriptor));
     };
     struct stat status {};
@@ -1717,7 +1717,8 @@ inline void validate_runtime_closure(
 
     std::set<std::filesystem::path> allowed_external_directories;
     const auto allow_ancestors =
-        [&](std::filesystem::path directory) {
+        [&allowed_external_directories,
+         &canonical_root](std::filesystem::path directory) {
             while (directory != canonical_root) {
                 if (!path_is_within(canonical_root, directory)
                     || directory.empty()
@@ -1759,7 +1760,7 @@ inline void validate_runtime_closure(
         }
         const auto root = std::ranges::find_if(
             roots,
-            [&](const runtime_root_metadata& candidate) {
+            [&path](const runtime_root_metadata& candidate) {
                 return candidate.staged_directory == path;
             });
         if (root != roots.end()) {
