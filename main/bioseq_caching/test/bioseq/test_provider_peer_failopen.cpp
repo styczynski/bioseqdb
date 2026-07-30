@@ -102,6 +102,12 @@ TEST_CASE(
         CHECK(
             bioseq::cache_test::integer(
                 connection,
+                "SELECT bioseq.len("
+                "'ACGT'::bioseq.seq('dna4', 8))")
+            == 4);
+        CHECK(
+            bioseq::cache_test::integer(
+                connection,
                 "SELECT count(*) FROM pg_extension "
                 "WHERE extname = 'bioseq_cache'")
             == 0);

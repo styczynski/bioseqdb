@@ -120,6 +120,8 @@ extern "C" {
 
 PG_MODULE_MAGIC;
 
+PGDLLEXPORT void _PG_init();
+
 void _PG_init() {
     const char* const mode = startup_mode();
     if (mode == nullptr) {
