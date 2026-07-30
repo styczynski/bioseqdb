@@ -47,7 +47,7 @@ constexpr std::string_view late_fetch_text_source_query{
 constexpr std::string_view late_fetch_text_consumer_query{
     "SELECT row_id "
     "FROM cache_provider_rows "
-    "WHERE payload IN ('first match', 'second match') "
+    "WHERE payload = 'first match' OR payload = 'second match' "
     "ORDER BY row_id"};
 
 void create_provider_fixture(bioseq::libpq::connection& connection) {
@@ -228,7 +228,16 @@ TEST_CASE("provider status outcomes fail open without committing partial rows",
         const auto declined = connection.exec(provider_query, 30s);
         CHECK(bioseq::postgres_test::exact_row_hash(declined)
               == oracle_digest);
-        CHECK(bioseq::cache_test::read_cache_stats(connection).fallbacks
+        const auto stats =
+            bioseq::cache_test::read_cache_stats(connection);
+        CHECK(stats.produced == 1);
+        CHECK(stats.completed_hits == 0);
+        CHECK(stats.reuse_hits == 0);
+        CHECK(stats.fallbacks == 0);
+        CHECK(bioseq::cache_test::integer(
+                  connection,
+                  "SELECT (bioseq_cache_test.provider_stats()"
+                  "->>'map_source')::bigint")
               >= 1);
         require_provider_references_drained(connection);
         bioseq::cache_test::exec(

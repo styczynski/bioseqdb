@@ -307,7 +307,7 @@ void require_structured_reusable_explain(
                    OR jsonb_typeof(
                        cache_node->'Reusable Sources') <> 'number'
                    OR (
-                       cache_node->>'Reusable Sources')::bigint <> 0
+                       cache_node->>'Reusable Sources')::bigint <> 1
                    OR jsonb_typeof(
                        cache_node->'Selected Cache Branches')
                        <> 'number'

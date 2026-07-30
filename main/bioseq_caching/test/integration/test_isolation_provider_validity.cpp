@@ -181,6 +181,17 @@ void run_validity_permutation(validity_change change) {
         bioseq::cache_test::exec(
             connection,
             "SELECT bioseq_cache_test.provider_shutdown()");
+        const auto replanned = bioseq::postgres_test::run_explain(
+            connection, "EXECUTE cache_provider_validity", false, 30s);
+        CHECK(replanned
+                  .find_plan_nodes(
+                      "Custom Plan Provider",
+                      "BioseqCacheGenericTestProvider")
+                  .empty());
+        CHECK(replanned
+                  .find_plan_nodes(
+                      "Cache Entry Kind", "ReusableCoverage")
+                  .empty());
     }
 
     const auto retained_child =
@@ -197,10 +208,15 @@ void run_validity_permutation(validity_change change) {
         "CROSS JOIN bioseq_cache.stats() AS cache_stats");
     REQUIRE(counters.rows() == 1);
     REQUIRE(counters.columns() == 4);
-    CHECK(counters.value(0, 0) == "4");
     CHECK(counters.value(0, 1) == "0");
     CHECK(counters.value(0, 2) == "0");
-    CHECK(counters.value(0, 3) == "1");
+    if (change == validity_change::runtime_digest_mismatch) {
+        CHECK(counters.value(0, 0) == "4");
+        CHECK(counters.value(0, 3) == "1");
+    } else {
+        CHECK(counters.value(0, 0) == "0");
+        CHECK(counters.value(0, 3) == "0");
+    }
     require_references_drained(connection);
 
     if (change == validity_change::runtime_digest_mismatch) {
