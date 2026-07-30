@@ -89,6 +89,20 @@ INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 RUN_ID_RE = re.compile(r"^(?P<timestamp>\d{8}T\d{6}Z)-(?P<revision>[0-9a-f]{12})$")
+PACKAGE_UNIT_RE = re.compile(r"^bioseq-package-[A-Za-z0-9_.@-]+\.service$")
+PACKAGE_CONTAINER_NAME_RE = re.compile(
+    r"^/?bioseq-(?:arm64|x64)-pg[0-9]+-"
+    r"(?:opensuse_16\.0|fedora_44|debian_13|ubuntu_26\.04|arch)-"
+    r"(?:build|rpm-build|deb-repository|rpm-repository|pacman-repository|"
+    r"repository|validation|smoke)$"
+)
+FINALIZE_ALLOWED_COMMITTED_DELTAS = frozenset(
+    {
+        "main/infra/package_builder.py",
+        "main/infra/tests/test_package_builder.py",
+    }
+)
+FINALIZE_ALLOWED_COMMITTED_PREFIXES = ("main/DOCS/",)
 ACTIVE_CHILDREN: set[subprocess.Popen[str]] = set()
 ACTIVE_CHILDREN_LOCK = threading.RLock()
 
@@ -1211,13 +1225,6 @@ def create_cached_ami(
 ) -> dict[str, Any]:
     """Create a no-reboot image from a quiescent, still-running builder."""
 
-    require_quiescent_remote_worker(
-        builder,
-        key_path,
-        unit_name,
-        worker_argv,
-        allow_not_found=allow_not_found,
-    )
     record = describe_builder(region, builder, architecture)
     if instance_state(record) != "running":
         raise PackageBuilderError(
@@ -1225,6 +1232,15 @@ def create_cached_ami(
             f"{instance_state(record)!r}"
         )
     ssh_run(builder, key_path, "sync")
+    # This is intentionally the last remote operation before CreateImage.  The
+    # earlier joint preflight protects the pair; this closes the per-image gap.
+    require_quiescent_remote_worker(
+        builder,
+        key_path,
+        unit_name,
+        worker_argv,
+        allow_not_found=allow_not_found,
+    )
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     name = (
         f"bioseq-package-builder-{architecture.name}-schema{BOOTSTRAP_SCHEMA}-"
@@ -1336,6 +1352,67 @@ def commit_id() -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise PackageBuilderError("could not resolve a full committed Git HEAD")
     return value
+
+
+def require_committed_build_input_equivalence(
+    recovered_revision: str,
+    current_revision: str | None = None,
+) -> tuple[str, ...]:
+    """Reject every committed delta except reviewed recovery-only paths."""
+
+    current = commit_id() if current_revision is None else current_revision
+    for label, value in (
+        ("recovered", recovered_revision),
+        ("current", current),
+    ):
+        if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            raise PackageBuilderError(
+                f"{label} build-input revision must be a full lower-case Git SHA-1"
+            )
+    if recovered_revision == current:
+        return ()
+    result = run_command(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            recovered_revision,
+            current,
+            "--",
+        ],
+        cwd=REPO_ROOT,
+        capture=True,
+    )
+    if result.stdout and not result.stdout.endswith("\0"):
+        raise PackageBuilderError("committed build-input diff returned malformed paths")
+    paths = tuple(sorted(set(filter(None, result.stdout.split("\0")))))
+    for path in paths:
+        if (
+            path.startswith("/")
+            or path.startswith("../")
+            or "/../" in path
+            or any(ord(character) < 32 for character in path)
+        ):
+            raise PackageBuilderError(
+                f"committed build-input diff returned unsafe path {path!r}"
+            )
+    rejected = tuple(
+        path
+        for path in paths
+        if path not in FINALIZE_ALLOWED_COMMITTED_DELTAS
+        and not any(
+            path.startswith(prefix)
+            for prefix in FINALIZE_ALLOWED_COMMITTED_PREFIXES
+        )
+    )
+    if rejected:
+        raise PackageBuilderError(
+            "completed run is not equivalent to current committed build inputs; "
+            f"changed build-affecting paths: {list(rejected)}"
+        )
+    return paths
 
 
 def committed_poetry_lock_sha256(revision: str) -> str:
@@ -1686,6 +1763,207 @@ def require_exact_worker_absent(
         )
 
 
+def package_worker_processes(builder: Builder, key_path: Path) -> tuple[int, ...]:
+    """Return every process running a script named build_packages.py."""
+
+    scanner = """import json
+import pathlib
+
+found = []
+for process in pathlib.Path("/proc").glob("[0-9]*"):
+    try:
+        raw = process.joinpath("cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    argv = [value.decode("utf-8", "replace") for value in raw.rstrip(b"\\0").split(b"\\0")]
+    if any(value.rsplit("/", 1)[-1] == "build_packages.py" for value in argv):
+        found.append(int(process.name))
+print(json.dumps(sorted(found)))
+"""
+    result = ssh_run(
+        builder,
+        key_path,
+        command_text(["sudo", "python3", "-c", scanner]),
+        capture=True,
+    )
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise PackageBuilderError(
+            f"{builder.architecture} package-worker process probe returned invalid JSON"
+        ) from error
+    if (
+        not isinstance(raw, list)
+        or any(
+            not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+            for pid in raw
+        )
+        or raw != sorted(set(raw))
+    ):
+        raise PackageBuilderError(
+            f"{builder.architecture} package-worker process probe returned malformed PIDs"
+        )
+    return tuple(raw)
+
+
+def active_package_units(builder: Builder, key_path: Path) -> tuple[str, ...]:
+    """Return every non-quiescent package-worker transient systemd unit."""
+
+    result = ssh_run(
+        builder,
+        key_path,
+        command_text(
+            [
+                "sudo",
+                "systemctl",
+                "list-units",
+                "bioseq-package-*.service",
+                "--type=service",
+                "--all",
+                "--no-pager",
+                "--output=json",
+            ]
+        ),
+        capture=True,
+    )
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise PackageBuilderError(
+            f"{builder.architecture} package-unit probe returned invalid JSON"
+        ) from error
+    if not isinstance(raw, list):
+        raise PackageBuilderError(
+            f"{builder.architecture} package-unit probe returned malformed rows"
+        )
+    active: list[str] = []
+    for row in raw:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("unit"), str)
+            or PACKAGE_UNIT_RE.fullmatch(row["unit"]) is None
+            or not isinstance(row.get("load"), str)
+            or not isinstance(row.get("active"), str)
+            or not isinstance(row.get("sub"), str)
+        ):
+            raise PackageBuilderError(
+                f"{builder.architecture} package-unit probe returned malformed row {row}"
+            )
+        state = row["active"]
+        if state in {"inactive", "failed"}:
+            continue
+        if state not in {
+            "active",
+            "activating",
+            "deactivating",
+            "reloading",
+            "refreshing",
+            "maintenance",
+        }:
+            raise PackageBuilderError(
+                f"{builder.architecture} package-unit probe returned unknown state "
+                f"{state!r} for {row['unit']}"
+            )
+        active.append(row["unit"])
+    return tuple(sorted(set(active)))
+
+
+def running_package_containers(
+    builder: Builder, key_path: Path
+) -> tuple[str, ...]:
+    """Return active containers matching package names and reviewed bind mounts."""
+
+    probe = """set -Eeuo pipefail
+ids=$(sudo docker ps --filter status=running --no-trunc --quiet)
+if [[ -z $ids ]]; then
+  printf '[]\n'
+else
+  readarray -t container_ids <<< "$ids"
+  sudo docker inspect --type container "${container_ids[@]}"
+fi
+"""
+    result = ssh_run(
+        builder,
+        key_path,
+        f"bash -lc {shlex.quote(probe)}",
+        capture=True,
+    )
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise PackageBuilderError(
+            f"{builder.architecture} package-container probe returned invalid JSON"
+        ) from error
+    if not isinstance(raw, list):
+        raise PackageBuilderError(
+            f"{builder.architecture} package-container probe returned malformed rows"
+        )
+    active: list[str] = []
+    seen_ids: set[str] = set()
+    reviewed_destinations = {
+        "/source",
+        "/work",
+        "/repo",
+        "/root/rpmbuild",
+        "/opt/bioseq-package-toolchain",
+        "/opt/bioseq-package-cmake-cache",
+    }
+    for row in raw:
+        if (
+            not isinstance(row, dict)
+            or re.fullmatch(r"[0-9a-f]{12,64}", str(row.get("Id", ""))) is None
+            or not isinstance(row.get("Name"), str)
+            or not isinstance(row.get("State"), dict)
+            or not isinstance(row["State"].get("Running"), bool)
+            or not isinstance(row.get("Mounts"), list)
+        ):
+            raise PackageBuilderError(
+                f"{builder.architecture} package-container probe returned malformed row"
+            )
+        container_id = str(row["Id"])
+        if container_id in seen_ids:
+            raise PackageBuilderError(
+                f"{builder.architecture} package-container probe returned duplicate ID"
+            )
+        seen_ids.add(container_id)
+        if not row["State"]["Running"]:
+            continue
+        reviewed_mount = False
+        for mount in row["Mounts"]:
+            if (
+                not isinstance(mount, dict)
+                or not isinstance(mount.get("Type"), str)
+                or not isinstance(mount.get("Source"), str)
+                or not isinstance(mount.get("Destination"), str)
+            ):
+                raise PackageBuilderError(
+                    f"{builder.architecture} package-container probe returned "
+                    "malformed mount"
+                )
+            source = mount["Source"]
+            destination = mount["Destination"]
+            source_is_package_workspace = (
+                source.startswith(f"{REMOTE_WORKSPACE}/source-")
+                or source.startswith(f"{REMOTE_ROOT}/")
+                or source.startswith(f"{REMOTE_WORKSPACE}/caches/package-")
+            )
+            if (
+                mount["Type"] == "bind"
+                and source_is_package_workspace
+                and destination in reviewed_destinations
+            ):
+                reviewed_mount = True
+        reviewed_name = PACKAGE_CONTAINER_NAME_RE.fullmatch(row["Name"]) is not None
+        if reviewed_name != reviewed_mount:
+            raise PackageBuilderError(
+                f"{builder.architecture} running container has inconsistent package "
+                f"identity: {row['Name']!r}"
+            )
+        if reviewed_name:
+            active.append(f"{container_id}:{row['Name'].removeprefix('/')}")
+    return tuple(sorted(active))
+
+
 def successful_terminal_unit_status(
     status: dict[str, str], *, allow_not_found: bool
 ) -> bool:
@@ -1725,7 +2003,25 @@ def require_quiescent_remote_worker(
     *,
     allow_not_found: bool,
 ) -> dict[str, str]:
-    require_exact_worker_absent(builder, key_path, worker_argv)
+    del worker_argv
+    processes = package_worker_processes(builder, key_path)
+    if processes:
+        raise PackageBuilderError(
+            f"{builder.architecture} package workers are still running: "
+            f"PIDs {list(processes)}"
+        )
+    units = active_package_units(builder, key_path)
+    if units:
+        raise PackageBuilderError(
+            f"{builder.architecture} package systemd units are still active: "
+            f"{list(units)}"
+        )
+    containers = running_package_containers(builder, key_path)
+    if containers:
+        raise PackageBuilderError(
+            f"{builder.architecture} package Docker containers are still running: "
+            f"{list(containers)}"
+        )
     return require_successful_remote_unit(
         builder,
         key_path,
@@ -2936,6 +3232,8 @@ def finalize_completed_run(
         raise PackageBuilderError(
             "completed manifest revision does not match the requested run ID"
         )
+    finalizer_revision = commit_id()
+    require_committed_build_input_equivalence(revision, finalizer_revision)
     if len(locks) != 1:
         raise PackageBuilderError("completed manifests disagree on Poetry lock hash")
     lock_sha256 = locks.pop()
@@ -2975,6 +3273,7 @@ def finalize_completed_run(
         "run_id": args.run_id,
         "revision": revision,
         "source_revision": revision,
+        "finalizer_revision": finalizer_revision,
         "poetry_lock_sha256": lock_sha256,
         "worker_generation": WORKER_GENERATION,
         "selection": {

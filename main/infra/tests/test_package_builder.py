@@ -770,10 +770,269 @@ class RemoteUnitCompletionTests(unittest.TestCase):
                 )
 
 
+class AmiQuiescenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.builder = package_builder.Builder(
+            "arm64",
+            "i-0aaabbbcccdddeee1",
+            "c7g.xlarge",
+            "arm64",
+            "203.0.113.1",
+            "10.0.0.1",
+            "ami-0123456789abcdef0",
+        )
+        self.key_path = Path("/tmp/key")
+        self.unit_name = "bioseq-package-run-arm64.service"
+        self.worker_argv = (
+            f"{package_builder.REMOTE_POETRY_VENV_ROOT}/{'b' * 64}/bin/python",
+            "/different/source/main/infra/packaging/build_packages.py",
+            "--architecture",
+            "x64",
+        )
+        self.success = {
+            "LoadState": "not-found",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        }
+
+    def test_different_argv_build_packages_process_is_rejected(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "[731]", "")
+        with mock.patch.object(
+            package_builder, "ssh_run", return_value=completed
+        ) as ssh:
+            self.assertEqual(
+                package_builder.package_worker_processes(
+                    self.builder, self.key_path
+                ),
+                (731,),
+            )
+        self.assertIn('== "build_packages.py"', ssh.call_args.args[2])
+        self.assertNotIn(json.dumps(list(self.worker_argv)), ssh.call_args.args[2])
+
+        with mock.patch.object(
+            package_builder, "package_worker_processes", return_value=(731,)
+        ), mock.patch.object(package_builder, "active_package_units") as units:
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "workers are still running"
+            ):
+                package_builder.require_quiescent_remote_worker(
+                    self.builder,
+                    self.key_path,
+                    self.unit_name,
+                    self.worker_argv,
+                    allow_not_found=True,
+                )
+        units.assert_not_called()
+
+    def test_active_package_unit_is_rejected(self) -> None:
+        unit_name = "bioseq-package-other-x64.service"
+        for state in ("active", "activating", "deactivating"):
+            row = {
+                "unit": unit_name,
+                "load": "loaded",
+                "active": state,
+                "sub": "running",
+            }
+            completed = subprocess.CompletedProcess([], 0, json.dumps([row]), "")
+            with self.subTest(state=state), mock.patch.object(
+                package_builder, "ssh_run", return_value=completed
+            ):
+                self.assertEqual(
+                    package_builder.active_package_units(
+                        self.builder, self.key_path
+                    ),
+                    (unit_name,),
+                )
+
+        with mock.patch.object(
+            package_builder, "package_worker_processes", return_value=()
+        ), mock.patch.object(
+            package_builder, "active_package_units", return_value=(unit_name,)
+        ), mock.patch.object(package_builder, "running_package_containers") as containers:
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "units are still active"
+            ):
+                package_builder.require_quiescent_remote_worker(
+                    self.builder,
+                    self.key_path,
+                    self.unit_name,
+                    self.worker_argv,
+                    allow_not_found=True,
+                )
+        containers.assert_not_called()
+
+    def test_running_package_container_is_rejected(self) -> None:
+        container_id = "d" * 64
+        row = {
+            "Id": container_id,
+            "Name": "/bioseq-arm64-pg17-debian_13-build",
+            "State": {"Running": True},
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": (
+                        f"{package_builder.REMOTE_ROOT}/run-arm64/"
+                        "cells/postgresql17/debian_13"
+                    ),
+                    "Destination": "/work",
+                }
+            ],
+        }
+        completed = subprocess.CompletedProcess([], 0, json.dumps([row]), "")
+        with mock.patch.object(package_builder, "ssh_run", return_value=completed):
+            self.assertEqual(
+                package_builder.running_package_containers(
+                    self.builder, self.key_path
+                ),
+                (f"{container_id}:bioseq-arm64-pg17-debian_13-build",),
+            )
+
+        with mock.patch.object(
+            package_builder, "package_worker_processes", return_value=()
+        ), mock.patch.object(
+            package_builder, "active_package_units", return_value=()
+        ), mock.patch.object(
+            package_builder,
+            "running_package_containers",
+            return_value=(f"{container_id}:bioseq-arm64-pg17-debian_13-build",),
+        ), mock.patch.object(package_builder, "require_successful_remote_unit") as unit:
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "containers are still running"
+            ):
+                package_builder.require_quiescent_remote_worker(
+                    self.builder,
+                    self.key_path,
+                    self.unit_name,
+                    self.worker_argv,
+                    allow_not_found=True,
+                )
+        unit.assert_not_called()
+
+    def test_clean_host_and_completed_unit_are_accepted(self) -> None:
+        with mock.patch.object(
+            package_builder, "package_worker_processes", return_value=()
+        ), mock.patch.object(
+            package_builder, "active_package_units", return_value=()
+        ), mock.patch.object(
+            package_builder, "running_package_containers", return_value=()
+        ), mock.patch.object(
+            package_builder,
+            "require_successful_remote_unit",
+            return_value=self.success,
+        ) as unit:
+            result = package_builder.require_quiescent_remote_worker(
+                self.builder,
+                self.key_path,
+                self.unit_name,
+                self.worker_argv,
+                allow_not_found=True,
+            )
+        self.assertEqual(result, self.success)
+        unit.assert_called_once_with(
+            self.builder,
+            self.key_path,
+            self.unit_name,
+            allow_not_found=True,
+        )
+
+    def test_malformed_host_probe_output_is_fail_closed(self) -> None:
+        completed = subprocess.CompletedProcess([], 0, "not-json", "")
+        for probe in (
+            package_builder.package_worker_processes,
+            package_builder.active_package_units,
+            package_builder.running_package_containers,
+        ):
+            with self.subTest(probe=probe.__name__), mock.patch.object(
+                package_builder, "ssh_run", return_value=completed
+            ), self.assertRaisesRegex(package_builder.PackageBuilderError, "invalid JSON"):
+                probe(self.builder, self.key_path)
+
+    def test_host_probe_command_failure_is_fail_closed(self) -> None:
+        failure = subprocess.CalledProcessError(1, ["ssh"], stderr="probe failed")
+        with mock.patch.object(
+            package_builder, "ssh_run", side_effect=failure
+        ), self.assertRaises(subprocess.CalledProcessError):
+            package_builder.package_worker_processes(self.builder, self.key_path)
+
+
+class CommittedInputEquivalenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.recovered = "a" * 40
+        self.current = "b" * 40
+
+    @staticmethod
+    def diff_result(paths: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        output = "".join(f"{path}\0" for path in paths)
+        return subprocess.CompletedProcess([], 0, output, "")
+
+    def test_controller_tests_and_docs_are_the_only_allowed_delta(self) -> None:
+        allowed = (
+            "main/infra/package_builder.py",
+            "main/infra/tests/test_package_builder.py",
+            "main/DOCS/CURRENT/TECH_SPECS/recovery.md",
+        )
+        with mock.patch.object(
+            package_builder, "run_command", return_value=self.diff_result(allowed)
+        ) as run:
+            result = package_builder.require_committed_build_input_equivalence(
+                self.recovered, self.current
+            )
+        self.assertEqual(result, tuple(sorted(allowed)))
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "git",
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                self.recovered,
+                self.current,
+                "--",
+            ],
+        )
+
+    def test_every_packaging_source_matrix_and_infra_delta_is_rejected(self) -> None:
+        rejected = (
+            "main/infra/packaging/bioseq_packaging/pipeline.py",
+            "main/infra/packaging/deb/control.j2",
+            "main/bioseq/sql/sequence.cppm",
+            "main/CMakeLists.txt",
+            "main/infra/package_matrix.json",
+            "main/infra/package_build_infra/main.tf",
+            "main/infra/initialize_package_signing_key.py",
+        )
+        for path in rejected:
+            with self.subTest(path=path), mock.patch.object(
+                package_builder,
+                "run_command",
+                return_value=self.diff_result((path,)),
+            ), self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "build-affecting paths"
+            ):
+                package_builder.require_committed_build_input_equivalence(
+                    self.recovered, self.current
+                )
+
+    def test_malformed_committed_diff_is_fail_closed(self) -> None:
+        malformed = subprocess.CompletedProcess(
+            [], 0, "main/infra/package_builder.py", ""
+        )
+        with mock.patch.object(
+            package_builder, "run_command", return_value=malformed
+        ), self.assertRaisesRegex(package_builder.PackageBuilderError, "malformed"):
+            package_builder.require_committed_build_input_equivalence(
+                self.recovered, self.current
+            )
+
+
 class FinalizeRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.matrix = package_builder.load_matrix()
         self.revision = "a" * 40
+        self.finalizer_revision = "c" * 40
         self.lock_sha256 = "b" * 64
         self.run_id = f"20260730T012519Z-{self.revision[:12]}"
         self.args = argparse.Namespace(
@@ -872,6 +1131,10 @@ class FinalizeRunTests(unittest.TestCase):
         ), mock.patch.object(package_builder, "wait_for_ssh"), mock.patch.object(
             package_builder, "fetch_completed_manifest", side_effect=fetch
         ), mock.patch.object(
+            package_builder, "commit_id", return_value=self.finalizer_revision
+        ), mock.patch.object(
+            package_builder, "require_committed_build_input_equivalence"
+        ) as equivalent, mock.patch.object(
             package_builder,
             "committed_poetry_lock_sha256",
             return_value=self.lock_sha256,
@@ -893,6 +1156,8 @@ class FinalizeRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "success")
+        self.assertEqual(result["finalizer_revision"], self.finalizer_revision)
+        equivalent.assert_called_once_with(self.revision, self.finalizer_revision)
         self.assertTrue(result["finalized_from_completed_manifests"])
         self.assertEqual(validate.call_count, 2)
         verify.assert_called_once()
@@ -920,6 +1185,10 @@ class FinalizeRunTests(unittest.TestCase):
             package_builder, "ssh_key_path", return_value=Path("/tmp/key")
         ), mock.patch.object(package_builder, "wait_for_ssh"), mock.patch.object(
             package_builder, "fetch_completed_manifest", side_effect=fetch
+        ), mock.patch.object(
+            package_builder, "commit_id", return_value=self.finalizer_revision
+        ), mock.patch.object(
+            package_builder, "require_committed_build_input_equivalence"
         ), mock.patch.object(
             package_builder,
             "committed_poetry_lock_sha256",
@@ -955,6 +1224,10 @@ class FinalizeRunTests(unittest.TestCase):
             package_builder, "ssh_key_path", return_value=Path("/tmp/key")
         ), mock.patch.object(package_builder, "wait_for_ssh"), mock.patch.object(
             package_builder, "fetch_completed_manifest", side_effect=fetch
+        ), mock.patch.object(
+            package_builder, "commit_id", return_value=self.finalizer_revision
+        ), mock.patch.object(
+            package_builder, "require_committed_build_input_equivalence"
         ), mock.patch.object(
             package_builder,
             "committed_poetry_lock_sha256",
@@ -1288,14 +1561,35 @@ class AmiCacheTests(unittest.TestCase):
             + "a" * 40
             + "/main/infra/packaging/build_packages.py",
         )
+        events: list[str] = []
+
+        def describe(*_args):
+            events.append("describe")
+            return {"State": {"Name": "running"}}
+
+        def sync(*_args, **_kwargs):
+            events.append("sync")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        def quiescent(*_args, **_kwargs):
+            events.append("quiescent")
+
+        def create_image(*_args):
+            events.append("create-image")
+            return created
+
         with mock.patch.object(
-            package_builder, "require_quiescent_remote_worker"
+            package_builder,
+            "require_quiescent_remote_worker",
+            side_effect=quiescent,
         ) as require_quiescent, mock.patch.object(
             package_builder,
             "describe_builder",
-            return_value={"State": {"Name": "running"}},
-        ), mock.patch.object(package_builder, "ssh_run") as ssh, mock.patch.object(
-            package_builder, "aws_json", return_value=created
+            side_effect=describe,
+        ), mock.patch.object(
+            package_builder, "ssh_run", side_effect=sync
+        ) as ssh, mock.patch.object(
+            package_builder, "aws_json", side_effect=create_image
         ) as aws_json, mock.patch.object(
             package_builder, "aws_no_output", side_effect=capture_tags
         ) as aws_no_output, mock.patch.object(
@@ -1315,6 +1609,7 @@ class AmiCacheTests(unittest.TestCase):
             )
 
         self.assertEqual(image["State"], "available")
+        self.assertEqual(events, ["describe", "sync", "quiescent", "create-image"])
         require_quiescent.assert_called_once_with(
             builder,
             Path("/tmp/key"),
