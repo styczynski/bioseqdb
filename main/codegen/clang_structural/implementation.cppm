@@ -3814,25 +3814,6 @@ struct lexical_module_description {
         .lexically_normal();
 }
 
-[[nodiscard]] std::optional<std::filesystem::path>
-profile_sibling_path(const std::filesystem::path& source) {
-    std::filesystem::path result;
-    bool replaced = false;
-    for (const std::filesystem::path& component : source) {
-        if (component == "production") {
-            result /= "test_indexes";
-            replaced = true;
-        } else if (component == "test_indexes") {
-            result /= "production";
-            replaced = true;
-        } else {
-            result /= component;
-        }
-    }
-    if (!replaced || result == source) return std::nullopt;
-    return result.lexically_normal();
-}
-
 [[nodiscard]] std::optional<std::string_view>
 profile_path_component(const std::filesystem::path& source) {
     std::optional<std::string_view> result;
@@ -3842,6 +3823,8 @@ profile_path_component(const std::filesystem::path& source) {
             profile = "production";
         } else if (component == "test_indexes") {
             profile = "test_indexes";
+        } else if (component == "test_support") {
+            profile = "test_support";
         } else {
             continue;
         }
@@ -3861,13 +3844,41 @@ profile_path_component(const std::filesystem::path& source) {
     std::filesystem::path result;
     for (const std::filesystem::path& component : source) {
         if (component == "production"
-            || component == "test_indexes") {
+            || component == "test_indexes"
+            || component == "test_support") {
             result /= compiler_profile;
         } else {
             result /= component;
         }
     }
     return result.lexically_normal();
+}
+
+[[nodiscard]] std::vector<std::filesystem::path>
+profile_alternate_paths(const std::filesystem::path& source) {
+    const std::optional<std::string_view> source_profile =
+        profile_path_component(source);
+    if (!source_profile) return {};
+    std::vector<std::filesystem::path> result;
+    static constexpr std::array profiles{
+        std::string_view{"production"},
+        std::string_view{"test_indexes"},
+        std::string_view{"test_support"},
+    };
+    for (const std::string_view profile :
+         profiles) {
+        if (profile != *source_profile) {
+            result.push_back(path_for_profile(source, profile));
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] bool known_generated_sql_profile_path(
+    const std::filesystem::path& source) {
+    const std::string spelling = source.generic_string();
+    return spelling.contains("/generated/")
+        && spelling.contains("/sql/");
 }
 
 [[nodiscard]] clang::tooling::CompileCommand
@@ -3907,6 +3918,43 @@ retarget_compile_command(
     return false;
 }
 
+[[nodiscard]] bool cache_test_support_definition(
+    const std::vector<std::string>& arguments) {
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        const std::string_view argument = arguments[index];
+        if (argument == "-DBIOSEQ_CACHE_TESTING"
+            || argument == "-DBIOSEQ_CACHE_TESTING=1") {
+            return true;
+        }
+        if (argument == "-D" && index + 1 < arguments.size()
+            && (arguments[index + 1] == "BIOSEQ_CACHE_TESTING"
+                || arguments[index + 1]
+                    == "BIOSEQ_CACHE_TESTING=1")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool command_matches_profile(
+    const std::vector<std::string>& arguments,
+    std::string_view compiler_profile) {
+    const bool test_indexes =
+        test_indexes_definition(arguments);
+    const bool test_support =
+        cache_test_support_definition(arguments);
+    if (compiler_profile == "production") {
+        return !test_indexes && !test_support;
+    }
+    if (compiler_profile == "test_indexes") {
+        return test_indexes && !test_support;
+    }
+    if (compiler_profile == "test_support") {
+        return !test_indexes && test_support;
+    }
+    return false;
+}
+
 [[nodiscard]] bool path_within_root(
     const std::filesystem::path& candidate,
     const std::filesystem::path& root) {
@@ -3933,7 +3981,8 @@ void validate_owned_compile_database(
     std::string_view compiler_profile,
     const std::filesystem::path& pcm_root) {
     if (compiler_profile != "production"
-        && compiler_profile != "test_indexes") {
+        && compiler_profile != "test_indexes"
+        && compiler_profile != "test_support") {
         throw std::runtime_error(
             "owned Clang compile database received an unknown profile");
     }
@@ -3947,8 +3996,8 @@ void validate_owned_compile_database(
                 "owned Clang compile database has no satisfiable command "
                 "for " + source.string());
         }
-        if (test_indexes_definition(selected->CommandLine)
-            != (compiler_profile == "test_indexes")) {
+        if (!command_matches_profile(
+                selected->CommandLine, compiler_profile)) {
             throw std::runtime_error(
                 "owned Clang compile database profile mismatch for "
                 + source.string());
@@ -4005,8 +4054,8 @@ void validate_owned_compile_database(
             score += 10;
         }
     }
-    if (test_indexes_definition(command.CommandLine)
-        == (compiler_profile == "test_indexes")) {
+    if (command_matches_profile(
+            command.CommandLine, compiler_profile)) {
         score += 5;
     }
     for (const std::string& argument : command.CommandLine) {
@@ -4158,7 +4207,9 @@ void validate_owned_compile_database(
         || argument.starts_with("-fdebug-compilation-dir=")
         || argument.starts_with("-x")
         || argument.starts_with("-DBIOSEQ_TEST_INDEXES")
-        || argument.starts_with("-UBIOSEQ_TEST_INDEXES");
+        || argument.starts_with("-UBIOSEQ_TEST_INDEXES")
+        || argument.starts_with("-DBIOSEQ_CACHE_TESTING")
+        || argument.starts_with("-UBIOSEQ_CACHE_TESTING");
 }
 
 [[nodiscard]] std::vector<std::string> normalized_base_arguments(
@@ -4191,8 +4242,10 @@ void validate_owned_compile_database(
         }
         if (argument == "-D" || argument == "-U") {
             if (index + 1 < expanded.size()
-                && expanded[index + 1]
-                    .starts_with("BIOSEQ_TEST_INDEXES")) {
+                && (expanded[index + 1]
+                        .starts_with("BIOSEQ_TEST_INDEXES")
+                    || expanded[index + 1]
+                        .starts_with("BIOSEQ_CACHE_TESTING"))) {
                 ++index;
                 continue;
             }
@@ -4211,6 +4264,8 @@ void validate_owned_compile_database(
     }
     if (compiler_profile == "test_indexes") {
         result.emplace_back("-DBIOSEQ_TEST_INDEXES=1");
+    } else if (compiler_profile == "test_support") {
+        result.emplace_back("-DBIOSEQ_CACHE_TESTING=1");
     }
     const std::string relocation_root_spelling =
         relocation_root.generic_string();
@@ -5652,7 +5707,8 @@ prepare_compilation_environment(
             "Clang preparation requires at least one source");
     }
     if (compiler_profile != "production"
-        && compiler_profile != "test_indexes") {
+        && compiler_profile != "test_indexes"
+        && compiler_profile != "test_support") {
         throw std::runtime_error(
             "Clang preparation received an unknown compiler profile");
     }
@@ -5793,15 +5849,19 @@ prepare_compilation_environment(
         selected_commands;
     std::set<std::filesystem::path> ambiguous_selected_commands;
     for (const auto& [source, command] : raw_commands) {
-        const std::optional<std::filesystem::path> sibling =
-            clang_backend::profile_sibling_path(source);
+        const std::vector<std::filesystem::path> alternates =
+            clang_backend::profile_alternate_paths(source);
         const bool known_sql_profile_path =
-            source.generic_string().contains(
-                "/generated/sql/");
+            clang_backend::known_generated_sql_profile_path(source);
         const bool generated_profile_variant =
-            sibling
-            && (raw_commands.contains(*sibling)
-                || std::filesystem::is_regular_file(*sibling)
+            !alternates.empty()
+            && (std::ranges::any_of(
+                    alternates,
+                    [&](const std::filesystem::path& alternate) {
+                        return raw_commands.contains(alternate)
+                            || std::filesystem::is_regular_file(
+                                alternate);
+                    })
                 || known_sql_profile_path);
         if (!generated_profile_variant) {
             if (std::filesystem::is_regular_file(source)) {
@@ -5883,15 +5943,20 @@ prepare_compilation_environment(
     }
     for (const auto& [source, command] : selected_commands) {
         static_cast<void>(command);
-        const std::optional<std::filesystem::path> sibling =
-            clang_backend::profile_sibling_path(source);
+        const std::vector<std::filesystem::path> alternates =
+            clang_backend::profile_alternate_paths(source);
         const std::optional<std::string_view> source_profile =
             clang_backend::profile_path_component(source);
-        if (sibling && source_profile
-            && (raw_commands.contains(*sibling)
-                || std::filesystem::is_regular_file(*sibling)
-                || source.generic_string().contains(
-                    "/generated/sql/"))
+        if (!alternates.empty() && source_profile
+            && (std::ranges::any_of(
+                    alternates,
+                    [&](const std::filesystem::path& alternate) {
+                        return raw_commands.contains(alternate)
+                            || std::filesystem::is_regular_file(
+                                alternate);
+                    })
+                || clang_backend::known_generated_sql_profile_path(
+                    source))
             && *source_profile != compiler_profile) {
             throw std::runtime_error(
                 "owned Clang provider inventory leaked generated profile '"

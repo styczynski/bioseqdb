@@ -1679,10 +1679,34 @@ inline void run_fmgr_renderer_contract_tests() {
             "bioseq::pg_utils::sql_bytea",
             "bytea",
             false);
+        const auto bytea_result = fmgr_detail::scalar_converter(
+            "bioseq::pg_utils::sql_bytea",
+            "bytea",
+            true);
+        const auto int64_array_result =
+            fmgr_detail::scalar_converter(
+                "bioseq::pg_utils::sql_int64_array",
+                "bigint[]",
+                true);
+        const auto nullable_oid_result =
+            fmgr_detail::scalar_converter(
+                "std::optional<std::uint32_t>",
+                "oid",
+                true);
         const auto nullable_interval_result =
             fmgr_detail::scalar_converter(
                 "std::optional<bioseq::pg_utils::sql_interval>",
                 "interval",
+                true);
+        const auto timestamptz_result =
+            fmgr_detail::scalar_converter(
+                "bioseq::pg_utils::sql_timestamptz",
+                "timestamptz",
+                true);
+        const auto nullable_timestamptz_result =
+            fmgr_detail::scalar_converter(
+                "std::optional<bioseq::pg_utils::sql_timestamptz>",
+                "timestamptz",
                 true);
         const auto tid_argument = fmgr_detail::scalar_converter(
             "bioseq::pg_utils::sql_tid",
@@ -1718,10 +1742,27 @@ inline void run_fmgr_renderer_contract_tests() {
                     == "result.jsonb.owning.nullable"
                 && bytea_argument.key
                     == "argument.bytea.owning"
+                && bytea_result.key
+                    == "result.bytea.owning"
+                && int64_array_result.key
+                    == "result.int64_array.owning"
+                && nullable_oid_result.key
+                    == "result.oid.by_value[oid].nullable"
                 && nullable_interval_result.key
                     == "result.interval.owning.nullable"
+                && timestamptz_result.key
+                    == "result.timestamptz.owning"
+                && nullable_timestamptz_result.key
+                    == "result.timestamptz.owning.nullable"
                 && tid_argument.key
                     == "argument.tid.by_value"
+                && infer_sql_type_from_cpp(
+                    "bioseq::pg_utils::sql_timestamptz")
+                    == "timestamptz"
+                && infer_sql_type_from_cpp(
+                    "std::optional<"
+                    "bioseq::pg_utils::sql_timestamptz>")
+                    == "timestamptz"
                 && infer_sql_type_from_cpp(
                     "bioseq::pg_utils::vector_operand<"
                     "bioseq::sql::pg::character, "
@@ -1758,18 +1799,6 @@ inline void run_fmgr_renderer_contract_tests() {
         require(
             rejected_ambiguous_array,
             "typed array converters reject ambiguous SQL ownership");
-        bool rejected_bytea_result = false;
-        try {
-            static_cast<void>(fmgr_detail::scalar_converter(
-                "bioseq::pg_utils::sql_bytea",
-                "bytea",
-                true));
-        } catch (const std::runtime_error&) {
-            rejected_bytea_result = true;
-        }
-        require(
-            rejected_bytea_result,
-            "input-only BYTEA values reject result ownership");
         require(
             fmgr_detail::expected_vector_associations().size() == 84,
             "closed vector registry has exactly 84 scalar associations");

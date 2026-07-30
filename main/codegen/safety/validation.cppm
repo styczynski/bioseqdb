@@ -510,9 +510,9 @@ inline void validate_bridge_evidence(
     if (site.bridge == bridge_kind::invoke_pg_as_cpp) {
         expected_implementation =
             "bioseq::pg_utils::invoke_pg_as_cpp";
-        expected_module = "bioseq.pg_utils.error_bridge";
+        expected_module = "bioseq.pg_support:error_boundary";
         expected_source_suffix =
-            "/bioseq/backend/pg/pg_utils/error_bridge.cppm";
+            "/main/common/pg_support/error_boundary.cppm";
         expected_region =
             "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp";
         expected_contract_id =
@@ -523,9 +523,9 @@ inline void validate_bridge_evidence(
     } else if (site.bridge == bridge_kind::sql_call_context) {
         expected_implementation =
             "bioseq::pg_utils::invoke_pg_across_transactions_as_cpp";
-        expected_module = "bioseq.pg_utils.error_bridge";
+        expected_module = "bioseq.pg_support:error_boundary";
         expected_source_suffix =
-            "/bioseq/backend/pg/pg_utils/error_bridge.cppm";
+            "/main/common/pg_support/error_boundary.cppm";
         expected_region =
             "bioseq.pg_utils.error_bridge/"
             "invoke_pg_across_transactions_as_cpp";
@@ -579,9 +579,9 @@ inline void validate_bridge_evidence(
         expected_implementation =
             evidence.implementation_qualified_name;
         expected_module =
-            "bioseq.pg_utils.sql_boundary:context";
+            "bioseq.pg_sql_boundary:call_context";
         expected_source_suffix =
-            "/bioseq/backend/pg/pg_utils/sql_boundary/context.cppm";
+            "/main/common/pg_sql_boundary/call_context.cppm";
         expected_region =
             "bioseq.pg_utils.sql_boundary.context/"
             + region->second.second;
@@ -590,9 +590,9 @@ inline void validate_bridge_evidence(
         site.bridge == bridge_kind::generated_boundary_tail) {
         expected_implementation =
             "bioseq::pg_utils::invoke_sql_boundary";
-        expected_module = "bioseq.pg_utils.sql_boundary";
+        expected_module = "bioseq.pg_sql_boundary";
         expected_source_suffix =
-            "/bioseq/backend/pg/pg_utils/sql_boundary/index.cppm";
+            "/main/common/pg_sql_boundary/index.cppm";
         expected_region =
             "bioseq.pg_utils.sql_boundary/rethrow_tail";
     } else {

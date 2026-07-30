@@ -166,6 +166,33 @@ parse_fmgr_entrypoint_output(std::string_view value) {
     };
 }
 
+[[nodiscard]] inline configured_fmgr_owner
+parse_fmgr_owner(std::string_view value) {
+    const configured_entity_handle_output parsed =
+        parse_entity_handle_output(value);
+    const std::string source_module = parsed.path.generic_string();
+    if (source_module.empty()
+        || source_module.front() == '.'
+        || source_module.back() == '.'
+        || source_module.contains("..")
+        || !std::ranges::all_of(
+            source_module,
+            [](char item) {
+                return (item >= 'a' && item <= 'z')
+                    || (item >= 'A' && item <= 'Z')
+                    || (item >= '0' && item <= '9')
+                    || item == '_' || item == '.' || item == ':';
+            })) {
+        throw std::runtime_error(
+            "--fmgr-owner-module has invalid C++ module name '"
+            + source_module + "'");
+    }
+    return {
+        .owner_key = parsed.owner_key,
+        .source_module = source_module,
+    };
+}
+
 [[nodiscard]] inline std::filesystem::path
 normalized_artifact_path(const std::filesystem::path& path) {
     return (path.is_absolute()
@@ -1838,7 +1865,7 @@ load_sealed_guc_profile_projection(
         throw std::runtime_error(
             "usage: bioseq_codegen sql <prepare|generate|update-golden> "
             "(--source <owner.cppm>... | --source-list <path>) "
-            "--profile <production|test_indexes> "
+            "--profile <context-profile> "
             "--pcm-root <owned-dir> --stamp <path>; prepare additionally "
             "requires --authority <support|core|final|safety>, "
             "--raw-compile-database, --clang-binary, "
@@ -1857,7 +1884,9 @@ load_sealed_guc_profile_projection(
             "--guc-active-profile <production|test_indexes>] "
             "[--require-complete-codegen] "
             "[--require-checked-physical-ledger] "
-            "[--extension-schema <name>]; legacy import is isolated as "
+            "[--extension-name <name>] [--extension-schema <name>] "
+            "[--generated-module-prefix <module>] "
+            "[--fmgr-boundary-module <module>]; legacy import is isolated as "
             "sql migrate-baseline --input <legacy.sql> "
             "--migration-owner <owner.cppm> ...");
     }
@@ -1899,7 +1928,8 @@ load_sealed_guc_profile_projection(
             option == "--source"
             || option == "--entity-handles-output"
             || option == "--row-codecs-output"
-            || option == "--fmgr-entrypoints-output";
+            || option == "--fmgr-entrypoints-output"
+            || option == "--fmgr-owner-module";
         if (!repeatable
             && !singleton_options.emplace(option).second) {
             throw std::runtime_error(
@@ -1990,6 +2020,9 @@ load_sealed_guc_profile_projection(
         } else if (option == "--fmgr-entrypoints-output") {
             result.fmgr_entrypoint_outputs.push_back(
                 detail::parse_fmgr_entrypoint_output(value));
+        } else if (option == "--fmgr-owner-module") {
+            result.fmgr_owners.push_back(
+                detail::parse_fmgr_owner(value));
         } else if (option == "--guc-parity-ledger") {
             result.guc_parity_ledger = std::filesystem::path{value};
         } else if (option == "--guc-output-root") {
@@ -2019,8 +2052,14 @@ load_sealed_guc_profile_projection(
             result.expected_core_hash = std::filesystem::path{value};
         } else if (option == "--guc-active-profile") {
             result.guc_active_profile = std::string{value};
+        } else if (option == "--extension-name") {
+            result.extension_name = std::string{value};
         } else if (option == "--extension-schema") {
             result.extension_schema = std::string{value};
+        } else if (option == "--generated-module-prefix") {
+            result.generated_module_prefix = std::string{value};
+        } else if (option == "--fmgr-boundary-module") {
+            result.fmgr_boundary_module = std::string{value};
         } else {
             throw std::runtime_error(
                 "unknown SQL generator option: " + std::string{option});
@@ -2035,6 +2074,7 @@ load_sealed_guc_profile_projection(
             || !result.entity_handle_outputs.empty()
             || !result.row_codec_outputs.empty()
             || !result.fmgr_entrypoint_outputs.empty()
+            || !result.fmgr_owners.empty()
             || !result.physical_ledger.empty()
             || !result.physical_ledger_output.empty()
             || !result.guc_parity_ledger.empty()
@@ -2068,10 +2108,21 @@ load_sealed_guc_profile_projection(
             "--source/--source-list; --input is accepted only by the "
             "explicit migrate-baseline command");
     }
-    if (!migrate_baseline && result.compiler_profile != "production"
-        && result.compiler_profile != "test_indexes") {
+    const auto valid_context_token = [](std::string_view value) {
+        return !value.empty()
+            && value.front() >= 'a' && value.front() <= 'z'
+            && std::ranges::all_of(
+                value.substr(1),
+                [](char item) {
+                    return (item >= 'a' && item <= 'z')
+                        || (item >= '0' && item <= '9')
+                        || item == '_';
+                });
+    };
+    if (!migrate_baseline
+        && !valid_context_token(result.compiler_profile)) {
         throw std::runtime_error(
-            "--profile must be production or test_indexes");
+            "--profile must be a lowercase context profile identifier");
     }
     if (!migrate_baseline) {
         const auto require_sha256 =
@@ -2225,27 +2276,55 @@ load_sealed_guc_profile_projection(
     }
     if (!migrate_baseline
         && result.stage == generation_stage::final
-        && (result.output.empty() || result.manifest.empty()
-            || result.support_manifest.empty()
-            || result.support_seal.empty()
-            || result.production_support_manifest.empty()
-            || result.production_support_seal.empty()
-            || result.test_indexes_support_manifest.empty()
-            || result.test_indexes_support_seal.empty()
-            || result.expected_core_hash.empty()
-            || result.core_manifest.empty()
-            || result.entity_handle_outputs.empty()
-            || result.row_codec_outputs.empty()
-            || result.fmgr_entrypoint_outputs.empty()
-            || result.guc_parity_ledger.empty()
-            || result.guc_output_root.empty())) {
+        && (result.output.empty() || result.manifest.empty())) {
         throw std::runtime_error(
-            "final generation requires --output, --manifest, "
-            "--support-manifest, --support-seal, "
-            "both explicit profile SUPPORT manifests/seals, "
-            "--expected-core-hash, --core-manifest, "
-            "entity-handle verification inputs, row-codec and fmgr "
-            "outputs, and GUC configuration");
+            "final generation requires --output and --manifest; "
+            "CORE, SUPPORT, row-codec, GUC, and fmgr artifacts are "
+            "required only when selected by registered owners");
+    }
+    if (!migrate_baseline
+        && result.stage == generation_stage::final) {
+        const bool any_core =
+            !result.expected_core_hash.empty()
+            || !result.core_manifest.empty()
+            || !result.entity_handle_outputs.empty();
+        const bool complete_core =
+            !result.expected_core_hash.empty()
+            && !result.core_manifest.empty()
+            && !result.entity_handle_outputs.empty();
+        if (any_core != complete_core) {
+            throw std::runtime_error(
+                "FINAL CORE handoff requires expected seal, manifest, and "
+                "entity-handle outputs together");
+        }
+        if (result.support_manifest.empty()
+            != result.support_seal.empty()) {
+            throw std::runtime_error(
+                "FINAL active SUPPORT manifest and seal must be supplied "
+                "together");
+        }
+        const bool any_profile_support =
+            !result.production_support_manifest.empty()
+            || !result.production_support_seal.empty()
+            || !result.test_indexes_support_manifest.empty()
+            || !result.test_indexes_support_seal.empty();
+        const bool complete_profile_support =
+            !result.production_support_manifest.empty()
+            && !result.production_support_seal.empty()
+            && !result.test_indexes_support_manifest.empty()
+            && !result.test_indexes_support_seal.empty();
+        if (any_profile_support != complete_profile_support) {
+            throw std::runtime_error(
+                "FINAL cross-profile SUPPORT handoff requires both "
+                "production and test_indexes manifest/seal pairs");
+        }
+        if (!result.guc_parity_ledger.empty()
+            && (result.support_manifest.empty()
+                || !complete_profile_support)) {
+            throw std::runtime_error(
+                "FINAL GUC generation requires active and cross-profile "
+                "SUPPORT handoffs");
+        }
     }
     if (!migrate_baseline
         && result.stage == generation_stage::support
@@ -2367,7 +2446,8 @@ load_sealed_guc_profile_projection(
         command_line command = parse_command_line(args);
         if (command.mode == authority_mode::legacy_baseline) {
             const std::string source = read_file(command.input);
-            install_script script = parse_install_script(source);
+            install_script script = parse_install_script(
+                source, command.extension_name);
             validate_install_script(script);
             const std::string rendered =
                 render_install_script(script);
@@ -2515,7 +2595,10 @@ load_sealed_guc_profile_projection(
             active_gucs.emplace(collect_guc_inventory(
                 program, command.guc_parity_ledger, profile));
             active_guc_package.emplace(
-                render_guc_package(*active_gucs));
+                render_guc_package(
+                    *active_gucs,
+                    command.generated_module_prefix,
+                    command.fmgr_boundary_module));
             detail::validate_artifact_path_aliases(
                 command,
                 detail::guc_derived_outputs(
@@ -2526,7 +2609,11 @@ load_sealed_guc_profile_projection(
         const std::string clang_version =
             program.module_graph.clang_version;
         sql_graph graph = build_sql_graph(
-            std::move(program), command.extension_schema);
+            std::move(program),
+            command.extension_schema,
+            command.extension_name,
+            command.generated_module_prefix,
+            command.fmgr_boundary_module);
 
         if (command.stage == generation_stage::support) {
             if (!active_guc_package) {
@@ -2573,9 +2660,13 @@ load_sealed_guc_profile_projection(
             return 0;
         }
 
-        const std::vector<rendered_entity_handle_module>
+        std::vector<rendered_entity_handle_module>
+            entity_handle_modules;
+        if (command.stage == generation_stage::core
+            || !command.expected_core_hash.empty()) {
             entity_handle_modules =
                 render_entity_handle_modules(graph);
+        }
         const std::string core_hash =
             detail::core_descriptor_hash(entity_handle_modules);
         if (command.stage == generation_stage::core) {
@@ -2612,20 +2703,22 @@ load_sealed_guc_profile_projection(
             return 0;
         }
 
-        detail::verify_core_artifacts(
-            command,
-            clang_version,
-            entity_handle_modules);
-        if (!active_gucs || !active_guc_package) {
-            throw std::runtime_error(
-                "FINAL generation has no active GUC inventory");
+        if (!command.expected_core_hash.empty()) {
+            detail::verify_core_artifacts(
+                command,
+                clang_version,
+                entity_handle_modules);
         }
-        const std::vector<rendered_row_codec_module>
+        std::vector<rendered_row_codec_module>
+            row_codec_modules;
+        if (!command.row_codec_outputs.empty()) {
             row_codec_modules =
                 render_row_codec_modules(graph);
+        }
         const std::vector<rendered_fmgr_entrypoint_module>
             fmgr_entrypoint_modules =
-                render_fmgr_entrypoint_modules(graph);
+                render_fmgr_entrypoint_modules(
+                    graph, command.fmgr_owners);
         std::vector<rendered_fmgr_entrypoint_module>
             vector_registry_modules;
         for (const rendered_fmgr_entrypoint_module& module :
@@ -2635,49 +2728,55 @@ load_sealed_guc_profile_projection(
                 vector_registry_modules.push_back(module);
             }
         }
-        detail::verify_row_codec_modules(
-            command, row_codec_modules);
-        detail::verify_guc_package(
-            command, *active_guc_package);
-        detail::verify_support_fmgr_entrypoint_modules(
-            command, vector_registry_modules);
-        detail::verify_support_manifest(
-            command,
-            clang_version,
-            row_codec_modules,
-            *active_gucs,
-            *active_guc_package,
-            vector_registry_modules);
-        const guc_profile_projection production_guc_projection =
-            detail::load_sealed_guc_profile_projection(
-                command.production_support_manifest,
-                command.production_support_seal,
-                command.guc_output_root,
-                guc_profile::production,
-                clang_version);
-        const guc_profile_projection test_indexes_guc_projection =
-            detail::load_sealed_guc_profile_projection(
-                command.test_indexes_support_manifest,
-                command.test_indexes_support_seal,
-                command.guc_output_root,
-                guc_profile::test_indexes,
-                clang_version);
-        const guc_profile_projection active_guc_projection =
-            make_guc_profile_projection(
-                *active_gucs, *active_guc_package);
-        if (active_guc_projection
-            != (active_guc_projection.profile
-                        == guc_profile::production
-                    ? production_guc_projection
-                    : test_indexes_guc_projection)) {
-            throw std::runtime_error(
-                "active FINAL GUC projection differs from its sealed "
-                "SUPPORT handoff");
+        if (!command.row_codec_outputs.empty()) {
+            detail::verify_row_codec_modules(
+                command, row_codec_modules);
         }
-        const guc_profile_delta_evidence guc_delta_evidence =
-            make_guc_profile_delta_evidence(
+        std::optional<guc_profile_delta_evidence>
+            guc_delta_evidence;
+        if (active_gucs && active_guc_package) {
+            detail::verify_guc_package(
+                command, *active_guc_package);
+            detail::verify_support_fmgr_entrypoint_modules(
+                command, vector_registry_modules);
+            detail::verify_support_manifest(
+                command,
+                clang_version,
+                row_codec_modules,
+                *active_gucs,
+                *active_guc_package,
+                vector_registry_modules);
+            const guc_profile_projection production_guc_projection =
+                detail::load_sealed_guc_profile_projection(
+                    command.production_support_manifest,
+                    command.production_support_seal,
+                    command.guc_output_root,
+                    guc_profile::production,
+                    clang_version);
+            const guc_profile_projection test_indexes_guc_projection =
+                detail::load_sealed_guc_profile_projection(
+                    command.test_indexes_support_manifest,
+                    command.test_indexes_support_seal,
+                    command.guc_output_root,
+                    guc_profile::test_indexes,
+                    clang_version);
+            const guc_profile_projection active_guc_projection =
+                make_guc_profile_projection(
+                    *active_gucs, *active_guc_package);
+            if (active_guc_projection
+                != (active_guc_projection.profile
+                            == guc_profile::production
+                        ? production_guc_projection
+                        : test_indexes_guc_projection)) {
+                throw std::runtime_error(
+                    "active FINAL GUC projection differs from its sealed "
+                    "SUPPORT handoff");
+            }
+            guc_delta_evidence.emplace(
+                make_guc_profile_delta_evidence(
                 production_guc_projection,
-                test_indexes_guc_projection);
+                test_indexes_guc_projection));
+        }
 
         physical_ledger_material ledger_material =
             make_physical_ledger_material({});
@@ -2698,16 +2797,18 @@ load_sealed_guc_profile_projection(
             graph,
             artifact,
             fmgr_entrypoint_modules,
-            true);
-        manifest = merge_guc_manifest(
-            manifest,
-            *active_gucs,
-            *active_guc_package,
-            nullptr,
-            nullptr,
-            nullptr,
-            nullptr,
-            &guc_delta_evidence);
+            command.extension_name == "bioseq");
+        if (active_gucs && active_guc_package) {
+            manifest = merge_guc_manifest(
+                manifest,
+                *active_gucs,
+                *active_guc_package,
+                nullptr,
+                nullptr,
+                nullptr,
+                nullptr,
+                &*guc_delta_evidence);
+        }
         detail::publish_fmgr_entrypoint_modules(
             command, fmgr_entrypoint_modules, false);
         if (!command.physical_ledger_output.empty()) {
@@ -2729,29 +2830,51 @@ load_sealed_guc_profile_projection(
             "clang_version=" + clang_version
             + "\ncompilation_signature=" + compilation_signature
             + "\nrelocatable_prepare_signature="
-            + prepared_validation.relocatable_compilation_signature
-            + "\nsupport_manifest_sha256="
-            + sha256_hex(read_file(command.support_manifest))
-            + "\nsupport_seal_sha256="
-            + sha256_hex(read_file(command.support_seal))
-            + "\nproduction_support_manifest_sha256="
-            + sha256_hex(
-                read_file(command.production_support_manifest))
-            + "\nproduction_support_seal_sha256="
-            + sha256_hex(
-                read_file(command.production_support_seal))
-            + "\ntest_indexes_support_manifest_sha256="
-            + sha256_hex(
-                read_file(command.test_indexes_support_manifest))
-            + "\ntest_indexes_support_seal_sha256="
-            + sha256_hex(
-                read_file(command.test_indexes_support_seal))
-            + "\ncore_manifest_sha256="
-            + sha256_hex(read_file(command.core_manifest))
-            + "\ncore_seal_sha256="
-            + sha256_hex(read_file(command.expected_core_hash))
-            + "\nphysical_ledger_sha256="
+            + prepared_validation.relocatable_compilation_signature;
+        if (command.extension_name != "bioseq"
+            || command.generated_module_prefix
+                != "bioseq.sql.generated"
+            || command.fmgr_boundary_module
+                != "bioseq.pg_utils.sql_boundary") {
+            publication_material +=
+                "\nextension_name=" + command.extension_name
+                + "\nextension_schema=" + command.extension_schema
+                + "\ngenerated_module_prefix="
+                + command.generated_module_prefix
+                + "\nfmgr_boundary_module="
+                + command.fmgr_boundary_module;
+        }
+        publication_material +=
+            "\nphysical_ledger_sha256="
             + ledger_material.sha256 + "\n";
+        const auto append_artifact_hash =
+            [&publication_material](
+                std::string_view label,
+                const std::filesystem::path& path) {
+                if (path.empty()) return;
+                publication_material += std::string{label} + "="
+                    + sha256_hex(read_file(path)) + "\n";
+            };
+        append_artifact_hash(
+            "support_manifest_sha256", command.support_manifest);
+        append_artifact_hash(
+            "support_seal_sha256", command.support_seal);
+        append_artifact_hash(
+            "production_support_manifest_sha256",
+            command.production_support_manifest);
+        append_artifact_hash(
+            "production_support_seal_sha256",
+            command.production_support_seal);
+        append_artifact_hash(
+            "test_indexes_support_manifest_sha256",
+            command.test_indexes_support_manifest);
+        append_artifact_hash(
+            "test_indexes_support_seal_sha256",
+            command.test_indexes_support_seal);
+        append_artifact_hash(
+            "core_manifest_sha256", command.core_manifest);
+        append_artifact_hash(
+            "core_seal_sha256", command.expected_core_hash);
         for (const std::string& seal : fmgr_seals) {
             publication_material +=
                 "fmgr=" + seal + "\n";

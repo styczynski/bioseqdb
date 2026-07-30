@@ -845,7 +845,7 @@ inline void validate_bridge_transition(
     if (call.bridge_transition == bridge_kind::invoke_pg_as_cpp) {
         expected_implementation =
             "bioseq::pg_utils::invoke_pg_as_cpp";
-        expected_module = "bioseq.pg_utils.error_bridge";
+        expected_module = "bioseq.pg_support:error_boundary";
         expected_region =
             "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp";
         expected_contract_id =
@@ -857,7 +857,7 @@ inline void validate_bridge_transition(
         call.bridge_transition == bridge_kind::sql_call_context) {
         expected_implementation =
             "bioseq::pg_utils::invoke_pg_across_transactions_as_cpp";
-        expected_module = "bioseq.pg_utils.error_bridge";
+        expected_module = "bioseq.pg_support:error_boundary";
         expected_region =
             "bioseq.pg_utils.error_bridge/"
             "invoke_pg_across_transactions_as_cpp";
@@ -886,7 +886,7 @@ inline void validate_bridge_transition(
         expected_implementation =
             evidence.implementation_qualified_name;
         expected_module =
-            "bioseq.pg_utils.sql_boundary:context";
+            "bioseq.pg_sql_boundary:call_context";
         expected_region =
             "bioseq.pg_utils.sql_boundary.context/"
             + std::string{expected_implementation.substr(
@@ -896,7 +896,7 @@ inline void validate_bridge_transition(
         == bridge_kind::generated_boundary_tail) {
         expected_implementation =
             "bioseq::pg_utils::invoke_sql_boundary";
-        expected_module = "bioseq.pg_utils.sql_boundary";
+        expected_module = "bioseq.pg_sql_boundary";
         expected_region =
             "bioseq.pg_utils.sql_boundary/rethrow_tail";
     } else {
@@ -1983,7 +1983,7 @@ converter_families(const safety_manifest_overload& overload) {
     for (const function_flow* step : site.path) {
         const std::string_view name = step->qualified_name;
         if (step->module_name
-                == "bioseq.pg_utils.sql_boundary:context"
+                == "bioseq.pg_sql_boundary:call_context"
             && (name
                     == "bioseq::pg_utils::scoped_spi_session::connect"
                 || name

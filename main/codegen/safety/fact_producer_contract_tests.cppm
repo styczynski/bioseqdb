@@ -288,13 +288,13 @@ inline void run_bridge_proof_contracts() {
     bridge_fixture fixture = make_bridge_fixture();
     const std::filesystem::path context_path = module_path(
         fixture,
-        "bioseq/backend/pg/pg_utils/sql_boundary/context.cppm");
+        "main/common/pg_sql_boundary/call_context.cppm");
     const std::filesystem::path error_bridge_path = module_path(
         fixture,
-        "bioseq/backend/pg/pg_utils/error_bridge.cppm");
+        "main/common/pg_support/error_boundary.cppm");
     const std::filesystem::path boundary_path = module_path(
         fixture,
-        "bioseq/backend/pg/pg_utils/sql_boundary/index.cppm");
+        "main/common/pg_sql_boundary/index.cppm");
     const auto scan = [&](
         const std::filesystem::path& path,
         std::string_view source,
@@ -310,7 +310,7 @@ inline void run_bridge_proof_contracts() {
     static constexpr std::string_view subtransaction_positive =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary:context;
+export module bioseq.pg_sql_boundary:call_context;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -340,7 +340,7 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_decoy =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary:context;
+export module bioseq.pg_sql_boundary:call_context;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -365,7 +365,7 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_multiple =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary:context;
+export module bioseq.pg_sql_boundary:call_context;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -407,7 +407,7 @@ void sql_subtransaction::commit() {
 #define PG_TRY() do { if (true) {
 #define PG_CATCH() } else {
 #define PG_END_TRY() } } while (false)
-export module bioseq.pg_utils.sql_boundary:context;
+export module bioseq.pg_sql_boundary:call_context;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -437,7 +437,7 @@ void sql_subtransaction::commit() {
         R"cpp(module;
 #include <utils/elog.h>
 #define PROJECT_TRY() PG_TRY()
-export module bioseq.pg_utils.sql_boundary:context;
+export module bioseq.pg_sql_boundary:call_context;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -466,7 +466,7 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_catch =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary:context;
+export module bioseq.pg_sql_boundary:call_context;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -495,7 +495,7 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view invoke_positive =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 using PgCppInvokeBody = void (*)(void*);
 struct pg_cpp_invoke_state {
@@ -648,7 +648,7 @@ void invoke_root() {
     static constexpr std::string_view call_context_positive =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 using PgCppInvokeBody = void (*)(void*);
 struct pg_cpp_invoke_state {
@@ -737,7 +737,7 @@ void call_context_root() {
     static constexpr std::string_view invoke_token_decoy =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 template<class F>
 void invoke_pg_as_cpp(F&& function) {
@@ -763,7 +763,7 @@ void invoke_root() {
     static constexpr std::string_view invoke_unprotected_erased =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 using PgCppInvokeBody = void (*)(void*);
 struct pg_cpp_invoke_state {
@@ -816,7 +816,7 @@ void invoke_root() {
         invoke_constexpr_init_escape =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 using PgCppInvokeBody = void (*)(void*);
 struct pg_cpp_invoke_state {
@@ -875,7 +875,7 @@ void invoke_root() {
 #include <exception>
 #include <functional>
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct PostgresErrorAsCpp {};
 template<class F>
@@ -907,7 +907,7 @@ int boundary_root() {
     static constexpr std::string_view tail_token_decoy =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 template<class F>
 int invoke_sql_boundary(F&&) {
@@ -935,7 +935,7 @@ int boundary_root() {
 #include <exception>
 #include <functional>
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct PostgresErrorAsCpp {};
 template<class F>
@@ -968,7 +968,7 @@ int boundary_root() {
 #include <exception>
 #include <functional>
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct PostgresErrorAsCpp {};
 template<class F>
@@ -1020,7 +1020,7 @@ inline void run_runtime_probe_contracts() {
         "bioseq/runtime_probe_contract.cppm");
     const std::filesystem::path boundary_path = module_path(
         fixture,
-        "bioseq/backend/pg/pg_utils/sql_boundary/index.cppm");
+        "main/common/pg_sql_boundary/index.cppm");
     const auto scan = [&](
         std::string_view source,
         std::string_view profile) {
@@ -1247,7 +1247,7 @@ int generated_wrapper() {
 #include <stdexcept>
 #include <string_view>
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 namespace bioseq::pg_utils::safety_runtime_probe {
 void record_site_visit(std::string_view) noexcept;
 bool consume_fault(std::string_view) noexcept;

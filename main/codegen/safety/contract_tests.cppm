@@ -275,10 +275,10 @@ fixture_bridge_evidence(bridge_kind bridge) {
             implementation_name =
                 "bioseq::pg_utils::invoke_pg_as_cpp";
             implementation_module =
-                "bioseq.pg_utils.error_bridge";
+                "bioseq.pg_support:error_boundary";
             implementation_source =
-                "/fixture/main/bioseq/backend/pg/pg_utils/"
-                "error_bridge.cppm";
+                "/fixture/main/common/pg_support/"
+                "error_boundary.cppm";
             protected_region =
                 "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp";
             break;
@@ -292,10 +292,10 @@ fixture_bridge_evidence(bridge_kind bridge) {
                 "bioseq::pg_utils::"
                 "invoke_pg_across_transactions_as_cpp";
             implementation_module =
-                "bioseq.pg_utils.error_bridge";
+                "bioseq.pg_support:error_boundary";
             implementation_source =
-                "/fixture/main/bioseq/backend/pg/pg_utils/"
-                "error_bridge.cppm";
+                "/fixture/main/common/pg_support/"
+                "error_boundary.cppm";
             protected_region =
                 "bioseq.pg_utils.error_bridge/"
                 "invoke_pg_across_transactions_as_cpp";
@@ -309,10 +309,10 @@ fixture_bridge_evidence(bridge_kind bridge) {
             implementation_name =
                 "bioseq::pg_utils::sql_subtransaction::begin";
             implementation_module =
-                "bioseq.pg_utils.sql_boundary:context";
+                "bioseq.pg_sql_boundary:call_context";
             implementation_source =
-                "/fixture/main/bioseq/backend/pg/pg_utils/"
-                "sql_boundary/context.cppm";
+                "/fixture/main/common/pg_sql_boundary/"
+                "call_context.cppm";
             protected_region =
                 "bioseq.pg_utils.sql_boundary.context/begin";
             break;
@@ -324,10 +324,10 @@ fixture_bridge_evidence(bridge_kind bridge) {
             implementation_name =
                 "bioseq::pg_utils::invoke_sql_boundary";
             implementation_module =
-                "bioseq.pg_utils.sql_boundary";
+                "bioseq.pg_sql_boundary";
             implementation_source =
-                "/fixture/main/bioseq/backend/pg/pg_utils/"
-                "sql_boundary/index.cppm";
+                "/fixture/main/common/pg_sql_boundary/"
+                "index.cppm";
             protected_region =
                 "bioseq.pg_utils.sql_boundary/rethrow_tail";
             break;

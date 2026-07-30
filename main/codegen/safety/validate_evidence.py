@@ -2448,9 +2448,9 @@ def _validate_site(
         )
         if bridge == "invoke_pg_as_cpp":
             expected_implementation = "bioseq::pg_utils::invoke_pg_as_cpp"
-            expected_module = "bioseq.pg_utils.error_bridge"
+            expected_module = "bioseq.pg_support:error_boundary"
             expected_source_suffix = (
-                "/bioseq/backend/pg/pg_utils/error_bridge.cppm"
+                "/main/common/pg_support/error_boundary.cppm"
             )
             expected_region = (
                 "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp"
@@ -2468,9 +2468,9 @@ def _validate_site(
                 "bioseq::pg_utils::"
                 "invoke_pg_across_transactions_as_cpp"
             )
-            expected_module = "bioseq.pg_utils.error_bridge"
+            expected_module = "bioseq.pg_support:error_boundary"
             expected_source_suffix = (
-                "/bioseq/backend/pg/pg_utils/error_bridge.cppm"
+                "/main/common/pg_support/error_boundary.cppm"
             )
             expected_region = (
                 "bioseq.pg_utils.error_bridge/"
@@ -2514,9 +2514,9 @@ def _validate_site(
                     "reviewed implementation",
                 )
             expected_implementation = implementation_name
-            expected_module = "bioseq.pg_utils.sql_boundary:context"
+            expected_module = "bioseq.pg_sql_boundary:call_context"
             expected_source_suffix = (
-                "/bioseq/backend/pg/pg_utils/sql_boundary/context.cppm"
+                "/main/common/pg_sql_boundary/call_context.cppm"
             )
             expected_region = (
                 "bioseq.pg_utils.sql_boundary.context/" + region[1]
@@ -2528,9 +2528,9 @@ def _validate_site(
             expected_implementation = (
                 "bioseq::pg_utils::invoke_sql_boundary"
             )
-            expected_module = "bioseq.pg_utils.sql_boundary"
+            expected_module = "bioseq.pg_sql_boundary"
             expected_source_suffix = (
-                "/bioseq/backend/pg/pg_utils/sql_boundary/index.cppm"
+                "/main/common/pg_sql_boundary/index.cppm"
             )
             expected_region = (
                 "bioseq.pg_utils.sql_boundary/rethrow_tail"

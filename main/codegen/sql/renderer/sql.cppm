@@ -766,15 +766,29 @@ inline void append_compatibility_sql_newline(std::string& output) {
     } else {
         result += "\nSECURITY INVOKER";
     }
-    const std::vector<const routine_parameter*> parameters =
-        sql_parameters(entity);
-    const bool strict = !parameters.empty()
-        && std::ranges::none_of(
-            parameters,
-            [](const routine_parameter* parameter) {
-                return parameter->nullable;
-            });
+    const option_value* null_input =
+        find_option(entity, "null_input");
+    bool strict = false;
+    bool called = false;
+    if (!null_input || option_is(entity, "null_input", "derived")) {
+        const std::vector<const routine_parameter*> parameters =
+            sql_parameters(entity);
+        strict = !parameters.empty()
+            && std::ranges::none_of(
+                parameters,
+                [](const routine_parameter* parameter) {
+                    return parameter->nullable;
+                });
+    } else if (option_is(entity, "null_input", "strict")) {
+        strict = true;
+    } else if (option_is(entity, "null_input", "called")) {
+        called = true;
+    } else {
+        throw std::runtime_error(
+            "function null_input must be derived, strict, or called");
+    }
     if (strict) result += "\nSTRICT";
+    else if (called) result += "\nCALLED ON NULL INPUT";
     if (option_is(entity, "leakproof", "true")) {
         result += "\nLEAKPROOF";
     }
@@ -1384,6 +1398,7 @@ struct type_role_binding {
         {"trigger", "TRIGGER"},
         {"usage", "USAGE"},
         {"execute", "EXECUTE"},
+        {"create", "CREATE"},
         {"all", "ALL"},
     };
     std::string result;
@@ -3163,6 +3178,12 @@ inline void validate_and_order_statement_candidates(
             }
             continue;
         }
+        if (entity.source.kind == entity_kind::schema
+            && detail::option_is(
+                entity.source, "provision", "extension_control")) {
+            pending_prefix += remarks;
+            continue;
+        }
         detail::append_entity_statement_candidates(
             candidates,
             entity,
@@ -3176,7 +3197,8 @@ inline void validate_and_order_statement_candidates(
 
     artifact.sql =
         "-- complain if script is sourced in psql, rather than via CREATE EXTENSION\n"
-        "\\echo Use \"CREATE EXTENSION bioseq\" to load this file. \\quit\n\n";
+        "\\echo Use \"CREATE EXTENSION " + graph.extension_name
+        + "\" to load this file. \\quit\n\n";
     artifact.statements.reserve(candidates.size());
     for (detail::statement_candidate& candidate : candidates) {
         const std::string id =

@@ -518,10 +518,10 @@ inline void mark_invoke_bridge(flow_call_site& call) {
             .implementation_qualified_name =
                 "bioseq::pg_utils::invoke_pg_as_cpp",
             .implementation_module =
-                "bioseq.pg_utils.error_bridge",
+                "bioseq.pg_support:error_boundary",
             .implementation_definition = located(
-                "/fixture/main/bioseq/backend/pg/pg_utils/"
-                "error_bridge.cppm",
+                "/fixture/main/common/pg_support/"
+                "error_boundary.cppm",
                 span(1, 100, 300)),
             .implementation_body_sha256 =
                 std::string(64, 'e'),
@@ -653,7 +653,7 @@ inline void run_safety_analyzer_contract_self_tests() {
     scoped_connect.qualified_name =
         "bioseq::pg_utils::scoped_spi_session::connect";
     scoped_connect.module_name =
-        "bioseq.pg_utils.sql_boundary:context";
+        "bioseq.pg_sql_boundary:call_context";
     function_flow scoped_finish = scoped_connect;
     scoped_finish.qualified_name =
         "bioseq::pg_utils::scoped_spi_session::finish";
@@ -684,7 +684,7 @@ inline void run_safety_analyzer_contract_self_tests() {
     function_flow spi_like{};
     spi_like.qualified_name = "fixture::SPI_connect";
     spi_like.module_name =
-        "bioseq.pg_utils.sql_boundary:context";
+        "bioseq.pg_sql_boundary:call_context";
     require_cleanup_phases(
         bridge_kind::none,
         {&connect_extra, &wrong_module, &spi_like},
