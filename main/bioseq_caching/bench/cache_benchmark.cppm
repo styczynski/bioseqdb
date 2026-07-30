@@ -49,7 +49,12 @@ namespace bioseq::cache_benchmark {
 
 using namespace std::chrono_literals;
 
-constexpr std::uint64_t reference_bases = 2'000'000'000ULL;
+constexpr std::uint64_t total_input_bases = 2'000'000'000ULL;
+constexpr std::uint64_t query_bases = 5'000'000ULL;
+constexpr std::uint64_t target_bases =
+    total_input_bases - query_bases;
+static_assert(query_bases > 0);
+static_assert(query_bases + target_bases == total_input_bases);
 constexpr std::uint64_t standalone_fixture_rows = 20'000ULL;
 constexpr std::string_view report_schema{"bioseq-cache-benchmark-v1"};
 constexpr std::chrono::milliseconds rss_sample_interval{50};
@@ -118,6 +123,9 @@ struct fixture_evidence {
     std::string relation;
     std::uint64_t source_rows{};
     std::uint64_t reference_base_count{};
+    std::uint64_t query_base_count{};
+    std::uint64_t target_base_count{};
+    std::uint64_t aggregate_input_base_count{};
     std::string query;
 };
 
@@ -1032,15 +1040,61 @@ void create_standalone_fixture(libpq::connection& connection) {
         2min);
 }
 
-void create_bioseq_fixture(libpq::connection& connection) {
+[[nodiscard]] fixture_evidence create_bioseq_fixture(
+    libpq::connection& connection) {
     configure_cpu_path(connection);
     execute(
         connection,
         "SET bioseq.update_index_on_insert = off; "
         "SELECT bioseq.create_query_target_sample_table("
-        "'cache_bioseq_2gbp', 1, 5000000, 100000.0, 2000000000, "
-        "0.001, 0.0005, 0.0005, 1.0, 1.0, 0.5, 3219876)",
+        "'cache_bioseq_2gbp', 1, 5000000, 0.0, 1995000000, "
+        "0.001, 0.0, 0.0, 1.0, 1.0, 0.5, 3219876)",
         40min);
+    const libpq::result measured_input = connection.exec(
+        "SELECT count(*)::bigint, "
+        "sum(query_locator.total_bp_size)::bigint, "
+        "sum(target_locator.total_bp_size)::bigint, "
+        "sum(query_locator.total_bp_size "
+        "    + target_locator.total_bp_size)::bigint "
+        "FROM cache_bioseq_2gbp AS sample "
+        "CROSS JOIN LATERAL "
+        "bioseq.inspect_locator(sample.query) AS query_locator "
+        "CROSS JOIN LATERAL "
+        "bioseq.inspect_locator(sample.target) AS target_locator",
+        5min);
+    if (measured_input.rows() != 1
+        || measured_input.columns() != 4) {
+        throw std::runtime_error(
+            "bioseq-2gbp stored-input measurement has wrong shape");
+    }
+    for (int column = 0; column < measured_input.columns(); ++column) {
+        if (measured_input.is_null(0, column)) {
+            throw std::runtime_error(
+                "bioseq-2gbp stored-input measurement is null");
+        }
+    }
+    const std::int64_t measured_source_rows =
+        parse_i64(measured_input.value(0, 0));
+    const std::int64_t measured_query_bases =
+        parse_i64(measured_input.value(0, 1));
+    const std::int64_t measured_target_bases =
+        parse_i64(measured_input.value(0, 2));
+    const std::int64_t measured_total_input_bases =
+        parse_i64(measured_input.value(0, 3));
+    if (measured_source_rows != 1
+        || measured_query_bases
+            != static_cast<std::int64_t>(query_bases)
+        || measured_query_bases <= 0
+        || measured_target_bases
+            != static_cast<std::int64_t>(target_bases)
+        || measured_total_input_bases
+            != static_cast<std::int64_t>(total_input_bases)
+        || measured_query_bases + measured_target_bases
+            != measured_total_input_bases) {
+        throw std::runtime_error(
+            "bioseq-2gbp stored input is not exactly "
+            "5,000,000 query bases plus 1,995,000,000 target bases");
+    }
     execute(
         connection,
         "SELECT bioseq.update_index("
@@ -1048,6 +1102,19 @@ void create_bioseq_fixture(libpq::connection& connection) {
         "SELECT bioseq.set_active_read_index("
         "'cache_bioseq_2gbp'::regclass, 'minimizers_per_fragment')",
         40min);
+    return fixture_evidence{
+        .relation = "cache_bioseq_2gbp",
+        .source_rows =
+            static_cast<std::uint64_t>(measured_source_rows),
+        .reference_base_count =
+            static_cast<std::uint64_t>(measured_target_bases),
+        .query_base_count =
+            static_cast<std::uint64_t>(measured_query_bases),
+        .target_base_count =
+            static_cast<std::uint64_t>(measured_target_bases),
+        .aggregate_input_base_count =
+            static_cast<std::uint64_t>(measured_total_input_bases),
+        .query = std::string(bioseq_query)};
 }
 
 [[nodiscard]] std::vector<postgres_test::extension_artifact>
@@ -1187,19 +1254,17 @@ void execute_benchmark(
         combined ? bioseq_query : standalone_query;
 
     if (combined) {
-        create_bioseq_fixture(admin);
+        report.fixture = create_bioseq_fixture(admin);
         configure_cpu_path(data);
-        report.fixture = fixture_evidence{
-            .relation = "cache_bioseq_2gbp",
-            .source_rows = 1,
-            .reference_base_count = reference_bases,
-            .query = std::string(query)};
     } else {
         create_standalone_fixture(admin);
         report.fixture = fixture_evidence{
             .relation = "cache_benchmark_rows",
             .source_rows = standalone_fixture_rows,
             .reference_base_count = 0,
+            .query_base_count = 0,
+            .target_base_count = 0,
+            .aggregate_input_base_count = 0,
             .query = std::string(query)};
     }
     resource_tracker.observe_phase_boundary();
@@ -1536,6 +1601,15 @@ void write(std::ostream& output, const benchmark_report& report) {
     key(output, "reference_bases");
     output << report.fixture.reference_base_count;
     output.put(',');
+    key(output, "query_bases");
+    output << report.fixture.query_base_count;
+    output.put(',');
+    key(output, "target_bases");
+    output << report.fixture.target_base_count;
+    output.put(',');
+    key(output, "aggregate_input_bases");
+    output << report.fixture.aggregate_input_base_count;
+    output.put(',');
     key(output, "query");
     string(output, report.fixture.query);
     output.put('}');
@@ -1643,6 +1717,9 @@ void write(std::ostream& output, const benchmark_report& report) {
                 .relation = "contract_fixture",
                 .source_rows = 4,
                 .reference_base_count = 0,
+                .query_base_count = 0,
+                .target_base_count = 0,
+                .aggregate_input_base_count = 0,
                 .query = "SELECT contract"},
         .correctness_digest = passed ? digest : "",
         .resources =

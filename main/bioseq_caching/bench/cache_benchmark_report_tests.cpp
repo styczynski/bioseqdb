@@ -145,6 +145,24 @@ TEST_CASE(
             required_property(artifact, "staged_control_sha256")).size()
         == 64);
 
+    const json_value& fixture = required_property(root, "fixture");
+    CHECK(
+        required_integer(required_property(fixture, "source_rows"))
+        == 4);
+    CHECK(
+        required_integer(required_property(fixture, "reference_bases"))
+        == 0);
+    CHECK(
+        required_integer(required_property(fixture, "query_bases"))
+        == 0);
+    CHECK(
+        required_integer(required_property(fixture, "target_bases"))
+        == 0);
+    CHECK(
+        required_integer(
+            required_property(fixture, "aggregate_input_bases"))
+        == 0);
+
     const json_value& producer =
         required_property(root, "cold_producer");
     CHECK(

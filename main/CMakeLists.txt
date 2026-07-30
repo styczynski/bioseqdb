@@ -753,10 +753,12 @@ endif()
 # stages the exact control, generated SQL, and DSO target artifacts.
 if(BIOSEQ_BUILD_CORE AND BIOSEQ_BUILD_CACHE
    AND BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
-  if(NOT TARGET postgresql_bioseq_cache_test_support
+  if(NOT TARGET postgresql_bioseq_cache
+     OR NOT TARGET postgresql_bioseq_cache_test_support
      OR NOT TARGET postgresql_bioseq)
     message(FATAL_ERROR
-      "Combined cache/Bioseq tests require both extension artifact targets")
+      "Combined cache/Bioseq tests require production cache, test-support "
+      "cache, and Bioseq extension artifact targets")
   endif()
   add_subdirectory(
     "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/bioseq"

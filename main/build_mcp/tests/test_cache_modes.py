@@ -247,6 +247,13 @@ class CacheModeRoutingTest(unittest.TestCase):
             "staged_dso",
             "staged_control_sha256",
             "2'000'000'000ULL",
+            "5'000'000ULL",
+            "reference_bases",
+            "query_bases",
+            "target_bases",
+            "aggregate_input_bases",
+            "bioseq.inspect_locator(sample.query)",
+            "bioseq.inspect_locator(sample.target)",
             "PQsetSingleRowMode first PGRES_SINGLE_TUPLE arrival",
         ):
             with self.subTest(required=required):
@@ -277,6 +284,33 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertEqual(
             contract["semantics"]["samples"],
             "measured warm cache-hit samples only",
+        )
+        self.assertIn(
+            "measured after storage",
+            contract["semantics"]["fixture_base_counts"],
+        )
+        self.assertIn(
+            "exactly 2000000000",
+            contract["semantics"]["fixture_base_counts"],
+        )
+        production_fixture_contract = contract["allOf"][1]["then"][
+            "properties"]["fixture"]["properties"]
+        self.assertEqual(
+            production_fixture_contract[
+                "aggregate_input_bases"]["const"],
+            2_000_000_000,
+        )
+        self.assertEqual(
+            production_fixture_contract["reference_bases"]["const"],
+            1_995_000_000,
+        )
+        self.assertEqual(
+            production_fixture_contract["query_bases"]["const"],
+            5_000_000,
+        )
+        self.assertEqual(
+            production_fixture_contract["target_bases"]["const"],
+            1_995_000_000,
         )
         self.assertIn(
             "PostgreSQL postmaster and all descendant processes",
@@ -360,6 +394,40 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("BIOSEQ_EXTENSION_CONTROL_FILE", cmake)
         self.assertIn("BIOSEQ_EXTENSION_INSTALL_SQL", cmake)
         self.assertIn("BIOSEQ_EXTENSION_DSO", cmake)
+        self.assertIn(
+            '\\"cache_control\\": '
+            '\\"$<SHELL_PATH:$<TARGET_PROPERTY:'
+            'postgresql_bioseq_cache,BIOSEQ_EXTENSION_CONTROL_FILE>>\\"',
+            cmake,
+        )
+        self.assertIn(
+            '\\"cache_install_sql\\": '
+            '\\"$<SHELL_PATH:$<TARGET_PROPERTY:'
+            'postgresql_bioseq_cache,BIOSEQ_EXTENSION_INSTALL_SQL>>\\"',
+            cmake,
+        )
+        self.assertIn(
+            "$<TARGET_GENEX_EVAL:postgresql_bioseq_cache,"
+            "$<TARGET_PROPERTY:postgresql_bioseq_cache,"
+            "BIOSEQ_EXTENSION_DSO>>",
+            cmake,
+        )
+        self.assertIn(
+            "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,"
+            "BIOSEQ_EXTENSION_CONTROL_FILE>",
+            cmake,
+        )
+        self.assertIn(
+            "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,"
+            "BIOSEQ_EXTENSION_TEST_INSTALL_SQL>",
+            cmake,
+        )
+        self.assertIn(
+            "$<TARGET_GENEX_EVAL:postgresql_bioseq_cache_test_support,"
+            "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,"
+            "BIOSEQ_EXTENSION_DSO>>",
+            cmake,
+        )
         for key in server._CACHE_NATIVE_ARTIFACT_KEYS:
             with self.subTest(native_artifact_key=key):
                 self.assertIn(f'\\"{key}\\"', cmake)
@@ -439,59 +507,76 @@ class CacheModeRoutingTest(unittest.TestCase):
     def test_native_cache_mode_commands_and_timeouts(self) -> None:
         expected = {
             "cache-integration": (
-                "bioseq_cache_integration_tests",
+                ("bioseq_cache_integration_tests",),
                 8.0,
                 "480",
                 None,
             ),
             "cache-bench": (
-                "bioseq_cache_bench",
+                ("bioseq_cache_bench",),
                 20.0,
                 None,
                 "standalone",
             ),
             "cache-bioseq-integration": (
-                "bioseq_cache_bioseq_integration_tests",
+                (
+                    "bioseq_cache_bioseq_support_integration_tests",
+                    "bioseq_cache_bioseq_production_integration_tests",
+                ),
                 120.0,
                 "480",
                 None,
             ),
             "cache-bioseq-bench": (
-                "bioseq_cache_bioseq_bench",
+                ("bioseq_cache_bioseq_bench",),
                 180.0,
                 None,
                 "bioseq-2gbp",
             ),
         }
-        for mode, (executable, timeout, case_timeout, scenario) in (
+        for mode, (executables, timeout, case_timeout, scenario) in (
                 expected.items()):
             with self.subTest(mode=mode):
                 details = server.MODES[mode]
                 self.assertEqual(details.expected_duration_min, timeout)
-                self.assertEqual(len(details.commands), 1)
-                command = details.commands[0]
-                self.assertEqual(command[0], executable)
-                self.assertIn("--postgres-bin-dir", command)
-                self.assertIn("{postgres_bin_dir}", command)
-                self.assertIn("--cache-control", command)
-                self.assertIn("--cache-install-sql", command)
-                self.assertIn("--cache-dso", command)
-                self.assertIn("--report", command)
-                self.assertIn("{report}", command)
+                self.assertEqual(
+                    tuple(command[0] for command in details.commands),
+                    executables,
+                )
                 self.assertTrue(details.reporting_subdir_name)
-                if case_timeout is not None:
-                    timeout_index = command.index(
-                        "--case-timeout-seconds")
-                    self.assertEqual(command[timeout_index + 1], case_timeout)
-                if scenario is not None:
-                    scenario_index = command.index("--scenario")
-                    self.assertEqual(command[scenario_index + 1], scenario)
-                    self.assertIn("--samples", command)
-                    self.assertIn("--warmup-samples", command)
-                if "bioseq" in mode:
-                    self.assertIn("--bioseq-control", command)
-                    self.assertIn("--bioseq-install-sql", command)
-                    self.assertIn("--bioseq-dso", command)
+                for command in details.commands:
+                    self.assertIn("--postgres-bin-dir", command)
+                    self.assertIn("{postgres_bin_dir}", command)
+                    self.assertIn("--cache-control", command)
+                    self.assertIn("--cache-install-sql", command)
+                    self.assertIn("--cache-dso", command)
+                    self.assertIn("--report", command)
+                    self.assertIn("{report}", command)
+                    if case_timeout is not None:
+                        timeout_index = command.index(
+                            "--case-timeout-seconds")
+                        self.assertEqual(
+                            command[timeout_index + 1], case_timeout)
+                    if scenario is not None:
+                        scenario_index = command.index("--scenario")
+                        self.assertEqual(
+                            command[scenario_index + 1], scenario)
+                        self.assertIn("--samples", command)
+                        self.assertIn("--warmup-samples", command)
+                    if "bioseq" in mode:
+                        self.assertIn("--bioseq-control", command)
+                        self.assertIn("--bioseq-install-sql", command)
+                        self.assertIn("--bioseq-dso", command)
+                if mode == "cache-bioseq-integration":
+                    support_command, production_command = details.commands
+                    self.assertNotIn(
+                        "--large-case-timeout-seconds",
+                        support_command,
+                    )
+                    timeout_index = production_command.index(
+                        "--large-case-timeout-seconds")
+                    self.assertEqual(
+                        production_command[timeout_index + 1], "6300")
 
     def test_cache_integration_resolves_exact_cmake_parity_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -535,7 +620,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             ],
         )
 
-    def test_combined_integration_resolves_exact_cmake_parity_argv(
+    def test_combined_integration_resolves_profile_exact_argv(
             self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             binary_dir = Path(tmp)
@@ -551,21 +636,30 @@ class CacheModeRoutingTest(unittest.TestCase):
                     path.touch()
             (binary_dir / "cache_native_artifacts.json").write_text(
                 json.dumps(manifest), encoding="utf-8")
-            report = binary_dir / "reports" / "report_0.json"
+            support_report = (
+                binary_dir / "reports" / "report_0.json")
+            production_report = (
+                binary_dir / "reports" / "report_1.json")
 
-            resolved = server._run_command_argv(
+            support_resolved = server._run_command_argv(
                 "cache-bioseq-integration",
                 binary_dir,
                 server.MODES["cache-bioseq-integration"].commands[0],
-                report_path=report,
+                report_path=support_report,
+            )
+            production_resolved = server._run_command_argv(
+                "cache-bioseq-integration",
+                binary_dir,
+                server.MODES["cache-bioseq-integration"].commands[1],
+                report_path=production_report,
             )
 
         self.assertEqual(
-            resolved,
+            support_resolved,
             [
                 str(
                     binary_dir
-                    / "bioseq_cache_bioseq_integration_tests"
+                    / "bioseq_cache_bioseq_support_integration_tests"
                 ),
                 "--postgres-bin-dir", manifest["postgres_bin_dir"],
                 "--cache-control", manifest["cache_test_control"],
@@ -577,7 +671,27 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "--provider-peer-test-dso",
                 manifest["provider_peer_test_dso"],
                 "--migration-ledger", manifest["migration_ledger"],
-                "--report", str(report),
+                "--report", str(support_report),
+                "--case-timeout-seconds", "480",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+        )
+        self.assertEqual(
+            production_resolved,
+            [
+                str(
+                    binary_dir
+                    / "bioseq_cache_bioseq_production_integration_tests"
+                ),
+                "--postgres-bin-dir", manifest["postgres_bin_dir"],
+                "--cache-control", manifest["cache_control"],
+                "--cache-install-sql", manifest["cache_install_sql"],
+                "--cache-dso", manifest["cache_dso"],
+                "--bioseq-control", manifest["bioseq_control"],
+                "--bioseq-install-sql", manifest["bioseq_install_sql"],
+                "--bioseq-dso", manifest["bioseq_dso"],
+                "--migration-ledger", manifest["migration_ledger"],
+                "--report", str(production_report),
                 "--case-timeout-seconds", "480",
                 "--large-case-timeout-seconds", "6300",
                 "--reporter", "console::out=-::colour-mode=ansi",

@@ -38,42 +38,63 @@ if(APPLE)
   endif()
 endif()
 
-add_executable(bioseq_cache_bioseq_integration_tests
+add_executable(bioseq_cache_bioseq_support_integration_tests
   "${CMAKE_CURRENT_LIST_DIR}/../support/cache_catch_runner.cpp"
   test_coexistence.cpp
   test_coexistence_acceptance.cpp
   test_exact_provider.cpp
-  test_provider_peer_failopen.cpp
-  test_bioseq_2gbp_cache.cpp)
-set_target_properties(bioseq_cache_bioseq_integration_tests PROPERTIES
+  test_provider_peer_failopen.cpp)
+set_target_properties(
+  bioseq_cache_bioseq_support_integration_tests PROPERTIES
   CXX_STANDARD 26
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS ON
   CXX_MODULE_STD ON
   INTERPROCEDURAL_OPTIMIZATION FALSE
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bioseq_caching")
-target_link_libraries(bioseq_cache_bioseq_integration_tests
+target_link_libraries(bioseq_cache_bioseq_support_integration_tests
   PRIVATE
     bioseq_cache_test_context
     Catch2::Catch2)
 add_dependencies(
-  bioseq_cache_bioseq_integration_tests
+  bioseq_cache_bioseq_support_integration_tests
   bioseq_cache_provider_peer_test
   postgresql_bioseq_cache_test_support
   postgresql_bioseq)
 
-# Ordinary combined cases retain the cache suite's eight-minute watchdog.
-# Only the literal [2gbp] acceptance case receives the 105-minute budget.
-# Seven ordinary cases plus the large case total 9,660 seconds; retain bounded
-# headroom without letting the aggregate CTest timeout mask a stalled runner.
+add_executable(bioseq_cache_bioseq_production_integration_tests
+  "${CMAKE_CURRENT_LIST_DIR}/../support/cache_catch_runner.cpp"
+  test_bioseq_2gbp_cache.cpp)
+set_target_properties(
+  bioseq_cache_bioseq_production_integration_tests PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bioseq_caching")
+target_link_libraries(
+  bioseq_cache_bioseq_production_integration_tests
+  PRIVATE
+    bioseq_cache_test_context
+    Catch2::Catch2)
+add_dependencies(
+  bioseq_cache_bioseq_production_integration_tests
+  postgresql_bioseq_cache
+  postgresql_bioseq)
+
+# Ordinary combined tests use the noninstalled diagnostics profile and retain
+# the cache suite's eight-minute per-case watchdog. The literal [2gbp] case is
+# isolated in a production-artifact executable with its 105-minute watchdog.
 set(_bioseq_cache_bioseq_case_timeout_seconds 480)
 set(_bioseq_cache_bioseq_large_case_timeout_seconds 6300)
-set(_bioseq_cache_bioseq_suite_timeout_seconds 12000)
+set(_bioseq_cache_bioseq_support_suite_timeout_seconds 6000)
+set(_bioseq_cache_bioseq_production_suite_timeout_seconds 6600)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/reports")
 add_test(
-  NAME bioseq_cache_bioseq_integration_tests
-  COMMAND bioseq_cache_bioseq_integration_tests
+  NAME bioseq_cache_bioseq_support_integration_tests
+  COMMAND bioseq_cache_bioseq_support_integration_tests
     --postgres-bin-dir "${PostgreSQL_BIN_DIR}"
     --cache-control
       "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_CONTROL_FILE>"
@@ -92,15 +113,44 @@ add_test(
     --migration-ledger
       "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
     --report
-      "${CMAKE_BINARY_DIR}/reports/bioseq-cache-bioseq-integration.json"
+      "${CMAKE_BINARY_DIR}/reports/bioseq-cache-bioseq-support-integration.json"
+    --case-timeout-seconds
+      "${_bioseq_cache_bioseq_case_timeout_seconds}")
+set_tests_properties(
+  bioseq_cache_bioseq_support_integration_tests PROPERTIES
+  LABELS "cache;integration;bioseq;test-support"
+  RESOURCE_LOCK "bioseq_private_postgres"
+  TIMEOUT "${_bioseq_cache_bioseq_support_suite_timeout_seconds}")
+
+add_test(
+  NAME bioseq_cache_bioseq_production_integration_tests
+  COMMAND bioseq_cache_bioseq_production_integration_tests
+    --postgres-bin-dir "${PostgreSQL_BIN_DIR}"
+    --cache-control
+      "$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_CONTROL_FILE>"
+    --cache-install-sql
+      "$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_INSTALL_SQL>"
+    --cache-dso
+      "$<TARGET_GENEX_EVAL:postgresql_bioseq_cache,$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_DSO>>"
+    --bioseq-control
+      "$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_CONTROL_FILE>"
+    --bioseq-install-sql
+      "$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_INSTALL_SQL>"
+    --bioseq-dso
+      "$<TARGET_GENEX_EVAL:postgresql_bioseq,$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_DSO>>"
+    --migration-ledger
+      "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
+    --report
+      "${CMAKE_BINARY_DIR}/reports/bioseq-cache-bioseq-production-integration.json"
     --case-timeout-seconds
       "${_bioseq_cache_bioseq_case_timeout_seconds}"
     --large-case-timeout-seconds
       "${_bioseq_cache_bioseq_large_case_timeout_seconds}")
-set_tests_properties(bioseq_cache_bioseq_integration_tests PROPERTIES
-  LABELS "cache;integration;bioseq;2gbp"
+set_tests_properties(
+  bioseq_cache_bioseq_production_integration_tests PROPERTIES
+  LABELS "cache;integration;bioseq;production;2gbp"
   RESOURCE_LOCK "bioseq_private_postgres"
-  TIMEOUT "${_bioseq_cache_bioseq_suite_timeout_seconds}")
+  TIMEOUT "${_bioseq_cache_bioseq_production_suite_timeout_seconds}")
 
 include(
   "${CMAKE_CURRENT_LIST_DIR}/../support/LegacyMigrationContract.cmake")
@@ -112,7 +162,8 @@ bioseq_cache_add_legacy_migration_contract(
   TARGETS
     bioseq_cache_unit_tests
     bioseq_cache_integration_tests
-    bioseq_cache_bioseq_integration_tests
+    bioseq_cache_bioseq_support_integration_tests
+    bioseq_cache_bioseq_production_integration_tests
   LEGACY_ASSETS
     bench/run_private_cluster_bench.py
     bench/sql_cases.json

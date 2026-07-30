@@ -1828,7 +1828,7 @@ int main(int argc, char* argv[]) {
         | Catch::Clara::Opt(cache_install_sql, "PATH")
               ["--cache-install-sql"]("bioseq_cache generated install SQL")
         | Catch::Clara::Opt(cache_dso, "PATH")
-              ["--cache-dso"]("bioseq_cache test-support DSO")
+              ["--cache-dso"]("bioseq_cache DSO for the selected profile")
         | Catch::Clara::Opt(bioseq_control, "PATH")
               ["--bioseq-control"]("optional Bioseq control file")
         | Catch::Clara::Opt(bioseq_install_sql, "PATH")

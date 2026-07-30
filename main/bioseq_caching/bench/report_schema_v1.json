@@ -134,6 +134,52 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "scenario": {
+            "const": "bioseq-2gbp"
+          },
+          "metadata": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "scenario",
+          "metadata"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fixture": {
+            "properties": {
+              "source_rows": {
+                "const": 1
+              },
+              "reference_bases": {
+                "const": 1995000000
+              },
+              "query_bases": {
+                "const": 5000000
+              },
+              "target_bases": {
+                "const": 1995000000
+              },
+              "aggregate_input_bases": {
+                "const": 2000000000
+              }
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -514,6 +560,9 @@
         "relation",
         "source_rows",
         "reference_bases",
+        "query_bases",
+        "target_bases",
+        "aggregate_input_bases",
         "query"
       ],
       "properties": {
@@ -524,6 +573,15 @@
           "$ref": "#/$defs/non_negative_integer"
         },
         "reference_bases": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "query_bases": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "target_bases": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "aggregate_input_bases": {
           "$ref": "#/$defs/non_negative_integer"
         },
         "query": {
@@ -640,6 +698,9 @@
       "relation",
       "source_rows",
       "reference_bases",
+      "query_bases",
+      "target_bases",
+      "aggregate_input_bases",
       "query"
     ],
     "sample": [
@@ -675,6 +736,7 @@
     "cold_producer": "one separately reported cold cache-production sample on passed reports; null on failures before production",
     "samples": "measured warm cache-hit samples only",
     "summary": "nearest-rank wall-time statistics over samples only",
+    "fixture_base_counts": "query_bases and target_bases are measured after storage from bioseq.inspect_locator total_bp_size; reference_bases is the v1 compatibility alias for measured target_bases; aggregate_input_bases is their checked sum, and bioseq-2gbp requires a nonempty query plus target totaling exactly 2000000000",
     "peak_rss_bytes": "maximum sampled sum of current RSS for the owned PostgreSQL postmaster and all descendant processes",
     "peak_temp_bytes": "maximum sampled regular-file bytes below the owned private-cluster root",
     "resource_measurement_window": "running private-cluster workload only; excludes initdb, server startup, shutdown, and cleanup"

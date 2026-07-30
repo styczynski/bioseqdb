@@ -17,14 +17,19 @@ using namespace std::chrono_literals;
 
 namespace {
 
-constexpr std::uint64_t reference_bases = 2'000'000'000ULL;
+constexpr std::uint64_t total_input_bases = 2'000'000'000ULL;
+constexpr std::uint64_t query_bases = 5'000'000ULL;
+constexpr std::uint64_t target_bases =
+    total_input_bases - query_bases;
+static_assert(query_bases > 0);
+static_assert(query_bases + target_bases == total_input_bases);
 constexpr std::uint64_t gibibyte = 1024ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t minimum_total_ram = 16ULL * gibibyte;
 constexpr std::uint64_t minimum_available_ram = 8ULL * gibibyte;
 constexpr std::uint64_t minimum_data_space =
-    32ULL * gibibyte > 12ULL * reference_bases
+    32ULL * gibibyte > 12ULL * total_input_bases
     ? 32ULL * gibibyte
-    : 12ULL * reference_bases;
+    : 12ULL * total_input_bases;
 constexpr std::uint64_t io_probe_bytes = gibibyte;
 constexpr double minimum_io_mib_per_second = 150.0;
 constexpr std::int64_t coordinate_tolerance = 50'000;
@@ -64,6 +69,29 @@ constexpr std::string_view alignment_query{
     return lhs >= rhs ? lhs - rhs : rhs - lhs;
 }
 
+/// @brief Compares ordered libpq text-row streams byte for byte.
+[[nodiscard]] bool byte_identical(const bioseq::libpq::result& lhs,
+                                  const bioseq::libpq::result& rhs) {
+    if (lhs.rows() != rhs.rows()
+        || lhs.columns() != rhs.columns()) {
+        return false;
+    }
+    for (int row = 0; row < lhs.rows(); ++row) {
+        for (int column = 0; column < lhs.columns(); ++column) {
+            if (lhs.is_null(row, column)
+                != rhs.is_null(row, column)) {
+                return false;
+            }
+            if (!lhs.is_null(row, column)
+                && lhs.value(row, column)
+                    != rhs.value(row, column)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void configure_canonical_cpu_path(
     bioseq::libpq::connection& connection) {
     bioseq::cache_test::exec(
@@ -99,10 +127,10 @@ void configure_canonical_cpu_path(
 
 }  // namespace
 
-TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
+TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly",
           "[cache][integration][bioseq][large][2gbp]") {
     bioseq::postgres_test::migration_probe_scope probes{
-        "exactly 2 Gbp Bioseq result produces once and replays exactly"};
+        "exactly 2 Gbp combined Bioseq input produces once and replays exactly"};
     const auto test_started = std::chrono::steady_clock::now();
     auto options = bioseq::cache_test::cluster_options(
         true, bioseq::cache_test::preload_order::cache_then_bioseq);
@@ -138,6 +166,20 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.host_qualified");
 
+    REQUIRE(bioseq::cache_test::integer(
+                admin,
+                "SELECT count(*) FROM pg_extension "
+                "WHERE extname IN ('bioseq', 'bioseq_cache')")
+            == 2);
+    CHECK(bioseq::cache_test::scalar(
+              admin, "SHOW shared_preload_libraries")
+          == "bioseq_cache,bioseq");
+    CHECK(bioseq::cache_test::boolean(
+        admin,
+        "SELECT to_regnamespace('bioseq_cache_test') IS NULL"));
+    bioseq::postgres_test::record_migration_probe(
+        "combined.bioseq_2gbp.production_profile");
+
     configure_canonical_cpu_path(admin);
     configure_canonical_cpu_path(data);
     {
@@ -146,12 +188,47 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
             admin,
             "SET bioseq.update_index_on_insert = off; "
             "SELECT bioseq.create_query_target_sample_table("
-            "'cache_bioseq_2gbp', 1, 5000000, 100000.0, 2000000000, "
-            "0.001, 0.0005, 0.0005, 1.0, 1.0, 0.5, 3219876)",
+            "'cache_bioseq_2gbp', 1, 5000000, 0.0, 1995000000, "
+            "0.001, 0.0, 0.0, 1.0, 1.0, 0.5, 3219876)",
             20min);
         phase.complete();
         fixture.observe_resource_phase("generation");
     }
+    const bioseq::libpq::result measured_input = admin.exec(
+        "SELECT count(*)::bigint, "
+        "sum(query_locator.total_bp_size)::bigint, "
+        "sum(target_locator.total_bp_size)::bigint, "
+        "sum(query_locator.total_bp_size "
+        "    + target_locator.total_bp_size)::bigint "
+        "FROM cache_bioseq_2gbp AS sample "
+        "CROSS JOIN LATERAL "
+        "bioseq.inspect_locator(sample.query) AS query_locator "
+        "CROSS JOIN LATERAL "
+        "bioseq.inspect_locator(sample.target) AS target_locator",
+        5min);
+    REQUIRE(measured_input.rows() == 1);
+    REQUIRE(measured_input.columns() == 4);
+    for (int column = 0; column < measured_input.columns(); ++column) {
+        REQUIRE_FALSE(measured_input.is_null(0, column));
+    }
+    CHECK(parse_i64(measured_input.value(0, 0)) == 1);
+    const std::int64_t measured_query_bases =
+        parse_i64(measured_input.value(0, 1));
+    const std::int64_t measured_target_bases =
+        parse_i64(measured_input.value(0, 2));
+    const std::int64_t measured_total_input_bases =
+        parse_i64(measured_input.value(0, 3));
+    REQUIRE(measured_query_bases
+            == static_cast<std::int64_t>(query_bases));
+    REQUIRE(measured_query_bases > 0);
+    REQUIRE(measured_target_bases
+            == static_cast<std::int64_t>(target_bases));
+    REQUIRE(measured_total_input_bases
+            == static_cast<std::int64_t>(total_input_bases));
+    REQUIRE(measured_query_bases + measured_target_bases
+            == measured_total_input_bases);
+    bioseq::postgres_test::record_migration_probe(
+        "combined.bioseq_2gbp.aggregate_input_bases_exact");
     {
         bioseq::postgres_test::scoped_report_phase phase{"index"};
         bioseq::cache_test::exec(
@@ -211,7 +288,9 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
     const auto after_cold =
         bioseq::cache_test::read_cache_stats(admin);
     REQUIRE(cold.rows() > 0);
-    CHECK(bioseq::postgres_test::exact_row_hash(cold) == oracle_digest);
+    REQUIRE(byte_identical(cold, oracle));
+    CHECK(bioseq::postgres_test::exact_row_hash(cold)
+          == oracle_digest);
     const auto cold_delta = after_cold - before_cold;
     CHECK(cold_delta.produced == 1);
     CHECK(cold_delta.completed_hits == 0);
@@ -259,13 +338,16 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
             CHECK(target_start >= 0);
             CHECK(target_start < target_end);
             CHECK(target_end <=
-                  static_cast<std::int64_t>(reference_bases));
+                  static_cast<std::int64_t>(target_bases));
             CHECK(target_len ==
-                  static_cast<std::int64_t>(reference_bases));
+                  static_cast<std::int64_t>(target_bases));
             CHECK(query_start >= 0);
             CHECK(query_start < query_end);
             CHECK(query_end <= query_len);
-            CHECK(query_len > 0);
+            CHECK(query_len ==
+                  static_cast<std::int64_t>(query_bases));
+            CHECK(original_query_len ==
+                  static_cast<std::int64_t>(query_bases));
             CHECK(absolute_difference(query_len, original_query_len)
                   <= coordinate_tolerance);
             CHECK((is_reverse == "t" || is_reverse == "f"));
@@ -296,6 +378,8 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
     }();
     const auto after_warm =
         bioseq::cache_test::read_cache_stats(admin);
+    REQUIRE(warm.rows() > 0);
+    REQUIRE(byte_identical(warm, cold));
     CHECK(bioseq::postgres_test::exact_row_hash(warm) == oracle_digest);
     const auto warm_delta = after_warm - after_cold;
     CHECK(warm_delta.produced == 0);
@@ -371,15 +455,10 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
               "SELECT count(*) FROM bioseq_cache.entries() "
               "WHERE state = 'BUILDING'")
           == 0);
-    const auto references = admin.exec(
-        "SELECT reader_pins, waiter_references, admission_reservations "
-        "FROM bioseq_cache_test.planner_reference_counts()");
-    REQUIRE(references.rows() == 1);
-    CHECK(references.value(0, 0) == "0");
-    CHECK(references.value(0, 1) == "0");
-    CHECK(references.value(0, 2) == "0");
     CHECK_FALSE(has_partial_file(fixture.cluster().data_directory()));
     CHECK(std::chrono::steady_clock::now() - test_started < 105min);
+    bioseq::postgres_test::record_migration_probe(
+        "python.benchmark.resource_sampling");
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.cleanup_invariants");
 }

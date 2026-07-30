@@ -1232,7 +1232,10 @@ MODES: Dict[str, ModeDefinition] = {
         expected_duration_min=120.0,
         build_only_expected_duration_min=10.0,
         label="bioseq_cache provider integration tests",
-        docs="Build both DSOs and run Bioseq cache tests in a private cluster",
+        docs=(
+            "Run support-profile Bioseq/cache diagnostics, then gate the exact "
+            "2 Gbp case against both shipping production extensions"
+        ),
         is_verb_plular=True,
         preset_family="cache-bioseq",
         binary_subdir="bioseq_caching",
@@ -1240,11 +1243,12 @@ MODES: Dict[str, ModeDefinition] = {
             "postgresql_bioseq_cache",
             "postgresql_bioseq_cache_test_support",
             "postgresql_bioseq",
-            "bioseq_cache_bioseq_integration_tests",
+            "bioseq_cache_bioseq_support_integration_tests",
+            "bioseq_cache_bioseq_production_integration_tests",
         ],
         commands=[
             [
-                "bioseq_cache_bioseq_integration_tests",
+                "bioseq_cache_bioseq_support_integration_tests",
                 "--postgres-bin-dir", "{postgres_bin_dir}",
                 "--cache-control", "{cache_test_control}",
                 "--cache-install-sql", "{cache_test_install_sql}",
@@ -1253,6 +1257,20 @@ MODES: Dict[str, ModeDefinition] = {
                 "--bioseq-install-sql", "{bioseq_install_sql}",
                 "--bioseq-dso", "{bioseq_dso}",
                 "--provider-peer-test-dso", "{provider_peer_test_dso}",
+                "--migration-ledger", "{migration_ledger}",
+                "--report", "{report}",
+                "--case-timeout-seconds", "480",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+            [
+                "bioseq_cache_bioseq_production_integration_tests",
+                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--cache-control", "{cache_control}",
+                "--cache-install-sql", "{cache_install_sql}",
+                "--cache-dso", "{cache_dso}",
+                "--bioseq-control", "{bioseq_control}",
+                "--bioseq-install-sql", "{bioseq_install_sql}",
+                "--bioseq-dso", "{bioseq_dso}",
                 "--migration-ledger", "{migration_ledger}",
                 "--report", "{report}",
                 "--case-timeout-seconds", "480",
