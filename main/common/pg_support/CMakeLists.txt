@@ -5,12 +5,27 @@ set_target_properties(bioseq_pg_support PROPERTIES
   CXX_EXTENSIONS ON
   CXX_MODULE_STD ON
   POSITION_INDEPENDENT_CODE ON
-  INTERPROCEDURAL_OPTIMIZATION FALSE)
+  INTERPROCEDURAL_OPTIMIZATION FALSE
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN YES)
 # This library is consumed by PostgreSQL server extensions.  It needs server
 # headers, but must not propagate the libpq client archive into those modules;
 # backend symbols are resolved by the postmaster at module load time.
 target_include_directories(bioseq_pg_support PUBLIC ${PostgreSQL_INCLUDE_DIRS})
+target_link_libraries(bioseq_pg_support PUBLIC PostgreSQL::ServerHeaders)
 target_sources(bioseq_pg_support
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-    FILES "${CMAKE_CURRENT_LIST_DIR}/index.cppm")
+    FILES
+      "${CMAKE_CURRENT_LIST_DIR}/safety_runtime_probe.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/error_boundary.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/index.cppm")
+
+# The source-neutral generated-SQL boundary is required by both extension
+# DSOs.  Provision it alongside the PostgreSQL support target so cache-only
+# builds do not need to enter the Bioseq source tree.
+if(NOT TARGET bioseq_pg_sql_boundary)
+  add_subdirectory(
+    "${CMAKE_CURRENT_LIST_DIR}/../pg_sql_boundary"
+    "${CMAKE_CURRENT_BINARY_DIR}/../pg_sql_boundary")
+endif()

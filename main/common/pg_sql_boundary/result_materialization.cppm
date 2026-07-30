@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * pg_utils/sql_boundary/result_materialization.cppm
+ * common/pg_sql_boundary/result_materialization.cppm
  *
  * Composite and materialized-set result encoding for generated SQL
  * boundaries.
@@ -9,9 +9,8 @@
  */
 module;
 
-#include "common.h"
-
 extern "C" {
+#include "postgres.h"
 #include "access/htup_details.h"
 #include "catalog/pg_type_d.h"
 #include "funcapi.h"
@@ -30,12 +29,12 @@ extern "C" {
 #include <type_traits>
 #include <utility>
 
-export module bioseq.pg_utils.sql_boundary:result_materialization;
+export module bioseq.pg_sql_boundary:result_materialization;
 
-import bioseq.pg_utils.error_bridge;
-import :conversions;
-import :results;
-import :values;
+import :error_boundary;
+import :owning_values;
+import :scalar_conversion;
+import :shape;
 
 export namespace bioseq::pg_utils {
 
@@ -62,6 +61,8 @@ concept direct_sql_result_field =
     typed_sql_result_scalar<T>
     || std::same_as<std::remove_cvref_t<T>, std::string>
     || std::same_as<std::remove_cvref_t<T>, sql_jsonb>
+    || std::same_as<std::remove_cvref_t<T>, sql_bytea>
+    || std::same_as<std::remove_cvref_t<T>, sql_int64_array>
     || std::same_as<std::remove_cvref_t<T>, sql_interval>;
 
 template<class T>
@@ -109,10 +110,18 @@ sql_result_field_types() {
         return {FLOAT8OID, InvalidOid};
     } else if constexpr (std::same_as<Value, Oid>) {
         return {OIDOID, REGCLASSOID};
+    } else if constexpr (
+            std::same_as<Value, sql_timestamptz>) {
+        return {TIMESTAMPTZOID, InvalidOid};
     } else if constexpr (std::same_as<Value, std::string>) {
         return {TEXTOID, InvalidOid};
     } else if constexpr (std::same_as<Value, sql_jsonb>) {
         return {JSONBOID, InvalidOid};
+    } else if constexpr (std::same_as<Value, sql_bytea>) {
+        return {BYTEAOID, InvalidOid};
+    } else if constexpr (
+            std::same_as<Value, sql_int64_array>) {
+        return {INT8ARRAYOID, InvalidOid};
     } else if constexpr (std::same_as<Value, sql_interval>) {
         return {INTERVALOID, InvalidOid};
     } else {
@@ -131,7 +140,10 @@ sql_result_field_types() {
 template<class T>
     requires detail::typed_sql_result_scalar<T>
 [[nodiscard]] inline encoded_sql_result_field sql_result_field(
-        T&& value) noexcept {
+        T&& value) noexcept(noexcept(
+            detail::sql_scalar_conversion<
+                std::remove_cvref_t<T>>::write(
+                    std::forward<T>(value)))) {
     using Value = std::remove_cvref_t<T>;
     return {
         .value =
@@ -159,6 +171,24 @@ template<class T>
         const sql_jsonb& value) {
     return {
         .value = detail::encode_sql_jsonb(value),
+        .is_null = false,
+    };
+}
+
+/** Encode one owning BYTEA value as a result-row field. */
+[[nodiscard]] inline encoded_sql_result_field sql_result_field(
+        const sql_bytea& value) {
+    return {
+        .value = detail::encode_sql_bytea(value),
+        .is_null = false,
+    };
+}
+
+/** Encode one owning bigint[] value as a result-row field. */
+[[nodiscard]] inline encoded_sql_result_field sql_result_field(
+        const sql_int64_array& value) {
+    return {
+        .value = detail::encode_sql_int64_array(value),
         .is_null = false,
     };
 }
@@ -585,7 +615,10 @@ using oid_result_probe = encoded_sql_result_row<Oid>;
 using exact_boundary_result_probe =
     encoded_sql_result_row<
         sql_jsonb,
-        std::optional<sql_interval>>;
+        sql_bytea,
+        sql_int64_array,
+        std::optional<sql_interval>,
+        std::optional<sql_timestamptz>>;
 
 static_assert(scalar_result_probe::fields_count == 2);
 static_assert(
@@ -605,7 +638,16 @@ static_assert(
         == JSONBOID);
 static_assert(
     exact_boundary_result_probe::expected_type_oids()[1]
+        == BYTEAOID);
+static_assert(
+    exact_boundary_result_probe::expected_type_oids()[2]
+        == INT8ARRAYOID);
+static_assert(
+    exact_boundary_result_probe::expected_type_oids()[3]
         == INTERVALOID);
+static_assert(
+    exact_boundary_result_probe::expected_type_oids()[4]
+        == TIMESTAMPTZOID);
 static_assert(
     !oid_result_probe::accepts_type_oid(0, TEXTOID));
 static_assert(!encodable_sql_result_field<Datum>);

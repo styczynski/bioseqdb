@@ -18,6 +18,9 @@ extern "C" {
 
 export module bioseq.pg_support;
 
+export import :safety_runtime_probe;
+export import :error_boundary;
+
 export namespace bioseq::pg_support {
 
 /** Restore the calling backend's MemoryContext at normal C++ scope exit. */

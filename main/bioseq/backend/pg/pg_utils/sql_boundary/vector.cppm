@@ -31,9 +31,9 @@ export module bioseq.pg_utils.sql_boundary:vector;
 
 import bioseq.codegen.sql.annotation_model;
 import bioseq.pg_utils.error_bridge;
+import bioseq.pg_sql_boundary;
 import bioseq.pg_utils.runtime_test_counters;
 import bioseq.vector.types;
-import :conversions;
 
 export namespace bioseq::pg_utils {
 

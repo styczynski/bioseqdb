@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * pg_utils/sql_boundary/context.cppm
+ * common/pg_sql_boundary/call_context.cppm
  *
  * Checked PostgreSQL call-context views and transaction/SPI owners used by
  * generated SQL boundaries.
@@ -9,9 +9,8 @@
  */
 module;
 
-#include "common.h"
-
 extern "C" {
+#include "postgres.h"
 #include "access/xact.h"
 #include "executor/spi.h"
 #include "fmgr.h"
@@ -31,10 +30,9 @@ extern "C" {
 #include <type_traits>
 #include <utility>
 
-export module bioseq.pg_utils.sql_boundary:context;
+export module bioseq.pg_sql_boundary:call_context;
 
-import bioseq.pg_utils.error_bridge;
-import bioseq.pg_utils.safety_runtime_probe;
+import :error_boundary;
 
 export namespace bioseq::pg_utils {
 
@@ -42,6 +40,11 @@ struct sql_boundary_access;
 
 class sql_call_context final {
 public:
+    [[nodiscard]] Oid function_oid() const noexcept {
+        return call_ == nullptr || call_->flinfo == nullptr
+            ? InvalidOid
+            : call_->flinfo->fn_oid;
+    }
     [[nodiscard]] Oid collation() const noexcept;
     [[nodiscard]] Oid argument_type(int zero_based_index) const;
     [[nodiscard]] Oid result_type() const;
@@ -783,6 +786,8 @@ static_assert(!std::is_move_assignable_v<scoped_spi_session>);
 static_assert(std::is_nothrow_destructible_v<scoped_spi_session>);
 static_assert(noexcept(
     std::declval<const scoped_spi_session&>().active()));
+static_assert(noexcept(
+    std::declval<const sql_call_context&>().function_oid()));
 static_assert(context_factory_probe != nullptr);
 
 }  // namespace bioseq::pg_utils::detail

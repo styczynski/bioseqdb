@@ -1100,14 +1100,9 @@ set(BIOSEQ_SQL_COMPILE_CONTRACT_AUTHORED_PROVIDERS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/safety_runtime_probe.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_catalog_entities.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/aggregate.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/conversions.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/context.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/guc_storage.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/result_materialization.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/results.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/row_codec.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/values.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/vector.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/sql_rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/io/sql_rows.cppm"
@@ -3022,6 +3017,7 @@ endif()
 target_link_libraries(bioseq_sql_compile_contract_providers PUBLIC
   bioseq_modules_nopg
   bioseq_pg_support
+  bioseq_pg_sql_boundary
   bioseq_sql_annotation_model)
 set_target_properties(bioseq_sql_compile_contract_providers PROPERTIES
   CXX_STANDARD 26
@@ -3710,6 +3706,7 @@ endif()
 target_link_libraries(postgresql_bioseq PRIVATE
   bioseq_cache_provider_api
   bioseq_pg_support
+  bioseq_pg_sql_boundary
   bioseq_sql_annotation_model)
 
 # Proofs consume the generator-owned scan/modmap closure, while the DSO link
@@ -4053,6 +4050,12 @@ else()
     set(_bioseq_sql_runtime_active_profile production)
   endif()
   target_compile_definitions(postgresql_bioseq PRIVATE
+    BIOSEQ_SAFETY_RUNTIME_PROBES=1
+    "BIOSEQ_SAFETY_RUNTIME_PROFILE=\"${_bioseq_sql_runtime_active_profile}\"")
+  target_compile_definitions(bioseq_pg_support PRIVATE
+    BIOSEQ_SAFETY_RUNTIME_PROBES=1
+    "BIOSEQ_SAFETY_RUNTIME_PROFILE=\"${_bioseq_sql_runtime_active_profile}\"")
+  target_compile_definitions(bioseq_pg_sql_boundary PRIVATE
     BIOSEQ_SAFETY_RUNTIME_PROBES=1
     "BIOSEQ_SAFETY_RUNTIME_PROFILE=\"${_bioseq_sql_runtime_active_profile}\"")
 

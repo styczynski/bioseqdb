@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * pg_utils/sql_boundary/results.cppm
+ * common/pg_sql_boundary/shape.cppm
  *
  * Owning result-shape markers used by generated PostgreSQL boundaries.
  *
@@ -13,7 +13,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq.pg_utils.sql_boundary:results;
+export module bioseq.pg_sql_boundary:shape;
 
 export namespace bioseq::pg_utils {
 
