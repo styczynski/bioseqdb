@@ -306,6 +306,8 @@ TEST_CASE("snapshot predating commit cannot claim a generation",
         "SELECT bioseq_cache.reset_stats()");
 
     std::atomic<bool> pause_armed{};
+    std::atomic<bool> old_snapshot_done{};
+    std::atomic<bool> fresh_queries_allowed{};
     std::atomic<bool> consumer_done{};
     row_pair old_snapshot_rows;
     row_pair fresh_rows;
@@ -317,7 +319,8 @@ TEST_CASE("snapshot predating commit cannot claim a generation",
     std::vector<bioseq::postgres_test::session_task> tasks;
     tasks.push_back({
         .name = "controller",
-        .body = [&pause_armed, &consumer_done, &fresh_rows, &hit_rows,
+        .body = [&pause_armed, &old_snapshot_done,
+                 &fresh_queries_allowed, &consumer_done,
                  &rejected_entries, &rejected_stats, &final_stats](
                     bioseq::postgres_test::session_context& session) {
             static_cast<void>(session.exec(
@@ -334,7 +337,7 @@ TEST_CASE("snapshot predating commit cannot claim a generation",
                 "SELECT bioseq_cache_test.release_pause("
                 "'before_visibility_ticket')"));
             wait_for_flag(
-                consumer_done, session,
+                old_snapshot_done, session,
                 "old-snapshot claim query did not finish");
             const auto rejected = session.exec(
                 "SELECT (SELECT count(*) "
@@ -355,16 +358,11 @@ TEST_CASE("snapshot predating commit cannot claim a generation",
                 std::stoll(std::string(rejected.value(0, 2)));
             rejected_stats.fallbacks =
                 std::stoll(std::string(rejected.value(0, 5)));
-            static_cast<void>(session.exec(
-                "SET bioseq.query_cache_optimisation_mode = 'same'"));
-            fresh_rows = query_pair(
-                session,
-                "SELECT count(*), sum(id) "
-                "FROM cache_snapshot_claim_rows");
-            hit_rows = query_pair(
-                session,
-                "SELECT count(*), sum(id) "
-                "FROM cache_snapshot_claim_rows");
+            fresh_queries_allowed.store(
+                true, std::memory_order_release);
+            wait_for_flag(
+                consumer_done, session,
+                "fresh snapshot-claim queries did not finish");
             const auto stats = session.exec(
                 "SELECT produced, completed_hits, fallbacks "
                 "FROM bioseq_cache.stats()");
@@ -381,7 +379,9 @@ TEST_CASE("snapshot predating commit cannot claim a generation",
         }});
     tasks.push_back({
         .name = "old_snapshot_consumer",
-        .body = [&pause_armed, &consumer_done, &old_snapshot_rows](
+        .body = [&pause_armed, &old_snapshot_done,
+                 &fresh_queries_allowed, &consumer_done,
+                 &old_snapshot_rows, &fresh_rows, &hit_rows](
                     bioseq::postgres_test::session_context& session) {
             wait_for_flag(
                 pause_armed, session,
@@ -389,6 +389,18 @@ TEST_CASE("snapshot predating commit cannot claim a generation",
             static_cast<void>(session.exec(
                 "SET bioseq.query_cache_optimisation_mode = 'same'"));
             old_snapshot_rows = query_pair(
+                session,
+                "SELECT count(*), sum(id) "
+                "FROM cache_snapshot_claim_rows");
+            old_snapshot_done.store(true, std::memory_order_release);
+            wait_for_flag(
+                fresh_queries_allowed, session,
+                "snapshot-claim rejection state was not sampled");
+            fresh_rows = query_pair(
+                session,
+                "SELECT count(*), sum(id) "
+                "FROM cache_snapshot_claim_rows");
+            hit_rows = query_pair(
                 session,
                 "SELECT count(*), sum(id) "
                 "FROM cache_snapshot_claim_rows");
@@ -440,6 +452,8 @@ TEST_CASE("snapshot predating commit cannot replay stale COMPLETE generation",
         admin, "SELECT bioseq_cache.reset_stats()");
 
     std::atomic<bool> pause_armed{};
+    std::atomic<bool> old_snapshot_done{};
+    std::atomic<bool> fresh_queries_allowed{};
     std::atomic<bool> consumer_done{};
     row_pair old_snapshot_rows;
     row_pair fresh_rows;
@@ -451,7 +465,8 @@ TEST_CASE("snapshot predating commit cannot replay stale COMPLETE generation",
     std::vector<bioseq::postgres_test::session_task> tasks;
     tasks.push_back({
         .name = "controller",
-        .body = [&pause_armed, &consumer_done, &fresh_rows, &hit_rows,
+        .body = [&pause_armed, &old_snapshot_done,
+                 &fresh_queries_allowed, &consumer_done,
                  &rejected_complete, &rejected_stats, &final_stats](
                     bioseq::postgres_test::session_context& session) {
             static_cast<void>(session.exec(
@@ -468,7 +483,7 @@ TEST_CASE("snapshot predating commit cannot replay stale COMPLETE generation",
                 "SELECT bioseq_cache_test.release_pause("
                 "'before_visibility_ticket')"));
             wait_for_flag(
-                consumer_done, session,
+                old_snapshot_done, session,
                 "old-snapshot lookup query did not finish");
             const auto rejected = session.exec(
                 "SELECT (SELECT count(*) FILTER ("
@@ -488,16 +503,11 @@ TEST_CASE("snapshot predating commit cannot replay stale COMPLETE generation",
                 std::stoll(std::string(rejected.value(0, 2)));
             rejected_stats.fallbacks =
                 std::stoll(std::string(rejected.value(0, 3)));
-            static_cast<void>(session.exec(
-                "SET bioseq.query_cache_optimisation_mode = 'same'"));
-            fresh_rows = query_pair(
-                session,
-                "SELECT count(*), sum(id) "
-                "FROM cache_snapshot_lookup_rows");
-            hit_rows = query_pair(
-                session,
-                "SELECT count(*), sum(id) "
-                "FROM cache_snapshot_lookup_rows");
+            fresh_queries_allowed.store(
+                true, std::memory_order_release);
+            wait_for_flag(
+                consumer_done, session,
+                "fresh snapshot-lookup queries did not finish");
             const auto stats = session.exec(
                 "SELECT produced, completed_hits, fallbacks "
                 "FROM bioseq_cache.stats()");
@@ -514,7 +524,9 @@ TEST_CASE("snapshot predating commit cannot replay stale COMPLETE generation",
         }});
     tasks.push_back({
         .name = "old_snapshot_consumer",
-        .body = [&pause_armed, &consumer_done, &old_snapshot_rows](
+        .body = [&pause_armed, &old_snapshot_done,
+                 &fresh_queries_allowed, &consumer_done,
+                 &old_snapshot_rows, &fresh_rows, &hit_rows](
                     bioseq::postgres_test::session_context& session) {
             wait_for_flag(
                 pause_armed, session,
@@ -522,6 +534,18 @@ TEST_CASE("snapshot predating commit cannot replay stale COMPLETE generation",
             static_cast<void>(session.exec(
                 "SET bioseq.query_cache_optimisation_mode = 'same'"));
             old_snapshot_rows = query_pair(
+                session,
+                "SELECT count(*), sum(id) "
+                "FROM cache_snapshot_lookup_rows");
+            old_snapshot_done.store(true, std::memory_order_release);
+            wait_for_flag(
+                fresh_queries_allowed, session,
+                "snapshot-lookup rejection state was not sampled");
+            fresh_rows = query_pair(
+                session,
+                "SELECT count(*), sum(id) "
+                "FROM cache_snapshot_lookup_rows");
+            hit_rows = query_pair(
                 session,
                 "SELECT count(*), sum(id) "
                 "FROM cache_snapshot_lookup_rows");

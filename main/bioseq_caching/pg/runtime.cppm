@@ -22136,6 +22136,13 @@ void initialize_extension() {
             .executor_end = cache_executor_end,
             .process_utility = cache_process_utility,
         });
+    /*
+     * PostgreSQL invokes transaction callbacks in reverse registration order.
+     * Register the dependency runtime first so the legacy cache callback
+     * publishes its event-specific transition before the dependency runtime
+     * publishes and reaches the test-only after-transition pause.
+     */
+    dependency_runtime::register_dependency_runtime_callbacks();
     if (!g_callbacks_registered) {
         RegisterXactCallback(cache_transaction_callback, nullptr);
         RegisterSubXactCallback(cache_subtransaction_callback, nullptr);
@@ -22146,7 +22153,6 @@ void initialize_extension() {
         before_shmem_exit(cache_backend_transition_exit, 0);
         g_callbacks_registered = true;
     }
-    dependency_runtime::register_dependency_runtime_callbacks();
 #if defined(BIOSEQ_CACHE_TESTING)
     dependency_runtime::set_dependency_runtime_test_hooks(
         dependency_runtime::DependencyRuntimeTestHooksV1{
