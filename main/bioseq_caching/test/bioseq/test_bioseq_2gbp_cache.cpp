@@ -356,7 +356,8 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
         "combined.bioseq_2gbp.cold_counter_contract");
 
     const bioseq::libpq::result truth = admin.exec(
-        "SELECT id, truth_target_start, truth_target_end "
+        "SELECT id, truth_target_start, truth_target_end, "
+        "is_reverse, original_query_length "
         "FROM cache_bioseq_2gbp ORDER BY id",
         5min);
     REQUIRE(truth.rows() > 0);
@@ -373,16 +374,36 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
                 parse_i64(cold.value(row, 2));
             const std::int64_t target_len =
                 parse_i64(cold.value(row, 3));
+            const std::int64_t query_start =
+                parse_i64(cold.value(row, 4));
+            const std::int64_t query_end =
+                parse_i64(cold.value(row, 5));
+            const std::int64_t query_len =
+                parse_i64(cold.value(row, 6));
+            const std::string_view is_reverse =
+                cold.value(row, 7);
             const std::int64_t truth_start =
                 parse_i64(truth.value(truth_row, 1));
             const std::int64_t truth_end =
                 parse_i64(truth.value(truth_row, 2));
+            const std::string_view truth_is_reverse =
+                truth.value(truth_row, 3);
+            const std::int64_t original_query_len =
+                parse_i64(truth.value(truth_row, 4));
             CHECK(target_start >= 0);
             CHECK(target_start < target_end);
             CHECK(target_end <=
                   static_cast<std::int64_t>(reference_bases));
             CHECK(target_len ==
                   static_cast<std::int64_t>(reference_bases));
+            CHECK(query_start >= 0);
+            CHECK(query_start < query_end);
+            CHECK(query_end <= query_len);
+            CHECK(query_len > 0);
+            CHECK(absolute_difference(query_len, original_query_len)
+                  <= coordinate_tolerance);
+            CHECK((is_reverse == "t" || is_reverse == "f"));
+            CHECK(is_reverse == truth_is_reverse);
             CHECK(absolute_difference(target_start, truth_start)
                   <= coordinate_tolerance);
             CHECK(absolute_difference(target_end, truth_end)
@@ -396,6 +417,8 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
         "combined.bioseq_2gbp.coordinates_match_truth");
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.target_len_exact");
+    bioseq::postgres_test::record_migration_probe(
+        "combined.bioseq_2gbp.query_bounds_and_strand");
 
     const bioseq::libpq::result warm =
         data.exec(alignment_query, 5min);

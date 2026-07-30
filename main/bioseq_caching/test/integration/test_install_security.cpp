@@ -1,5 +1,7 @@
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <string>
 #include <string_view>
@@ -20,24 +22,52 @@ TEST_CASE("cache install, preload diagnostics, and ACLs are native",
                 false, bioseq::cache_test::preload_order::none)};
         auto& connection = fixture.admin();
 
-        bool rejected = false;
-        std::string diagnostic;
-        try {
-            bioseq::cache_test::exec(
-                connection,
-                "SET bioseq.query_cache_optimisation_mode = 'same'");
-        } catch (const bioseq::libpq::query_error& error) {
-            rejected = true;
-            diagnostic = error.what();
+        struct non_preloaded_mode {
+            std::string_view mode;
+            std::string_view probe;
+        };
+        constexpr std::array scenarios{
+            non_preloaded_mode{
+                "same", "tap.001.preload.same_requires_preload"},
+            non_preloaded_mode{
+                "reuse", "tap.001.preload.reuse_requires_preload"}};
+        for (const non_preloaded_mode& scenario : scenarios) {
+            DYNAMIC_SECTION("mode " << scenario.mode) {
+                bioseq::postgres_test::migration_probe_scope mode_probes{
+                    "cache install, preload diagnostics, and ACLs are native",
+                    "cache-required modes reject a non-preloaded postmaster",
+                    std::string(scenario.mode)};
+                bool rejected = false;
+                std::string sqlstate;
+                std::string diagnostic;
+                std::string hint;
+                try {
+                    bioseq::cache_test::exec(
+                        connection,
+                        "SET bioseq.query_cache_optimisation_mode = "
+                            + connection.escape_literal(scenario.mode));
+                } catch (const bioseq::libpq::query_error& error) {
+                    rejected = true;
+                    sqlstate = error.sqlstate();
+                    diagnostic = error.what();
+                    hint = error.hint();
+                }
+                REQUIRE(rejected);
+                CHECK(sqlstate == "22023");
+                CHECK(diagnostic
+                      == "bioseq_cache shared memory is not registered");
+                CHECK(hint.find("shared_preload_libraries")
+                      != std::string::npos);
+                CHECK(hint.find("restart PostgreSQL")
+                      != std::string::npos);
+                bioseq::postgres_test::record_migration_probe(
+                    scenario.probe);
+                bioseq::postgres_test::record_migration_probe(
+                    "tap.001.preload.restart_hint");
+                bioseq::postgres_test::record_migration_probe(
+                    "tap.001.preload.sqlstate_and_message");
+            }
         }
-        REQUIRE(rejected);
-        CHECK(diagnostic.find("shared_preload_libraries")
-              != std::string::npos);
-        CHECK(diagnostic.find("restart PostgreSQL") != std::string::npos);
-        bioseq::postgres_test::record_migration_probe(
-            "tap.001.preload.same_requires_preload");
-        bioseq::postgres_test::record_migration_probe(
-            "tap.001.preload.restart_hint");
     }
 
     SECTION("preload, catalog identity, and diagnostics ACLs") {
