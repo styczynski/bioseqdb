@@ -2243,8 +2243,39 @@ inline void run_fmgr_renderer_contract_tests() {
             && module.module_name
                 == "bioseq.sql.generated.production.fixture.entrypoints"
             && module.source_module == "bioseq.fixture"
-            && module.content_sha256.size() == 64,
+            && module.content_sha256.size() == 64
+            && module.content.starts_with(
+                "module;\n\n"
+                "#include \"common.h\"\n\n"
+                "#include <array>\n"),
         "configure-stable owner identity");
+    sql_graph sibling_graph = graph;
+    sibling_graph.extension_name = "bioseq_cache";
+    sibling_graph.extension_schema = "bioseq_cache";
+    sibling_graph.generated_module_prefix =
+        "bioseq.cache.sql.generated";
+    sibling_graph.fmgr_boundary_module =
+        "bioseq.pg_sql_boundary";
+    sibling_graph.fmgr_prelude = "postgresql";
+    const std::vector<rendered_fmgr_entrypoint_module>
+        sibling_modules =
+            render_fmgr_entrypoint_modules(sibling_graph);
+    require(
+        sibling_modules.size() == 1
+            && sibling_modules.front().module_name
+                == "bioseq.cache.sql.generated.production."
+                   "fixture.entrypoints"
+            && sibling_modules.front().content.starts_with(
+                "module;\n\n"
+                "extern \"C\" {\n"
+                "#include \"postgres.h\"\n"
+                "#include \"fmgr.h\"\n"
+                "}\n\n"
+                "#include <array>\n")
+            && !sibling_modules.front().content.contains(
+                "#include \"common.h\""),
+        "sibling fmgr module uses only its configured PostgreSQL "
+        "global-module prelude");
     const std::vector<rendered_fmgr_entrypoint_module>
         configured_owner_modules =
             render_fmgr_entrypoint_modules(

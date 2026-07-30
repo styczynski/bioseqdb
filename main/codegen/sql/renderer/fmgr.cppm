@@ -1180,6 +1180,24 @@ struct cpp_template_binding final {
     return output.str();
 }
 
+[[nodiscard]] inline std::string render_global_module_fragment(
+        std::string_view prelude) {
+    if (prelude == "bioseq_common") {
+        return "module;\n\n"
+               "#include \"common.h\"\n\n";
+    }
+    if (prelude == "postgresql") {
+        return "module;\n\n"
+               "extern \"C\" {\n"
+               "#include \"postgres.h\"\n"
+               "#include \"fmgr.h\"\n"
+               "}\n\n";
+    }
+    throw std::runtime_error(
+        "unsupported generated fmgr prelude '"
+        + std::string{prelude} + "'");
+}
+
 [[nodiscard]] inline std::string render_module(
         rendered_fmgr_entrypoint_module& module,
         const std::map<
@@ -1270,8 +1288,7 @@ struct cpp_template_binding final {
 
     std::ostringstream output;
     output
-        << "module;\n\n"
-        << "#include \"common.h\"\n\n"
+        << render_global_module_fragment(graph.fmgr_prelude)
         << "#include <array>\n"
         << "#include <cstdint>\n"
         << "#include <optional>\n"

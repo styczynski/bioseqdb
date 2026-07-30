@@ -172,6 +172,7 @@ struct command_line {
     std::string generated_module_prefix{"bioseq.sql.generated"};
     std::string fmgr_boundary_module{
         "bioseq.pg_utils.sql_boundary"};
+    std::string fmgr_prelude{"bioseq_common"};
     bool update_golden{};
     bool require_complete_codegen{};
     bool require_checked_physical_ledger{};

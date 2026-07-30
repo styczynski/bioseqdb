@@ -18,7 +18,7 @@ function(bioseq_add_sql_codegen_context)
   cmake_parse_arguments(
     ARG
     "PUBLISH_PHYSICAL_LEDGER;REQUIRE_COMPLETE_CODEGEN"
-    "EXTENSION;EXTENSION_NAME;EXTENSION_SCHEMA;GENERATED_MODULE_PREFIX;FMGR_BOUNDARY_MODULE;OUTPUT_DIR;GENERATED_CPP_DIR;VERSION;RAW_COMPILE_DATABASE"
+    "EXTENSION;EXTENSION_NAME;EXTENSION_SCHEMA;GENERATED_MODULE_PREFIX;FMGR_BOUNDARY_MODULE;FMGR_PRELUDE;OUTPUT_DIR;GENERATED_CPP_DIR;VERSION;RAW_COMPILE_DATABASE"
     "PROFILES"
     ${ARGN})
   if(ARG_UNPARSED_ARGUMENTS)
@@ -55,6 +55,15 @@ function(bioseq_add_sql_codegen_context)
     set(ARG_RAW_COMPILE_DATABASE
       "${CMAKE_BINARY_DIR}/compile_commands.json")
   endif()
+  if(NOT ARG_FMGR_PRELUDE)
+    set(ARG_FMGR_PRELUDE bioseq_common)
+  endif()
+  if(NOT ARG_FMGR_PRELUDE STREQUAL "bioseq_common"
+      AND NOT ARG_FMGR_PRELUDE STREQUAL "postgresql")
+    _bioseq_sql_registry_fail(
+      "invalid FMGR_PRELUDE '${ARG_FMGR_PRELUDE}'; expected "
+      "bioseq_common or postgresql")
+  endif()
   set(_codegen_dependencies)
   if(TARGET bioseq_codegen_project)
     list(APPEND _codegen_dependencies bioseq_codegen_project)
@@ -74,7 +83,8 @@ function(bioseq_add_sql_codegen_context)
     --extension-name "${ARG_EXTENSION_NAME}"
     --extension-schema "${ARG_EXTENSION_SCHEMA}"
     --generated-module-prefix "${ARG_GENERATED_MODULE_PREFIX}"
-    --fmgr-boundary-module "${ARG_FMGR_BOUNDARY_MODULE}")
+    --fmgr-boundary-module "${ARG_FMGR_BOUNDARY_MODULE}"
+    --fmgr-prelude "${ARG_FMGR_PRELUDE}")
   set(_completion_arguments)
   if(ARG_REQUIRE_COMPLETE_CODEGEN)
     list(APPEND _completion_arguments --require-complete-codegen)

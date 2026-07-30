@@ -6807,7 +6807,8 @@ inline void inherit_natural_column_schemas(
     std::string extension_name = "bioseq",
     std::string generated_module_prefix = "bioseq.sql.generated",
     std::string fmgr_boundary_module =
-        "bioseq.pg_utils.sql_boundary") {
+        "bioseq.pg_utils.sql_boundary",
+    std::string fmgr_prelude = "bioseq_common") {
     if (!detail::sql_identifier(extension_schema)
         || detail::reserved_sql_identifier(extension_schema)) {
         throw std::runtime_error(
@@ -6863,6 +6864,12 @@ inline void inherit_natural_column_schemas(
             "invalid fmgr boundary module '"
             + fmgr_boundary_module + "'");
     }
+    if (fmgr_prelude != "bioseq_common"
+        && fmgr_prelude != "postgresql") {
+        throw std::runtime_error(
+            "invalid fmgr prelude '" + fmgr_prelude
+            + "'; expected bioseq_common or postgresql");
+    }
     detail::inherit_natural_column_schemas(program);
     std::vector<baseline_physical_statement>
         expected_baseline_physical_statements =
@@ -6904,6 +6911,7 @@ inline void inherit_natural_column_schemas(
             std::move(generated_module_prefix),
         .fmgr_boundary_module =
             std::move(fmgr_boundary_module),
+        .fmgr_prelude = std::move(fmgr_prelude),
         .compiler_profile = std::move(program.compiler_profile),
         .clang_version =
             std::move(program.module_graph.clang_version),

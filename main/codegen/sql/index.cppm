@@ -1883,7 +1883,9 @@ load_sealed_guc_profile_projection(
             "[--require-checked-physical-ledger] "
             "[--extension-name <name>] [--extension-schema <name>] "
             "[--generated-module-prefix <module>] "
-            "[--fmgr-boundary-module <module>]; legacy import is isolated as "
+            "[--fmgr-boundary-module <module>] "
+            "[--fmgr-prelude <bioseq_common|postgresql>]; "
+            "legacy import is isolated as "
             "sql migrate-baseline --input <legacy.sql> "
             "--migration-owner <owner.cppm> ...");
     }
@@ -2057,6 +2059,8 @@ load_sealed_guc_profile_projection(
             result.generated_module_prefix = std::string{value};
         } else if (option == "--fmgr-boundary-module") {
             result.fmgr_boundary_module = std::string{value};
+        } else if (option == "--fmgr-prelude") {
+            result.fmgr_prelude = std::string{value};
         } else {
             throw std::runtime_error(
                 "unknown SQL generator option: " + std::string{option});
@@ -2120,6 +2124,11 @@ load_sealed_guc_profile_projection(
         && !valid_context_token(result.compiler_profile)) {
         throw std::runtime_error(
             "--profile must be a lowercase context profile identifier");
+    }
+    if (result.fmgr_prelude != "bioseq_common"
+        && result.fmgr_prelude != "postgresql") {
+        throw std::runtime_error(
+            "--fmgr-prelude must be bioseq_common or postgresql");
     }
     if (!migrate_baseline) {
         const auto require_sha256 =
@@ -2610,7 +2619,8 @@ load_sealed_guc_profile_projection(
             command.extension_schema,
             command.extension_name,
             command.generated_module_prefix,
-            command.fmgr_boundary_module);
+            command.fmgr_boundary_module,
+            command.fmgr_prelude);
 
         if (command.stage == generation_stage::support) {
             if (!active_guc_package) {
@@ -2832,14 +2842,16 @@ load_sealed_guc_profile_projection(
             || command.generated_module_prefix
                 != "bioseq.sql.generated"
             || command.fmgr_boundary_module
-                != "bioseq.pg_utils.sql_boundary") {
+                != "bioseq.pg_utils.sql_boundary"
+            || command.fmgr_prelude != "bioseq_common") {
             publication_material +=
                 "\nextension_name=" + command.extension_name
                 + "\nextension_schema=" + command.extension_schema
                 + "\ngenerated_module_prefix="
                 + command.generated_module_prefix
                 + "\nfmgr_boundary_module="
-                + command.fmgr_boundary_module;
+                + command.fmgr_boundary_module
+                + "\nfmgr_prelude=" + command.fmgr_prelude;
         }
         publication_material +=
             "\nphysical_ledger_sha256="

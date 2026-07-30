@@ -140,6 +140,7 @@ bioseq_add_sql_codegen_context(
   EXTENSION_SCHEMA bioseq_cache
   GENERATED_MODULE_PREFIX bioseq.cache.sql.generated
   FMGR_BOUNDARY_MODULE bioseq.pg_sql_boundary
+  FMGR_PRELUDE postgresql
   OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/sql"
   GENERATED_CPP_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/generated/bioseq_cache/sql"
