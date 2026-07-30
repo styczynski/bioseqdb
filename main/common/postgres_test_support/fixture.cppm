@@ -9,6 +9,7 @@ module;
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -143,16 +144,26 @@ public:
                               bool install_extensions = true)
         : extension_names_(collect_extension_names(options.extensions)),
           cluster_(std::move(options)) {
-        cluster_.initialize();
-        cluster_.start();
-        admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
-        if (install_extensions) {
-            this->install_extensions();
+        try {
+            cluster_.initialize();
+            cluster_.start();
+            admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
+            attach_process_sql_transcript(*admin_, "admin");
+            if (install_extensions) {
+                this->install_extensions();
+            }
+        } catch (...) {
+            cleanup_and_record();
+            throw;
         }
     }
 
     postgres_fixture(const postgres_fixture&) = delete;
     postgres_fixture& operator=(const postgres_fixture&) = delete;
+
+    ~postgres_fixture() noexcept {
+        cleanup_and_record();
+    }
 
     /// @brief Returns the owned cluster for restart/crash/backend controls.
     [[nodiscard]] private_cluster& cluster() noexcept { return cluster_; }
@@ -165,6 +176,7 @@ public:
         if (!admin_ || !admin_->is_idle()) {
             admin_.reset();
             admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
+            attach_process_sql_transcript(*admin_, "admin");
         }
         return *admin_;
     }
@@ -173,12 +185,16 @@ public:
     void reconnect_admin() {
         admin_.reset();
         admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
+        attach_process_sql_transcript(*admin_, "admin");
     }
 
     /// @brief Opens an independent session under a caller deadline.
     [[nodiscard]] bioseq::libpq::connection connect(
         std::chrono::milliseconds deadline = std::chrono::seconds(10)) const {
-        return cluster_.connect(deadline);
+        bioseq::libpq::connection connection =
+            cluster_.connect(deadline);
+        attach_process_sql_transcript(connection, "session");
+        return connection;
     }
 
     /// @brief Runs ordinary CREATE EXTENSION in artifact-vector order.
@@ -196,6 +212,35 @@ public:
     }
 
 private:
+    void cleanup_and_record() noexcept {
+        if (cleanup_recorded_) {
+            return;
+        }
+        cleanup_recorded_ = true;
+        try {
+            admin_.reset();
+            if (!automatic_report_collection_enabled()) {
+                static_cast<void>(cluster_.cleanup());
+                return;
+            }
+            const std::filesystem::path root =
+                cluster_.root_directory();
+            const resource_report resources =
+                capture_resource_report(
+                    std::span<const std::filesystem::path>(&root, 1));
+            const cluster_cleanup_result& cleanup = cluster_.cleanup();
+            record_cleanup_observation(
+                root, cleanup.succeeded, cleanup.detail, resources);
+        } catch (const std::exception& error) {
+            record_cleanup_observation(
+                cluster_.root_directory(), false, error.what());
+        } catch (...) {
+            record_cleanup_observation(
+                cluster_.root_directory(), false,
+                "unknown fixture cleanup failure");
+        }
+    }
+
     /// @brief Copies artifact names before cluster_options is moved.
     [[nodiscard]] static std::vector<std::string> collect_extension_names(
         std::span<const extension_artifact> extensions) {
@@ -211,6 +256,7 @@ private:
     private_cluster cluster_;
     std::optional<bioseq::libpq::connection> admin_;
     bool extensions_installed_{};
+    bool cleanup_recorded_{};
 };
 
 /// @brief Restores one session GUC to its exact prior value on destruction.
@@ -505,6 +551,7 @@ public:
             || gid_.find('\0') != std::string::npos) {
             throw fixture_error("invalid prepared transaction GID");
         }
+        attach_process_sql_transcript(*session_, "prepared-transaction");
         static_cast<void>(session_->exec(
             "BEGIN", deadline_,
             bioseq::libpq::transaction_policy::allow_open));
@@ -524,6 +571,8 @@ public:
                        && cluster_->state() == cluster_state::running) {
                 bioseq::libpq::connection cleanup =
                     cluster_->connect(deadline_);
+                attach_process_sql_transcript(
+                    cleanup, "prepared-transaction-cleanup");
                 static_cast<void>(cleanup.exec(
                     "ROLLBACK PREPARED " + cleanup.escape_literal(gid_),
                     deadline_));
@@ -555,6 +604,8 @@ public:
     void commit_prepared() {
         require_prepared();
         bioseq::libpq::connection admin = cluster_->connect(deadline_);
+        attach_process_sql_transcript(
+            admin, "prepared-transaction-commit");
         static_cast<void>(admin.exec(
             "COMMIT PREPARED " + admin.escape_literal(gid_), deadline_));
         state_ = state::finished;
@@ -564,6 +615,8 @@ public:
     void rollback_prepared() {
         require_prepared();
         bioseq::libpq::connection admin = cluster_->connect(deadline_);
+        attach_process_sql_transcript(
+            admin, "prepared-transaction-rollback");
         static_cast<void>(admin.exec(
             "ROLLBACK PREPARED " + admin.escape_literal(gid_), deadline_));
         state_ = state::finished;
@@ -713,8 +766,12 @@ run_independent_session_tasks(
                     std::chrono::milliseconds(1),
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         finish - now));
+                bioseq::libpq::connection connection =
+                    cluster.connect(connection_budget);
+                attach_process_sql_transcript(
+                    connection, tasks[index].name);
                 session_context context(
-                    cluster.connect(connection_budget), finish,
+                    std::move(connection), finish,
                     transcript, tasks[index].name);
                 tasks[index].body(context);
                 outcome.passed = true;

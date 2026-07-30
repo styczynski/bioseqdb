@@ -30,6 +30,7 @@ export module bioseq.test.postgres:cluster;
 import bioseq.libpq.client;
 import :artifact;
 import :process;
+import :report;
 
 export namespace bioseq::postgres_test {
 
@@ -49,6 +50,12 @@ enum class cluster_state {
     initialized,
     running,
     stopped,
+};
+
+/// @brief Terminal no-throw cleanup result for one owned private cluster.
+struct cluster_cleanup_result {
+    bool succeeded{};
+    std::string detail;
 };
 
 }  // namespace bioseq::postgres_test
@@ -212,10 +219,7 @@ public:
           port_(cluster_detail::available_port()) {}
 
     ~private_cluster() noexcept {
-        stop();
-        if (state_ != cluster_state::running) {
-            remove_owned_root();
-        }
+        static_cast<void>(cleanup());
     }
 
     private_cluster(const private_cluster&) = delete;
@@ -223,10 +227,17 @@ public:
 
     /// @brief Stages artifacts, initializes PGDATA, and writes private settings.
     void initialize() {
+        if (cleanup_attempted_) {
+            throw std::logic_error(
+                "initialize cannot reuse a cleaned private cluster");
+        }
         require_state(cluster_state::constructed, "initialize");
         std::filesystem::create_directories(socket_directory_);
         std::filesystem::create_directories(log_directory_);
         stage_ = stage_extension_artifacts(root_ / "stage", options_.extensions);
+        if (automatic_report_collection_enabled()) {
+            record_artifact_stage(*stage_);
+        }
         const auto init_exit = run_program(
             "initdb",
             {"--pgdata", data_directory_.string(),
@@ -248,6 +259,10 @@ public:
 
     /// @brief Starts the initialized or previously stopped postmaster.
     void start() {
+        if (cleanup_attempted_) {
+            throw std::logic_error(
+                "start cannot reuse a cleaned private cluster");
+        }
         if (state_ != cluster_state::initialized
             && state_ != cluster_state::stopped) {
             throw std::logic_error("start requires initialized or stopped state");
@@ -305,7 +320,7 @@ public:
     }
 
     /// @brief Stops the owned postmaster; never throws from cleanup paths.
-    void stop() noexcept {
+    void stop() noexcept try {
         if (state_ != cluster_state::running) {
             return;
         }
@@ -357,16 +372,67 @@ public:
                 + std::string("postmaster remains live; PGDATA retained at ")
                 + data_directory_.string();
         }
+    } catch (...) {
+        const std::int64_t postmaster_pid = read_postmaster_pid();
+        if (postmaster_pid > 1
+            && cluster_detail::process_absent(postmaster_pid)) {
+            state_ = cluster_state::stopped;
+        }
+        set_cleanup_error_noexcept(
+            "private cluster stop failed while recording diagnostics");
+    }
+
+    /// @brief Stops the postmaster and removes the marker-owned root once.
+    [[nodiscard]] const cluster_cleanup_result& cleanup() noexcept try {
+        if (cleanup_attempted_) {
+            return cleanup_result_;
+        }
+        cleanup_attempted_ = true;
+        stop();
+        if (state_ != cluster_state::running) {
+            remove_owned_root();
+        }
+        std::error_code error;
+        const bool root_exists = std::filesystem::exists(root_, error);
+        cleanup_result_.succeeded =
+            state_ != cluster_state::running
+            && !root_exists
+            && !error
+            && cleanup_error_.empty();
+        if (cleanup_result_.succeeded) {
+            cleanup_result_.detail =
+                "postmaster stopped and private root removed";
+        } else if (!cleanup_error_.empty()) {
+            cleanup_result_.detail = cleanup_error_;
+        } else if (state_ == cluster_state::running) {
+            cleanup_result_.detail =
+                "postmaster remains live; private root retained";
+        } else if (error) {
+            cleanup_result_.detail =
+                "cannot verify private-root cleanup: " + error.message();
+        } else {
+            cleanup_result_.detail =
+                "private root remains after cleanup";
+        }
+        return cleanup_result_;
+    } catch (...) {
+        cleanup_result_.succeeded = false;
+        cleanup_result_.detail.clear();
+        set_cleanup_error_noexcept(
+            "private cluster cleanup failed while recording diagnostics");
+        return cleanup_result_;
     }
 
     /// @brief Opens a Unix-socket connection under the caller deadline.
     [[nodiscard]] bioseq::libpq::connection connect(
         std::chrono::milliseconds deadline) const {
         require_state(cluster_state::running, "connect");
-        return bioseq::libpq::connection(
+        bioseq::libpq::connection connection(
             bioseq::libpq::unix_socket_conninfo(
                 socket_directory_.string(), "postgres", "postgres", port_),
             deadline);
+        attach_process_sql_transcript(connection, "cluster");
+        return connection;
     }
 
     /// @brief Requests cancellation of one backend through a dedicated admin session.
@@ -564,6 +630,16 @@ private:
         }
     }
 
+    /// @brief Records cleanup diagnostics without allowing allocation failures out.
+    void set_cleanup_error_noexcept(std::string_view message) noexcept {
+        try {
+            if (cleanup_error_.empty()) {
+                cleanup_error_.assign(message);
+            }
+        } catch (...) {
+        }
+    }
+
     /// @brief Removes only a marker-proven root allocated by this instance.
     void remove_owned_root() noexcept {
         try {
@@ -589,13 +665,10 @@ private:
                     + error.message();
             }
         } catch (const std::exception& error) {
-            if (cleanup_error_.empty()) {
-                cleanup_error_ = error.what();
-            }
+            set_cleanup_error_noexcept(error.what());
         } catch (...) {
-            if (cleanup_error_.empty()) {
-                cleanup_error_ = "unknown private-root cleanup failure";
-            }
+            set_cleanup_error_noexcept(
+                "unknown private-root cleanup failure");
         }
     }
 
@@ -608,6 +681,8 @@ private:
     std::optional<extension_stage> stage_;
     int port_{};
     std::string cleanup_error_;
+    bool cleanup_attempted_{};
+    cluster_cleanup_result cleanup_result_;
 };
 
 }  // namespace bioseq::postgres_test

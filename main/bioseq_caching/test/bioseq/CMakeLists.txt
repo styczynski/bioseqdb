@@ -44,6 +44,8 @@ add_test(
       "$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_INSTALL_SQL>"
     --bioseq-dso
       "$<TARGET_GENEX_EVAL:postgresql_bioseq,$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_DSO>>"
+    --migration-ledger
+      "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
     --report
       "${CMAKE_BINARY_DIR}/reports/bioseq-cache-bioseq-integration.json"
     --case-timeout-seconds 6300)

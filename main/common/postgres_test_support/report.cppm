@@ -2,11 +2,14 @@ module;
 
 #include <sys/resource.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <ostream>
@@ -35,6 +38,8 @@ enum class sql_transcript_status {
 struct sql_transcript_entry {
     std::uint64_t ordinal{};
     std::string session;
+    std::string test_case;
+    std::string section;
     std::string sql;
     sql_transcript_status status{sql_transcript_status::succeeded};
     std::string sqlstate;
@@ -47,8 +52,71 @@ struct sql_transcript_entry {
     std::chrono::milliseconds duration{};
 };
 
-/// @brief Thread-safe executor/collector for literal SQL transcripts.
-class sql_transcript {
+/// @brief Catch case/section associated with process-wide report observations.
+struct report_case_context {
+    std::string test_case;
+    std::string section;
+};
+
+}  // namespace bioseq::postgres_test
+
+namespace bioseq::postgres_test::report_state_detail {
+
+struct context_state {
+    std::mutex mutex;
+    report_case_context current;
+};
+
+[[nodiscard]] inline context_state& process_context() {
+    static context_state state;
+    return state;
+}
+
+[[nodiscard]] inline std::atomic_bool& automatic_collection() {
+    static std::atomic_bool enabled{false};
+    return enabled;
+}
+
+}  // namespace bioseq::postgres_test::report_state_detail
+
+export namespace bioseq::postgres_test {
+
+/// @brief Enables fixture-owned process evidence for an integration runner.
+inline void set_automatic_report_collection_enabled(bool enabled) noexcept {
+    report_state_detail::automatic_collection().store(
+        enabled, std::memory_order_relaxed);
+}
+
+/// @brief Returns whether fixtures should attach the process report collectors.
+[[nodiscard]] inline bool automatic_report_collection_enabled() noexcept {
+    return report_state_detail::automatic_collection().load(
+        std::memory_order_relaxed);
+}
+
+/// @brief Updates the active Catch context inherited by SQL/cleanup observers.
+inline void set_report_case_context(report_case_context context) {
+    auto& state = report_state_detail::process_context();
+    std::scoped_lock lock(state.mutex);
+    state.current = std::move(context);
+}
+
+/// @brief Clears the active Catch context outside test execution.
+inline void clear_report_case_context() noexcept {
+    try {
+        set_report_case_context({});
+    } catch (...) {
+    }
+}
+
+/// @brief Returns a stable copy of the active process report context.
+[[nodiscard]] inline report_case_context current_report_case_context() {
+    auto& state = report_state_detail::process_context();
+    std::scoped_lock lock(state.mutex);
+    return state.current;
+}
+
+/// @brief Thread-safe executor/observer for literal SQL transcripts.
+class sql_transcript : public bioseq::libpq::execution_observer {
 public:
     /// @brief Executes SQL, records bounded rows/errors, and preserves exceptions.
     [[nodiscard]] bioseq::libpq::result execute(
@@ -58,58 +126,34 @@ public:
         std::chrono::milliseconds deadline,
         bioseq::libpq::transaction_policy policy =
             bioseq::libpq::transaction_policy::require_idle,
-        std::size_t max_sample_cells = 256) {
+        std::size_t max_sample_cells = 256,
+        std::size_t max_sample_bytes = 64U * 1024U) {
+        if (connection.execution_observer_ptr() == this) {
+            return connection.exec(sql, deadline, policy);
+        }
         const auto started = std::chrono::steady_clock::now();
         try {
             bioseq::libpq::result result =
                 connection.exec(sql, deadline, policy);
-            sql_transcript_entry entry{
-                .session = std::string(session),
-                .sql = std::string(sql),
-                .status = sql_transcript_status::succeeded,
-                .command_tag = result.command_tag(),
-                .row_count = result.rows(),
-                .column_count = result.columns(),
-                .duration =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - started)};
-            std::size_t sampled_cells = 0;
-            for (int row = 0; row < result.rows(); ++row) {
-                if (sampled_cells
-                    + static_cast<std::size_t>(result.columns())
-                    > max_sample_cells) {
-                    entry.rows_truncated = true;
-                    break;
-                }
-                std::vector<std::optional<std::string>> sampled_row;
-                sampled_row.reserve(
-                    static_cast<std::size_t>(result.columns()));
-                for (int column = 0; column < result.columns(); ++column) {
-                    if (result.is_null(row, column)) {
-                        sampled_row.push_back(std::nullopt);
-                    } else {
-                        sampled_row.emplace_back(result.value(row, column));
-                    }
-                    ++sampled_cells;
-                }
-                entry.sampled_rows.push_back(std::move(sampled_row));
-            }
-            append(std::move(entry));
+            append(success_entry(
+                session, sql, result,
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - started),
+                max_sample_cells, max_sample_bytes));
             return result;
         } catch (const bioseq::libpq::query_error& error) {
-            append(sql_transcript_entry{
-                .session = std::string(session),
-                .sql = std::string(sql),
-                .status = sql_transcript_status::failed,
-                .sqlstate = std::string(error.sqlstate()),
-                .message = error.what(),
-                .duration =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - started)});
+            append(failure_entry(
+                session, sql, error,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started)));
             throw;
         } catch (const std::exception& error) {
+            const report_case_context context =
+                current_report_case_context();
             append(sql_transcript_entry{
                 .session = std::string(session),
+                .test_case = context.test_case,
+                .section = context.section,
                 .sql = std::string(sql),
                 .status = sql_transcript_status::failed,
                 .message = error.what(),
@@ -117,6 +161,30 @@ public:
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - started)});
             throw;
+        }
+    }
+
+    void command_succeeded(
+        std::string_view context,
+        std::string_view sql,
+        const bioseq::libpq::result& outcome,
+        std::chrono::nanoseconds elapsed) noexcept override {
+        try {
+            append(success_entry(
+                context, sql, outcome, elapsed,
+                max_observed_sample_cells, max_observed_sample_bytes));
+        } catch (...) {
+        }
+    }
+
+    void command_failed(
+        std::string_view context,
+        std::string_view sql,
+        const bioseq::libpq::query_error& error,
+        std::chrono::nanoseconds elapsed) noexcept override {
+        try {
+            append(failure_entry(context, sql, error, elapsed));
+        } catch (...) {
         }
     }
 
@@ -141,10 +209,132 @@ public:
     }
 
 private:
+    static constexpr std::size_t max_observed_sample_cells = 256;
+    static constexpr std::size_t max_observed_sample_bytes = 64U * 1024U;
+
+    [[nodiscard]] static sql_transcript_entry success_entry(
+        std::string_view session,
+        std::string_view sql,
+        const bioseq::libpq::result& result,
+        std::chrono::nanoseconds elapsed,
+        std::size_t max_sample_cells,
+        std::size_t max_sample_bytes) {
+        const report_case_context context =
+            current_report_case_context();
+        sql_transcript_entry entry{
+            .session = std::string(session),
+            .test_case = context.test_case,
+            .section = context.section,
+            .sql = std::string(sql),
+            .status = sql_transcript_status::succeeded,
+            .command_tag = result.command_tag(),
+            .row_count = result.rows(),
+            .column_count = result.columns(),
+            .duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    elapsed)};
+        std::size_t sampled_cells = 0;
+        std::size_t sampled_bytes = 0;
+        for (int row = 0; row < result.rows(); ++row) {
+            const std::size_t column_count =
+                static_cast<std::size_t>(result.columns());
+            if (sampled_cells > max_sample_cells
+                || column_count > max_sample_cells - sampled_cells) {
+                entry.rows_truncated = true;
+                break;
+            }
+            std::size_t row_bytes = 0;
+            bool row_exceeds_byte_limit = false;
+            for (int column = 0; column < result.columns(); ++column) {
+                if (result.is_null(row, column)) {
+                    continue;
+                }
+                const std::size_t cell_bytes =
+                    result.value(row, column).size();
+                if (row_bytes > max_sample_bytes
+                    || cell_bytes > max_sample_bytes - row_bytes) {
+                    row_exceeds_byte_limit = true;
+                    break;
+                }
+                row_bytes += cell_bytes;
+            }
+            if (row_exceeds_byte_limit
+                || sampled_bytes > max_sample_bytes - row_bytes) {
+                entry.rows_truncated = true;
+                break;
+            }
+            std::vector<std::optional<std::string>> sampled_row;
+            sampled_row.reserve(
+                static_cast<std::size_t>(result.columns()));
+            for (int column = 0; column < result.columns(); ++column) {
+                if (result.is_null(row, column)) {
+                    sampled_row.push_back(std::nullopt);
+                } else {
+                    sampled_row.emplace_back(result.value(row, column));
+                }
+                ++sampled_cells;
+            }
+            sampled_bytes += row_bytes;
+            entry.sampled_rows.push_back(std::move(sampled_row));
+        }
+        return entry;
+    }
+
+    [[nodiscard]] static sql_transcript_entry failure_entry(
+        std::string_view session,
+        std::string_view sql,
+        const bioseq::libpq::query_error& error,
+        std::chrono::nanoseconds elapsed) {
+        const report_case_context context =
+            current_report_case_context();
+        return sql_transcript_entry{
+            .session = std::string(session),
+            .test_case = context.test_case,
+            .section = context.section,
+            .sql = std::string(sql),
+            .status = sql_transcript_status::failed,
+            .sqlstate = std::string(error.sqlstate()),
+            .message = error.what(),
+            .duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    elapsed)};
+    }
+
     mutable std::mutex mutex_;
     std::vector<sql_transcript_entry> entries_;
     std::uint64_t next_ordinal_{};
 };
+
+/// @brief Returns the run-owned collector installed by PostgreSQL fixtures.
+[[nodiscard]] inline sql_transcript& process_sql_transcript() {
+    static sql_transcript transcript;
+    return transcript;
+}
+
+/// @brief Attaches process transcript capture to one test connection.
+inline void attach_process_sql_transcript(
+    bioseq::libpq::connection& connection,
+    std::string_view session) noexcept {
+    try {
+        if (!automatic_report_collection_enabled()) {
+            return;
+        }
+        connection.set_execution_observer(
+            &process_sql_transcript(), std::string(session));
+    } catch (...) {
+    }
+}
+
+/// @brief Clears SQL evidence before a new native Catch session.
+inline void clear_process_sql_transcript() {
+    process_sql_transcript().clear();
+}
+
+/// @brief Returns the run's ordinal-ordered SQL evidence.
+[[nodiscard]] inline std::vector<sql_transcript_entry>
+process_sql_transcript_entries() {
+    return process_sql_transcript().entries();
+}
 
 /// @brief One command-line argument after runner-owned sensitivity classification.
 struct report_argument {
@@ -189,6 +379,17 @@ struct cleanup_report {
     std::string detail;
 };
 
+/// @brief One case-associated private-cluster teardown observation.
+struct cleanup_observation {
+    std::uint64_t ordinal{};
+    std::string test_case;
+    std::string section;
+    std::filesystem::path root;
+    bool succeeded{};
+    std::string detail;
+    resource_report resources;
+};
+
 /// @brief Complete source-neutral JSON model for a native integration run.
 struct integration_test_report {
     std::string schema_version{"bioseq-postgres-test-v1"};
@@ -200,6 +401,7 @@ struct integration_test_report {
     std::vector<sql_transcript_entry> sql_transcripts;
     std::vector<migration_probe_record> migration_probes;
     std::vector<artifact_report> artifacts;
+    std::vector<cleanup_observation> cleanup_observations;
     resource_report resources;
     cleanup_report cleanup;
 };
@@ -268,6 +470,166 @@ struct integration_test_report {
 
 }  // namespace bioseq::postgres_test
 
+namespace bioseq::postgres_test::report_state_detail {
+
+struct cleanup_state {
+    std::mutex mutex;
+    std::vector<cleanup_observation> observations;
+    std::uint64_t next_ordinal{};
+};
+
+struct artifact_state {
+    std::mutex mutex;
+    std::vector<artifact_report> reports;
+};
+
+[[nodiscard]] inline cleanup_state& process_cleanup() {
+    static cleanup_state state;
+    return state;
+}
+
+[[nodiscard]] inline artifact_state& process_artifacts() {
+    static artifact_state state;
+    return state;
+}
+
+}  // namespace bioseq::postgres_test::report_state_detail
+
+export namespace bioseq::postgres_test {
+
+/// @brief Records exact source/staged artifact evidence for one fixture.
+inline void record_artifact_stage(
+    const extension_stage& stage) noexcept {
+    try {
+        std::vector<artifact_report> reports =
+            artifact_reports(stage);
+        auto& state = report_state_detail::process_artifacts();
+        std::scoped_lock lock(state.mutex);
+        state.reports.insert(
+            state.reports.end(),
+            std::make_move_iterator(reports.begin()),
+            std::make_move_iterator(reports.end()));
+    } catch (...) {
+    }
+}
+
+/// @brief Clears staged-artifact evidence before a native Catch session.
+inline void clear_artifact_stage_reports() noexcept {
+    try {
+        auto& state = report_state_detail::process_artifacts();
+        std::scoped_lock lock(state.mutex);
+        state.reports.clear();
+    } catch (...) {
+    }
+}
+
+/// @brief Returns source/staged artifact evidence in fixture order.
+[[nodiscard]] inline std::vector<artifact_report>
+artifact_stage_reports() {
+    auto& state = report_state_detail::process_artifacts();
+    std::scoped_lock lock(state.mutex);
+    return state.reports;
+}
+
+/// @brief Records one no-throw private-cluster cleanup and resource sample.
+inline void record_cleanup_observation(
+    const std::filesystem::path& root,
+    bool succeeded,
+    std::string_view detail,
+    resource_report resources = {}) noexcept {
+    try {
+        const report_case_context context =
+            current_report_case_context();
+        auto& state = report_state_detail::process_cleanup();
+        std::scoped_lock lock(state.mutex);
+        state.observations.push_back(cleanup_observation{
+            .ordinal = state.next_ordinal++,
+            .test_case = context.test_case,
+            .section = context.section,
+            .root = root,
+            .succeeded = succeeded,
+            .detail = std::string(detail),
+            .resources = resources});
+    } catch (...) {
+    }
+}
+
+/// @brief Clears teardown evidence before a new native Catch session.
+inline void clear_cleanup_observations() noexcept {
+    try {
+        auto& state = report_state_detail::process_cleanup();
+        std::scoped_lock lock(state.mutex);
+        state.observations.clear();
+        state.next_ordinal = 0;
+    } catch (...) {
+    }
+}
+
+/// @brief Returns an ordinal-ordered cleanup snapshot.
+[[nodiscard]] inline std::vector<cleanup_observation>
+cleanup_observations() {
+    auto& state = report_state_detail::process_cleanup();
+    std::scoped_lock lock(state.mutex);
+    return state.observations;
+}
+
+/// @brief Aggregates all observed fixture teardowns into one run verdict.
+[[nodiscard]] inline cleanup_report aggregate_cleanup_report() {
+    const std::vector<cleanup_observation> observations =
+        cleanup_observations();
+    if (observations.empty()) {
+        return cleanup_report{
+            .succeeded = false,
+            .detail = "no private-cluster cleanup observation was recorded"};
+    }
+    std::size_t failed = 0;
+    std::string failures;
+    for (const cleanup_observation& observation : observations) {
+        if (observation.succeeded) {
+            continue;
+        }
+        ++failed;
+        if (!failures.empty()) {
+            failures += "; ";
+        }
+        failures += observation.test_case.empty()
+            ? observation.root.string()
+            : observation.test_case;
+        if (!observation.detail.empty()) {
+            failures += ": " + observation.detail;
+        }
+    }
+    if (failed != 0) {
+        return cleanup_report{
+            .succeeded = false,
+            .detail = std::to_string(failed)
+                + " private-cluster cleanup(s) failed: " + failures};
+    }
+    return cleanup_report{
+        .succeeded = true,
+        .detail = std::to_string(observations.size())
+            + " private-cluster cleanup(s) completed"};
+}
+
+/// @brief Combines client peak RSS with the largest observed fixture tree.
+[[nodiscard]] inline resource_report aggregate_resource_report() {
+    resource_report aggregate = capture_resource_report();
+    for (const cleanup_observation& observation :
+         cleanup_observations()) {
+        aggregate.peak_rss_bytes =
+            std::max(
+                aggregate.peak_rss_bytes,
+                observation.resources.peak_rss_bytes);
+        aggregate.observed_temp_bytes =
+            std::max(
+                aggregate.observed_temp_bytes,
+                observation.resources.observed_temp_bytes);
+    }
+    return aggregate;
+}
+
+}  // namespace bioseq::postgres_test
+
 namespace bioseq::postgres_test::report_detail {
 
 /// @brief Writes one correctly escaped JSON string.
@@ -326,6 +688,8 @@ inline void write_transcript(
         };
     integer_field("ordinal", static_cast<std::int64_t>(entry.ordinal));
     string_field("session", entry.session);
+    string_field("test_case", entry.test_case);
+    string_field("section", entry.section);
     string_field("sql", entry.sql);
     string_field("status",
                  entry.status == sql_transcript_status::succeeded
@@ -515,6 +879,41 @@ inline void write_integration_test_report(
         artifact_field("dso_sha256", artifact.dso_sha256);
         artifact_field("staged_control_sha256",
                        artifact.staged_control_sha256);
+        output.put('}');
+    }
+    output.put(']');
+
+    report_detail::comma(output, first);
+    report_detail::key(output, "cleanup_observations");
+    output.put('[');
+    bool first_cleanup_observation = true;
+    for (const cleanup_observation& observation :
+         report.cleanup_observations) {
+        report_detail::comma(output, first_cleanup_observation);
+        output.put('{');
+        report_detail::key(output, "ordinal");
+        output << observation.ordinal;
+        output.put(',');
+        report_detail::key(output, "test_case");
+        report_detail::write_string(output, observation.test_case);
+        output.put(',');
+        report_detail::key(output, "section");
+        report_detail::write_string(output, observation.section);
+        output.put(',');
+        report_detail::key(output, "root");
+        report_detail::write_string(output, observation.root.string());
+        output.put(',');
+        report_detail::key(output, "succeeded");
+        output << (observation.succeeded ? "true" : "false");
+        output.put(',');
+        report_detail::key(output, "detail");
+        report_detail::write_string(output, observation.detail);
+        output.put(',');
+        report_detail::key(output, "peak_rss_bytes");
+        output << observation.resources.peak_rss_bytes;
+        output.put(',');
+        report_detail::key(output, "observed_temp_bytes");
+        output << observation.resources.observed_temp_bytes;
         output.put('}');
     }
     output.put(']');

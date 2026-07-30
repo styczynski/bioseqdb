@@ -95,6 +95,16 @@ inline void clear_migration_probe_context() noexcept {
     migration_probe_detail::current_context = {};
 }
 
+/// @brief Updates Catch-owned fields while preserving a scoped permutation.
+inline void update_migration_probe_case_section(
+    std::string test_case,
+    std::string section) {
+    migration_probe_detail::current_context.test_case =
+        std::move(test_case);
+    migration_probe_detail::current_context.section =
+        std::move(section);
+}
+
 /// @brief Sets the calling thread's Catch context and restores it on destruction.
 class migration_probe_scope {
 public:
@@ -166,6 +176,25 @@ migration_probe_records() {
     auto& registry = migration_probe_detail::process_registry();
     std::scoped_lock lock(registry.mutex);
     return registry.records;
+}
+
+/// @brief Invalidates emitted proof when its owning Catch case did not pass.
+inline void reconcile_migration_probe_case(
+    std::string_view test_case,
+    bool passed) noexcept {
+    if (passed) {
+        return;
+    }
+    try {
+        auto& registry = migration_probe_detail::process_registry();
+        std::scoped_lock lock(registry.mutex);
+        for (migration_probe_record& record : registry.records) {
+            if (record.test_case == test_case) {
+                record.passed = false;
+            }
+        }
+    } catch (...) {
+    }
 }
 
 /// @brief Clears runtime evidence before a new Catch session starts.

@@ -173,6 +173,28 @@ private:
     }
 };
 
+/// @brief Optional, non-owning observation sink for completed client commands.
+///
+/// Connections do not install an observer by default. Test fixtures may attach
+/// one whose lifetime exceeds the connection; callbacks are synchronous,
+/// nonthrowing, and receive owned results before they are returned to callers.
+class execution_observer {
+public:
+    virtual ~execution_observer() = default;
+
+    virtual void command_succeeded(
+        std::string_view context,
+        std::string_view sql,
+        const result& outcome,
+        std::chrono::nanoseconds elapsed) noexcept = 0;
+
+    virtual void command_failed(
+        std::string_view context,
+        std::string_view sql,
+        const query_error& error,
+        std::chrono::nanoseconds elapsed) noexcept = 0;
+};
+
 /// @brief Materialised result plus wire-observed first-row and completion time.
 ///
 /// `time_to_first_row` is empty for a successful command or empty tuple result.
@@ -219,7 +241,9 @@ public:
     }
     connection(connection&& other) noexcept
         : handle_(std::exchange(other.handle_, nullptr)),
-          notices_(std::move(other.notices_)) {
+          notices_(std::move(other.notices_)),
+          observer_(std::exchange(other.observer_, nullptr)),
+          observer_context_(std::move(other.observer_context_)) {
         if (handle_) {
             PQsetNoticeReceiver(handle_, &connection::receive_notice, this);
         }
@@ -235,36 +259,39 @@ public:
 
     /// @brief Runs a command with the default ten-second client deadline.
     [[nodiscard]] result exec(std::string_view sql) {
-        return run_statement(sql, std::chrono::seconds(10), execution_limits{},
-                             transaction_policy::require_idle);
+        return execute_observed(
+            sql, std::chrono::seconds(10), execution_limits{},
+            transaction_policy::require_idle);
     }
 
     /// @brief Runs a command with an explicit client deadline (e.g. the fence).
     [[nodiscard]] result exec(std::string_view sql,
                               std::chrono::milliseconds deadline) {
-        return run_statement(sql, deadline, execution_limits{},
-                             transaction_policy::require_idle);
+        return execute_observed(
+            sql, deadline, execution_limits{},
+            transaction_policy::require_idle);
     }
 
     /// @brief Runs a command while applying the selected transaction-idle policy.
     [[nodiscard]] result exec(std::string_view sql, transaction_policy policy) {
-        return run_statement(sql, std::chrono::seconds(10), execution_limits{},
-                             policy);
+        return execute_observed(
+            sql, std::chrono::seconds(10), execution_limits{}, policy);
     }
 
     /// @brief Runs a bounded command that may intentionally leave a transaction open.
     [[nodiscard]] result exec(std::string_view sql,
                               std::chrono::milliseconds deadline,
                               transaction_policy policy) {
-        return run_statement(sql, deadline, execution_limits{}, policy);
+        return execute_observed(
+            sql, deadline, execution_limits{}, policy);
     }
 
     /// @brief Runs a command under both a client deadline and retention limits.
     [[nodiscard]] result exec_bounded(std::string_view sql,
                                       std::chrono::milliseconds deadline,
                                       const execution_limits& limits) {
-        return run_statement(sql, deadline, limits,
-                             transaction_policy::require_idle);
+        return execute_observed(
+            sql, deadline, limits, transaction_policy::require_idle);
     }
 
     /// @brief Runs a retention-bounded command under an explicit transaction policy.
@@ -272,7 +299,7 @@ public:
                                       std::chrono::milliseconds deadline,
                                       const execution_limits& limits,
                                       transaction_policy policy) {
-        return run_statement(sql, deadline, limits, policy);
+        return execute_observed(sql, deadline, limits, policy);
     }
 
     /// @brief Executes one bounded query and observes its first wire-level row.
@@ -287,7 +314,7 @@ public:
         transaction_policy policy =
             transaction_policy::require_idle) {
         single_row_observed_result observed;
-        observed.rows = run_statement(
+        observed.rows = execute_observed(
             sql, deadline, limits, policy, &observed);
         return observed;
     }
@@ -302,8 +329,8 @@ public:
     [[nodiscard]] multi_result exec_bounded_multi(std::string_view sql,
                                                   std::chrono::milliseconds deadline,
                                                   const execution_limits& limits) {
-        return run_statement_multi(sql, deadline, limits,
-                                   transaction_policy::require_idle);
+        return execute_multi_observed(
+            sql, deadline, limits, transaction_policy::require_idle);
     }
 
     /// @brief Runs a multi-result command under an explicit transaction policy.
@@ -312,7 +339,22 @@ public:
         std::chrono::milliseconds deadline,
         const execution_limits& limits,
         transaction_policy policy) {
-        return run_statement_multi(sql, deadline, limits, policy);
+        return execute_multi_observed(sql, deadline, limits, policy);
+    }
+
+    /// @brief Attaches or clears a non-owning synchronous execution observer.
+    void set_execution_observer(
+        execution_observer* observer,
+        std::string context = {}) {
+        observer_context_ = observer == nullptr
+            ? std::string{}
+            : std::move(context);
+        observer_ = observer;
+    }
+
+    /// @brief Returns the currently attached observer, if any.
+    [[nodiscard]] execution_observer* execution_observer_ptr() const noexcept {
+        return observer_;
     }
 
     /// @brief Drains and clears notices captured since the last drain.
@@ -388,6 +430,75 @@ public:
 
 private:
     using clock = std::chrono::steady_clock;
+
+    [[nodiscard]] result execute_observed(
+        std::string_view sql,
+        clock::duration budget,
+        const execution_limits& limits,
+        transaction_policy policy,
+        single_row_observed_result* observation = nullptr) {
+        const auto started = clock::now();
+        try {
+            result outcome =
+                run_statement(sql, budget, limits, policy, observation);
+            notify_success(sql, outcome, started);
+            return outcome;
+        } catch (const query_error& error) {
+            notify_failure(sql, error, started);
+            throw;
+        }
+    }
+
+    [[nodiscard]] multi_result execute_multi_observed(
+        std::string_view sql,
+        clock::duration budget,
+        const execution_limits& limits,
+        transaction_policy policy) {
+        const auto started = clock::now();
+        try {
+            multi_result outcome =
+                run_statement_multi(sql, budget, limits, policy);
+            if (outcome.error) {
+                notify_failure(sql, *outcome.error, started);
+            } else {
+                const result empty;
+                notify_success(
+                    sql,
+                    outcome.results.empty() ? empty : outcome.results.back(),
+                    started);
+            }
+            return outcome;
+        } catch (const query_error& error) {
+            notify_failure(sql, error, started);
+            throw;
+        }
+    }
+
+    void notify_success(
+        std::string_view sql,
+        const result& outcome,
+        clock::time_point started) noexcept {
+        if (observer_ == nullptr) {
+            return;
+        }
+        observer_->command_succeeded(
+            observer_context_, sql, outcome,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - started));
+    }
+
+    void notify_failure(
+        std::string_view sql,
+        const query_error& error,
+        clock::time_point started) noexcept {
+        if (observer_ == nullptr) {
+            return;
+        }
+        observer_->command_failed(
+            observer_context_, sql, error,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - started));
+    }
 
     [[nodiscard]] static std::optional<std::uint64_t> command_affected_rows(
         PGresult* raw) noexcept {
@@ -534,6 +645,10 @@ private:
                 out.columns_.push_back(result::column_meta{
                     .name = PQfname(res, column) ? PQfname(res, column) : std::string{},
                     .type_oid = static_cast<unsigned int>(PQftype(res, column))});
+            }
+            if (limits.max_columns != 0
+                && out.columns_.size() > limits.max_columns) {
+                limited = true;
             }
         }
         if (!copy_rows) {
@@ -910,6 +1025,8 @@ private:
 
     PGconn* handle_{};
     std::vector<notice> notices_;
+    execution_observer* observer_{};
+    std::string observer_context_;
 };
 
 /// @brief Builds a Unix-socket-only conninfo string from explicit parts.

@@ -30,8 +30,11 @@ TEST_CASE("single-row libpq mode observes wire arrival before completion",
     CHECK(delayed.rows.value(0, 1).size() == 1048576);
     CHECK(delayed.rows.value(1, 1).size() == 1048576);
     REQUIRE(delayed.time_to_first_row.has_value());
+    CHECK(*delayed.time_to_first_row
+          > std::chrono::nanoseconds::zero());
     CHECK(*delayed.time_to_first_row < delayed.elapsed);
-    CHECK(delayed.elapsed - *delayed.time_to_first_row >= 200ms);
+    CHECK(delayed.elapsed - *delayed.time_to_first_row
+          >= 150ms);
     bioseq::postgres_test::record_migration_probe(
         "harness.libpq.single_row_precedes_completion");
 

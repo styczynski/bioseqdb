@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <filesystem>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -16,11 +17,28 @@ static_assert(requires(bioseq::libpq::connection& connection) {
         "BEGIN", 1s, bioseq::libpq::transaction_policy::allow_open);
     connection.current_transaction_state();
     connection.exec_single_row_observed("SELECT 1", 1s);
+    connection.set_execution_observer(nullptr, "contract");
+    connection.execution_observer_ptr();
 });
 static_assert(std::is_same_v<
     decltype(std::declval<bioseq::libpq::connection&>()
                  .exec_single_row_observed("SELECT 1", 1s)),
     bioseq::libpq::single_row_observed_result>);
+
+namespace {
+
+struct report_state_reset {
+    ~report_state_reset() noexcept {
+        clear_report_case_context();
+        try {
+            clear_process_sql_transcript();
+        } catch (...) {
+        }
+        clear_cleanup_observations();
+    }
+};
+
+}  // namespace
 
 TEST_CASE("libpq first-row observation has explicit empty-result semantics",
           "[postgres-test-support][unit][libpq][first-row]") {
@@ -28,6 +46,54 @@ TEST_CASE("libpq first-row observation has explicit empty-result semantics",
     CHECK_FALSE(observation.time_to_first_row.has_value());
     CHECK(observation.elapsed == 0ns);
     CHECK(observation.rows.rows() == 0);
+}
+
+TEST_CASE("process report collectors preserve case SQL and cleanup evidence",
+          "[postgres-test-support][unit][report]") {
+    const report_state_reset reset;
+    clear_process_sql_transcript();
+    clear_cleanup_observations();
+    set_report_case_context({
+        .test_case = "report collector contract",
+        .section = "observer"});
+
+    bioseq::libpq::result command;
+    process_sql_transcript().command_succeeded(
+        "admin", "SELECT 1", command, 2ms);
+    const bioseq::libpq::query_error expected{
+        "expected failure", "22000"};
+    process_sql_transcript().command_failed(
+        "session", "SELECT fail()", expected, 3ms);
+    bioseq::libpq::result oversized;
+    oversized.columns_.push_back(
+        {.name = "payload", .type_oid = 25});
+    oversized.rows_.push_back({
+        {.is_null = false,
+         .text = std::string(64U * 1024U + 1U, 'x')}});
+    process_sql_transcript().command_succeeded(
+        "session", "SELECT oversized_payload", oversized, 4ms);
+
+    const auto transcript = process_sql_transcript_entries();
+    REQUIRE(transcript.size() == 3);
+    CHECK(transcript[0].test_case == "report collector contract");
+    CHECK(transcript[0].section == "observer");
+    CHECK(transcript[0].status == sql_transcript_status::succeeded);
+    CHECK(transcript[1].sqlstate == "22000");
+    CHECK(transcript[1].status == sql_transcript_status::failed);
+    CHECK(transcript[2].rows_truncated);
+    CHECK(transcript[2].sampled_rows.empty());
+
+    record_cleanup_observation(
+        std::filesystem::path{"/tmp/bioseq-report-contract"},
+        true, "removed",
+        resource_report{
+            .peak_rss_bytes = 1024,
+            .observed_temp_bytes = 2048});
+    const cleanup_report cleanup = aggregate_cleanup_report();
+    CHECK(cleanup.succeeded);
+    REQUIRE(cleanup_observations().size() == 1);
+    CHECK(aggregate_resource_report().observed_temp_bytes >= 2048);
+
 }
 
 TEST_CASE("postgres test support SHA-256 matches the standard vector",

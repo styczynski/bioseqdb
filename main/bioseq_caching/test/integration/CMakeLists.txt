@@ -46,6 +46,8 @@ if(TARGET postgresql_bioseq_cache_test_support)
         "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_TEST_INSTALL_SQL>"
       --cache-dso
         "$<TARGET_GENEX_EVAL:postgresql_bioseq_cache_test_support,$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_DSO>>"
+      --migration-ledger
+        "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
       --report
         "${CMAKE_BINARY_DIR}/reports/bioseq-cache-integration.json"
       --case-timeout-seconds 480)
