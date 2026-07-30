@@ -14,8 +14,15 @@ add_executable(bioseq_cache_integration_tests
   test_types.cpp
   test_transactions.cpp
   test_concurrency.cpp
+  test_backend_recovery.cpp
+  test_cross_database.cpp
+  test_owner_liveness.cpp
+  test_bootstrap_recovery.cpp
   test_provider.cpp
   test_planner.cpp
+  test_legacy_dml_parity.cpp
+  test_legacy_security_parity.cpp
+  test_legacy_upper_parity.cpp
   test_storage_lifecycle.cpp
   test_two_phase_commit.cpp)
 set_target_properties(bioseq_cache_integration_tests PROPERTIES
