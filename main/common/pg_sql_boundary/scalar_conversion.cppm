@@ -10,6 +10,7 @@ module;
 
 extern "C" {
 #include "postgres.h"
+#include "access/tableam.h"
 #include "catalog/pg_type_d.h"
 #include "lib/stringinfo.h"
 #include "storage/itemptr.h"
