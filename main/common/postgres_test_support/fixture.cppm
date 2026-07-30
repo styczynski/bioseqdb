@@ -142,6 +142,8 @@ public:
     explicit postgres_fixture(cluster_options options,
                               bool install_extensions = true)
         : extension_names_(collect_extension_names(options.extensions)),
+          post_extension_readiness_(
+              options.post_extension_readiness),
           cluster_(std::move(options)) {
         try {
             cluster_.initialize();
@@ -183,6 +185,10 @@ public:
             admin_.reset();
             admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
             attach_process_sql_transcript(*admin_, "admin");
+            admin_readiness_confirmed_ = false;
+        }
+        if (!admin_readiness_confirmed_) {
+            require_post_extension_readiness();
         }
         return *admin_;
     }
@@ -192,6 +198,8 @@ public:
         admin_.reset();
         admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
         attach_process_sql_transcript(*admin_, "admin");
+        admin_readiness_confirmed_ = false;
+        require_post_extension_readiness();
     }
 
     /// @brief Opens an independent session under a caller deadline.
@@ -215,6 +223,8 @@ public:
                 std::chrono::seconds(60)));
         }
         extensions_installed_ = true;
+        admin_readiness_confirmed_ = false;
+        require_post_extension_readiness();
     }
 
     /// @brief Forces an exact resource sample at a workload phase boundary.
@@ -269,11 +279,52 @@ private:
         return names;
     }
 
+    /// @brief Polls one configured Boolean gate without knowing its extension.
+    void require_post_extension_readiness() {
+        if (!extensions_installed_ || !post_extension_readiness_) {
+            admin_readiness_confirmed_ = true;
+            return;
+        }
+        const post_extension_readiness_probe& probe =
+            *post_extension_readiness_;
+        const auto deadline =
+            std::chrono::steady_clock::now() + probe.deadline;
+        for (;;) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                throw fixture_error(
+                    "post-extension readiness probe timed out");
+            }
+            const auto remaining = std::max(
+                std::chrono::milliseconds{1},
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - now));
+            const bioseq::libpq::result result = admin_->exec(
+                probe.sql, remaining);
+            if (single_bool_cell(result)) {
+                admin_readiness_confirmed_ = true;
+                return;
+            }
+            const auto after_query = std::chrono::steady_clock::now();
+            if (after_query >= deadline) {
+                throw fixture_error(
+                    "post-extension readiness probe timed out");
+            }
+            std::this_thread::sleep_for(std::min(
+                probe.poll_interval,
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - after_query)));
+        }
+    }
+
     std::vector<std::string> extension_names_;
+    std::optional<post_extension_readiness_probe>
+        post_extension_readiness_;
     private_cluster cluster_;
     std::optional<bioseq::libpq::connection> admin_;
     std::optional<resource_sampler> resource_sampler_;
     bool extensions_installed_{};
+    bool admin_readiness_confirmed_{};
     bool cleanup_recorded_{};
 };
 

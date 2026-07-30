@@ -1055,6 +1055,53 @@ TEST_CASE("private cluster configuration is portable and stage-first",
           != std::string::npos);
 }
 
+TEST_CASE("post-extension readiness probes require a bounded Boolean poll",
+          "[postgres-test-support][unit][cluster][readiness]") {
+    temporary_preinstalled_stage_tree tree;
+    const auto options_with =
+        [&tree](post_extension_readiness_probe probe) {
+            return cluster_options{
+                .postgres_bin_dir = tree.bin_directory(),
+                .preinstalled_stage_root = tree.stage_root(),
+                .preinstalled_stage_manifest = tree.manifest(),
+                .extensions = {tree.normal_artifact()},
+                .post_extension_readiness = std::move(probe)};
+        };
+
+    SECTION("SQL is mandatory") {
+        CHECK_THROWS_WITH(
+            static_cast<void>(private_cluster{options_with(
+                post_extension_readiness_probe{
+                    .sql = "",
+                    .deadline = 1s,
+                    .poll_interval = 10ms})}),
+            Catch::Matchers::ContainsSubstring(
+                "readiness SQL must not be empty"));
+    }
+
+    SECTION("deadline is positive") {
+        CHECK_THROWS_WITH(
+            static_cast<void>(private_cluster{options_with(
+                post_extension_readiness_probe{
+                    .sql = "SELECT true",
+                    .deadline = 0ms,
+                    .poll_interval = 10ms})}),
+            Catch::Matchers::ContainsSubstring(
+                "readiness deadlines must be positive and ordered"));
+    }
+
+    SECTION("poll interval is positive and bounded by the deadline") {
+        CHECK_THROWS_WITH(
+            static_cast<void>(private_cluster{options_with(
+                post_extension_readiness_probe{
+                    .sql = "SELECT true",
+                    .deadline = 10ms,
+                    .poll_interval = 20ms})}),
+            Catch::Matchers::ContainsSubstring(
+                "readiness deadlines must be positive and ordered"));
+    }
+}
+
 TEST_CASE("preinstalled stage attestation consumes suite artifacts in place",
           "[postgres-test-support][unit][artifact][preinstalled-stage]") {
     temporary_preinstalled_stage_tree tree;

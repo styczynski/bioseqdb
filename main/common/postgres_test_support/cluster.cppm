@@ -51,6 +51,13 @@ struct pre_initdb_context {
     const std::filesystem::path& log_directory;
 };
 
+/// @brief Optional source-neutral Boolean gate after extension installation.
+struct post_extension_readiness_probe {
+    std::string sql;
+    std::chrono::milliseconds deadline{60'000};
+    std::chrono::milliseconds poll_interval{20};
+};
+
 /// @brief Complete source-neutral configuration for one private PostgreSQL node.
 struct cluster_options {
     std::filesystem::path postgres_bin_dir;
@@ -62,6 +69,8 @@ struct cluster_options {
     std::vector<std::pair<std::string, std::string>> startup_gucs;
     std::vector<std::pair<std::string, std::string>> process_environment;
     std::function<void(const pre_initdb_context&)> pre_initdb;
+    std::optional<post_extension_readiness_probe>
+        post_extension_readiness;
     std::chrono::seconds startup_timeout{60};
     std::chrono::seconds stop_timeout{30};
 };
@@ -89,6 +98,21 @@ namespace bioseq::postgres_test::cluster_detail {
     if (options.startup_timeout <= std::chrono::seconds::zero()
         || options.stop_timeout <= std::chrono::seconds::zero()) {
         throw std::invalid_argument("cluster deadlines must be positive");
+    }
+    if (options.post_extension_readiness) {
+        const post_extension_readiness_probe& probe =
+            *options.post_extension_readiness;
+        if (probe.sql.empty()) {
+            throw std::invalid_argument(
+                "post-extension readiness SQL must not be empty");
+        }
+        if (probe.deadline <= std::chrono::milliseconds::zero()
+            || probe.poll_interval <= std::chrono::milliseconds::zero()
+            || probe.poll_interval > probe.deadline) {
+            throw std::invalid_argument(
+                "post-extension readiness deadlines must be positive and "
+                "ordered");
+        }
     }
     if (options.preinstalled_stage_root.empty()
         || options.preinstalled_stage_manifest.empty()) {
