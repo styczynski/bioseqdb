@@ -178,6 +178,7 @@ inline void set_runner_configuration(runner_configuration configuration) {
         .extensions = std::move(artifacts),
         .preload_libraries = std::move(preload_libraries),
         .startup_gucs = std::move(startup_gucs),
+        .process_environment = {},
         .startup_timeout = 60s,
         .stop_timeout = 30s};
 }

@@ -40,6 +40,7 @@ struct cluster_options {
     std::vector<extension_artifact> extensions;
     std::vector<std::string> preload_libraries;
     std::vector<std::pair<std::string, std::string>> startup_gucs;
+    std::vector<std::pair<std::string, std::string>> process_environment;
     std::chrono::seconds startup_timeout{60};
     std::chrono::seconds stop_timeout{30};
 };
@@ -509,7 +510,7 @@ private:
         spawned_process child = spawned_process::spawn(process_options{
             .executable = program(name),
             .arguments = std::move(arguments),
-            .environment = {},
+            .environment = options_.process_environment,
             .output_file = output});
         return child.wait_for(deadline);
     }
