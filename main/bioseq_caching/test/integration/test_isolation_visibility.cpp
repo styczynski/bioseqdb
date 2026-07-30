@@ -297,6 +297,12 @@ TEST_CASE("snapshot predating commit cannot claim a generation",
     auto& admin = fixture.admin();
     bioseq::cache_test::exec(
         admin,
+        "SELECT bioseq_cache.invalidate_all(); "
+        "SELECT bioseq_cache_test.request_janitor_sweep()");
+    REQUIRE(single_value(admin.exec(
+        "SELECT count(*)::text FROM bioseq_cache.entries()")) == "0");
+    bioseq::cache_test::exec(
+        admin,
         "CREATE TABLE cache_snapshot_claim_rows("
         "id integer PRIMARY KEY, value text NOT NULL); "
         "INSERT INTO cache_snapshot_claim_rows VALUES "
