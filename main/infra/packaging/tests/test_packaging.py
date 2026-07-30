@@ -1559,21 +1559,67 @@ class BuildAndStageContractTests(unittest.TestCase):
         cache_cmake = (
             MAIN_ROOT / "bioseq_caching" / "CMakeLists.txt"
         ).read_text(encoding="utf-8")
+        bioseq_cmake = (
+            MAIN_ROOT / "bioseq" / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
 
         self.assertIn(
             "function(bioseq_attach_extension_dso_closure TARGET_NAME)",
             helper,
         )
         self.assertIn("--dso-only", helper)
+        self.assertIn('--dso-contract "${ARG_CONTRACT}"', helper)
         self.assertIn("--require-complete-codegen", helper)
+        self.assertRegex(
+            helper,
+            (
+                r"if\(NOT DEFINED ARG_CONTRACT "
+                r"OR ARG_CONTRACT STREQUAL \"\"\)"
+                r"\s*set\(ARG_CONTRACT bioseq\)"
+            ),
+        )
+        self.assertNotIn("DSO_CLOSURE_CONTRACT manifest", bioseq_cmake)
+        self.assertRegex(
+            cache_cmake,
+            (
+                r"AddCommonTargetX\(\s*postgresql_bioseq_cache"
+                r"[\s\S]*?DSO_CLOSURE_CONTRACT manifest"
+                r"[\s\S]*?REQUIRE_COMPLETE_CODEGEN"
+            ),
+        )
         self.assertRegex(
             cache_cmake,
             (
                 r"bioseq_attach_extension_dso_closure\(\s*"
                 r"postgresql_bioseq_cache_test_support[\s\S]*?"
                 r"BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MANIFEST"
+                r"[\s\S]*?CONTRACT manifest"
                 r"[\s\S]*?REQUIRE_COMPLETE_CODEGEN\)"
             ),
+        )
+
+    def test_manifest_dso_contract_has_non_bioseq_self_test(self) -> None:
+        validator = (
+            MAIN_ROOT / "codegen" / "safety" / "validate_evidence.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'DSO_CLOSURE_CONTRACTS = frozenset({"bioseq", "manifest"})',
+            validator,
+        )
+        self.assertIn('contract: str = "bioseq"', validator)
+        self.assertIn('contract="manifest"', validator)
+        self.assertIn(
+            "Bioseq DSO defaults accepted a cache manifest",
+            validator,
+        )
+        self.assertIn(
+            "manifest DSO contract accepted an unowned fmgr export",
+            validator,
+        )
+        self.assertIn(
+            "full Bioseq evidence accepted the manifest DSO contract",
+            validator,
         )
 
     def test_install_enforces_cache_inclusive_exact_six_artifact_gate(self) -> None:

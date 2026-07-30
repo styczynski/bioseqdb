@@ -28,7 +28,7 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
   cmake_parse_arguments(
     ARG
     "REQUIRE_COMPLETE_CODEGEN"
-    "EXTENSION_NAME;SQL_MANIFEST;REPORT_PATH"
+    "EXTENSION_NAME;SQL_MANIFEST;REPORT_PATH;CONTRACT"
     ""
     ${ARGN})
   if(ARG_UNPARSED_ARGUMENTS)
@@ -43,6 +43,14 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
   if(NOT ARG_EXTENSION_NAME OR NOT ARG_SQL_MANIFEST)
     message(FATAL_ERROR
       "${TARGET_NAME}: EXTENSION_NAME and SQL_MANIFEST are required")
+  endif()
+  if(NOT DEFINED ARG_CONTRACT OR ARG_CONTRACT STREQUAL "")
+    set(ARG_CONTRACT bioseq)
+  endif()
+  set(_bioseq_dso_contracts bioseq manifest)
+  if(NOT ARG_CONTRACT IN_LIST _bioseq_dso_contracts)
+    message(FATAL_ERROR
+      "${TARGET_NAME}: CONTRACT must be bioseq or manifest")
   endif()
   if(NOT IS_ABSOLUTE "${ARG_SQL_MANIFEST}")
     message(FATAL_ERROR
@@ -85,6 +93,7 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
     COMMAND "${Python3_EXECUTABLE}"
       "${_bioseq_dso_validator}"
       --dso-only
+      --dso-contract "${ARG_CONTRACT}"
       --sql-manifest "${ARG_SQL_MANIFEST}"
       --dso "$<TARGET_FILE:${TARGET_NAME}>"
       ${_bioseq_dso_completion_args}
@@ -96,6 +105,7 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
     COMMAND "${Python3_EXECUTABLE}"
       "${_bioseq_dso_validator}"
       --dso-only
+      --dso-contract "${ARG_CONTRACT}"
       --sql-manifest "${ARG_SQL_MANIFEST}"
       --dso "$<TARGET_FILE:${TARGET_NAME}>"
       ${_bioseq_dso_completion_args}
@@ -108,7 +118,8 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
       "Revalidating ${ARG_EXTENSION_NAME} fmgr ownership report"
     VERBATIM)
   set_target_properties(${TARGET_NAME} PROPERTIES
-    BIOSEQ_EXTENSION_DSO_CLOSURE_REPORT "${_bioseq_dso_report}")
+    BIOSEQ_EXTENSION_DSO_CLOSURE_REPORT "${_bioseq_dso_report}"
+    BIOSEQ_EXTENSION_DSO_CLOSURE_CONTRACT "${ARG_CONTRACT}")
 endfunction()
 
 # Helper command to add extensions
@@ -120,7 +131,7 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
     REQUIRE_COMPLETE_CODEGEN)
   set(oneValueArgs
     NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN SCHEMA
-    GENERATED_INSTALL SQL_MANIFEST)
+    GENERATED_INSTALL SQL_MANIFEST DSO_CLOSURE_CONTRACT)
   # SHARED_MODULE_LIBS: object/static libraries that export FILE_SET
   # CXX_MODULES PUBLIC. Linking them into the consumer makes the BMIs they
   # produced visible without rebuilding the module sources for every target —
@@ -479,10 +490,15 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
         list(APPEND _extension_dso_closure_options
           REQUIRE_COMPLETE_CODEGEN)
       endif()
+      if(NOT DEFINED EXTENSION_DSO_CLOSURE_CONTRACT
+          OR EXTENSION_DSO_CLOSURE_CONTRACT STREQUAL "")
+        set(EXTENSION_DSO_CLOSURE_CONTRACT bioseq)
+      endif()
       bioseq_attach_extension_dso_closure(
         ${LIBRARY_NAME}
         EXTENSION_NAME "${EXTENSION_NAME}"
         SQL_MANIFEST "${EXTENSION_SQL_MANIFEST}"
+        CONTRACT "${EXTENSION_DSO_CLOSURE_CONTRACT}"
         ${_extension_dso_closure_options})
     endif()
 

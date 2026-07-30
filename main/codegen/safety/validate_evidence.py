@@ -1043,6 +1043,7 @@ EXTERNAL_SYMBOLS = frozenset(
         "bioseq_external_handler",
     }
 )
+DSO_CLOSURE_CONTRACTS = frozenset({"bioseq", "manifest"})
 FMGR_OWNER_MACROS = frozenset(
     {
         "CXX_PG_FUNCTION_INFO_V1",
@@ -9721,6 +9722,7 @@ def validate_dso_closure(
     manifest: dict[str, Any],
     inventory: list[DynamicSymbol],
     *,
+    contract: str = "bioseq",
     expected_main_identity_count: int = 270,
     expected_main_symbol_count: int = 268,
     expected_retired_symbol_count: int = 117,
@@ -9736,7 +9738,9 @@ def validate_dso_closure(
 
     During migration, each main symbol must have exactly one generated or
     source-macro owner. Final evidence additionally requires every owner to
-    be generated.
+    be generated. The Bioseq contract retains its reviewed fixed inventory;
+    the manifest contract derives extension-specific counts and ownership
+    partitions from the authenticated generated manifest.
     """
 
     if _integer(
@@ -9744,7 +9748,47 @@ def validate_dso_closure(
         "DSO-manifest.manifest_version",
     ) != 1:
         _fail("DSO-manifest", "unsupported manifest version")
-    if external_symbols != EXTERNAL_SYMBOLS:
+    if contract not in DSO_CLOSURE_CONTRACTS:
+        _fail("DSO", f"unknown closure contract {contract!r}")
+    manifest_contract = contract == "manifest"
+    if manifest_contract:
+        expected_main_identity_count = _integer(
+            _field(
+                manifest,
+                "c_routine_identity_count",
+                "DSO-manifest",
+            ),
+            "DSO-manifest.c_routine_identity_count",
+        )
+        expected_main_symbol_count = _integer(
+            _field(
+                manifest,
+                "c_link_symbol_inventory_count",
+                "DSO-manifest",
+            ),
+            "DSO-manifest.c_link_symbol_inventory_count",
+        )
+        expected_retired_symbol_count = _integer(
+            _field(
+                manifest,
+                "retired_c_symbol_count",
+                "DSO-manifest",
+            ),
+            "DSO-manifest.retired_c_symbol_count",
+        )
+        external_symbols = frozenset(
+            _string_list(
+                _field(
+                    manifest,
+                    "external_legacy_macro_symbols",
+                    "DSO-manifest",
+                ),
+                "DSO-manifest.external_legacy_macro_symbols",
+            )
+        )
+        required_absent_symbols = frozenset()
+        required_present_symbols = frozenset()
+    elif external_symbols != EXTERNAL_SYMBOLS:
         _fail(
             "DSO",
             "bioseq_external disposition must contain only its handler",
@@ -9782,7 +9826,14 @@ def validate_dso_closure(
     ):
         _fail("DSO", "main public fmgr symbol total is not exact")
     if main_symbols & set(external_symbols):
-        _fail("DSO", "bioseq and bioseq_external ownership overlaps")
+        _fail(
+            "DSO",
+            (
+                "main and external fmgr ownership overlaps"
+                if manifest_contract
+                else "bioseq and bioseq_external ownership overlaps"
+            ),
+        )
 
     finfo_symbols = set(
         _string_list(
@@ -9848,16 +9899,32 @@ def validate_dso_closure(
             ):
                 _fail(symbol, "symbol sharing crosses SQL names or identities")
             grouped_identities.add(identity)
-    if (
+    owner_closure_mismatch = (
         grouped_identities != set(identities)
         or grouped_symbols != main_symbols
-        or shared_symbols != set(expected_shared_symbols)
-    ):
-        _fail("DSO", "270 identities do not close over the exact 268 owners")
+    )
+    sharing_mismatch = (
+        not manifest_contract
+        and shared_symbols != set(expected_shared_symbols)
+    )
+    if owner_closure_mismatch or sharing_mismatch:
+        _fail(
+            "DSO",
+            (
+                "routine identities do not close over symbol owners"
+                if manifest_contract
+                else "270 identities do not close over the exact 268 owners"
+            ),
+        )
+    expected_sharing_group_count = (
+        len(shared_symbols)
+        if manifest_contract
+        else len(expected_shared_symbols)
+    )
     if _integer(
         _field(manifest, "c_symbol_sharing_group_count", "DSO-manifest"),
         "DSO-manifest.c_symbol_sharing_group_count",
-    ) != len(expected_shared_symbols):
+    ) != expected_sharing_group_count:
         _fail("DSO", "manifest sharing-group count is stale")
 
     generated_wrapper_symbols = set(
@@ -9922,7 +9989,7 @@ def validate_dso_closure(
                 "DSO-manifest",
             ),
             "DSO-manifest.external_legacy_macro_symbols",
-            allow_empty=False,
+            allow_empty=manifest_contract,
         )
     )
     if (
@@ -9937,6 +10004,11 @@ def validate_dso_closure(
         != len(external_symbols)
         or external_legacy_macro_symbols != set(external_symbols)
     ):
+        if manifest_contract:
+            _fail(
+                "DSO",
+                "external source-macro inventory is inconsistent",
+            )
         _fail(
             "DSO",
             "source macro scan must contain exactly the reviewed "
@@ -10027,10 +10099,15 @@ def validate_dso_closure(
     }
     expected_fmgr_symbols = main_symbols | set(external_symbols)
     if actual_fmgr_symbols != expected_fmgr_symbols:
+        expected_description = (
+            "the manifest-owned symbols"
+            if manifest_contract
+            else "the main symbols plus the bioseq_external handler"
+        )
         _fail(
             "DSO",
-            "fmgr/finfo exports do not exactly match the main symbols "
-            "plus the bioseq_external handler",
+            "fmgr/finfo exports do not exactly match "
+            + expected_description,
         )
     for symbol in expected_fmgr_symbols:
         _one_dynamic_export(visible_symbols, symbol)
@@ -10044,9 +10121,10 @@ def validate_dso_closure(
             _fail(symbol, "target BPCHAR owner is absent from the manifest")
         _one_dynamic_export(visible_symbols, symbol)
         _one_dynamic_export(visible_symbols, f"pg_finfo_{symbol}")
-    for symbol in {"seq_concat", "array_cat"}:
-        if symbol not in main_symbols:
-            _fail(symbol, "distinct concat entrypoint is absent")
+    if not manifest_contract:
+        for symbol in {"seq_concat", "array_cat"}:
+            if symbol not in main_symbols:
+                _fail(symbol, "distinct concat entrypoint is absent")
 
     return {
         "main_identity_count": len(identities),
@@ -10260,6 +10338,7 @@ ACTIVE_DSO_VALIDATOR_ARGUMENTS = (
     ("--sql-manifest", "sql_manifest"),
     ("--dso", "dso"),
     ("--symbol-dump", "symbol_dump"),
+    ("--dso-contract", "dso_contract"),
 )
 
 
@@ -10372,6 +10451,11 @@ def _validate_command_line(arguments: argparse.Namespace) -> str:
     if arguments.sql_manifest is None:
         _fail("command-line", "missing --sql-manifest")
     _require_dynamic_symbol_source(arguments)
+    if arguments.dso_contract is not None:
+        _fail(
+            "command-line",
+            "--dso-contract is valid only with --dso-only",
+        )
     return "full"
 
 
@@ -14211,6 +14295,14 @@ def run_python_self_tests() -> None:
     )
     if _validate_command_line(dso_arguments) != "dso":
         _fail("self-test", "dso-only validator mode changed")
+    manifest_dso_arguments = validator_arguments(
+        dso_only=True,
+        sql_manifest=Path("/self-test/cache-manifest"),
+        dso=Path("/self-test/cache-dso"),
+        dso_contract="manifest",
+    )
+    if _validate_command_line(manifest_dso_arguments) != "dso":
+        _fail("self-test", "manifest DSO contract mode changed")
     require_command_line_failure(
         validator_arguments(
             dso_only=True,
@@ -14230,6 +14322,17 @@ def run_python_self_tests() -> None:
         ),
         "missing --dso or --symbol-dump",
         "full validation accepted no dynamic symbol source",
+    )
+    require_command_line_failure(
+        validator_arguments(
+            STATIC_VALIDATOR_ARGUMENTS,
+            RUNTIME_VALIDATOR_ARGUMENTS,
+            sql_manifest=Path("/self-test/active-manifest"),
+            dso=Path("/self-test/active-dso"),
+            dso_contract="manifest",
+        ),
+        "--dso-contract is valid only with --dso-only",
+        "full Bioseq evidence accepted the manifest DSO contract",
     )
     require_command_line_failure(
         validator_arguments(
@@ -15174,6 +15277,109 @@ def run_python_self_tests() -> None:
         required_present_symbols=frozenset(),
     )
 
+    cache_symbol = "cache_lookup"
+    cache_manifest = {
+        "manifest_version": 1,
+        "c_routine_identity_count": 1,
+        "c_link_symbol_inventory_count": 1,
+        "c_finfo_symbol_inventory_count": 1,
+        "c_wrapper_entity_count": 1,
+        "retired_c_symbol_count": 0,
+        "generated_wrapper_symbol_count": 1,
+        "legacy_macro_symbol_count": 0,
+        "external_legacy_macro_symbol_count": 0,
+        "legacy_fmgr_macro_owner_count": 0,
+        "c_symbol_sharing_group_count": 0,
+        "c_routine_identities": [
+            "bioseq_cache.cache_lookup(text)",
+        ],
+        "c_link_symbols": [cache_symbol],
+        "c_finfo_symbols": [f"pg_finfo_{cache_symbol}"],
+        "c_symbol_owners": [
+            {
+                "symbol": cache_symbol,
+                "finfo_symbol": f"pg_finfo_{cache_symbol}",
+                "generated_wrapper": True,
+                "routine_identities": [
+                    "bioseq_cache.cache_lookup(text)",
+                ],
+                "implementation_declarations": [
+                    "fixture::cache_lookup",
+                ],
+            }
+        ],
+        "retired_c_symbols": [],
+        "generated_wrapper_symbols": [cache_symbol],
+        "legacy_macro_symbols": [],
+        "external_legacy_macro_symbols": [],
+        "legacy_fmgr_macro_owners": [],
+    }
+    cache_inventory = parse_nm_symbols(
+        "\n".join(
+            (
+                f"{cache_symbol} T 1 1",
+                f"pg_finfo_{cache_symbol} T 2 1",
+            )
+        ),
+        source_tool="self-test-cache-nm",
+    )
+    validate_dso_closure(
+        cache_manifest,
+        cache_inventory,
+        contract="manifest",
+    )
+    try:
+        validate_dso_closure(cache_manifest, cache_inventory)
+    except EvidenceError as error:
+        if "main C routine identity total is not exact" not in str(error):
+            raise
+    else:
+        _fail(
+            "self-test",
+            "Bioseq DSO defaults accepted a cache manifest",
+        )
+    stale_cache_manifest = json.loads(json.dumps(cache_manifest))
+    stale_cache_manifest["c_link_symbol_inventory_count"] = 2
+    try:
+        validate_dso_closure(
+            stale_cache_manifest,
+            cache_inventory,
+            contract="manifest",
+        )
+    except EvidenceError as error:
+        if "main public fmgr symbol total is not exact" not in str(error):
+            raise
+    else:
+        _fail(
+            "self-test",
+            "manifest DSO contract accepted a stale symbol count",
+        )
+    cache_inventory_with_unowned_finfo = parse_nm_symbols(
+        "\n".join(
+            (
+                f"{cache_symbol} T 1 1",
+                f"pg_finfo_{cache_symbol} T 2 1",
+                "unowned T 3 1",
+                "pg_finfo_unowned T 4 1",
+            )
+        ),
+        source_tool="self-test-cache-extra-nm",
+    )
+    try:
+        validate_dso_closure(
+            cache_manifest,
+            cache_inventory_with_unowned_finfo,
+            contract="manifest",
+        )
+    except EvidenceError as error:
+        if "manifest-owned symbols" not in str(error):
+            raise
+    else:
+        _fail(
+            "self-test",
+            "manifest DSO contract accepted an unowned fmgr export",
+        )
+
     incremental_manifest = json.loads(json.dumps(manifest))
     incremental_manifest["c_wrapper_entity_count"] = 1
     incremental_manifest["generated_wrapper_symbol_count"] = 1
@@ -15378,6 +15584,14 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
     )
     parser.add_argument("--sql-manifest", type=Path)
+    parser.add_argument(
+        "--dso-contract",
+        choices=sorted(DSO_CLOSURE_CONTRACTS),
+        help=(
+            "Bioseq uses its reviewed fixed inventory; manifest validates "
+            "an extension's exact generated fmgr inventory"
+        ),
+    )
     dso_source = parser.add_mutually_exclusive_group()
     dso_source.add_argument("--dso", type=Path)
     dso_source.add_argument("--symbol-dump", type=Path)
@@ -15402,6 +15616,7 @@ def main(argv: list[str] | None = None) -> int:
             run_python_self_tests()
             return 0
         if validation_scope == "dso":
+            dso_contract = args.dso_contract or "bioseq"
             dynamic_symbols, dso_inspector, dso_input_sha256 = (
                 _load_dynamic_symbol_input(
                     args.dso,
@@ -15413,6 +15628,7 @@ def main(argv: list[str] | None = None) -> int:
             dso_summary = validate_dso_closure(
                 sql_manifest,
                 dynamic_symbols,
+                contract=dso_contract,
                 require_complete_codegen=args.require_complete_codegen,
             )
             _write_report(
@@ -15421,6 +15637,7 @@ def main(argv: list[str] | None = None) -> int:
                     "schema_version": 1,
                     "status": "pass",
                     "validation_scope": "dso_closure",
+                    "dso_contract": dso_contract,
                     "require_complete_codegen": (
                         args.require_complete_codegen
                     ),
@@ -15847,6 +16064,7 @@ def main(argv: list[str] | None = None) -> int:
         dso_summary = validate_dso_closure(
             sql_manifest,
             dynamic_symbols,
+            contract="bioseq",
             require_complete_codegen=args.require_complete_codegen,
         )
 
@@ -15856,6 +16074,7 @@ def main(argv: list[str] | None = None) -> int:
                 "schema_version": 1,
                 "status": "pass",
                 "validation_scope": "ledger_runtime_manifest_dso",
+                "dso_contract": "bioseq",
                 "require_complete_codegen": args.require_complete_codegen,
                 "postgresql_tag": PG17_TAG,
                 "postgresql_revision": PG17_REVISION,
