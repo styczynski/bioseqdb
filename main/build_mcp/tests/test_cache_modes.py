@@ -431,6 +431,19 @@ class CacheModeRoutingTest(unittest.TestCase):
         for key in server._CACHE_NATIVE_ARTIFACT_KEYS:
             with self.subTest(native_artifact_key=key):
                 self.assertIn(f'\\"{key}\\"', cmake)
+        for stage_target in (
+            "bioseq_cache_test_support_postgres_stage",
+            "bioseq_cache_production_postgres_stage",
+            "bioseq_cache_bioseq_support_postgres_stage",
+            "bioseq_cache_bioseq_production_postgres_stage",
+        ):
+            with self.subTest(stage_target=stage_target):
+                self.assertIn(
+                    f"$<TARGET_PROPERTY:{stage_target},"
+                    "BIOSEQ_POSTGRES_BIN_DIR>",
+                    cmake,
+                )
+        self.assertNotIn('\\"postgres_bin_dir\\"', cmake)
         self.assertIn(
             "$<TARGET_FILE:bioseq_cache_provider_peer_test>", cmake)
         self.assertIn("../test/legacy_migration_ledger.tsv", cmake)
@@ -463,6 +476,96 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "console::out=-::colour-mode=ansi",
             ],
             cache_unit.commands,
+        )
+
+    def test_cache_runtime_targets_use_profile_exact_postgres_stages(
+            self) -> None:
+        cache_cmake = (
+            MAIN_DIR
+            / "bioseq_caching"
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        main_cmake = (
+            MAIN_DIR
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        integration_cmake = (
+            MAIN_DIR
+            / "bioseq_caching"
+            / "test"
+            / "integration"
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        combined_cmake = (
+            MAIN_DIR
+            / "bioseq_caching"
+            / "test"
+            / "bioseq"
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        bench_cmake = (
+            MAIN_DIR
+            / "bioseq_caching"
+            / "bench"
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+
+        expected = (
+            (
+                integration_cmake,
+                "bioseq_cache_test_support_postgres_stage",
+            ),
+            (
+                bench_cmake,
+                "bioseq_cache_production_postgres_stage",
+            ),
+            (
+                combined_cmake,
+                "bioseq_cache_bioseq_support_postgres_stage",
+            ),
+            (
+                combined_cmake,
+                "bioseq_cache_bioseq_production_postgres_stage",
+            ),
+        )
+        for cmake, stage_target in expected:
+            with self.subTest(stage_target=stage_target):
+                self.assertIn(stage_target, cmake)
+                self.assertIn(
+                    f"$<TARGET_PROPERTY:{stage_target},"
+                    "BIOSEQ_POSTGRES_BIN_DIR>",
+                    cmake,
+                )
+        for cmake in (integration_cmake, combined_cmake):
+            self.assertNotIn(
+                '--postgres-bin-dir "${PostgreSQL_BIN_DIR}"', cmake)
+        self.assertIn(
+            "bioseq_add_private_postgres_stage(\n"
+            "      TARGET bioseq_cache_test_support_postgres_stage",
+            cache_cmake,
+        )
+        self.assertIn(
+            "bioseq_add_private_postgres_stage(\n"
+            "    TARGET bioseq_cache_production_postgres_stage",
+            cache_cmake,
+        )
+        self.assertIn(
+            "bioseq_add_private_postgres_stage(\n"
+            "        TARGET bioseq_cache_bioseq_support_postgres_stage",
+            main_cmake,
+        )
+        self.assertIn(
+            "bioseq_add_private_postgres_stage(\n"
+            "      TARGET bioseq_cache_bioseq_production_postgres_stage",
+            main_cmake,
+        )
+        self.assertEqual(
+            cache_cmake.count("MODULE_PATHNAME_OVERRIDES"),
+            2,
+        )
+        self.assertEqual(
+            main_cmake.count("MODULE_PATHNAME_OVERRIDES"),
+            2,
         )
 
     def test_cache_unit_common_contract_binaries_share_runtime_directory(
@@ -539,6 +642,18 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("cache-bench", result)
 
     def test_native_cache_mode_commands_and_timeouts(self) -> None:
+        postgres_bin_dir_key_by_executable = {
+            "bioseq_cache_integration_tests":
+                "cache_test_support_postgres_bin_dir",
+            "bioseq_cache_bench":
+                "cache_production_postgres_bin_dir",
+            "bioseq_cache_bioseq_support_integration_tests":
+                "cache_bioseq_support_postgres_bin_dir",
+            "bioseq_cache_bioseq_production_integration_tests":
+                "cache_bioseq_production_postgres_bin_dir",
+            "bioseq_cache_bioseq_bench":
+                "cache_bioseq_production_postgres_bin_dir",
+        }
         expected = {
             "cache-integration": (
                 ("bioseq_cache_integration_tests",),
@@ -580,7 +695,15 @@ class CacheModeRoutingTest(unittest.TestCase):
                 self.assertTrue(details.reporting_subdir_name)
                 for command in details.commands:
                     self.assertIn("--postgres-bin-dir", command)
-                    self.assertIn("{postgres_bin_dir}", command)
+                    postgres_bin_dir_key = (
+                        postgres_bin_dir_key_by_executable[command[0]])
+                    self.assertIn(
+                        f"{{{postgres_bin_dir_key}}}", command)
+                    for other_key in (
+                            key for key in
+                            postgres_bin_dir_key_by_executable.values()
+                            if key != postgres_bin_dir_key):
+                        self.assertNotIn(f"{{{other_key}}}", command)
                     self.assertIn("--cache-control", command)
                     self.assertIn("--cache-install-sql", command)
                     self.assertIn("--cache-dso", command)
@@ -624,7 +747,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 if not value:
                     continue
                 path = Path(value)
-                if key == "postgres_bin_dir":
+                if key.endswith("_postgres_bin_dir"):
                     path.mkdir()
                 else:
                     path.touch()
@@ -643,7 +766,8 @@ class CacheModeRoutingTest(unittest.TestCase):
             resolved,
             [
                 str(binary_dir / "bioseq_cache_integration_tests"),
-                "--postgres-bin-dir", manifest["postgres_bin_dir"],
+                "--postgres-bin-dir",
+                manifest["cache_test_support_postgres_bin_dir"],
                 "--cache-control", manifest["cache_test_control"],
                 "--cache-install-sql", manifest["cache_test_install_sql"],
                 "--cache-dso", manifest["cache_test_dso"],
@@ -664,7 +788,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             }
             for key, value in manifest.items():
                 path = Path(value)
-                if key == "postgres_bin_dir":
+                if key.endswith("_postgres_bin_dir"):
                     path.mkdir()
                 else:
                     path.touch()
@@ -695,7 +819,8 @@ class CacheModeRoutingTest(unittest.TestCase):
                     binary_dir
                     / "bioseq_cache_bioseq_support_integration_tests"
                 ),
-                "--postgres-bin-dir", manifest["postgres_bin_dir"],
+                "--postgres-bin-dir",
+                manifest["cache_bioseq_support_postgres_bin_dir"],
                 "--cache-control", manifest["cache_test_control"],
                 "--cache-install-sql", manifest["cache_test_install_sql"],
                 "--cache-dso", manifest["cache_test_dso"],
@@ -717,7 +842,8 @@ class CacheModeRoutingTest(unittest.TestCase):
                     binary_dir
                     / "bioseq_cache_bioseq_production_integration_tests"
                 ),
-                "--postgres-bin-dir", manifest["postgres_bin_dir"],
+                "--postgres-bin-dir",
+                manifest["cache_bioseq_production_postgres_bin_dir"],
                 "--cache-control", manifest["cache_control"],
                 "--cache-install-sql", manifest["cache_install_sql"],
                 "--cache-dso", manifest["cache_dso"],
@@ -753,7 +879,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             }
             for key, value in manifest.items():
                 path = Path(value)
-                if key == "postgres_bin_dir":
+                if key.endswith("_postgres_bin_dir"):
                     path.mkdir()
                 else:
                     path.touch()
@@ -769,7 +895,10 @@ class CacheModeRoutingTest(unittest.TestCase):
             )
         self.assertEqual(
             resolved[0], str(binary_dir / "bioseq_cache_bioseq_bench"))
-        self.assertIn(str(binary_dir / "postgres_bin_dir"), resolved)
+        self.assertIn(
+            str(binary_dir / "cache_bioseq_production_postgres_bin_dir"),
+            resolved,
+        )
         self.assertIn(str(binary_dir / "cache_control"), resolved)
         self.assertIn(str(binary_dir / "bioseq_dso"), resolved)
         self.assertIn(str(report), resolved)
@@ -788,7 +917,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 if not value:
                     continue
                 path = Path(value)
-                if key == "postgres_bin_dir":
+                if key.endswith("_postgres_bin_dir"):
                     path.mkdir()
                 else:
                     path.touch()

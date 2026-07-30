@@ -1190,7 +1190,8 @@ MODES: Dict[str, ModeDefinition] = {
         commands=[
             [
                 "bioseq_cache_integration_tests",
-                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--postgres-bin-dir",
+                "{cache_test_support_postgres_bin_dir}",
                 "--cache-control", "{cache_test_control}",
                 "--cache-install-sql", "{cache_test_install_sql}",
                 "--cache-dso", "{cache_test_dso}",
@@ -1216,7 +1217,8 @@ MODES: Dict[str, ModeDefinition] = {
         commands=[
             [
                 "bioseq_cache_bench",
-                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--postgres-bin-dir",
+                "{cache_production_postgres_bin_dir}",
                 "--cache-control", "{cache_control}",
                 "--cache-install-sql", "{cache_install_sql}",
                 "--cache-dso", "{cache_dso}",
@@ -1252,7 +1254,8 @@ MODES: Dict[str, ModeDefinition] = {
         commands=[
             [
                 "bioseq_cache_bioseq_support_integration_tests",
-                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--postgres-bin-dir",
+                "{cache_bioseq_support_postgres_bin_dir}",
                 "--cache-control", "{cache_test_control}",
                 "--cache-install-sql", "{cache_test_install_sql}",
                 "--cache-dso", "{cache_test_dso}",
@@ -1267,7 +1270,8 @@ MODES: Dict[str, ModeDefinition] = {
             ],
             [
                 "bioseq_cache_bioseq_production_integration_tests",
-                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--postgres-bin-dir",
+                "{cache_bioseq_production_postgres_bin_dir}",
                 "--cache-control", "{cache_control}",
                 "--cache-install-sql", "{cache_install_sql}",
                 "--cache-dso", "{cache_dso}",
@@ -1301,7 +1305,8 @@ MODES: Dict[str, ModeDefinition] = {
         commands=[
             [
                 "bioseq_cache_bioseq_bench",
-                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--postgres-bin-dir",
+                "{cache_bioseq_production_postgres_bin_dir}",
                 "--cache-control", "{cache_control}",
                 "--cache-install-sql", "{cache_install_sql}",
                 "--cache-dso", "{cache_dso}",
@@ -2023,7 +2028,10 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
 
 
 _CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
-    "postgres_bin_dir",
+    "cache_test_support_postgres_bin_dir",
+    "cache_production_postgres_bin_dir",
+    "cache_bioseq_support_postgres_bin_dir",
+    "cache_bioseq_production_postgres_bin_dir",
     "cache_control",
     "cache_install_sql",
     "cache_dso",
@@ -4148,12 +4156,12 @@ def _run_command_argv(mode: str, active_bin_dir: Path,
             artifact_path = Path(value)
             usable = (
                 artifact_path.is_dir()
-                if key == "postgres_bin_dir"
+                if key.endswith("_postgres_bin_dir")
                 else artifact_path.is_file()
             )
             if not usable:
                 expected_kind = (
-                    "directory" if key == "postgres_bin_dir"
+                    "directory" if key.endswith("_postgres_bin_dir")
                     else "file"
                 )
                 raise RuntimeError(

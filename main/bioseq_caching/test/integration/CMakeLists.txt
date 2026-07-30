@@ -45,7 +45,8 @@ target_link_libraries(bioseq_cache_integration_tests
 if(TARGET postgresql_bioseq_cache_test_support)
   add_dependencies(
     bioseq_cache_integration_tests
-    postgresql_bioseq_cache_test_support)
+    postgresql_bioseq_cache_test_support
+    bioseq_cache_test_support_postgres_stage)
 
   # The external watchdog owns each of the 49 Catch cases independently. Keep
   # CTest's aggregate ceiling above 49 * 480 seconds, with lifecycle/reporting
@@ -57,7 +58,8 @@ if(TARGET postgresql_bioseq_cache_test_support)
   add_test(
     NAME bioseq_cache_integration_tests
     COMMAND bioseq_cache_integration_tests
-      --postgres-bin-dir "${PostgreSQL_BIN_DIR}"
+      --postgres-bin-dir
+        "$<TARGET_GENEX_EVAL:bioseq_cache_test_support_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_test_support_postgres_stage,BIOSEQ_POSTGRES_BIN_DIR>>"
       --cache-control
         "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_CONTROL_FILE>"
       --cache-install-sql

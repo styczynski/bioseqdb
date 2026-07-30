@@ -290,6 +290,37 @@ if(BIOSEQ_CACHE_TESTING)
 endif()
 
 if(BIOSEQ_CACHE_BUILD_TESTS)
+  include(
+    "${CMAKE_SOURCE_DIR}/cmake/BioseqPrivatePostgresStage.cmake")
+  bioseq_add_private_postgres_stage(
+    TARGET bioseq_cache_production_postgres_stage
+    PG_CONFIG "${PostgreSQL_CONFIG}"
+    EXTENSION_NAMES
+      bioseq_cache
+    EXTENSION_TARGETS
+      postgresql_bioseq_cache
+    CONTROL_PROPERTIES
+      BIOSEQ_EXTENSION_CONTROL_FILE
+    INSTALL_SQL_PROPERTIES
+      BIOSEQ_EXTENSION_INSTALL_SQL
+    MODULE_PATHNAME_OVERRIDES
+      bioseq_cache)
+  if(TARGET postgresql_bioseq_cache_test_support)
+    bioseq_add_private_postgres_stage(
+      TARGET bioseq_cache_test_support_postgres_stage
+      PG_CONFIG "${PostgreSQL_CONFIG}"
+      EXTENSION_NAMES
+        bioseq_cache
+      EXTENSION_TARGETS
+        postgresql_bioseq_cache_test_support
+      CONTROL_PROPERTIES
+        BIOSEQ_EXTENSION_CONTROL_FILE
+      INSTALL_SQL_PROPERTIES
+        BIOSEQ_EXTENSION_TEST_INSTALL_SQL
+      MODULE_PATHNAME_OVERRIDES
+        bioseq_cache)
+  endif()
+
   if(NOT TARGET bioseq_postgres_test_support)
     add_subdirectory(
       "${CMAKE_CURRENT_LIST_DIR}/../common/postgres_test_support"

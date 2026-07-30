@@ -60,7 +60,8 @@ add_dependencies(
   bioseq_cache_bioseq_support_integration_tests
   bioseq_cache_provider_peer_test
   postgresql_bioseq_cache_test_support
-  postgresql_bioseq)
+  postgresql_bioseq
+  bioseq_cache_bioseq_support_postgres_stage)
 
 add_executable(bioseq_cache_bioseq_production_integration_tests
   "${CMAKE_CURRENT_LIST_DIR}/../support/cache_catch_runner.cpp"
@@ -81,7 +82,8 @@ target_link_libraries(
 add_dependencies(
   bioseq_cache_bioseq_production_integration_tests
   postgresql_bioseq_cache
-  postgresql_bioseq)
+  postgresql_bioseq
+  bioseq_cache_bioseq_production_postgres_stage)
 
 # Ordinary combined tests use the noninstalled diagnostics profile and retain
 # the cache suite's eight-minute per-case watchdog. The literal [2gbp] case is
@@ -95,7 +97,8 @@ file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/reports")
 add_test(
   NAME bioseq_cache_bioseq_support_integration_tests
   COMMAND bioseq_cache_bioseq_support_integration_tests
-    --postgres-bin-dir "${PostgreSQL_BIN_DIR}"
+    --postgres-bin-dir
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_support_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_support_postgres_stage,BIOSEQ_POSTGRES_BIN_DIR>>"
     --cache-control
       "$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_CONTROL_FILE>"
     --cache-install-sql
@@ -125,7 +128,8 @@ set_tests_properties(
 add_test(
   NAME bioseq_cache_bioseq_production_integration_tests
   COMMAND bioseq_cache_bioseq_production_integration_tests
-    --postgres-bin-dir "${PostgreSQL_BIN_DIR}"
+    --postgres-bin-dir
+      "$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_production_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_production_postgres_stage,BIOSEQ_POSTGRES_BIN_DIR>>"
     --cache-control
       "$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_CONTROL_FILE>"
     --cache-install-sql

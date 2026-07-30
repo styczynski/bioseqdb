@@ -702,6 +702,52 @@ if(BIOSEQ_BUILD_CORE)
       bioseq_cache_bioseq_bench
       postgresql_bioseq)
   endif()
+  if(BIOSEQ_BUILD_CACHE AND BIOSEQ_CACHE_BUILD_TESTS)
+    include(
+      "${CMAKE_SOURCE_DIR}/cmake/BioseqPrivatePostgresStage.cmake")
+    bioseq_add_private_postgres_stage(
+      TARGET bioseq_cache_bioseq_production_postgres_stage
+      PG_CONFIG "${PostgreSQL_CONFIG}"
+      EXTENSION_NAMES
+        bioseq_cache
+        bioseq
+      EXTENSION_TARGETS
+        postgresql_bioseq_cache
+        postgresql_bioseq
+      CONTROL_PROPERTIES
+        BIOSEQ_EXTENSION_CONTROL_FILE
+        BIOSEQ_EXTENSION_CONTROL_FILE
+      INSTALL_SQL_PROPERTIES
+        BIOSEQ_EXTENSION_INSTALL_SQL
+        BIOSEQ_EXTENSION_INSTALL_SQL
+      MODULE_PATHNAME_OVERRIDES
+        bioseq_cache
+        bioseq)
+    add_dependencies(
+      bioseq_cache_bioseq_bench
+      bioseq_cache_bioseq_production_postgres_stage)
+
+    if(TARGET postgresql_bioseq_cache_test_support)
+      bioseq_add_private_postgres_stage(
+        TARGET bioseq_cache_bioseq_support_postgres_stage
+        PG_CONFIG "${PostgreSQL_CONFIG}"
+        EXTENSION_NAMES
+          bioseq_cache
+          bioseq
+        EXTENSION_TARGETS
+          postgresql_bioseq_cache_test_support
+          postgresql_bioseq
+        CONTROL_PROPERTIES
+          BIOSEQ_EXTENSION_CONTROL_FILE
+          BIOSEQ_EXTENSION_CONTROL_FILE
+        INSTALL_SQL_PROPERTIES
+          BIOSEQ_EXTENSION_TEST_INSTALL_SQL
+          BIOSEQ_EXTENSION_INSTALL_SQL
+        MODULE_PATHNAME_OVERRIDES
+          bioseq_cache
+          bioseq)
+    endif()
+  endif()
   include(BioseqExternalPostgresAcceptance)
   add_subdirectory(vendor)
 endif()
