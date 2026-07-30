@@ -603,6 +603,28 @@ void observe_runtime_relation_write(
 void observe_runtime_provider_relation_write(
     Oid relation_oid,
     const PhysicalIdentityV1& physical_identity) noexcept;
+[[nodiscard]] bool bind_shared_reusable_registry() noexcept;
+void mark_shared_cache_failed() noexcept;
+
+/**
+ * Writers must bind the reusable registry even when their cache GUC is
+ * disabled.  Do this while normal executor/utility error handling is still
+ * available; transaction callbacks are too late to attach shared storage.
+ */
+void bind_reusable_registry_for_write_invalidation() noexcept {
+    if (!guc::preload_requested() || g_shared == nullptr
+        || pg_atomic_read_u32(&g_shared->ready) == 0
+        || pg_atomic_read_u32(&g_shared->bootstrap_failure) != 0) {
+        return;
+    }
+    if (!bind_shared_reusable_registry()) {
+        /*
+         * The source write must remain fail-open, but reusable reads cannot
+         * remain enabled when this commit cannot invalidate their registry.
+         */
+        mark_shared_cache_failed();
+    }
+}
 
 /** One query-local provider intent retained only for this planner invocation. */
 struct NestedPlannerIntentV1 {
@@ -830,6 +852,7 @@ void initialize_shared_state(CacheSharedState& shared) noexcept {
 /** Remember a possible result-changing write until its transaction outcome. */
 void mark_current_transaction_dirty() noexcept {
     if (IsTransactionState()) {
+        bind_reusable_registry_for_write_invalidation();
         g_dirty_observations.observe_coarse(
             static_cast<std::uint32_t>(GetCurrentSubTransactionId()));
         observe_runtime_database_dependency_write();
@@ -930,7 +953,11 @@ relation_physical_identity(
 void mark_current_transaction_relation_dirty(
         Oid relation_oid,
         const provider_registry::PhysicalIdentityV2* provider_identity = nullptr) {
-    if (!IsTransactionState() || g_dirty_observations.coarse()) {
+    if (!IsTransactionState()) {
+        return;
+    }
+    bind_reusable_registry_for_write_invalidation();
+    if (g_dirty_observations.coarse()) {
         return;
     }
     if (!OidIsValid(relation_oid)) {
@@ -3437,8 +3464,20 @@ void broadcast_reusable_generation(
 
 /** Commit-time invalidation is bounded, ABA-safe, and wakes after lock drop. */
 void invalidate_dirty_reusable_generations() noexcept {
-    if (!g_reusable_registry || g_reusable_membership_lock == nullptr
-        || MyDatabaseId == InvalidOid) {
+    if (MyDatabaseId == InvalidOid) {
+        return;
+    }
+    if (!g_reusable_registry || g_reusable_membership_lock == nullptr) {
+        /*
+         * A dirty preloaded backend should have bound during write
+         * observation.  Failing closed here prevents stale COMPLETE replay if
+         * that invariant is ever broken without attempting an unsafe attach
+         * from XACT_EVENT_COMMIT.
+         */
+        if (guc::preload_requested() && g_shared != nullptr
+            && transaction_is_dirty()) {
+            mark_shared_cache_failed();
+        }
         return;
     }
     std::array<PhysicalIdentityV1, kMaximumRelationDependencies> identities{};
