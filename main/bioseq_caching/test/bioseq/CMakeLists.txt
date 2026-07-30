@@ -62,6 +62,12 @@ add_dependencies(
   postgresql_bioseq_cache_test_support
   postgresql_bioseq)
 
+# Eight Catch cases share this executable, including the 2 Gbp acceptance case.
+# Keep the aggregate CTest ceiling above 8 * 6300 seconds so CTest cannot
+# preempt a later case's external watchdog.
+set(_bioseq_cache_bioseq_case_timeout_seconds 6300)
+set(_bioseq_cache_bioseq_suite_timeout_seconds 57600)
+
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/reports")
 add_test(
   NAME bioseq_cache_bioseq_integration_tests
@@ -85,11 +91,12 @@ add_test(
       "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
     --report
       "${CMAKE_BINARY_DIR}/reports/bioseq-cache-bioseq-integration.json"
-    --case-timeout-seconds 6300)
+    --case-timeout-seconds
+      "${_bioseq_cache_bioseq_case_timeout_seconds}")
 set_tests_properties(bioseq_cache_bioseq_integration_tests PROPERTIES
   LABELS "cache;integration;bioseq;2gbp"
   RESOURCE_LOCK "bioseq_private_postgres"
-  TIMEOUT 7200)
+  TIMEOUT "${_bioseq_cache_bioseq_suite_timeout_seconds}")
 
 include(
   "${CMAKE_CURRENT_LIST_DIR}/../support/LegacyMigrationContract.cmake")

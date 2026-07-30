@@ -47,6 +47,12 @@ if(TARGET postgresql_bioseq_cache_test_support)
     bioseq_cache_integration_tests
     postgresql_bioseq_cache_test_support)
 
+  # The external watchdog owns each of the 49 Catch cases independently. Keep
+  # CTest's aggregate ceiling above 49 * 480 seconds, with lifecycle/reporting
+  # headroom, so it cannot preempt a later case's watchdog.
+  set(_bioseq_cache_case_timeout_seconds 480)
+  set(_bioseq_cache_suite_timeout_seconds 28800)
+
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/reports")
   add_test(
     NAME bioseq_cache_integration_tests
@@ -62,9 +68,10 @@ if(TARGET postgresql_bioseq_cache_test_support)
         "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
       --report
         "${CMAKE_BINARY_DIR}/reports/bioseq-cache-integration.json"
-      --case-timeout-seconds 480)
+      --case-timeout-seconds
+        "${_bioseq_cache_case_timeout_seconds}")
   set_tests_properties(bioseq_cache_integration_tests PROPERTIES
     LABELS "cache;integration;postgres"
     RESOURCE_LOCK "bioseq_private_postgres"
-    TIMEOUT 480)
+    TIMEOUT "${_bioseq_cache_suite_timeout_seconds}")
 endif()
