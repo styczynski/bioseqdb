@@ -116,6 +116,7 @@ import bioseq.cache.pg.provider;
 import bioseq.cache.pg.shared_registry;
 import bioseq.cache.pg.storage;
 import bioseq.cache.pg.sql.rows;
+import bioseq.pg_support;
 import bioseq.pg_sql_boundary;
 
 namespace bioseq::cache::pg {
@@ -22016,10 +22017,19 @@ void direct_heap_insert(
         std::int32_t identifier,
         const std::string& value) {
     require_cache_test_superuser_typed();
-    const int status = bioseq::pg_utils::invoke_pg_as_cpp(
-        [identifier,
-         relation_oid,
-         value_pointer = &value] {
+    struct PreparedInsertV1 {
+        char* namespace_name = nullptr;
+        char* qualified_name = nullptr;
+        char* command = nullptr;
+        Oid argument_types[2]{};
+        Datum arguments[2]{};
+        char nulls[2]{};
+    };
+    PreparedInsertV1 prepared =
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [identifier,
+             relation_oid,
+             value_pointer = &value] {
             char* const relation_name =
                 get_rel_name(static_cast<Oid>(relation_oid));
             char* const namespace_name = get_namespace_name(
@@ -22036,30 +22046,38 @@ void direct_heap_insert(
                 namespace_name, relation_name);
             char* const command = psprintf(
                 "INSERT INTO %s VALUES ($1, $2)", qualified);
-            Oid argument_types[2]{INT4OID, TEXTOID};
-            Datum arguments[2]{
-                Int32GetDatum(identifier),
-                CStringGetTextDatum(value_pointer->c_str()),
+            return PreparedInsertV1{
+                .namespace_name = namespace_name,
+                .qualified_name = qualified,
+                .command = command,
+                .argument_types = {INT4OID, TEXTOID},
+                .arguments = {
+                    Int32GetDatum(identifier),
+                    CStringGetTextDatum(value_pointer->c_str()),
+                },
+                .nulls = {' ', ' '},
             };
-            char nulls[2]{' ', ' '};
-            if (SPI_connect() != SPI_OK_CONNECT) {
-                ereport(ERROR,
-                    (errcode(ERRCODE_INTERNAL_ERROR),
-                     errmsg("could not connect to SPI")));
-            }
-            const int result = SPI_execute_with_args(
-                command,
+        });
+    int status = 0;
+    {
+        bioseq::pg_support::ScopedSpiConnection connection;
+        status = connection.execute_with_args(
+                prepared.command,
                 2,
-                argument_types,
-                arguments,
-                nulls,
+                prepared.argument_types,
+                prepared.arguments,
+                prepared.nulls,
                 false,
                 0);
-            static_cast<void>(SPI_finish());
+        static_cast<void>(connection.finish());
+    }
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [command = prepared.command,
+         namespace_name = prepared.namespace_name,
+         qualified_name = prepared.qualified_name] {
             pfree(command);
-            pfree(qualified);
+            pfree(qualified_name);
             pfree(namespace_name);
-            return result;
         });
     if (status != SPI_OK_INSERT) {
         bioseq::pg_utils::raise_sql_error(
