@@ -1,13 +1,12 @@
 /*-------------------------------------------------------------------------
  *
  * provider_registry.cppm
- *     Backend-local provider registry and PostgreSQL rendezvous publication.
+ *     Backend-local V2 provider registry and rendezvous publication.
  *
- * The registry owns bounded copies of validated provider tables and names.
- * Callback and PostgreSQL method pointers remain valid only while the provider
- * DSO is mapped, so providers unregister before unload.  All exported
- * operations are bounded, allocation-free and non-throwing so malformed or
- * late-loaded providers fail closed.
+ * Provider descriptors and names are copied into stable, never-compacted
+ * slots.  A removed slot becomes a permanent tombstone for the life of the
+ * backend.  Registration tokens authenticate synthetic unregister requests;
+ * production providers remain registered for process lifetime.
  *
  *-------------------------------------------------------------------------
  */
@@ -18,10 +17,12 @@ extern "C" {
 #include "fmgr.h"
 #include "miscadmin.h"
 #include "utils/errcodes.h"
+#include "utils/plancache.h"
 }
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 export module bioseq.cache.pg.provider_registry;
@@ -30,103 +31,155 @@ import bioseq.cache.provider_api;
 
 export namespace bioseq::cache::pg::provider_registry {
 
-using ProviderV1 = bioseq::cache::BioseqCacheProviderV1;
-using PhysicalIdentityV1 = bioseq::cache::BioseqCachePhysicalIdentityV1;
-using PlannerBridgeV1 = bioseq::cache::BioseqCachePlannerBridgeV1;
-using CacheApiV1 = bioseq::cache::BioseqCacheApiV1;
+using ProviderV2 = bioseq::cache::BioseqCacheProviderV2;
+using ProviderRegistrationV2 =
+    bioseq::cache::BioseqCacheProviderRegistrationV2;
+using ProviderDirectoryV2 =
+    bioseq::cache::BioseqCacheProviderDirectoryV2;
+using PhysicalIdentityV2 = bioseq::cache::BioseqCachePhysicalIdentityV2;
+using PlannerBridgeV2 = bioseq::cache::BioseqCachePlannerBridgeV2;
+using CacheApiV2 = bioseq::cache::BioseqCacheApiV2;
 
 inline constexpr std::uint32_t kPostgresMajorVersion =
     static_cast<std::uint32_t>(PG_VERSION_NUM / 10000);
-inline constexpr std::size_t kMaximumRegisteredProvidersV1 = 32;
-inline constexpr std::size_t kMaximumProviderNameBytesV1 = 128;
-inline constexpr char kCacheApiRendezvousNameV1[] = "bioseq_cache.api.v1";
-inline constexpr char kPlannerBridgeRendezvousNameV1[] =
-    "bioseq_cache.planner_bridge.v1";
+inline constexpr std::size_t kMaximumRegisteredProvidersV2 = 32;
+inline constexpr std::size_t kMaximumProviderNameBytesV2 = 128;
+inline constexpr std::size_t kInvalidProviderSlotV2 =
+    (std::numeric_limits<std::size_t>::max)();
 
-/** Immutable point-in-time copy of the backend-local provider pointer set. */
-struct ProviderSnapshotV1 {
-    std::uint32_t struct_size;
-    std::uint32_t provider_count;
-    std::uint64_t generation;
-    const ProviderV1* providers[kMaximumRegisteredProvidersV1];
+/** Immutable point-in-time copy of active stable provider pointers. */
+struct ProviderSnapshotV2 {
+    std::uint32_t struct_size = sizeof(ProviderSnapshotV2);
+    std::uint32_t provider_count = 0;
+    std::uint64_t generation = 0;
+    const ProviderV2* providers[kMaximumRegisteredProvidersV2]{};
+};
+
+/** Execution-scoped proof that one stable provider slot remains active. */
+struct ProviderLeaseV2 {
+    std::size_t slot_index = kInvalidProviderSlotV2;
+    std::uint64_t registry_generation = 0;
+    std::uint32_t provider_id = 0;
+    std::uint64_t owner_cookie = 0;
+};
+
+/** One in-flight callback counted against registry mutation. */
+struct ProviderCallbackTokenV2 {
+    std::size_t slot_index = kInvalidProviderSlotV2;
+    std::uint64_t registry_generation = 0;
+    std::uint64_t owner_cookie = 0;
 };
 
 /** A null identity requests conservative/coarse write observation. */
-using RelationWriteObserverV1 = void (*)(
+using RelationWriteObserverV2 = void (*)(
     std::uint32_t database_oid,
     std::uint32_t relation_oid,
-    const PhysicalIdentityV1* physical_identity) noexcept;
+    const PhysicalIdentityV2* physical_identity) noexcept;
 
-using PlannerBridgeObserverV1 = void (*)(
+using PlannerBridgeObserverV2 = void (*)(
     PlannerInfo* root,
     RelOptInfo* rel,
     unsigned int rti,
     RangeTblEntry* rte,
-    const ProviderV1* provider) noexcept;
+    const ProviderV2* provider) noexcept;
 
-[[nodiscard]] bool validate_provider_v1(const ProviderV1* provider) noexcept;
-[[nodiscard]] bool register_provider_v1(const ProviderV1* provider) noexcept;
-void unregister_provider_v1(std::uint32_t provider_id) noexcept;
-[[nodiscard]] const ProviderV1* find_provider_v1(
+[[nodiscard]] bool validate_provider_v2(const ProviderV2* provider) noexcept;
+[[nodiscard]] BioseqCacheStatusV2 register_provider_v2(
+    const ProviderV2* provider,
+    ProviderRegistrationV2* registration) noexcept;
+[[nodiscard]] bool unregister_provider_v2(
+    const ProviderRegistrationV2* registration) noexcept;
+[[nodiscard]] const ProviderV2* find_provider_v2(
     std::uint32_t provider_id) noexcept;
-[[nodiscard]] ProviderSnapshotV1 snapshot_providers_v1() noexcept;
+[[nodiscard]] ProviderSnapshotV2 snapshot_providers_v2() noexcept;
 
-void install_relation_write_observer_v1(
-    RelationWriteObserverV1 observer) noexcept;
-void record_relation_write_v1(
+[[nodiscard]] bool acquire_provider_lease_v2(
+    const ProviderV2* provider,
+    ProviderLeaseV2* lease) noexcept;
+[[nodiscard]] const ProviderV2* provider_from_lease_v2(
+    const ProviderLeaseV2& lease) noexcept;
+[[nodiscard]] bool validate_provider_lease_v2(
+    const ProviderLeaseV2& lease,
+    const ProviderV2* expected_provider = nullptr) noexcept;
+void release_provider_lease_v2(ProviderLeaseV2* lease) noexcept;
+
+[[nodiscard]] bool begin_provider_callback_v2(
+    const ProviderV2* provider,
+    const ProviderLeaseV2* lease,
+    ProviderCallbackTokenV2* token) noexcept;
+void end_provider_callback_v2(ProviderCallbackTokenV2* token) noexcept;
+
+void install_relation_write_observer_v2(
+    RelationWriteObserverV2 observer) noexcept;
+void record_relation_write_v2(
     std::uint32_t database_oid,
     std::uint32_t relation_oid,
-    const PhysicalIdentityV1* physical_identity) noexcept;
+    const PhysicalIdentityV2* physical_identity) noexcept;
 
-void install_planner_bridge_observer_v1(
-    PlannerBridgeObserverV1 observer) noexcept;
-void after_provider_rel_paths_v1(
+void install_planner_bridge_observer_v2(
+    PlannerBridgeObserverV2 observer) noexcept;
+void after_provider_rel_paths_v2(
     PlannerInfo* root,
     RelOptInfo* rel,
     unsigned int rti,
     RangeTblEntry* rte,
-    const ProviderV1* provider) noexcept;
+    const ProviderV2* provider) noexcept;
 
-/** Publish both cache rendezvous pointers. Idempotent for this registry. */
-[[nodiscard]] bool initialize_provider_registry_v1() noexcept;
+/** Validate publication ownership and the optional peer before mutation. */
+[[nodiscard]] bool preflight_provider_registry_v2() noexcept;
 
-/** Clear only rendezvous slots still owned by this registry. */
-void unpublish_provider_registry_v1() noexcept;
+/** Publish the cache API, then request an optional Bioseq directory bind. */
+[[nodiscard]] bool initialize_provider_registry_v2() noexcept;
 
-[[nodiscard]] const CacheApiV1& cache_api_v1() noexcept;
-[[nodiscard]] const PlannerBridgeV1& planner_bridge_v1() noexcept;
+[[nodiscard]] const CacheApiV2& cache_api_v2() noexcept;
+[[nodiscard]] const PlannerBridgeV2& planner_bridge_v2() noexcept;
 
-static_assert(std::is_standard_layout_v<ProviderSnapshotV1>);
-static_assert(std::is_trivially_copyable_v<ProviderSnapshotV1>);
-static_assert(std::is_standard_layout_v<ProviderV1>);
-static_assert(std::is_trivially_copyable_v<ProviderV1>);
-static_assert(std::is_standard_layout_v<PhysicalIdentityV1>);
-static_assert(std::is_trivially_copyable_v<PhysicalIdentityV1>);
-static_assert(std::is_standard_layout_v<PlannerBridgeV1>);
-static_assert(std::is_trivially_copyable_v<PlannerBridgeV1>);
-static_assert(std::is_standard_layout_v<CacheApiV1>);
-static_assert(std::is_trivially_copyable_v<CacheApiV1>);
+#if defined(BIOSEQ_CACHE_TESTING)
+/** Test-only copy/token/tombstone probe exposed through generated SQL. */
+[[nodiscard]] bool provider_registry_owns_copy();
+#endif
+
+static_assert(std::is_standard_layout_v<ProviderSnapshotV2>);
+static_assert(std::is_trivially_copyable_v<ProviderSnapshotV2>);
+static_assert(std::is_standard_layout_v<ProviderLeaseV2>);
+static_assert(std::is_trivially_copyable_v<ProviderLeaseV2>);
+static_assert(std::is_standard_layout_v<ProviderCallbackTokenV2>);
+static_assert(std::is_trivially_copyable_v<ProviderCallbackTokenV2>);
 
 } // namespace bioseq::cache::pg::provider_registry
 
 namespace bioseq::cache::pg::provider_registry::detail {
 
+enum class ProviderSlotState : std::uint32_t {
+    Vacant = 0,
+    Active = 1,
+    Tombstone = 2,
+};
+
 struct ProviderSlot {
-    std::uint32_t provider_id;
-    ProviderV1 provider;
-    char provider_name[kMaximumProviderNameBytesV1];
+    ProviderSlotState state = ProviderSlotState::Vacant;
+    std::uint32_t provider_id = 0;
+    std::uint64_t registration_generation = 0;
+    std::uint64_t owner_cookie = 0;
+    std::uint32_t active_callbacks = 0;
+    std::uint32_t active_leases = 0;
+    ProviderV2 provider{};
+    char provider_name[kMaximumProviderNameBytesV2]{};
 };
 
 static_assert(std::is_standard_layout_v<ProviderSlot>);
 static_assert(std::is_trivially_copyable_v<ProviderSlot>);
 
-inline ProviderSlot g_provider_slots[kMaximumRegisteredProvidersV1]{};
-inline std::size_t g_provider_count = 0;
-inline std::uint64_t g_provider_generation = 1;
-inline RelationWriteObserverV1 g_relation_write_observer = nullptr;
-inline PlannerBridgeObserverV1 g_planner_bridge_observer = nullptr;
-inline void** g_cache_api_rendezvous_slot = nullptr;
-inline void** g_planner_bridge_rendezvous_slot = nullptr;
+inline ProviderSlot g_provider_slots[kMaximumRegisteredProvidersV2]{};
+inline std::size_t g_next_provider_slot = 0;
+inline std::size_t g_active_provider_count = 0;
+inline std::uint64_t g_registry_generation = 1;
+inline std::uint64_t g_registry_cookie = 0;
+inline std::uint32_t g_active_callback_count = 0;
+inline RelationWriteObserverV2 g_relation_write_observer = nullptr;
+inline PlannerBridgeObserverV2 g_planner_bridge_observer = nullptr;
+inline const ProviderDirectoryV2* g_preflight_directory = nullptr;
+inline bool g_preflight_directory_compatible = false;
 
 inline constexpr std::uint32_t kKnownProviderFlags =
     static_cast<std::uint32_t>(
@@ -135,13 +188,43 @@ inline constexpr std::uint32_t kKnownProviderFlags =
     | static_cast<std::uint32_t>(
         BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION);
 
+[[nodiscard]] constexpr std::uint64_t mix_cookie(
+        std::uint64_t value) noexcept {
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    value ^= value >> 31U;
+    return value == 0 ? 0x4253514341434845ULL : value;
+}
+
+[[nodiscard]] std::uint64_t process_cookie() noexcept {
+    if (g_registry_cookie == 0) {
+        const std::uint64_t address = static_cast<std::uint64_t>(
+            reinterpret_cast<std::uintptr_t>(&g_provider_slots));
+        const std::uint64_t pid =
+            static_cast<std::uint64_t>(static_cast<std::uint32_t>(MyProcPid));
+        g_registry_cookie = mix_cookie(
+            address ^ (pid << 32U) ^ 0x76325f7265676973ULL);
+    }
+    return g_registry_cookie;
+}
+
+[[nodiscard]] std::uint64_t next_generation() noexcept {
+    ++g_registry_generation;
+    if (g_registry_generation == 0) {
+        g_registry_generation = 1;
+    }
+    return g_registry_generation;
+}
+
 [[nodiscard]] bool provider_name_valid(const char* name) noexcept {
     if (name == nullptr || name[0] == '\0') {
         return false;
     }
-
     bool contains_non_space = false;
-    for (std::size_t index = 0; index < kMaximumProviderNameBytesV1; ++index) {
+    for (std::size_t index = 0; index < kMaximumProviderNameBytesV2;
+         ++index) {
         const unsigned char value = static_cast<unsigned char>(name[index]);
         if (value == 0) {
             return contains_non_space;
@@ -159,7 +242,8 @@ inline constexpr std::uint32_t kKnownProviderFlags =
     if (left == nullptr || right == nullptr) {
         return false;
     }
-    for (std::size_t index = 0; index < kMaximumProviderNameBytesV1; ++index) {
+    for (std::size_t index = 0; index < kMaximumProviderNameBytesV2;
+         ++index) {
         if (left[index] != right[index]) {
             return false;
         }
@@ -171,7 +255,7 @@ inline constexpr std::uint32_t kKnownProviderFlags =
 }
 
 [[nodiscard]] bool provider_tables_equal(
-        const ProviderV1& left, const ProviderV1& right) noexcept {
+        const ProviderV2& left, const ProviderV2& right) noexcept {
     return left.abi_version == right.abi_version
         && left.postgres_major == right.postgres_major
         && left.provider_id == right.provider_id
@@ -195,29 +279,23 @@ inline constexpr std::uint32_t kKnownProviderFlags =
         && left.explain_domain == right.explain_domain;
 }
 
-void clear_provider_slot(ProviderSlot& slot) noexcept {
-    slot = {};
-}
-
-void copy_provider_slot(
-        ProviderSlot& destination, const ProviderSlot& source) noexcept {
-    destination.provider_id = source.provider_id;
-    destination.provider = source.provider;
-    for (std::size_t index = 0; index < kMaximumProviderNameBytesV1;
-         ++index) {
-        destination.provider_name[index] = source.provider_name[index];
-    }
-    destination.provider.provider_name = destination.provider_name;
-}
-
 void capture_provider(
-        ProviderSlot& destination, const ProviderV1& source) noexcept {
-    clear_provider_slot(destination);
+        ProviderSlot& destination,
+        const ProviderV2& source,
+        std::size_t slot_index) noexcept {
+    destination = {};
+    destination.state = ProviderSlotState::Active;
     destination.provider_id = source.provider_id;
+    destination.registration_generation = next_generation();
+    destination.owner_cookie = mix_cookie(
+        process_cookie()
+        ^ destination.registration_generation
+        ^ (static_cast<std::uint64_t>(source.provider_id) << 17U)
+        ^ static_cast<std::uint64_t>(slot_index));
     destination.provider = source;
     destination.provider.struct_size =
-        static_cast<std::uint32_t>(sizeof(ProviderV1));
-    for (std::size_t index = 0; index < kMaximumProviderNameBytesV1;
+        static_cast<std::uint32_t>(sizeof(ProviderV2));
+    for (std::size_t index = 0; index < kMaximumProviderNameBytesV2;
          ++index) {
         destination.provider_name[index] = source.provider_name[index];
         if (source.provider_name[index] == '\0') {
@@ -228,7 +306,7 @@ void capture_provider(
 }
 
 [[nodiscard]] bool baseline_callbacks_present(
-        const ProviderV1& provider) noexcept {
+        const ProviderV2& provider) noexcept {
     return provider.provider_scan_methods != nullptr
         && provider.analyze_query != nullptr
         && provider.describe_path != nullptr
@@ -239,41 +317,81 @@ void capture_provider(
 }
 
 [[nodiscard]] bool reusable_callbacks_present(
-        const ProviderV1& provider) noexcept {
+        const ProviderV2& provider) noexcept {
     return provider.map_reusable_source != nullptr
         && provider.decorate_path != nullptr
         && provider.extract_occurrence != nullptr
         && provider.late_fetch_batch != nullptr;
 }
 
-[[nodiscard]] std::size_t lower_bound_provider(
+[[nodiscard]] std::size_t provider_slot_for_id(
         std::uint32_t provider_id) noexcept {
-    std::size_t first = 0;
-    std::size_t count = g_provider_count;
-    while (count != 0) {
-        const std::size_t step = count / 2;
-        const std::size_t middle = first + step;
-        if (g_provider_slots[middle].provider_id < provider_id) {
-            first = middle + 1;
-            count -= step + 1;
-        } else {
-            count = step;
+    if (provider_id == 0) {
+        return kInvalidProviderSlotV2;
+    }
+    for (std::size_t index = 0; index < g_next_provider_slot; ++index) {
+        const ProviderSlot& slot = g_provider_slots[index];
+        if (slot.state == ProviderSlotState::Active
+            && slot.provider_id == provider_id) {
+            return index;
         }
     }
-    return first;
+    return kInvalidProviderSlotV2;
 }
 
-void advance_generation() noexcept {
-    ++g_provider_generation;
-    if (g_provider_generation == 0) {
-        g_provider_generation = 1;
+[[nodiscard]] std::size_t provider_slot_for_pointer(
+        const ProviderV2* provider) noexcept {
+    if (provider == nullptr) {
+        return kInvalidProviderSlotV2;
     }
+    for (std::size_t index = 0; index < g_next_provider_slot; ++index) {
+        const ProviderSlot& slot = g_provider_slots[index];
+        if (slot.state == ProviderSlotState::Active
+            && &slot.provider == provider) {
+            return index;
+        }
+    }
+    return kInvalidProviderSlotV2;
+}
+
+[[nodiscard]] bool registration_token_valid(
+        const ProviderRegistrationV2* registration,
+        std::size_t* slot_index) noexcept {
+    if (slot_index != nullptr) {
+        *slot_index = kInvalidProviderSlotV2;
+    }
+    if (registration == nullptr
+        || registration->struct_size
+            < offsetof(ProviderRegistrationV2, owner_cookie)
+                + sizeof(registration->owner_cookie)
+        || registration->provider_id == 0
+        || registration->registry_generation == 0
+        || registration->owner_cookie == 0) {
+        return false;
+    }
+    const std::size_t index =
+        provider_slot_for_id(registration->provider_id);
+    if (index == kInvalidProviderSlotV2) {
+        return false;
+    }
+    const ProviderSlot& slot = g_provider_slots[index];
+    if (slot.registration_generation
+            != registration->registry_generation
+        || slot.owner_cookie != registration->owner_cookie) {
+        return false;
+    }
+    if (slot_index != nullptr) {
+        *slot_index = index;
+    }
+    return true;
 }
 
 [[nodiscard]] bool physical_identity_valid(
-        const PhysicalIdentityV1* identity) noexcept {
+        const PhysicalIdentityV2* identity) noexcept {
     if (identity == nullptr
-        || identity->struct_size < sizeof(PhysicalIdentityV1)
+        || identity->struct_size
+            < offsetof(PhysicalIdentityV2, bytes)
+                + sizeof(identity->bytes)
         || identity->reserved != 0
         || identity->length > sizeof(identity->bytes)
         || identity->kind > 2U) {
@@ -285,20 +403,35 @@ void advance_generation() noexcept {
     return identity->length != 0U;
 }
 
-[[nodiscard]] bool api_register_provider(
-        const ProviderV1* provider) noexcept {
-    return register_provider_v1(provider);
+[[nodiscard]] bool directory_valid(
+        const ProviderDirectoryV2* directory) noexcept {
+    return directory != nullptr
+        && directory->struct_size
+            >= offsetof(ProviderDirectoryV2, bind_cache_api)
+                + sizeof(directory->bind_cache_api)
+        && directory->abi_version == bioseq::cache::kProviderAbiVersion
+        && directory->postgres_major == kPostgresMajorVersion
+        && directory->reserved == 0
+        && directory->instance_cookie != 0
+        && directory->bind_cache_api != nullptr;
 }
 
-void api_unregister_provider(std::uint32_t provider_id) noexcept {
-    unregister_provider_v1(provider_id);
+[[nodiscard]] BioseqCacheStatusV2 api_register_provider(
+        const ProviderV2* provider,
+        ProviderRegistrationV2* registration) noexcept {
+    return register_provider_v2(provider, registration);
+}
+
+[[nodiscard]] bool api_unregister_provider(
+        const ProviderRegistrationV2* registration) noexcept {
+    return unregister_provider_v2(registration);
 }
 
 void api_record_relation_write(
         std::uint32_t database_oid,
         std::uint32_t relation_oid,
-        const PhysicalIdentityV1* physical_identity) noexcept {
-    record_relation_write_v1(database_oid, relation_oid, physical_identity);
+        const PhysicalIdentityV2* physical_identity) noexcept {
+    record_relation_write_v2(database_oid, relation_oid, physical_identity);
 }
 
 void bridge_after_provider_rel_paths(
@@ -306,34 +439,38 @@ void bridge_after_provider_rel_paths(
         RelOptInfo* rel,
         unsigned int rti,
         RangeTblEntry* rte,
-        const ProviderV1* provider) noexcept {
-    after_provider_rel_paths_v1(root, rel, rti, rte, provider);
+        const ProviderV2* provider) noexcept {
+    after_provider_rel_paths_v2(root, rel, rti, rte, provider);
 }
 
-inline constinit PlannerBridgeV1 g_planner_bridge_v1{
-    static_cast<std::uint32_t>(sizeof(PlannerBridgeV1)),
+inline constinit PlannerBridgeV2 g_planner_bridge_v2{
+    static_cast<std::uint32_t>(sizeof(PlannerBridgeV2)),
     bioseq::cache::kProviderAbiVersion,
     kPostgresMajorVersion,
     &bridge_after_provider_rel_paths,
 };
 
-inline constinit CacheApiV1 g_cache_api_v1{
-    static_cast<std::uint32_t>(sizeof(CacheApiV1)),
-    bioseq::cache::kProviderAbiVersion,
-    kPostgresMajorVersion,
-    &api_register_provider,
-    &api_unregister_provider,
-    &api_record_relation_write,
-    &g_planner_bridge_v1,
+inline CacheApiV2 g_cache_api_v2{
+    .struct_size = static_cast<std::uint32_t>(sizeof(CacheApiV2)),
+    .abi_version = bioseq::cache::kProviderAbiVersion,
+    .postgres_major = kPostgresMajorVersion,
+    .reserved = 0,
+    .instance_cookie = 0,
+    .register_provider = &api_register_provider,
+    .unregister_provider = &api_unregister_provider,
+    .record_relation_write = &api_record_relation_write,
+    .planner_bridge = &g_planner_bridge_v2,
 };
 
 } // namespace bioseq::cache::pg::provider_registry::detail
 
 namespace bioseq::cache::pg::provider_registry {
 
-bool validate_provider_v1(const ProviderV1* provider) noexcept {
+bool validate_provider_v2(const ProviderV2* provider) noexcept {
     if (provider == nullptr
-        || provider->struct_size < sizeof(ProviderV1)
+        || provider->struct_size
+            < offsetof(ProviderV2, explain_domain)
+                + sizeof(provider->explain_domain)
         || provider->abi_version != bioseq::cache::kProviderAbiVersion
         || provider->postgres_major != kPostgresMajorVersion
         || provider->provider_id == 0
@@ -343,7 +480,6 @@ bool validate_provider_v1(const ProviderV1* provider) noexcept {
         || !detail::baseline_callbacks_present(*provider)) {
         return false;
     }
-
     const bool reusable =
         (provider->provider_flags
          & static_cast<std::uint32_t>(
@@ -351,130 +487,288 @@ bool validate_provider_v1(const ProviderV1* provider) noexcept {
     return !reusable || detail::reusable_callbacks_present(*provider);
 }
 
-bool register_provider_v1(const ProviderV1* provider) noexcept {
-    if (!validate_provider_v1(provider)) {
-        return false;
+BioseqCacheStatusV2 register_provider_v2(
+        const ProviderV2* provider,
+        ProviderRegistrationV2* registration) noexcept {
+    if (registration == nullptr
+        || registration->struct_size
+            < offsetof(ProviderRegistrationV2, owner_cookie)
+                + sizeof(registration->owner_cookie)
+        || !validate_provider_v2(provider)
+        || detail::g_active_callback_count != 0) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
     }
 
-    const std::size_t position =
-        detail::lower_bound_provider(provider->provider_id);
-    if (position < detail::g_provider_count
-        && detail::g_provider_slots[position].provider_id
-            == provider->provider_id) {
-        return detail::provider_tables_equal(
-            detail::g_provider_slots[position].provider, *provider);
+    const std::size_t existing =
+        detail::provider_slot_for_id(provider->provider_id);
+    if (existing != kInvalidProviderSlotV2) {
+        const detail::ProviderSlot& slot =
+            detail::g_provider_slots[existing];
+        if (!detail::provider_tables_equal(slot.provider, *provider)) {
+            return BIOSEQ_CACHE_STATUS_ERROR;
+        }
+        *registration = ProviderRegistrationV2{
+            .struct_size =
+                static_cast<std::uint32_t>(sizeof(ProviderRegistrationV2)),
+            .provider_id = slot.provider_id,
+            .registry_generation = slot.registration_generation,
+            .owner_cookie = slot.owner_cookie,
+        };
+        return BIOSEQ_CACHE_STATUS_OK;
     }
 
-    for (std::size_t index = 0; index < detail::g_provider_count; ++index) {
-        const ProviderV1& registered = detail::g_provider_slots[index].provider;
-        if (registered.provider_scan_methods == provider->provider_scan_methods
+    for (std::size_t index = 0;
+         index < detail::g_next_provider_slot;
+         ++index) {
+        const detail::ProviderSlot& slot = detail::g_provider_slots[index];
+        if (slot.state != detail::ProviderSlotState::Active) {
+            continue;
+        }
+        if (slot.provider.provider_scan_methods
+                == provider->provider_scan_methods
             || detail::provider_names_equal(
-                registered.provider_name, provider->provider_name)) {
-            return false;
+                slot.provider.provider_name, provider->provider_name)) {
+            return BIOSEQ_CACHE_STATUS_ERROR;
         }
     }
+    if (detail::g_next_provider_slot == kMaximumRegisteredProvidersV2) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
 
-    if (detail::g_provider_count == kMaximumRegisteredProvidersV1) {
+    const std::size_t slot_index = detail::g_next_provider_slot++;
+    detail::ProviderSlot& slot = detail::g_provider_slots[slot_index];
+    detail::capture_provider(slot, *provider, slot_index);
+    ++detail::g_active_provider_count;
+    *registration = ProviderRegistrationV2{
+        .struct_size =
+            static_cast<std::uint32_t>(sizeof(ProviderRegistrationV2)),
+        .provider_id = slot.provider_id,
+        .registry_generation = slot.registration_generation,
+        .owner_cookie = slot.owner_cookie,
+    };
+    ResetPlanCache();
+    return BIOSEQ_CACHE_STATUS_OK;
+}
+
+bool unregister_provider_v2(
+        const ProviderRegistrationV2* registration) noexcept {
+    if (detail::g_active_callback_count != 0) {
         return false;
     }
-    for (std::size_t index = detail::g_provider_count;
-         index > position; --index) {
-        detail::copy_provider_slot(
-            detail::g_provider_slots[index],
-            detail::g_provider_slots[index - 1]);
+    std::size_t slot_index = kInvalidProviderSlotV2;
+    if (!detail::registration_token_valid(registration, &slot_index)) {
+        return false;
     }
-    detail::capture_provider(detail::g_provider_slots[position], *provider);
-    ++detail::g_provider_count;
-    detail::advance_generation();
+    detail::ProviderSlot& slot = detail::g_provider_slots[slot_index];
+    if (slot.active_callbacks != 0 || slot.active_leases != 0) {
+        return false;
+    }
+    slot.state = detail::ProviderSlotState::Tombstone;
+    slot.provider = {};
+    slot.provider_name[0] = '\0';
+    slot.provider_id = 0;
+    slot.owner_cookie = 0;
+    slot.registration_generation = 0;
+    if (detail::g_active_provider_count != 0) {
+        --detail::g_active_provider_count;
+    }
+    static_cast<void>(detail::next_generation());
+    ResetPlanCache();
     return true;
 }
 
-void unregister_provider_v1(std::uint32_t provider_id) noexcept {
-    if (provider_id == 0 || detail::g_provider_count == 0) {
-        return;
-    }
-    const std::size_t position = detail::lower_bound_provider(provider_id);
-    if (position == detail::g_provider_count
-        || detail::g_provider_slots[position].provider_id != provider_id) {
-        return;
-    }
-    for (std::size_t index = position + 1;
-         index < detail::g_provider_count; ++index) {
-        detail::copy_provider_slot(
-            detail::g_provider_slots[index - 1],
-            detail::g_provider_slots[index]);
-    }
-    --detail::g_provider_count;
-    detail::clear_provider_slot(
-        detail::g_provider_slots[detail::g_provider_count]);
-    detail::advance_generation();
+const ProviderV2* find_provider_v2(std::uint32_t provider_id) noexcept {
+    const std::size_t slot_index =
+        detail::provider_slot_for_id(provider_id);
+    return slot_index == kInvalidProviderSlotV2
+        ? nullptr
+        : &detail::g_provider_slots[slot_index].provider;
 }
 
-const ProviderV1* find_provider_v1(std::uint32_t provider_id) noexcept {
-    if (provider_id == 0 || detail::g_provider_count == 0) {
-        return nullptr;
-    }
-    const std::size_t position = detail::lower_bound_provider(provider_id);
-    if (position == detail::g_provider_count
-        || detail::g_provider_slots[position].provider_id != provider_id) {
-        return nullptr;
-    }
-    return &detail::g_provider_slots[position].provider;
-}
-
-ProviderSnapshotV1 snapshot_providers_v1() noexcept {
-    ProviderSnapshotV1 snapshot{};
-    snapshot.struct_size = static_cast<std::uint32_t>(sizeof(snapshot));
-    snapshot.provider_count =
-        static_cast<std::uint32_t>(detail::g_provider_count);
-    snapshot.generation = detail::g_provider_generation;
-    for (std::size_t index = 0; index < detail::g_provider_count; ++index) {
-        snapshot.providers[index] =
-            &detail::g_provider_slots[index].provider;
+ProviderSnapshotV2 snapshot_providers_v2() noexcept {
+    ProviderSnapshotV2 snapshot{};
+    snapshot.generation = detail::g_registry_generation;
+    for (std::size_t index = 0;
+         index < detail::g_next_provider_slot;
+         ++index) {
+        const detail::ProviderSlot& slot = detail::g_provider_slots[index];
+        if (slot.state != detail::ProviderSlotState::Active) {
+            continue;
+        }
+        snapshot.providers[snapshot.provider_count++] = &slot.provider;
     }
     return snapshot;
 }
 
-void install_relation_write_observer_v1(
-        RelationWriteObserverV1 observer) noexcept {
+bool acquire_provider_lease_v2(
+        const ProviderV2* provider,
+        ProviderLeaseV2* lease) noexcept {
+    if (lease == nullptr) {
+        return false;
+    }
+    *lease = {};
+    const std::size_t slot_index =
+        detail::provider_slot_for_pointer(provider);
+    if (slot_index == kInvalidProviderSlotV2) {
+        return false;
+    }
+    detail::ProviderSlot& slot = detail::g_provider_slots[slot_index];
+    if (slot.active_leases
+        == (std::numeric_limits<std::uint32_t>::max)()) {
+        return false;
+    }
+    ++slot.active_leases;
+    *lease = ProviderLeaseV2{
+        .slot_index = slot_index,
+        .registry_generation = slot.registration_generation,
+        .provider_id = slot.provider_id,
+        .owner_cookie = slot.owner_cookie,
+    };
+    return true;
+}
+
+const ProviderV2* provider_from_lease_v2(
+        const ProviderLeaseV2& lease) noexcept {
+    if (lease.slot_index >= detail::g_next_provider_slot
+        || lease.slot_index == kInvalidProviderSlotV2) {
+        return nullptr;
+    }
+    const detail::ProviderSlot& slot =
+        detail::g_provider_slots[lease.slot_index];
+    if (slot.state != detail::ProviderSlotState::Active
+        || slot.provider_id != lease.provider_id
+        || slot.registration_generation != lease.registry_generation
+        || slot.owner_cookie != lease.owner_cookie
+        || slot.active_leases == 0) {
+        return nullptr;
+    }
+    return &slot.provider;
+}
+
+bool validate_provider_lease_v2(
+        const ProviderLeaseV2& lease,
+        const ProviderV2* expected_provider) noexcept {
+    const ProviderV2* provider = provider_from_lease_v2(lease);
+    return provider != nullptr
+        && (expected_provider == nullptr || provider == expected_provider);
+}
+
+void release_provider_lease_v2(ProviderLeaseV2* lease) noexcept {
+    if (lease == nullptr) {
+        return;
+    }
+    if (lease->slot_index < detail::g_next_provider_slot
+        && lease->slot_index != kInvalidProviderSlotV2) {
+        detail::ProviderSlot& slot =
+            detail::g_provider_slots[lease->slot_index];
+        if (slot.state == detail::ProviderSlotState::Active
+            && slot.provider_id == lease->provider_id
+            && slot.registration_generation == lease->registry_generation
+            && slot.owner_cookie == lease->owner_cookie
+            && slot.active_leases != 0) {
+            --slot.active_leases;
+        }
+    }
+    *lease = {};
+}
+
+bool begin_provider_callback_v2(
+        const ProviderV2* provider,
+        const ProviderLeaseV2* lease,
+        ProviderCallbackTokenV2* token) noexcept {
+    if (token == nullptr) {
+        return false;
+    }
+    *token = {};
+    std::size_t slot_index = kInvalidProviderSlotV2;
+    if (lease != nullptr) {
+        if (!validate_provider_lease_v2(*lease, provider)) {
+            return false;
+        }
+        slot_index = lease->slot_index;
+    } else {
+        slot_index = detail::provider_slot_for_pointer(provider);
+    }
+    if (slot_index == kInvalidProviderSlotV2) {
+        return false;
+    }
+    detail::ProviderSlot& slot = detail::g_provider_slots[slot_index];
+    if (slot.active_callbacks
+            == (std::numeric_limits<std::uint32_t>::max)()
+        || detail::g_active_callback_count
+            == (std::numeric_limits<std::uint32_t>::max)()) {
+        return false;
+    }
+    ++slot.active_callbacks;
+    ++detail::g_active_callback_count;
+    *token = ProviderCallbackTokenV2{
+        .slot_index = slot_index,
+        .registry_generation = slot.registration_generation,
+        .owner_cookie = slot.owner_cookie,
+    };
+    return true;
+}
+
+void end_provider_callback_v2(ProviderCallbackTokenV2* token) noexcept {
+    if (token == nullptr) {
+        return;
+    }
+    if (token->slot_index < detail::g_next_provider_slot
+        && token->slot_index != kInvalidProviderSlotV2) {
+        detail::ProviderSlot& slot =
+            detail::g_provider_slots[token->slot_index];
+        if (slot.state == detail::ProviderSlotState::Active
+            && slot.registration_generation == token->registry_generation
+            && slot.owner_cookie == token->owner_cookie
+            && slot.active_callbacks != 0
+            && detail::g_active_callback_count != 0) {
+            --slot.active_callbacks;
+            --detail::g_active_callback_count;
+        }
+    }
+    *token = {};
+}
+
+void install_relation_write_observer_v2(
+        RelationWriteObserverV2 observer) noexcept {
     detail::g_relation_write_observer = observer;
 }
 
-void record_relation_write_v1(
+void record_relation_write_v2(
         std::uint32_t database_oid,
         std::uint32_t relation_oid,
-        const PhysicalIdentityV1* physical_identity) noexcept {
-    const RelationWriteObserverV1 observer =
+        const PhysicalIdentityV2* physical_identity) noexcept {
+    const RelationWriteObserverV2 observer =
         detail::g_relation_write_observer;
     if (observer == nullptr) {
         return;
     }
-
-    const PhysicalIdentityV1* validated_identity =
+    const PhysicalIdentityV2* validated_identity =
         detail::physical_identity_valid(physical_identity)
         ? physical_identity
         : nullptr;
     observer(database_oid, relation_oid, validated_identity);
 }
 
-void install_planner_bridge_observer_v1(
-        PlannerBridgeObserverV1 observer) noexcept {
+void install_planner_bridge_observer_v2(
+        PlannerBridgeObserverV2 observer) noexcept {
     detail::g_planner_bridge_observer = observer;
 }
 
-void after_provider_rel_paths_v1(
+void after_provider_rel_paths_v2(
         PlannerInfo* root,
         RelOptInfo* rel,
         unsigned int rti,
         RangeTblEntry* rte,
-        const ProviderV1* provider) noexcept {
-    const PlannerBridgeObserverV1 observer = detail::g_planner_bridge_observer;
+        const ProviderV2* provider) noexcept {
+    const PlannerBridgeObserverV2 observer =
+        detail::g_planner_bridge_observer;
     if (observer == nullptr || root == nullptr || rel == nullptr
-        || rti == 0 || rte == nullptr || !validate_provider_v1(provider)) {
+        || rti == 0 || rte == nullptr || !validate_provider_v2(provider)) {
         return;
     }
-    const ProviderV1* const registered =
-        find_provider_v1(provider->provider_id);
+    const ProviderV2* const registered =
+        find_provider_v2(provider->provider_id);
     if (registered == nullptr
         || !detail::provider_tables_equal(*registered, *provider)) {
         return;
@@ -482,85 +776,108 @@ void after_provider_rel_paths_v1(
     observer(root, rel, rti, rte, registered);
 }
 
-bool initialize_provider_registry_v1() noexcept {
+bool preflight_provider_registry_v2() noexcept {
     void** const api_slot = find_rendezvous_variable(
-        kCacheApiRendezvousNameV1);
-    void** const bridge_slot = find_rendezvous_variable(
-        kPlannerBridgeRendezvousNameV1);
-    if (api_slot == nullptr || bridge_slot == nullptr
+        bioseq::cache::kCacheApiRendezvousName);
+    if (api_slot == nullptr
         || (*api_slot != nullptr
-            && *api_slot != static_cast<void*>(&detail::g_cache_api_v1))
-        || (*bridge_slot != nullptr
-            && *bridge_slot
-                != static_cast<void*>(&detail::g_planner_bridge_v1))) {
+            && *api_slot != static_cast<void*>(&detail::g_cache_api_v2))) {
         return false;
     }
-
-    *bridge_slot = static_cast<void*>(&detail::g_planner_bridge_v1);
-    *api_slot = static_cast<void*>(&detail::g_cache_api_v1);
-    detail::g_cache_api_rendezvous_slot = api_slot;
-    detail::g_planner_bridge_rendezvous_slot = bridge_slot;
+    void** const directory_slot = find_rendezvous_variable(
+        bioseq::cache::kProviderDirectoryRendezvousName);
+    detail::g_preflight_directory =
+        directory_slot == nullptr || *directory_slot == nullptr
+        ? nullptr
+        : static_cast<const ProviderDirectoryV2*>(*directory_slot);
+    detail::g_preflight_directory_compatible =
+        detail::g_preflight_directory != nullptr
+        && detail::directory_valid(detail::g_preflight_directory);
     return true;
 }
 
-void unpublish_provider_registry_v1() noexcept {
-    if (detail::g_cache_api_rendezvous_slot != nullptr
-        && *detail::g_cache_api_rendezvous_slot
-            == static_cast<void*>(&detail::g_cache_api_v1)) {
-        *detail::g_cache_api_rendezvous_slot = nullptr;
+bool initialize_provider_registry_v2() noexcept {
+    if (!preflight_provider_registry_v2()) {
+        return false;
     }
-    if (detail::g_planner_bridge_rendezvous_slot != nullptr
-        && *detail::g_planner_bridge_rendezvous_slot
-            == static_cast<void*>(&detail::g_planner_bridge_v1)) {
-        *detail::g_planner_bridge_rendezvous_slot = nullptr;
+    void** const api_slot = find_rendezvous_variable(
+        bioseq::cache::kCacheApiRendezvousName);
+    if (detail::g_cache_api_v2.instance_cookie == 0) {
+        detail::g_cache_api_v2.instance_cookie =
+            detail::mix_cookie(
+                detail::process_cookie() ^ 0x76325f6361636865ULL);
     }
-    detail::g_cache_api_rendezvous_slot = nullptr;
-    detail::g_planner_bridge_rendezvous_slot = nullptr;
+    *api_slot = static_cast<void*>(&detail::g_cache_api_v2);
+
+    void** const directory_slot = find_rendezvous_variable(
+        bioseq::cache::kProviderDirectoryRendezvousName);
+    if (directory_slot == nullptr || *directory_slot == nullptr) {
+        return true;
+    }
+    const auto* directory =
+        static_cast<const ProviderDirectoryV2*>(*directory_slot);
+    const bool preflight_matches =
+        directory == detail::g_preflight_directory;
+    if (!preflight_matches
+        || !detail::g_preflight_directory_compatible
+        || !detail::directory_valid(directory)) {
+        ereport(WARNING,
+            (errmsg("ignoring incompatible bioseq cache-provider directory")));
+        return true;
+    }
+    try {
+        if (directory->bind_cache_api(&detail::g_cache_api_v2)
+            != BIOSEQ_CACHE_STATUS_OK) {
+            ereport(WARNING,
+                (errmsg("bioseq cache-provider directory declined binding")));
+        }
+    } catch (...) {
+        /* Optional providers fail open; the published cache API stays valid. */
+        ereport(WARNING,
+            (errmsg("bioseq cache-provider directory binding failed")));
+    }
+    return true;
 }
 
-const CacheApiV1& cache_api_v1() noexcept {
-    return detail::g_cache_api_v1;
+const CacheApiV2& cache_api_v2() noexcept {
+    return detail::g_cache_api_v2;
 }
 
-const PlannerBridgeV1& planner_bridge_v1() noexcept {
-    return detail::g_planner_bridge_v1;
+const PlannerBridgeV2& planner_bridge_v2() noexcept {
+    return detail::g_planner_bridge_v2;
 }
-
-} // namespace bioseq::cache::pg::provider_registry
 
 #if defined(BIOSEQ_CACHE_TESTING)
-extern "C" {
-
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_registry_owns_copy);
-
-Datum bioseq_cache_test_provider_registry_owns_copy(PG_FUNCTION_ARGS) {
-    using namespace bioseq::cache::pg::provider_registry;
-
+bool provider_registry_owns_copy() {
     if (!superuser()) {
         ereport(ERROR,
             (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
              errmsg("provider registry copy probe requires superuser")));
     }
 
-    const ProviderSnapshotV1 before = snapshot_providers_v1();
+    const ProviderSnapshotV2 before = snapshot_providers_v2();
     if (before.provider_count == 0 || before.providers[0] == nullptr
-        || find_provider_v1(1U) != nullptr) {
-        PG_RETURN_BOOL(false);
+        || find_provider_v2(1U) != nullptr) {
+        return false;
     }
 
-    const ProviderV1& source = *before.providers[0];
+    const ProviderV2& source = *before.providers[0];
     const std::uint32_t source_id = source.provider_id;
     const auto source_analyze = source.analyze_query;
     char probe_name[] = "registry-copy-probe";
-    ProviderV1 candidate = source;
+    ProviderV2 candidate = source;
     candidate.provider_id = 1U;
     candidate.provider_name = probe_name;
     candidate.provider_scan_methods =
         reinterpret_cast<const CustomScanMethods*>(&candidate);
     const auto probe_methods = candidate.provider_scan_methods;
+    ProviderRegistrationV2 registration{
+        .struct_size = sizeof(ProviderRegistrationV2),
+    };
 
-    if (!register_provider_v1(&candidate)) {
-        PG_RETURN_BOOL(false);
+    if (register_provider_v2(&candidate, &registration)
+        != BIOSEQ_CACHE_STATUS_OK) {
+        return false;
     }
 
     probe_name[0] = 'X';
@@ -569,27 +886,27 @@ Datum bioseq_cache_test_provider_registry_owns_copy(PG_FUNCTION_ARGS) {
     candidate.provider_scan_methods = nullptr;
     candidate.analyze_query = nullptr;
 
-    const ProviderV1* const stored = find_provider_v1(1U);
+    const ProviderV2* const stored = find_provider_v2(1U);
     bool valid = stored != nullptr
         && stored != &candidate
         && stored->provider_id == 1U
         && stored->provider_name != probe_name
-        && bioseq::cache::pg::provider_registry::detail::provider_names_equal(
+        && detail::provider_names_equal(
             stored->provider_name, "registry-copy-probe")
         && stored->provider_scan_methods == probe_methods
         && stored->analyze_query == source_analyze
-        && validate_provider_v1(stored);
+        && validate_provider_v2(stored);
 
-    unregister_provider_v1(1U);
-    const ProviderV1* const restored = find_provider_v1(source_id);
+    valid = valid && unregister_provider_v2(&registration);
+    const ProviderV2* const restored = find_provider_v2(source_id);
     valid = valid
-        && find_provider_v1(1U) == nullptr
+        && find_provider_v2(1U) == nullptr
         && restored != nullptr
         && restored->provider_id == source_id
         && restored->analyze_query == source_analyze
-        && snapshot_providers_v1().provider_count == before.provider_count;
-    PG_RETURN_BOOL(valid);
+        && snapshot_providers_v2().provider_count == before.provider_count;
+    return valid;
 }
-
-} // extern "C"
 #endif
+
+} // namespace bioseq::cache::pg::provider_registry

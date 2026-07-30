@@ -221,7 +221,7 @@ write_coverage_binding_semantics(
 
 /** Copy the provider-owned fixed digest after validate_path_domain succeeds. */
 [[nodiscard]] inline CacheDigest256 provider_security_digest(
-    const BioseqCachePathDomainV1& domain) noexcept {
+    const BioseqCachePathDomainV2& domain) noexcept {
     CacheDigest256 result{};
     std::copy_n(
         domain.provider_security_digest,
@@ -490,11 +490,11 @@ enum class ProviderContractErrorV1 : std::uint16_t {
 [[nodiscard]] constexpr std::expected<void, ProviderContractErrorV1>
 validate_query_intent(
     std::uint32_t provider_id,
-    const BioseqCacheQueryIntentV1* intent) noexcept {
+    const BioseqCacheQueryIntentV2* intent) noexcept {
     if (intent == nullptr) {
         return std::unexpected(ProviderContractErrorV1::NullPointer);
     }
-    if (intent->struct_size < sizeof(BioseqCacheQueryIntentV1)) {
+    if (intent->struct_size < sizeof(BioseqCacheQueryIntentV2)) {
         return std::unexpected(ProviderContractErrorV1::StructSize);
     }
     if (provider_id == 0 || intent->provider_id != provider_id) {
@@ -507,7 +507,7 @@ validate_query_intent(
 }
 
 [[nodiscard]] inline ProviderSchemaView boundary_schema_view(
-    const BioseqCachePathDomainV1& domain) noexcept {
+    const BioseqCachePathDomainV2& domain) noexcept {
     return ProviderSchemaView{
         .columns = domain.boundary_columns,
         .column_count = domain.boundary_column_count,
@@ -517,7 +517,7 @@ validate_query_intent(
 }
 
 [[nodiscard]] inline ProviderSchemaView lineage_schema_view(
-    const BioseqCachePathDomainV1& domain) noexcept {
+    const BioseqCachePathDomainV2& domain) noexcept {
     return ProviderSchemaView{
         .columns = domain.lineage_columns,
         .column_count = domain.lineage_column_count,
@@ -529,11 +529,11 @@ validate_query_intent(
 [[nodiscard]] inline std::expected<void, ProviderContractErrorV1>
 validate_path_domain(
     std::uint32_t provider_id,
-    const BioseqCachePathDomainV1* domain) noexcept {
+    const BioseqCachePathDomainV2* domain) noexcept {
     if (domain == nullptr) {
         return std::unexpected(ProviderContractErrorV1::NullPointer);
     }
-    if (domain->struct_size < sizeof(BioseqCachePathDomainV1)) {
+    if (domain->struct_size < sizeof(BioseqCachePathDomainV2)) {
         return std::unexpected(ProviderContractErrorV1::StructSize);
     }
     if (provider_id == 0 || domain->provider_id != provider_id) {
@@ -561,10 +561,10 @@ validate_path_domain(
 }
 
 [[nodiscard]] constexpr bool provider_column_equal(
-    const BioseqCacheColumnSchemaV1& left,
-    const BioseqCacheColumnSchemaV1& right) noexcept {
-    return left.struct_size >= sizeof(BioseqCacheColumnSchemaV1)
-        && right.struct_size >= sizeof(BioseqCacheColumnSchemaV1)
+    const BioseqCacheColumnSchemaV2& left,
+    const BioseqCacheColumnSchemaV2& right) noexcept {
+    return left.struct_size >= sizeof(BioseqCacheColumnSchemaV2)
+        && right.struct_size >= sizeof(BioseqCacheColumnSchemaV2)
         && left.attno == right.attno
         && left.semantic_id_high == right.semantic_id_high
         && left.semantic_id_low == right.semantic_id_low
@@ -575,9 +575,9 @@ validate_path_domain(
 }
 
 [[nodiscard]] inline bool provider_schema_equal(
-    const BioseqCacheColumnSchemaV1* left,
+    const BioseqCacheColumnSchemaV2* left,
     std::size_t left_count,
-    const BioseqCacheColumnSchemaV1* right,
+    const BioseqCacheColumnSchemaV2* right,
     std::size_t right_count) noexcept {
     if (left_count != right_count
         || left_count > kMaxProviderBoundaryColumns
@@ -595,12 +595,12 @@ validate_path_domain(
 /** Decorated output must reproduce the complete advertised schema contract. */
 [[nodiscard]] inline std::expected<void, ProviderContractErrorV1>
 validate_decorated_path(
-    const BioseqCachePathDomainV1* domain,
-    const BioseqCacheDecoratedPathV1* decorated) noexcept {
+    const BioseqCachePathDomainV2* domain,
+    const BioseqCacheDecoratedPathV2* decorated) noexcept {
     if (domain == nullptr || decorated == nullptr) {
         return std::unexpected(ProviderContractErrorV1::NullPointer);
     }
-    if (decorated->struct_size < sizeof(BioseqCacheDecoratedPathV1)) {
+    if (decorated->struct_size < sizeof(BioseqCacheDecoratedPathV2)) {
         return std::unexpected(ProviderContractErrorV1::StructSize);
     }
     if (decorated->flags != 0) {
@@ -632,14 +632,14 @@ validate_decorated_path(
 /** Validate the copyable, bounded finalized-plan/runtime recipe envelope. */
 [[nodiscard]] constexpr std::expected<void, ProviderContractErrorV1>
 validate_plan_digest_recipe(
-    const BioseqCachePlanDigestRecipeV1* recipe,
+    const BioseqCachePlanDigestRecipeV2* recipe,
     std::uint32_t recipe_count,
     std::uint64_t serialized_bytes,
     std::uint32_t node_count) noexcept {
     if (recipe == nullptr) {
         return std::unexpected(ProviderContractErrorV1::NullPointer);
     }
-    if (recipe->struct_size < sizeof(BioseqCachePlanDigestRecipeV1)) {
+    if (recipe->struct_size < sizeof(BioseqCachePlanDigestRecipeV2)) {
         return std::unexpected(ProviderContractErrorV1::StructSize);
     }
     if (recipe->flags != 0 || recipe->reserved != 0) {
@@ -674,7 +674,7 @@ struct FinalizedPlanRecipeContractV1 {
     FinalizedPlanRecipeContractV1,
     ProviderContractErrorV1>
 finalize_plan_digest_recipe(
-    const BioseqCachePlanDigestRecipeV1* recipe,
+    const BioseqCachePlanDigestRecipeV2* recipe,
     std::uint32_t recipe_count,
     std::uint64_t serialized_bytes,
     std::uint32_t node_count,
@@ -735,10 +735,10 @@ struct BoundedDigestSinkBufferV1 {
     return true;
 }
 
-[[nodiscard]] inline BioseqCacheDigestSinkV1 make_digest_sink(
+[[nodiscard]] inline BioseqCacheDigestSinkV2 make_digest_sink(
     BoundedDigestSinkBufferV1& buffer) noexcept {
-    return BioseqCacheDigestSinkV1{
-        .struct_size = sizeof(BioseqCacheDigestSinkV1),
+    return BioseqCacheDigestSinkV2{
+        .struct_size = sizeof(BioseqCacheDigestSinkV2),
         .opaque = &buffer,
         .append = &append_bounded_digest_bytes,
     };
@@ -810,10 +810,10 @@ struct CoverageBranchChoiceV1 {
 
 /** Keep self-join/binding identity in the occurrence equality contract. */
 [[nodiscard]] constexpr bool occurrence_equal(
-    const BioseqCacheOccurrenceV1& left,
-    const BioseqCacheOccurrenceV1& right) noexcept {
-    return left.struct_size >= sizeof(BioseqCacheOccurrenceV1)
-        && right.struct_size >= sizeof(BioseqCacheOccurrenceV1)
+    const BioseqCacheOccurrenceV2& left,
+    const BioseqCacheOccurrenceV2& right) noexcept {
+    return left.struct_size >= sizeof(BioseqCacheOccurrenceV2)
+        && right.struct_size >= sizeof(BioseqCacheOccurrenceV2)
         && left.rte_ordinal == right.rte_ordinal
         && left.logical_relation_oid == right.logical_relation_oid
         && left.leaf_relation_oid == right.leaf_relation_oid
@@ -866,7 +866,7 @@ struct LateFetchSinkStateV1 {
     return true;
 }
 
-[[nodiscard]] inline BioseqCacheStatusV1 late_fetch_emit_value(
+[[nodiscard]] inline BioseqCacheStatusV2 late_fetch_emit_value(
     void* opaque,
     std::size_t reference_index,
     std::size_t requested_attribute_index,
@@ -899,7 +899,7 @@ struct LateFetchSinkStateV1 {
 inline void late_fetch_emit_reference_status(
     void* opaque,
     std::size_t reference_index,
-    BioseqCacheStatusV1 status) noexcept {
+    BioseqCacheStatusV2 status) noexcept {
     auto* state = static_cast<LateFetchSinkStateV1*>(opaque);
     if (state == nullptr || state->malformed
         || reference_index >= state->reference_count
@@ -919,10 +919,10 @@ inline void late_fetch_emit_reference_status(
         state->any_reference_failure || status != BIOSEQ_CACHE_STATUS_OK;
 }
 
-[[nodiscard]] inline BioseqCacheLateFetchSinkV1 make_late_fetch_sink(
+[[nodiscard]] inline BioseqCacheLateFetchSinkV2 make_late_fetch_sink(
     LateFetchSinkStateV1& state) noexcept {
-    return BioseqCacheLateFetchSinkV1{
-        .struct_size = sizeof(BioseqCacheLateFetchSinkV1),
+    return BioseqCacheLateFetchSinkV2{
+        .struct_size = sizeof(BioseqCacheLateFetchSinkV2),
         .opaque = &state,
         .emit_value = &late_fetch_emit_value,
         .emit_reference_status = &late_fetch_emit_reference_status,

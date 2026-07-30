@@ -15,11 +15,11 @@ using namespace bioseq::cache::pg::reuse;
 
 namespace {
 
-BioseqCacheColumnSchemaV1 schema_column(
+BioseqCacheColumnSchemaV2 schema_column(
     std::uint32_t attno,
     std::uint64_t semantic_id) {
-    return BioseqCacheColumnSchemaV1{
-        .struct_size = sizeof(BioseqCacheColumnSchemaV1),
+    return BioseqCacheColumnSchemaV2{
+        .struct_size = sizeof(BioseqCacheColumnSchemaV2),
         .attno = attno,
         .semantic_id_high = 0x1234,
         .semantic_id_low = semantic_id,
@@ -316,8 +316,8 @@ TEST_CASE("provider domain and decorated schema contracts are exact") {
     const std::array<std::uint32_t, 2> required_boundary{2, 1};
     const std::array<std::uint32_t, 1> required_lineage{1};
 
-    BioseqCachePathDomainV1 domain{
-        .struct_size = sizeof(BioseqCachePathDomainV1),
+    BioseqCachePathDomainV2 domain{
+        .struct_size = sizeof(BioseqCachePathDomainV2),
         .provider_id = 7,
         .compatibility_family_id = 11,
         .capability_mask = 3,
@@ -340,15 +340,15 @@ TEST_CASE("provider domain and decorated schema contracts are exact") {
         == kProviderIndependentSecurityDigestV1);
 
     domain.struct_size = offsetof(
-        BioseqCachePathDomainV1,
+        BioseqCachePathDomainV2,
         provider_security_digest_format_version);
     REQUIRE(
         validate_path_domain(7, &domain).error()
         == ProviderContractErrorV1::StructSize);
-    domain.struct_size = sizeof(BioseqCachePathDomainV1);
+    domain.struct_size = sizeof(BioseqCachePathDomainV2);
 
-    BioseqCacheDecoratedPathV1 decorated{
-        .struct_size = sizeof(BioseqCacheDecoratedPathV1),
+    BioseqCacheDecoratedPathV2 decorated{
+        .struct_size = sizeof(BioseqCacheDecoratedPathV2),
         .flags = 0,
         .path = reinterpret_cast<::Path*>(0x1),
         .actual_boundary_columns = boundary.data(),
@@ -387,8 +387,8 @@ TEST_CASE("provider domain and decorated schema contracts are exact") {
 }
 
 TEST_CASE("runtime recipe and digest sink reject malformed or oversized data") {
-    BioseqCachePlanDigestRecipeV1 recipe{
-        .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+    BioseqCachePlanDigestRecipeV2 recipe{
+        .struct_size = sizeof(BioseqCachePlanDigestRecipeV2),
         .flags = 0,
         .digest_format_version = kProviderRecipeFormatVersion,
         .reserved = 0,
@@ -416,8 +416,8 @@ TEST_CASE("finalized recipe and expected digest are accepted atomically") {
     CacheDigest256 digest_b{};
     digest_b.bytes[0] = 0xb2;
 
-    BioseqCachePlanDigestRecipeV1 recipe{
-        .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+    BioseqCachePlanDigestRecipeV2 recipe{
+        .struct_size = sizeof(BioseqCachePlanDigestRecipeV2),
         .flags = 0,
         .digest_format_version = kProviderRecipeFormatVersion,
         .reserved = 0,
@@ -640,8 +640,8 @@ TEST_CASE("replacement plans retain independent frozen digests and gates") {
     CacheDigest256 digest_b{};
     digest_b.bytes[0] = 0xb2;
     CacheDigest256 live_configuration_digest = digest_a;
-    BioseqCachePlanDigestRecipeV1 recipe{
-        .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+    BioseqCachePlanDigestRecipeV2 recipe{
+        .struct_size = sizeof(BioseqCachePlanDigestRecipeV2),
         .digest_format_version = kProviderRecipeFormatVersion,
         .plan_domain_nodes = reinterpret_cast<::List*>(0x1),
     };

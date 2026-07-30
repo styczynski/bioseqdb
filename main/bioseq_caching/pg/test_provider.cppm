@@ -52,10 +52,12 @@ extern "C" {
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <string>
 
 export module bioseq.cache.pg.test_provider;
 
 import bioseq.cache.provider_api;
+import bioseq.pg_sql_boundary;
 
 namespace bioseq::cache::pg::test_provider {
 
@@ -71,9 +73,6 @@ inline constexpr std::size_t kMaximumRequiredBoundaryCount =
     kMaximumPlanNodeCount - kPlanFixedNodeCount;
 inline constexpr std::size_t kDigestBytes = 32;
 inline constexpr std::size_t kMaximumTargetRelations = 16;
-inline constexpr char kApiRendezvousName[] = "bioseq_cache.api.v1";
-inline constexpr char kBridgeRendezvousName[] =
-    "bioseq_cache.planner_bridge.v1";
 inline constexpr std::uint32_t kPgRelFileLocatorIdentityKindV1 = 1;
 inline constexpr std::size_t kPgRelFileLocatorIdentityBytesV1 =
     sizeof(Oid) + sizeof(Oid) + sizeof(RelFileNumber);
@@ -166,6 +165,9 @@ inline DigestFault g_digest_fault = DigestFault::None;
 inline ProjectionOrder g_projection_order = ProjectionOrder::Natural;
 inline bool g_force_domain_digest_collision = false;
 inline bool g_provider_registered = false;
+inline BioseqCacheProviderRegistrationV2 g_provider_registration{
+    .struct_size = sizeof(BioseqCacheProviderRegistrationV2),
+};
 inline bool g_hook_installed = false;
 inline bool g_scan_methods_registered = false;
 inline set_rel_pathlist_hook_type g_previous_set_rel_pathlist_hook = nullptr;
@@ -215,7 +217,7 @@ void require_test_superuser() {
 /** Encode the cache ABI's padding-free PostgreSQL locator identity. */
 [[nodiscard]] bool provider_relation_physical_identity(
         Oid relation_oid,
-        BioseqCachePhysicalIdentityV1* output) {
+        BioseqCachePhysicalIdentityV2* output) {
     if (!OidIsValid(relation_oid) || output == nullptr
         || kPgRelFileLocatorIdentityBytesV1 > sizeof(output->bytes)) {
         return false;
@@ -227,8 +229,8 @@ void require_test_superuser() {
         || !RelFileNumberIsValid(locator.relNumber)) {
         return false;
     }
-    *output = BioseqCachePhysicalIdentityV1{
-        .struct_size = sizeof(BioseqCachePhysicalIdentityV1),
+    *output = BioseqCachePhysicalIdentityV2{
+        .struct_size = sizeof(BioseqCachePhysicalIdentityV2),
         .kind = kPgRelFileLocatorIdentityKindV1,
         .length = static_cast<std::uint32_t>(
             kPgRelFileLocatorIdentityBytesV1),
@@ -245,17 +247,20 @@ void require_test_superuser() {
 
 /** Emit a provider-complete write marker before transaction PRE_COMMIT. */
 [[nodiscard]] bool record_provider_relation_write(Oid relation_oid) {
-    BioseqCachePhysicalIdentityV1 identity{};
-    void** slot = find_rendezvous_variable(kApiRendezvousName);
+    BioseqCachePhysicalIdentityV2 identity{};
+    void** slot = find_rendezvous_variable(
+        bioseq::cache::kCacheApiRendezvousName);
     if (!provider_relation_physical_identity(relation_oid, &identity)
         || slot == nullptr || *slot == nullptr) {
         return false;
     }
-    const auto* api = static_cast<const BioseqCacheApiV1*>(*slot);
+    const auto* api = static_cast<const BioseqCacheApiV2*>(*slot);
     if (api->struct_size < sizeof(*api)
         || api->abi_version != bioseq::cache::kProviderAbiVersion
         || api->postgres_major
             != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
+        || api->reserved != 0
+        || api->instance_cookie == 0
         || api->record_relation_write == nullptr) {
         return false;
     }
@@ -752,14 +757,14 @@ void provider_explain_custom_scan(
 
 /** Fill one ABI schema element from a physical table attribute. */
 void fill_column_schema(
-    BioseqCacheColumnSchemaV1& output,
+    BioseqCacheColumnSchemaV2& output,
     AttrNumber attribute_number,
     Form_pg_attribute attribute,
     bool lineage) noexcept {
     const auto semantic = column_semantic_id(
         attribute_number, attribute, lineage);
     output = {
-        .struct_size = sizeof(BioseqCacheColumnSchemaV1),
+        .struct_size = sizeof(BioseqCacheColumnSchemaV2),
         .attno = static_cast<std::uint32_t>(attribute_number),
         .semantic_id_high = semantic[0],
         .semantic_id_low = semantic[1],
@@ -771,8 +776,8 @@ void fill_column_schema(
 }
 
 /** Find a schema element by its 1-based provider attribute number. */
-[[nodiscard]] const BioseqCacheColumnSchemaV1* find_schema_column(
-    const BioseqCacheColumnSchemaV1* columns,
+[[nodiscard]] const BioseqCacheColumnSchemaV2* find_schema_column(
+    const BioseqCacheColumnSchemaV2* columns,
     std::size_t count,
     std::uint32_t attribute_number) noexcept {
     for (std::size_t index = 0; index < count; ++index) {
@@ -784,7 +789,7 @@ void fill_column_schema(
 }
 
 struct NormalizedPredicateContextV1 {
-    const BioseqCachePathDomainV1* domain = nullptr;
+    const BioseqCachePathDomainV2* domain = nullptr;
     bool valid = true;
 };
 
@@ -823,7 +828,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 }
 
 [[nodiscard]] bool provider_received_normalized_predicate(
-        const BioseqCachePathDomainV1& domain) {
+        const BioseqCachePathDomainV2& domain) {
     NormalizedPredicateContextV1 context{.domain = &domain};
     static_cast<void>(normalized_predicate_walker(
         reinterpret_cast<Node*>(domain.coverage_predicate), &context));
@@ -831,9 +836,9 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 }
 
 /** Query analysis admits only statements containing the configured table. */
-[[nodiscard]] BioseqCacheStatusV1 provider_analyze_query(
+[[nodiscard]] BioseqCacheStatusV2 provider_analyze_query(
     const Query* query,
-    BioseqCacheQueryIntentV1* output) {
+    BioseqCacheQueryIntentV2* output) {
     ++g_counters.analyze_query;
     if (query == nullptr || output == nullptr
         || output->struct_size < sizeof(*output)
@@ -864,12 +869,12 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 }
 
 /** Advertise a complete raw boundary and one-occurrence lineage contract. */
-[[nodiscard]] BioseqCacheStatusV1 provider_describe_path(
+[[nodiscard]] BioseqCacheStatusV2 provider_describe_path(
     PlannerInfo* root,
     RelOptInfo* relation_info,
     Path* provider_path,
-    const BioseqCacheQueryIntentV1* intent,
-    BioseqCachePathDomainV1* output) {
+    const BioseqCacheQueryIntentV2* intent,
+    BioseqCachePathDomainV2* output) {
     ++g_counters.describe_path;
     if (root == nullptr || relation_info == nullptr || provider_path == nullptr
         || intent == nullptr || output == nullptr
@@ -942,8 +947,8 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
 
-    auto* boundary = static_cast<BioseqCacheColumnSchemaV1*>(
-        palloc0(boundary_count * sizeof(BioseqCacheColumnSchemaV1)));
+    auto* boundary = static_cast<BioseqCacheColumnSchemaV2*>(
+        palloc0(boundary_count * sizeof(BioseqCacheColumnSchemaV2)));
     auto* required_boundary = required_boundary_count == 0
         ? nullptr
         : static_cast<std::uint32_t*>(palloc0(
@@ -971,8 +976,8 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 
     constexpr std::array<const char*, 3> lineage_names{
         "row_id", "base_id", "occurrence_no"};
-    auto* lineage = static_cast<BioseqCacheColumnSchemaV1*>(
-        palloc0(lineage_names.size() * sizeof(BioseqCacheColumnSchemaV1)));
+    auto* lineage = static_cast<BioseqCacheColumnSchemaV2*>(
+        palloc0(lineage_names.size() * sizeof(BioseqCacheColumnSchemaV2)));
     auto* required_lineage = static_cast<std::uint32_t*>(
         palloc0(lineage_names.size() * sizeof(std::uint32_t)));
     for (std::size_t index = 0; index < lineage_names.size(); ++index) {
@@ -1024,7 +1029,7 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 
 /** Append stable bytes to a cache-owned bounded digest sink. */
 [[nodiscard]] bool append_digest_bytes(
-    BioseqCacheDigestSinkV1* sink,
+    BioseqCacheDigestSinkV2* sink,
     const void* data,
     std::size_t size) noexcept {
     return sink != nullptr && sink->struct_size >= sizeof(*sink)
@@ -1038,9 +1043,9 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
  * must meet in the same coverage directory before the generation key and
  * coverage algebra distinguish them.
  */
-[[nodiscard]] BioseqCacheStatusV1 provider_append_domain_digest(
-    const BioseqCachePathDomainV1* domain,
-    BioseqCacheDigestSinkV1* sink) {
+[[nodiscard]] BioseqCacheStatusV2 provider_append_domain_digest(
+    const BioseqCachePathDomainV2* domain,
+    BioseqCacheDigestSinkV2* sink) {
     ++g_counters.domain_digest;
     if (domain == nullptr || domain->provider_id != kProviderId
         || domain->coverage_predicate == nullptr
@@ -1080,9 +1085,9 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
 }
 
 /** Generation bytes add the exact predicate, capability, and ordered schemas. */
-[[nodiscard]] BioseqCacheStatusV1 provider_append_generation_digest(
-    const BioseqCachePathDomainV1* domain,
-    BioseqCacheDigestSinkV1* sink) {
+[[nodiscard]] BioseqCacheStatusV2 provider_append_generation_digest(
+    const BioseqCachePathDomainV2* domain,
+    BioseqCacheDigestSinkV2* sink) {
     ++g_counters.generation_digest;
     if (provider_append_domain_digest(domain, sink)
         != BIOSEQ_CACHE_STATUS_OK) {
@@ -1121,14 +1126,14 @@ bool normalized_predicate_walker(Node* node, void* opaque) {
     for (std::size_t index = 0; index < domain->boundary_column_count; ++index) {
         if (!append_digest_bytes(
                 sink, &domain->boundary_columns[index],
-                sizeof(BioseqCacheColumnSchemaV1))) {
+                sizeof(BioseqCacheColumnSchemaV2))) {
             return BIOSEQ_CACHE_STATUS_ERROR;
         }
     }
     for (std::size_t index = 0; index < domain->lineage_column_count; ++index) {
         if (!append_digest_bytes(
                 sink, &domain->lineage_columns[index],
-                sizeof(BioseqCacheColumnSchemaV1))) {
+                sizeof(BioseqCacheColumnSchemaV2))) {
             return BIOSEQ_CACHE_STATUS_ERROR;
         }
     }
@@ -1155,7 +1160,7 @@ namespace bioseq::cache::pg::test_provider {
  * Genuine ordering cycle: the relation hook calls the provider table, while
  * the table must be defined after every callback it stores.
  */
-[[nodiscard]] const BioseqCacheProviderV1& provider_v1() noexcept;
+[[nodiscard]] const BioseqCacheProviderV2& provider_v2() noexcept;
 
 /** Resolve the four required occurrence columns on the configured table. */
 [[nodiscard]] bool relation_contract_attnos(
@@ -1238,11 +1243,25 @@ void call_planner_bridge(
     RelOptInfo* relation,
     Index range_table_index,
     RangeTblEntry* range_entry) noexcept {
-    void** slot = find_rendezvous_variable(kBridgeRendezvousName);
+    void** slot = find_rendezvous_variable(
+        bioseq::cache::kCacheApiRendezvousName);
     if (slot == nullptr || *slot == nullptr) {
         return;
     }
-    const auto* bridge = static_cast<const BioseqCachePlannerBridgeV1*>(*slot);
+    const auto* api = static_cast<const BioseqCacheApiV2*>(*slot);
+    if (api->struct_size
+            < offsetof(BioseqCacheApiV2, planner_bridge)
+                + sizeof(api->planner_bridge)
+        || api->abi_version != bioseq::cache::kProviderAbiVersion
+        || api->postgres_major
+            != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
+        || api->reserved != 0 || api->instance_cookie == 0) {
+        return;
+    }
+    const BioseqCachePlannerBridgeV2* bridge = api->planner_bridge;
+    if (bridge == nullptr) {
+        return;
+    }
     if (bridge->struct_size < sizeof(*bridge)
         || bridge->abi_version != bioseq::cache::kProviderAbiVersion
         || bridge->postgres_major
@@ -1256,7 +1275,7 @@ void call_planner_bridge(
         relation,
         range_table_index,
         range_entry,
-        &provider_v1());
+        &provider_v2());
 }
 
 /** Chained relation hook: add the provider path, then invoke the bridge. */
@@ -1353,17 +1372,26 @@ void provider_set_rel_pathlist_hook(
         g_scan_methods_registered = true;
     }
     if (!g_provider_registered) {
-        void** slot = find_rendezvous_variable(kApiRendezvousName);
+        void** slot = find_rendezvous_variable(
+            bioseq::cache::kCacheApiRendezvousName);
         if (slot == nullptr || *slot == nullptr) {
             return false;
         }
-        auto* api = static_cast<BioseqCacheApiV1*>(*slot);
+        auto* api = static_cast<BioseqCacheApiV2*>(*slot);
         if (api->struct_size < sizeof(*api)
             || api->abi_version != bioseq::cache::kProviderAbiVersion
             || api->postgres_major
                 != static_cast<std::uint32_t>(PG_VERSION_NUM / 10000)
-            || api->register_provider == nullptr
-            || !api->register_provider(&provider_v1())) {
+            || api->reserved != 0 || api->instance_cookie == 0
+            || api->register_provider == nullptr) {
+            return false;
+        }
+        g_provider_registration = {
+            .struct_size = sizeof(BioseqCacheProviderRegistrationV2),
+        };
+        if (api->register_provider(
+                &provider_v2(), &g_provider_registration)
+            != BIOSEQ_CACHE_STATUS_OK) {
             return false;
         }
         g_provider_registered = true;
@@ -1385,16 +1413,21 @@ void shutdown_provider() noexcept {
     g_hook_installed = false;
     g_previous_set_rel_pathlist_hook = nullptr;
     if (g_provider_registered) {
-        void** slot = find_rendezvous_variable(kApiRendezvousName);
+        void** slot = find_rendezvous_variable(
+            bioseq::cache::kCacheApiRendezvousName);
         if (slot != nullptr && *slot != nullptr) {
-            auto* api = static_cast<BioseqCacheApiV1*>(*slot);
+            auto* api = static_cast<BioseqCacheApiV2*>(*slot);
             if (api->struct_size >= sizeof(*api)
                 && api->unregister_provider != nullptr) {
-                api->unregister_provider(kProviderId);
+                static_cast<void>(
+                    api->unregister_provider(&g_provider_registration));
             }
         }
     }
     g_provider_registered = false;
+    g_provider_registration = {
+        .struct_size = sizeof(BioseqCacheProviderRegistrationV2),
+    };
     g_persisted_mapping_fault_statement = nullptr;
 }
 
@@ -1459,34 +1492,25 @@ void shutdown_provider() noexcept {
 
 } // namespace bioseq::cache::pg::test_provider
 
-extern "C" {
+namespace bioseq::cache::pg::test_provider {
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_init(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_init);
-Datum bioseq_cache_test_provider_init(PG_FUNCTION_ARGS) {
+export void provider_init() {
     bioseq::cache::pg::test_provider::require_test_superuser();
     if (!bioseq::cache::pg::test_provider::initialize_provider()) {
         ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
              errmsg("bioseq_cache test provider could not register")));
     }
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_shutdown(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_shutdown);
-Datum bioseq_cache_test_provider_shutdown(PG_FUNCTION_ARGS) {
+export void provider_shutdown() {
     bioseq::cache::pg::test_provider::require_test_superuser();
     bioseq::cache::pg::test_provider::shutdown_provider();
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_use_relation(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_use_relation);
-Datum bioseq_cache_test_provider_use_relation(PG_FUNCTION_ARGS) {
+export void provider_use_relation(std::uint32_t relation_oid) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    const Oid relation_oid = PG_GETARG_OID(0);
     AttrNumber row_attno = 0;
     AttrNumber base_attno = 0;
     AttrNumber occurrence_attno = 0;
@@ -1509,29 +1533,21 @@ Datum bioseq_cache_test_provider_use_relation(PG_FUNCTION_ARGS) {
     g_target_relation_oid = relation_oid;
     g_additional_target_relations.fill(InvalidOid);
     g_additional_target_relation_count = 0;
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_record_write(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_record_write);
-Datum bioseq_cache_test_provider_record_write(PG_FUNCTION_ARGS) {
+export void provider_record_write(std::uint32_t relation_oid) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    const Oid relation_oid = PG_GETARG_OID(0);
     if (!record_provider_relation_write(relation_oid)) {
         ereport(ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
              errmsg("generic test-provider write marker could not be recorded")));
     }
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_add_relation(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_add_relation);
-Datum bioseq_cache_test_provider_add_relation(PG_FUNCTION_ARGS) {
+export void provider_add_relation(std::uint32_t relation_oid) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    const Oid relation_oid = PG_GETARG_OID(0);
     AttrNumber row_attno = 0;
     AttrNumber base_attno = 0;
     AttrNumber occurrence_attno = 0;
@@ -1558,118 +1574,86 @@ Datum bioseq_cache_test_provider_add_relation(PG_FUNCTION_ARGS) {
             (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
              errmsg("generic test-provider relation target limit exceeded")));
     }
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_set_mapping_fault(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_mapping_fault);
-Datum bioseq_cache_test_provider_set_mapping_fault(PG_FUNCTION_ARGS) {
+export void provider_set_mapping_fault(const std::string& name) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    g_mapping_fault = parse_mapping_fault(name);
+    g_mapping_fault = parse_mapping_fault(name.c_str());
     g_persisted_mapping_fault_statement = nullptr;
-    pfree(name);
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_set_digest_fault(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_digest_fault);
-Datum bioseq_cache_test_provider_set_digest_fault(PG_FUNCTION_ARGS) {
+export void provider_set_digest_fault(const std::string& name) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    if (std::strcmp(name, "none") == 0) {
+    if (name == "none") {
         g_digest_fault = DigestFault::None;
-    } else if (std::strcmp(name, "runtime_mismatch") == 0) {
+    } else if (name == "runtime_mismatch") {
         g_digest_fault = DigestFault::RuntimeMismatch;
     } else {
         ereport(ERROR,
             (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-             errmsg("unknown generic test-provider digest fault: %s", name)));
+             errmsg("unknown generic test-provider digest fault: %s",
+                 name.c_str())));
     }
-    pfree(name);
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_set_security_digest(
-    PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_security_digest);
-Datum bioseq_cache_test_provider_set_security_digest(PG_FUNCTION_ARGS) {
+export void provider_set_security_digest(
+        const bioseq::pg_utils::sql_bytea& digest) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    bytea* digest = PG_GETARG_BYTEA_PP(0);
-    const std::size_t size = VARSIZE_ANY_EXHDR(digest);
-    if (size != g_provider_security_digest.size()) {
+    if (digest.bytes().size() != g_provider_security_digest.size()) {
         ereport(ERROR,
             (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
              errmsg("generic test-provider security digest must be 32 bytes")));
     }
     std::memcpy(
         g_provider_security_digest.data(),
-        VARDATA_ANY(digest),
+        digest.bytes().data(),
         g_provider_security_digest.size());
     ResetPlanCache();
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_clear_security_digest(
-    PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_clear_security_digest);
-Datum bioseq_cache_test_provider_clear_security_digest(PG_FUNCTION_ARGS) {
+export void provider_clear_security_digest() {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
     g_provider_security_digest.fill(0);
     ResetPlanCache();
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_set_projection_order(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_projection_order);
-Datum bioseq_cache_test_provider_set_projection_order(PG_FUNCTION_ARGS) {
+export void provider_set_projection_order(const std::string& name) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    if (std::strcmp(name, "natural") == 0) {
+    if (name == "natural") {
         g_projection_order = ProjectionOrder::Natural;
-    } else if (std::strcmp(name, "reverse") == 0) {
+    } else if (name == "reverse") {
         g_projection_order = ProjectionOrder::Reverse;
     } else {
         ereport(ERROR,
             (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-             errmsg("unknown generic test-provider projection order: %s", name)));
+             errmsg("unknown generic test-provider projection order: %s",
+                 name.c_str())));
     }
-    pfree(name);
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_set_capabilities(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_set_capabilities);
-Datum bioseq_cache_test_provider_set_capabilities(PG_FUNCTION_ARGS) {
+export void provider_set_capabilities(std::int64_t capabilities) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    const std::int64_t capabilities = PG_GETARG_INT64(0);
     if (capabilities <= 0) {
         ereport(ERROR,
             (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
              errmsg("generic test-provider capabilities must be positive")));
     }
     g_requested_capabilities = static_cast<std::uint64_t>(capabilities);
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_force_domain_collision(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_force_domain_collision);
-Datum bioseq_cache_test_provider_force_domain_collision(PG_FUNCTION_ARGS) {
+export void provider_force_domain_collision(bool enabled) {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
-    g_force_domain_digest_collision = PG_GETARG_BOOL(0);
-    PG_RETURN_VOID();
+    g_force_domain_digest_collision = enabled;
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_reset(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_reset);
-Datum bioseq_cache_test_provider_reset(PG_FUNCTION_ARGS) {
+export void provider_reset() {
     using namespace bioseq::cache::pg::test_provider;
     require_test_superuser();
     g_requested_capabilities = 1;
@@ -1681,12 +1665,9 @@ Datum bioseq_cache_test_provider_reset(PG_FUNCTION_ARGS) {
     g_provider_security_digest.fill(0);
     g_counters = {};
     ResetPlanCache();
-    PG_RETURN_VOID();
 }
 
-PGDLLEXPORT Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_provider_stats);
-Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
+export [[nodiscard]] bioseq::pg_utils::sql_jsonb provider_stats() {
     using namespace bioseq::cache::pg::test_provider;
     StringInfoData json{};
     initStringInfo(&json);
@@ -1736,21 +1717,20 @@ Datum bioseq_cache_test_provider_stats(PG_FUNCTION_ARGS) {
             g_counters.last_required_lineage_count),
         static_cast<unsigned long long>(
             g_counters.last_recipe_required_boundary_count));
-    Datum result = DirectFunctionCall1(
-        jsonb_in, CStringGetDatum(json.data));
+    bioseq::pg_utils::sql_jsonb result{std::string{json.data}};
     pfree(json.data);
-    PG_RETURN_DATUM(result);
+    return result;
 }
 
-} // extern "C"
+} // namespace bioseq::cache::pg::test_provider
 
 namespace bioseq::cache::pg::test_provider {
 
 /** Extract one stable provider-opaque binding occurrence from a raw slot. */
-[[nodiscard]] BioseqCacheStatusV1 provider_extract_occurrence(
+[[nodiscard]] BioseqCacheStatusV2 provider_extract_occurrence(
     List* plan_domain_nodes,
     TupleTableSlot* slot,
-    BioseqCacheOccurrenceV1* output) {
+    BioseqCacheOccurrenceV2* output) {
     ++g_counters.extract_occurrence;
     Oid relation_oid = InvalidOid;
     AttrNumber row_attno = 0;
@@ -1802,9 +1782,9 @@ namespace bioseq::cache::pg::test_provider {
 
 /** Emit one terminal status for every reference on an early batch failure. */
 void emit_batch_failure_statuses(
-    BioseqCacheLateFetchSinkV1* sink,
+    BioseqCacheLateFetchSinkV2* sink,
     std::size_t occurrence_count,
-    BioseqCacheStatusV1 status) noexcept {
+    BioseqCacheStatusV2 status) noexcept {
     if (sink == nullptr || sink->struct_size < sizeof(*sink)
         || sink->emit_reference_status == nullptr) {
         return;
@@ -1818,14 +1798,14 @@ void emit_batch_failure_statuses(
  * Fetch every provider-opaque row identity in one table scan under the
  * consumer snapshot, emitting values first and exactly one terminal status.
  */
-[[nodiscard]] BioseqCacheStatusV1 provider_late_fetch_batch(
+[[nodiscard]] BioseqCacheStatusV2 provider_late_fetch_batch(
     List* plan_domain_nodes,
     EState* estate,
-    const BioseqCacheOccurrenceV1* occurrences,
+    const BioseqCacheOccurrenceV2* occurrences,
     std::size_t occurrence_count,
     const std::int16_t* attribute_numbers,
     std::size_t attribute_count,
-    BioseqCacheLateFetchSinkV1* sink) {
+    BioseqCacheLateFetchSinkV2* sink) {
     ++g_counters.late_fetch_batch;
     g_counters.late_fetch_references += occurrence_count;
     if (g_mapping_fault == MappingFault::LateFetchErrorOnce) {
@@ -1860,7 +1840,7 @@ void emit_batch_failure_statuses(
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     for (std::size_t index = 0; index < occurrence_count; ++index) {
-        if (occurrences[index].struct_size < sizeof(BioseqCacheOccurrenceV1)
+        if (occurrences[index].struct_size < sizeof(BioseqCacheOccurrenceV2)
             || occurrences[index].identity_kind != 3U
             || occurrences[index].logical_relation_oid != relation_oid
             || occurrences[index].leaf_relation_oid != relation_oid) {
@@ -1885,8 +1865,8 @@ void emit_batch_failure_statuses(
 
     auto* found = static_cast<bool*>(
         palloc0(occurrence_count * sizeof(bool)));
-    auto* terminal = static_cast<BioseqCacheStatusV1*>(palloc(
-        occurrence_count * sizeof(BioseqCacheStatusV1)));
+    auto* terminal = static_cast<BioseqCacheStatusV2*>(palloc(
+        occurrence_count * sizeof(BioseqCacheStatusV2)));
     for (std::size_t index = 0; index < occurrence_count; ++index) {
         terminal[index] = BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
@@ -1957,7 +1937,7 @@ void emit_batch_failure_statuses(
                     }
                     value_bytes = static_cast<std::uint64_t>(datum_bytes);
                 }
-                const BioseqCacheStatusV1 status = sink->emit_value(
+                const BioseqCacheStatusV2 status = sink->emit_value(
                     sink->opaque,
                     reference,
                     requested,
@@ -1992,7 +1972,7 @@ void emit_batch_failure_statuses(
 /** Provider-specific EXPLAIN fields contain no raw SQL or sensitive values. */
 void provider_explain_domain(
     List* plan_domain_nodes,
-    BioseqCacheExplainSinkV1* sink) {
+    BioseqCacheExplainSinkV2* sink) {
     if (sink == nullptr || sink->struct_size < sizeof(*sink)) {
         return;
     }
@@ -2224,10 +2204,10 @@ void replace_list_node(List* list, int index, void* node) noexcept {
 }
 
 /** Runtime digest validates only the immutable Node recipe. */
-[[nodiscard]] BioseqCacheStatusV1 provider_append_runtime_digest(
+[[nodiscard]] BioseqCacheStatusV2 provider_append_runtime_digest(
     const List* plan_domain_nodes,
     EState* estate,
-    BioseqCacheDigestSinkV1* sink) {
+    BioseqCacheDigestSinkV2* sink) {
     ++g_counters.runtime_digest;
     if (persisted_mapping_fault_active()) {
         if (estate == nullptr || estate->es_plannedstmt == nullptr) {
@@ -2261,9 +2241,9 @@ void replace_list_node(List* list, int index, void* node) noexcept {
 }
 
 /** Find a source column having exactly the same semantic contract. */
-[[nodiscard]] const BioseqCacheColumnSchemaV1* find_compatible_source_column(
-    const BioseqCacheColumnSchemaV1& consumer,
-    const BioseqCacheColumnSchemaV1* source_columns,
+[[nodiscard]] const BioseqCacheColumnSchemaV2* find_compatible_source_column(
+    const BioseqCacheColumnSchemaV2& consumer,
+    const BioseqCacheColumnSchemaV2* source_columns,
     std::size_t source_count) noexcept {
     for (std::size_t index = 0; index < source_count; ++index) {
         const auto& source = source_columns[index];
@@ -2280,13 +2260,13 @@ void replace_list_node(List* list, int index, void* node) noexcept {
 
 /** Construct one complete source-to-consumer map in requested consumer order. */
 [[nodiscard]] bool fill_source_map(
-    const BioseqCacheColumnSchemaV1* consumer_columns,
+    const BioseqCacheColumnSchemaV2* consumer_columns,
     std::size_t consumer_count,
     const std::uint32_t* required_attnos,
     std::size_t required_count,
-    const BioseqCacheColumnSchemaV1* source_columns,
+    const BioseqCacheColumnSchemaV2* source_columns,
     std::size_t source_count,
-    BioseqCacheColumnMapEntryV1* output) noexcept {
+    BioseqCacheColumnMapEntryV2* output) noexcept {
     if (required_count != 0
         && (required_attnos == nullptr || output == nullptr)) {
         return false;
@@ -2303,7 +2283,7 @@ void replace_list_node(List* list, int index, void* node) noexcept {
             return false;
         }
         output[index] = {
-            .struct_size = sizeof(BioseqCacheColumnMapEntryV1),
+            .struct_size = sizeof(BioseqCacheColumnMapEntryV2),
             .consumer_attno = consumer->attno,
             .source_attno = source->attno,
             .flags = 0,
@@ -2320,12 +2300,12 @@ void replace_list_node(List* list, int index, void* node) noexcept {
 
 /** Apply one malformed-output mode after constructing a correct map. */
 void apply_mapping_fault(
-    BioseqCacheSourceMappingV1& mapping,
+    BioseqCacheSourceMappingV2& mapping,
     std::size_t boundary_capacity,
     std::size_t lineage_capacity) {
-    auto* boundary = const_cast<BioseqCacheColumnMapEntryV1*>(
+    auto* boundary = const_cast<BioseqCacheColumnMapEntryV2*>(
         mapping.boundary_map);
-    auto* lineage = const_cast<BioseqCacheColumnMapEntryV1*>(
+    auto* lineage = const_cast<BioseqCacheColumnMapEntryV2*>(
         mapping.lineage_map);
     switch (g_mapping_fault) {
         case MappingFault::None:
@@ -2442,11 +2422,11 @@ void apply_mapping_fault(
 }
 
 /** Explicitly affirm every older source, including apparent identity maps. */
-[[nodiscard]] BioseqCacheStatusV1 provider_map_reusable_source(
+[[nodiscard]] BioseqCacheStatusV2 provider_map_reusable_source(
     PlannerInfo*,
-    const BioseqCachePathDomainV1* consumer,
-    const BioseqCacheReusableSourceV1* source,
-    BioseqCacheSourceMappingV1* output) {
+    const BioseqCachePathDomainV2* consumer,
+    const BioseqCacheReusableSourceV2* source,
+    BioseqCacheSourceMappingV2* output) {
     ++g_counters.map_source;
     if (g_mapping_fault == MappingFault::ProviderError) {
         ereport(ERROR,
@@ -2467,10 +2447,10 @@ void apply_mapping_fault(
         consumer->required_boundary_attno_count + 1U;
     const std::size_t lineage_capacity =
         consumer->required_lineage_attno_count + 1U;
-    auto* boundary = static_cast<BioseqCacheColumnMapEntryV1*>(palloc0(
-        boundary_capacity * sizeof(BioseqCacheColumnMapEntryV1)));
-    auto* lineage = static_cast<BioseqCacheColumnMapEntryV1*>(palloc0(
-        lineage_capacity * sizeof(BioseqCacheColumnMapEntryV1)));
+    auto* boundary = static_cast<BioseqCacheColumnMapEntryV2*>(palloc0(
+        boundary_capacity * sizeof(BioseqCacheColumnMapEntryV2)));
+    auto* lineage = static_cast<BioseqCacheColumnMapEntryV2*>(palloc0(
+        lineage_capacity * sizeof(BioseqCacheColumnMapEntryV2)));
     if (!fill_source_map(
             consumer->boundary_columns,
             consumer->boundary_column_count,
@@ -2502,13 +2482,13 @@ void apply_mapping_fault(
 }
 
 /** Add cache-owned gate expressions to a cloned provider path only. */
-[[nodiscard]] BioseqCacheStatusV1 provider_decorate_path(
+[[nodiscard]] BioseqCacheStatusV2 provider_decorate_path(
     PlannerInfo* root,
     RelOptInfo* relation,
     Path* provider_path,
-    const BioseqCachePathDomainV1* domain,
+    const BioseqCachePathDomainV2* domain,
     List* gated_qual_exprs,
-    BioseqCacheDecoratedPathV1* output) {
+    BioseqCacheDecoratedPathV2* output) {
     ++g_counters.decorate_path;
     if (root == nullptr || relation == nullptr || provider_path == nullptr
         || domain == nullptr || output == nullptr
@@ -2560,27 +2540,27 @@ void apply_mapping_fault(
 
     if (g_mapping_fault == MappingFault::DecoratedBoundarySchemaMismatch
         && domain->boundary_column_count != 0) {
-        auto* columns = static_cast<BioseqCacheColumnSchemaV1*>(palloc(
+        auto* columns = static_cast<BioseqCacheColumnSchemaV2*>(palloc(
             domain->boundary_column_count
-            * sizeof(BioseqCacheColumnSchemaV1)));
+            * sizeof(BioseqCacheColumnSchemaV2)));
         std::memcpy(
             columns,
             domain->boundary_columns,
             domain->boundary_column_count
-                * sizeof(BioseqCacheColumnSchemaV1));
+                * sizeof(BioseqCacheColumnSchemaV2));
         columns[0].semantic_id_low ^= 1U;
         output->actual_boundary_columns = columns;
     }
     if (g_mapping_fault == MappingFault::DecoratedLineageSchemaMismatch
         && domain->lineage_column_count != 0) {
-        auto* columns = static_cast<BioseqCacheColumnSchemaV1*>(palloc(
+        auto* columns = static_cast<BioseqCacheColumnSchemaV2*>(palloc(
             domain->lineage_column_count
-            * sizeof(BioseqCacheColumnSchemaV1)));
+            * sizeof(BioseqCacheColumnSchemaV2)));
         std::memcpy(
             columns,
             domain->lineage_columns,
             domain->lineage_column_count
-                * sizeof(BioseqCacheColumnSchemaV1));
+                * sizeof(BioseqCacheColumnSchemaV2));
         columns[0].semantic_id_low ^= 1U;
         output->actual_lineage_columns = columns;
     }
@@ -2588,10 +2568,10 @@ void apply_mapping_fault(
 }
 
 /** Freeze plan semantics and expected runtime digest atomically. */
-[[nodiscard]] BioseqCacheStatusV1 provider_build_plan_digest_recipe(
+[[nodiscard]] BioseqCacheStatusV2 provider_build_plan_digest_recipe(
     PlannerInfo*,
     const Plan* provider_plan,
-    BioseqCachePlanDigestRecipeV1* output) {
+    BioseqCachePlanDigestRecipeV2* output) {
     ++g_counters.build_recipe;
     std::size_t required_boundary_count = 0;
     if (provider_plan == nullptr || output == nullptr
@@ -2630,9 +2610,9 @@ void apply_mapping_fault(
 namespace bioseq::cache::pg::test_provider {
 
 /** Complete ABI table registered only by an explicit test-only SQL call. */
-[[nodiscard]] const BioseqCacheProviderV1& provider_v1() noexcept {
-    static const BioseqCacheProviderV1 provider{
-        .struct_size = sizeof(BioseqCacheProviderV1),
+[[nodiscard]] const BioseqCacheProviderV2& provider_v2() noexcept {
+    static const BioseqCacheProviderV2 provider{
+        .struct_size = sizeof(BioseqCacheProviderV2),
         .abi_version = bioseq::cache::kProviderAbiVersion,
         .postgres_major = static_cast<std::uint32_t>(PG_VERSION_NUM / 10000),
         .provider_id = kProviderId,

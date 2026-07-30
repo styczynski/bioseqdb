@@ -60,82 +60,82 @@ struct TestBudget {
     }
 };
 
-BioseqCacheStatusV1 analyze_query(
+BioseqCacheStatusV2 analyze_query(
     const ::Query*,
-    BioseqCacheQueryIntentV1*) {
+    BioseqCacheQueryIntentV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheStatusV1 describe_path(
+BioseqCacheStatusV2 describe_path(
     ::PlannerInfo*,
     ::RelOptInfo*,
     ::Path*,
-    const BioseqCacheQueryIntentV1*,
-    BioseqCachePathDomainV1*) {
+    const BioseqCacheQueryIntentV2*,
+    BioseqCachePathDomainV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheStatusV1 append_domain(
-    const BioseqCachePathDomainV1*,
-    BioseqCacheDigestSinkV1*) {
+BioseqCacheStatusV2 append_domain(
+    const BioseqCachePathDomainV2*,
+    BioseqCacheDigestSinkV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheStatusV1 append_runtime(
+BioseqCacheStatusV2 append_runtime(
     const ::List*,
     ::EState*,
-    BioseqCacheDigestSinkV1*) {
+    BioseqCacheDigestSinkV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheStatusV1 map_source(
+BioseqCacheStatusV2 map_source(
     ::PlannerInfo*,
-    const BioseqCachePathDomainV1*,
-    const BioseqCacheReusableSourceV1*,
-    BioseqCacheSourceMappingV1*) {
+    const BioseqCachePathDomainV2*,
+    const BioseqCacheReusableSourceV2*,
+    BioseqCacheSourceMappingV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheStatusV1 decorate_path(
+BioseqCacheStatusV2 decorate_path(
     ::PlannerInfo*,
     ::RelOptInfo*,
     ::Path*,
-    const BioseqCachePathDomainV1*,
+    const BioseqCachePathDomainV2*,
     ::List*,
-    BioseqCacheDecoratedPathV1*) {
+    BioseqCacheDecoratedPathV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheStatusV1 build_recipe(
+BioseqCacheStatusV2 build_recipe(
     ::PlannerInfo*,
     const ::Plan*,
-    BioseqCachePlanDigestRecipeV1*) {
+    BioseqCachePlanDigestRecipeV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheStatusV1 extract_occurrence(
+BioseqCacheStatusV2 extract_occurrence(
     ::List*,
     ::TupleTableSlot*,
-    BioseqCacheOccurrenceV1*) {
+    BioseqCacheOccurrenceV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheStatusV1 late_fetch(
+BioseqCacheStatusV2 late_fetch(
     ::List*,
     ::EState*,
-    const BioseqCacheOccurrenceV1*,
+    const BioseqCacheOccurrenceV2*,
     std::size_t,
     const std::int16_t*,
     std::size_t,
-    BioseqCacheLateFetchSinkV1*) {
+    BioseqCacheLateFetchSinkV2*) {
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
-BioseqCacheColumnSchemaV1 column(
+BioseqCacheColumnSchemaV2 column(
     std::uint32_t attno,
     std::uint64_t semantic_id = 7) {
-    return BioseqCacheColumnSchemaV1{
-        .struct_size = sizeof(BioseqCacheColumnSchemaV1),
+    return BioseqCacheColumnSchemaV2{
+        .struct_size = sizeof(BioseqCacheColumnSchemaV2),
         .attno = attno,
         .semantic_id_high = 0,
         .semantic_id_low = semantic_id,
@@ -146,12 +146,12 @@ BioseqCacheColumnSchemaV1 column(
     };
 }
 
-BioseqCacheColumnMapEntryV1 map_entry(
+BioseqCacheColumnMapEntryV2 map_entry(
     std::uint32_t consumer_attno,
     std::uint32_t source_attno,
     std::uint64_t semantic_id = 7) {
-    return BioseqCacheColumnMapEntryV1{
-        .struct_size = sizeof(BioseqCacheColumnMapEntryV1),
+    return BioseqCacheColumnMapEntryV2{
+        .struct_size = sizeof(BioseqCacheColumnMapEntryV2),
         .consumer_attno = consumer_attno,
         .source_attno = source_attno,
         .flags = 0,
@@ -284,8 +284,8 @@ TEST_CASE("provider schema maps require exact SQL and semantic meaning") {
         .capability_mask = BIOSEQ_CAP_SCORE | BIOSEQ_CAP_CIGAR
             | BIOSEQ_CAP_MAPQ,
     };
-    BioseqCacheSourceMappingV1 mapping{
-        .struct_size = sizeof(BioseqCacheSourceMappingV1),
+    BioseqCacheSourceMappingV2 mapping{
+        .struct_size = sizeof(BioseqCacheSourceMappingV2),
         .flags = 0,
         .boundary_map = mappings.data(),
         .boundary_map_count = mappings.size(),
@@ -416,8 +416,8 @@ TEST_CASE("source-map shape and meaning failures are exhaustive") {
         .capability_mask = BIOSEQ_CAP_SCORE,
     };
     const std::array valid_maps{map_entry(1, 1, 7), map_entry(2, 2, 8)};
-    BioseqCacheSourceMappingV1 mapping{
-        .struct_size = sizeof(BioseqCacheSourceMappingV1),
+    BioseqCacheSourceMappingV2 mapping{
+        .struct_size = sizeof(BioseqCacheSourceMappingV2),
         .boundary_map = valid_maps.data(),
         .boundary_map_count = valid_maps.size(),
     };
@@ -504,8 +504,8 @@ TEST_CASE("source-map shape and meaning failures are exhaustive") {
 }
 
 TEST_CASE("provider registration enforces callbacks implied by flags") {
-    BioseqCacheProviderV1 provider{
-        .struct_size = sizeof(BioseqCacheProviderV1),
+    BioseqCacheProviderV2 provider{
+        .struct_size = sizeof(BioseqCacheProviderV2),
         .abi_version = kProviderAbiVersion,
         .postgres_major = 18,
         .provider_id = 9,
@@ -550,9 +550,9 @@ TEST_CASE("provider registration enforces callbacks implied by flags") {
     REQUIRE_FALSE(provider_registration_valid(&provider, 18));
     provider.provider_scan_methods =
         reinterpret_cast<const ::CustomScanMethods*>(std::uintptr_t{1});
-    provider.struct_size = sizeof(BioseqCacheProviderV1) - 1;
+    provider.struct_size = sizeof(BioseqCacheProviderV2) - 1;
     REQUIRE_FALSE(provider_registration_valid(&provider, 18));
-    provider.struct_size = sizeof(BioseqCacheProviderV1);
+    provider.struct_size = sizeof(BioseqCacheProviderV2);
     provider.abi_version = kProviderAbiVersion + 1;
     REQUIRE_FALSE(provider_registration_valid(&provider, 18));
 }
