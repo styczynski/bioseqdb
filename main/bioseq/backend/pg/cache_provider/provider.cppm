@@ -26,6 +26,8 @@ inline constexpr std::uint32_t kPostgresMajorVersion =
     static_cast<std::uint32_t>(PG_VERSION_NUM / 10000);
 
 inline void** g_directory_slot = nullptr;
+inline void** g_cache_api_slot = nullptr;
+inline const BioseqCacheApiV2* g_preflight_cache_api = nullptr;
 inline const BioseqCacheApiV2* g_bound_api = nullptr;
 inline std::uint64_t g_bound_api_cookie = 0;
 inline BioseqCacheProviderRegistrationV2 g_registration{
@@ -227,22 +229,40 @@ inline BioseqCacheProviderDirectoryV2 g_directory{
 } // namespace detail
 
 export void bioseq_cache_provider_preflight() {
-    void** const slot = find_rendezvous_variable(
+    void** const directory_slot = find_rendezvous_variable(
         bioseq::cache::kProviderDirectoryRendezvousName);
-    if (slot == nullptr) {
+    if (directory_slot == nullptr) {
         ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
              errmsg("Bioseq cache-provider rendezvous allocation failed")));
     }
-    if (*slot != nullptr
-        && *slot != static_cast<void*>(&detail::g_directory)) {
+    if (*directory_slot != nullptr
+        && *directory_slot != static_cast<void*>(&detail::g_directory)) {
         ereport(ERROR,
             (errcode(ERRCODE_DUPLICATE_OBJECT),
              errmsg("Bioseq cache-provider rendezvous is already owned"),
              errdetail("Rendezvous name: %s",
                 bioseq::cache::kProviderDirectoryRendezvousName)));
     }
-    detail::g_directory_slot = slot;
+    void** const api_slot = find_rendezvous_variable(
+        bioseq::cache::kCacheApiRendezvousName);
+    if (api_slot == nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("Bioseq cache API rendezvous allocation failed")));
+    }
+    const auto* const cache_api =
+        static_cast<const BioseqCacheApiV2*>(*api_slot);
+    if (cache_api != nullptr && !detail::cache_api_valid(cache_api)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("Bioseq cache API rendezvous is incompatible"),
+             errdetail("Rendezvous name: %s",
+                bioseq::cache::kCacheApiRendezvousName)));
+    }
+    detail::g_directory_slot = directory_slot;
+    detail::g_cache_api_slot = api_slot;
+    detail::g_preflight_cache_api = cache_api;
     if (detail::g_directory.instance_cookie == 0) {
         const auto address = static_cast<std::uint64_t>(
             reinterpret_cast<std::uintptr_t>(&detail::g_directory));
@@ -253,31 +273,38 @@ export void bioseq_cache_provider_preflight() {
 }
 
 export void bioseq_cache_provider_publish_directory() {
-    if (detail::g_directory_slot == nullptr) {
-        bioseq_cache_provider_preflight();
+    if (detail::g_directory_slot == nullptr
+        || detail::g_cache_api_slot == nullptr) {
+        ereport(WARNING,
+            (errmsg("Bioseq cache provider directory was not preflighted")));
+        return;
     }
     if (*detail::g_directory_slot != nullptr
         && *detail::g_directory_slot
             != static_cast<void*>(&detail::g_directory)) {
-        ereport(ERROR,
-            (errcode(ERRCODE_DUPLICATE_OBJECT),
-             errmsg("Bioseq cache-provider rendezvous ownership changed during initialization")));
+        ereport(WARNING,
+            (errmsg("Bioseq cache-provider rendezvous ownership changed during initialization")));
+        return;
     }
     *detail::g_directory_slot =
         static_cast<void*>(&detail::g_directory);
     detail::g_directory_published = true;
 
-    void** const api_slot = find_rendezvous_variable(
-        bioseq::cache::kCacheApiRendezvousName);
-    if (api_slot == nullptr || *api_slot == nullptr) return;
+    if (*detail::g_cache_api_slot == nullptr) return;
     const auto* api =
-        static_cast<const BioseqCacheApiV2*>(*api_slot);
+        static_cast<const BioseqCacheApiV2*>(
+            *detail::g_cache_api_slot);
     if (!detail::cache_api_valid(api)) {
         ereport(WARNING,
             (errmsg("Bioseq cache provider ignored an incompatible cache API"),
              errdetail("Rendezvous name: %s",
                 bioseq::cache::kCacheApiRendezvousName)));
         return;
+    }
+    if (detail::g_preflight_cache_api != nullptr
+        && api != detail::g_preflight_cache_api) {
+        ereport(WARNING,
+            (errmsg("Bioseq cache API rendezvous changed during initialization")));
     }
     const BioseqCacheStatusV2 status =
         detail::bind_cache_api(api);
