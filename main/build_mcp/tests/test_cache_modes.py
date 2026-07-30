@@ -713,6 +713,13 @@ class CacheModeRoutingTest(unittest.TestCase):
             'BIOSEQ_POSTGRES_STAGE_MANIFEST "${_stage_manifest}"',
             helper_cmake,
         )
+        self.assertIn(
+            'COMMENT\n'
+            '      "Staging immutable PostgreSQL 17 runtime for '
+            '${BIOSEQ_STAGE_TARGET}"\n'
+            '    VERBATIM)',
+            helper_cmake,
+        )
 
         inventory_targets = {
             "cache_test_support_postgres":

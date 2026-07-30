@@ -294,8 +294,7 @@ function(bioseq_add_private_postgres_stage)
       "${_stage_script}"
       "${CMAKE_CURRENT_FUNCTION_LIST_FILE}"
     COMMENT
-      "Staging immutable PostgreSQL 17 runtime for "
-      "${BIOSEQ_STAGE_TARGET}"
+      "Staging immutable PostgreSQL 17 runtime for ${BIOSEQ_STAGE_TARGET}"
     VERBATIM)
   add_custom_target(
     "${BIOSEQ_STAGE_TARGET}"
