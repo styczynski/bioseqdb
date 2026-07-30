@@ -41,8 +41,12 @@ classify_final_physical_ledger_state(
 
 /**
  * Require an explicit physical-ledger authority state for complete FINAL
- * generation. Transition output remains available only when selected
- * explicitly; the cutover switch accepts checked input only.
+ * generation of the main extension, whose annotated owners reconcile the
+ * legacy install ledger. Sibling extensions have no inherited physical
+ * ledger: complete natural generation is their terminal state unless a
+ * checked-ledger cutover is explicitly requested. Transition output remains
+ * available only when selected explicitly; the cutover switch accepts checked
+ * input only.
  */
 inline void validate_final_physical_ledger_policy(
     const command_line& command) {
@@ -64,6 +68,11 @@ inline void validate_final_physical_ledger_policy(
 
     const final_physical_ledger_state state =
         classify_final_physical_ledger_state(command);
+    if (command.extension_name != "bioseq"
+        && !command.require_checked_physical_ledger
+        && state == final_physical_ledger_state::missing) {
+        return;
+    }
     if (state == final_physical_ledger_state::missing) {
         throw std::runtime_error(
             "complete FINAL generation requires an explicit physical "

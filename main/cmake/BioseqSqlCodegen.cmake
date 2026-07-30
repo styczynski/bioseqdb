@@ -17,7 +17,7 @@ endfunction()
 function(bioseq_add_sql_codegen_context)
   cmake_parse_arguments(
     ARG
-    "REQUIRE_COMPLETE_CODEGEN"
+    "PUBLISH_PHYSICAL_LEDGER;REQUIRE_COMPLETE_CODEGEN"
     "EXTENSION;EXTENSION_NAME;EXTENSION_SCHEMA;GENERATED_MODULE_PREFIX;FMGR_BOUNDARY_MODULE;OUTPUT_DIR;GENERATED_CPP_DIR;VERSION;RAW_COMPILE_DATABASE"
     "PROFILES"
     ${ARGN})
@@ -119,8 +119,15 @@ function(bioseq_add_sql_codegen_context)
       "${_profile_sql_dir}/${ARG_EXTENSION_NAME}.manifest.json")
     set(_render_stamp "${_profile_sql_dir}/render.stamp")
     set(_validate_stamp "${_profile_sql_dir}/validate.stamp")
-    set(_physical_ledger
-      "${_profile_sql_dir}/${ARG_EXTENSION_NAME}.physical-ledger.tsv")
+    set(_physical_ledger_arguments)
+    set(_physical_ledger_outputs)
+    if(ARG_PUBLISH_PHYSICAL_LEDGER)
+      set(_physical_ledger
+        "${_profile_sql_dir}/${ARG_EXTENSION_NAME}.physical-ledger.tsv")
+      list(APPEND _physical_ledger_arguments
+        --physical-ledger-output "${_physical_ledger}")
+      list(APPEND _physical_ledger_outputs "${_physical_ledger}")
+    endif()
 
     set(_fmgr_arguments)
     set(_fmgr_outputs)
@@ -186,7 +193,7 @@ function(bioseq_add_sql_codegen_context)
         "${_generated_install}"
         "${_generated_manifest}"
         "${_render_stamp}"
-      BYPRODUCTS "${_physical_ledger}" ${_fmgr_outputs}
+      BYPRODUCTS ${_physical_ledger_outputs} ${_fmgr_outputs}
       COMMAND "${CMAKE_COMMAND}" -E make_directory
         "${_profile_sql_dir}" "${_profile_cpp_dir}"
       COMMAND
@@ -211,7 +218,7 @@ function(bioseq_add_sql_codegen_context)
         --output "${_generated_install}"
         --manifest "${_generated_manifest}"
         --stamp "${_render_stamp}"
-        --physical-ledger-output "${_physical_ledger}"
+        ${_physical_ledger_arguments}
         ${_fmgr_arguments}
         ${_completion_arguments}
         ${_identity_arguments}

@@ -182,6 +182,53 @@ struct [[bioseq_sql::table({
         collect_source_text(
             "derived_column.cppm", derived_column_source),
         "relocated_extension");
+    constexpr std::string_view sibling_context_source = R"CPP(
+export module fixture.sibling_context.sql_rows;
+namespace fixture {
+struct [[bioseq_sql::table]]
+cache_probe {
+    std::int64_t generation_id;
+};
+}
+)CPP";
+    const sql_graph sibling_context_graph = build_sql_graph(
+        collect_source_text(
+            "sibling_context.cppm", sibling_context_source),
+        "bioseq_cache",
+        "bioseq_cache",
+        "bioseq.cache.sql.generated",
+        "bioseq.pg_sql_boundary");
+    require(
+        sibling_context_graph.extension_name == "bioseq_cache"
+            && sibling_context_graph.extension_schema
+                == "bioseq_cache"
+            && std::ranges::any_of(
+                sibling_context_graph.entities,
+                [](const normalized_entity& entity) {
+                    return entity.source.kind == entity_kind::table
+                        && entity.source.schema == "$extension"
+                        && entity.installed_identity
+                            == "sql:table:bioseq_cache.cache_probe";
+                }),
+        "owner-derived sibling context binds unguarded annotations to "
+        "the configured extension identity");
+    const rendered_sql_artifact sibling_context_sql =
+        render_sql_graph(sibling_context_graph);
+    require(
+        std::ranges::any_of(
+            sibling_context_sql.statements,
+            [](const rendered_statement& statement) {
+                return statement.statement_kind
+                    == entity_kind::table;
+            }),
+        "a natural sibling owner renders physical SQL without a "
+        "migration-ledger binding");
+    require_failure(
+        [&sibling_context_graph] {
+            static_cast<void>(
+                render_physical_ledger(sibling_context_graph));
+        },
+        "cannot publish an empty physical ledger");
     const rendered_sql_artifact derived_column_sql =
         render_sql_graph(derived_column_graph);
     const rendered_sql_artifact relocated_derived_column_sql =
@@ -4109,6 +4156,19 @@ inline constexpr bioseq::sql::schema_entity private_schema{};
         [&missing_ledger_command] {
             validate_final_physical_ledger_policy(
                 missing_ledger_command);
+        },
+        "requires an explicit physical ledger state");
+    command_line sibling_complete_command =
+        missing_ledger_command;
+    sibling_complete_command.extension_name = "bioseq_cache";
+    validate_final_physical_ledger_policy(
+        sibling_complete_command);
+    sibling_complete_command.require_checked_physical_ledger =
+        true;
+    require_failure(
+        [&sibling_complete_command] {
+            validate_final_physical_ledger_policy(
+                sibling_complete_command);
         },
         "requires an explicit physical ledger state");
     command_line checked_ledger_command =
