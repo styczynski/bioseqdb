@@ -1,7 +1,6 @@
 module;
 
 #include <algorithm>
-#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -9,7 +8,6 @@ module;
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <limits>
 #include <optional>
 #include <ostream>
 #include <sstream>
@@ -18,20 +16,16 @@ module;
 #include <string_view>
 #include <system_error>
 #include <thread>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include <sys/types.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
 #include "../test/support/legacy_migration_ledger.hpp"
 
 #if defined(__APPLE__)
-#include <libproc.h>
 #include <mach-o/dyld.h>
-#include <sys/proc_info.h>
 #endif
 
 export module bioseq.cache.benchmark;
@@ -416,276 +410,6 @@ void finalize_build_identity(benchmark_report& report) {
         postgres_test::sha256(material).hex();
 }
 
-namespace resource_detail {
-
-struct process_entry {
-    std::uint64_t pid{};
-    std::uint64_t parent_pid{};
-    std::uint64_t rss_bytes{};
-};
-
-struct process_snapshot_result {
-    std::vector<process_entry> processes;
-    bool complete{};
-};
-
-#if defined(__linux__)
-
-[[nodiscard]] std::optional<process_entry> linux_process_entry(
-    const std::filesystem::path& stat_path, std::uint64_t pid,
-    std::uint64_t page_size) {
-    std::ifstream input(stat_path);
-    std::string line;
-    if (!input || !std::getline(input, line)) {
-        return std::nullopt;
-    }
-    const std::size_t command_end = line.rfind(')');
-    if (command_end == std::string::npos
-        || command_end + 2 >= line.size()) {
-        return std::nullopt;
-    }
-    std::istringstream fields(line.substr(command_end + 2));
-    char state{};
-    std::uint64_t parent_pid{};
-    fields >> state >> parent_pid;
-    std::int64_t ignored{};
-    for (int field = 5; field <= 23 && fields; ++field) {
-        fields >> ignored;
-    }
-    std::int64_t rss_pages{};
-    fields >> rss_pages;
-    if (!fields || rss_pages < 0) {
-        return std::nullopt;
-    }
-    const std::uint64_t pages =
-        static_cast<std::uint64_t>(rss_pages);
-    if (page_size != 0
-        && pages > std::numeric_limits<std::uint64_t>::max() / page_size) {
-        return std::nullopt;
-    }
-    return process_entry{
-        .pid = pid,
-        .parent_pid = parent_pid,
-        .rss_bytes = pages * page_size};
-}
-
-[[nodiscard]] process_snapshot_result process_snapshot(
-    std::uint64_t postmaster_pid) {
-    const long native_page_size = ::sysconf(_SC_PAGESIZE);
-    if (native_page_size <= 0) {
-        return process_snapshot_result{};
-    }
-    const std::uint64_t page_size =
-        static_cast<std::uint64_t>(native_page_size);
-    std::vector<process_entry> processes;
-    std::vector<std::uint64_t> pending{postmaster_pid};
-    std::unordered_set<std::uint64_t> observed{postmaster_pid};
-    bool complete = true;
-    while (!pending.empty()) {
-        const std::uint64_t pid = pending.back();
-        pending.pop_back();
-        const std::filesystem::path process_root =
-            std::filesystem::path("/proc") / std::to_string(pid);
-        if (std::optional<process_entry> process =
-                linux_process_entry(
-                    process_root / "stat", pid, page_size)) {
-            processes.push_back(*process);
-        } else {
-            complete = false;
-        }
-        std::ifstream children(
-            process_root / "task" / std::to_string(pid) / "children");
-        if (!children) {
-            complete = false;
-            continue;
-        }
-        std::uint64_t child{};
-        while (children >> child) {
-            if (child > 1 && observed.insert(child).second) {
-                pending.push_back(child);
-            }
-        }
-        if (!children.eof()) {
-            complete = false;
-        }
-    }
-    return process_snapshot_result{
-        .processes = std::move(processes),
-        .complete = complete};
-}
-
-#elif defined(__APPLE__)
-
-[[nodiscard]] process_snapshot_result process_snapshot(
-    std::uint64_t postmaster_pid) {
-    const int process_capacity = ::proc_listallpids(nullptr, 0);
-    if (process_capacity <= 0) {
-        return process_snapshot_result{};
-    }
-    std::vector<pid_t> child_buffer(
-        static_cast<std::size_t>(process_capacity) + 32U);
-    std::vector<process_entry> processes;
-    std::vector<std::uint64_t> pending{postmaster_pid};
-    std::unordered_set<std::uint64_t> observed{postmaster_pid};
-    bool complete = true;
-    while (!pending.empty()) {
-        const std::uint64_t unsigned_pid = pending.back();
-        pending.pop_back();
-        const pid_t pid = static_cast<pid_t>(unsigned_pid);
-        proc_bsdinfo basic{};
-        proc_taskinfo task{};
-        if (::proc_pidinfo(
-                pid, PROC_PIDTBSDINFO, 0, &basic, sizeof(basic))
-                != static_cast<int>(sizeof(basic))
-            || ::proc_pidinfo(
-                   pid, PROC_PIDTASKINFO, 0, &task, sizeof(task))
-                != static_cast<int>(sizeof(task))) {
-            complete = false;
-            continue;
-        }
-        processes.push_back(process_entry{
-            .pid = unsigned_pid,
-            .parent_pid =
-                static_cast<std::uint64_t>(basic.pbi_ppid),
-            .rss_bytes =
-                static_cast<std::uint64_t>(task.pti_resident_size)});
-        const int child_count = ::proc_listchildpids(
-            pid, child_buffer.data(),
-            static_cast<int>(child_buffer.size() * sizeof(pid_t)));
-        if (child_count < 0
-            || static_cast<std::size_t>(child_count)
-                > child_buffer.size()) {
-            complete = false;
-            continue;
-        }
-        for (int index = 0;
-             index < child_count
-             && static_cast<std::size_t>(index) < child_buffer.size();
-             ++index) {
-            const pid_t child = child_buffer[
-                static_cast<std::size_t>(index)];
-            if (child > 1
-                && observed.insert(
-                       static_cast<std::uint64_t>(child)).second) {
-                pending.push_back(
-                    static_cast<std::uint64_t>(child));
-            }
-        }
-    }
-    return process_snapshot_result{
-        .processes = std::move(processes),
-        .complete = complete};
-}
-
-#else
-
-[[nodiscard]] process_snapshot_result process_snapshot(
-    std::uint64_t) {
-    return process_snapshot_result{};
-}
-
-#endif
-
-[[nodiscard]] std::optional<std::uint64_t>
-postgres_cluster_rss_bytes(std::uint64_t postmaster_pid) {
-    process_snapshot_result snapshot =
-        process_snapshot(postmaster_pid);
-    if (!snapshot.complete) {
-        return std::nullopt;
-    }
-    const std::vector<process_entry>& processes = snapshot.processes;
-    const bool root_present = std::any_of(
-        processes.begin(), processes.end(),
-        [postmaster_pid](const process_entry& process) {
-            return process.pid == postmaster_pid;
-        });
-    if (!root_present) {
-        return std::nullopt;
-    }
-    std::unordered_set<std::uint64_t> descendants{postmaster_pid};
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (const process_entry& process : processes) {
-            if (!descendants.contains(process.pid)
-                && descendants.contains(process.parent_pid)) {
-                descendants.insert(process.pid);
-                changed = true;
-            }
-        }
-    }
-    std::uint64_t aggregate{};
-    for (const process_entry& process : processes) {
-        if (!descendants.contains(process.pid)) {
-            continue;
-        }
-        if (process.rss_bytes
-            > std::numeric_limits<std::uint64_t>::max() - aggregate) {
-            return std::nullopt;
-        }
-        aggregate += process.rss_bytes;
-    }
-    return aggregate;
-}
-
-[[nodiscard]] std::uint64_t read_postmaster_pid(
-    const std::filesystem::path& data_directory) {
-    std::ifstream input(data_directory / "postmaster.pid");
-    std::uint64_t pid{};
-    input >> pid;
-    if (!input || pid <= 1) {
-        throw std::runtime_error(
-            "cannot identify the private PostgreSQL postmaster");
-    }
-    return pid;
-}
-
-[[nodiscard]] std::optional<std::uint64_t> strict_tree_bytes(
-    const std::filesystem::path& root) {
-    std::error_code error;
-    if (!std::filesystem::exists(root, error) || error) {
-        return std::nullopt;
-    }
-    std::filesystem::recursive_directory_iterator iterator(
-        root, std::filesystem::directory_options::none, error);
-    if (error) {
-        return std::nullopt;
-    }
-    const std::filesystem::recursive_directory_iterator end;
-    std::uint64_t total{};
-    while (iterator != end) {
-        const bool regular = iterator->is_regular_file(error);
-        if (error) {
-            return std::nullopt;
-        }
-        if (regular) {
-            const std::uintmax_t bytes = iterator->file_size(error);
-            if (error
-                || bytes
-                    > std::numeric_limits<std::uint64_t>::max() - total) {
-                return std::nullopt;
-            }
-            total += static_cast<std::uint64_t>(bytes);
-        }
-        iterator.increment(error);
-        if (error) {
-            return std::nullopt;
-        }
-    }
-    return total;
-}
-
-void update_peak(
-    std::atomic<std::uint64_t>& peak, std::uint64_t value) noexcept {
-    std::uint64_t current = peak.load(std::memory_order_relaxed);
-    while (current < value
-           && !peak.compare_exchange_weak(
-               current, value, std::memory_order_relaxed)) {
-    }
-}
-
-}  // namespace resource_detail
-
 [[nodiscard]] bool resource_sampling_contract_satisfied(
     const benchmark_resource_report& report) noexcept {
     return report.rss_samples >= 2
@@ -696,37 +420,30 @@ void update_peak(
         && report.temp_sampling_failures == 0;
 }
 
+[[nodiscard]] benchmark_resource_report adapt_resource_report(
+    const postgres_test::resource_sampling_report& source) noexcept {
+    return benchmark_resource_report{
+        .peak_postgres_rss_bytes =
+            source.peak_postmaster_process_tree_rss_bytes,
+        .peak_temp_bytes = source.peak_owned_root_bytes,
+        .rss_samples = source.rss_samples,
+        .temp_samples = source.owned_root_samples,
+        .rss_sampling_failures = source.rss_sampling_failures,
+        .temp_sampling_failures =
+            source.owned_root_sampling_failures};
+}
+
+/// @brief Adapts the shared sampler to stable benchmark-v2 field names.
 class benchmark_resource_tracker {
 public:
     benchmark_resource_tracker(
         std::filesystem::path cluster_root,
         const std::filesystem::path& data_directory,
         benchmark_resource_report& destination)
-        : cluster_root_(std::move(cluster_root)),
-          postmaster_pid_(
-              resource_detail::read_postmaster_pid(data_directory)),
-          destination_(&destination) {
-        sample_rss_once();
-        sample_temp_once();
-        rss_thread_ = std::jthread(
-            [this](std::stop_token stop_token) noexcept {
-                while (!stop_token.stop_requested()) {
-                    std::this_thread::sleep_for(rss_sample_interval);
-                    if (!stop_token.stop_requested()) {
-                        sample_rss_once();
-                    }
-                }
-            });
-        temp_thread_ = std::jthread(
-            [this](std::stop_token stop_token) noexcept {
-                while (!stop_token.stop_requested()) {
-                    std::this_thread::sleep_for(temp_sample_interval);
-                    if (!stop_token.stop_requested()) {
-                        sample_temp_once();
-                    }
-                }
-            });
-    }
+        : sampler_(
+              std::move(cluster_root), data_directory,
+              rss_sample_interval, temp_sample_interval),
+          destination_(&destination) {}
 
     benchmark_resource_tracker(const benchmark_resource_tracker&) = delete;
     benchmark_resource_tracker& operator=(
@@ -743,99 +460,25 @@ public:
         }
     }
 
-    void observe_phase_boundary() noexcept {
-        sample_rss_once();
-        sample_temp_once();
+    void observe_phase_boundary(std::string_view phase) noexcept {
+        sampler_.observe_phase_boundary(phase);
     }
 
     [[nodiscard]] benchmark_resource_report finish() {
-        rss_thread_.request_stop();
-        temp_thread_.request_stop();
-        if (rss_thread_.joinable()) {
-            rss_thread_.join();
-        }
-        if (temp_thread_.joinable()) {
-            temp_thread_.join();
-        }
-        sample_rss_once();
-        sample_temp_once();
-        const benchmark_resource_report report{
-            .peak_postgres_rss_bytes =
-                peak_postgres_rss_bytes_.load(std::memory_order_relaxed),
-            .peak_temp_bytes =
-                peak_temp_bytes_.load(std::memory_order_relaxed),
-            .rss_samples =
-                rss_samples_.load(std::memory_order_relaxed),
-            .temp_samples =
-                temp_samples_.load(std::memory_order_relaxed),
-            .rss_sampling_failures =
-                rss_sampling_failures_.load(std::memory_order_relaxed),
-            .temp_sampling_failures =
-                temp_sampling_failures_.load(std::memory_order_relaxed)};
+        const benchmark_resource_report report =
+            adapt_resource_report(sampler_.finish());
         *destination_ = report;
         finished_ = true;
-        if (report.rss_samples < 2
-            || report.peak_postgres_rss_bytes == 0
-            || report.rss_sampling_failures != 0) {
+        if (!resource_sampling_contract_satisfied(report)) {
             throw std::runtime_error(
-                "PostgreSQL cluster-process RSS sampling was incomplete");
-        }
-        if (report.temp_samples < 2 || report.peak_temp_bytes == 0
-            || report.temp_sampling_failures != 0) {
-            throw std::runtime_error(
-                "private-cluster temp-byte sampling was incomplete");
+                "shared PostgreSQL RSS/root resource sampling was "
+                "incomplete");
         }
         return report;
     }
 
 private:
-    void sample_rss_once() noexcept {
-        try {
-            const std::optional<std::uint64_t> bytes =
-                resource_detail::postgres_cluster_rss_bytes(
-                    postmaster_pid_);
-            if (!bytes) {
-                rss_sampling_failures_.fetch_add(
-                    1, std::memory_order_relaxed);
-                return;
-            }
-            resource_detail::update_peak(
-                peak_postgres_rss_bytes_, *bytes);
-            rss_samples_.fetch_add(1, std::memory_order_relaxed);
-        } catch (...) {
-            rss_sampling_failures_.fetch_add(
-                1, std::memory_order_relaxed);
-        }
-    }
-
-    void sample_temp_once() noexcept {
-        try {
-            const std::optional<std::uint64_t> bytes =
-                resource_detail::strict_tree_bytes(cluster_root_);
-            if (!bytes) {
-                temp_sampling_failures_.fetch_add(
-                    1, std::memory_order_relaxed);
-                return;
-            }
-            resource_detail::update_peak(
-                peak_temp_bytes_, *bytes);
-            temp_samples_.fetch_add(1, std::memory_order_relaxed);
-        } catch (...) {
-            temp_sampling_failures_.fetch_add(
-                1, std::memory_order_relaxed);
-        }
-    }
-
-    std::filesystem::path cluster_root_;
-    std::uint64_t postmaster_pid_{};
-    std::atomic<std::uint64_t> peak_postgres_rss_bytes_{};
-    std::atomic<std::uint64_t> peak_temp_bytes_{};
-    std::atomic<std::uint64_t> rss_samples_{};
-    std::atomic<std::uint64_t> temp_samples_{};
-    std::atomic<std::uint64_t> rss_sampling_failures_{};
-    std::atomic<std::uint64_t> temp_sampling_failures_{};
-    std::jthread rss_thread_;
-    std::jthread temp_thread_;
+    postgres_test::resource_sampler sampler_;
     benchmark_resource_report* destination_{};
     bool finished_{};
 };
@@ -1804,7 +1447,7 @@ void execute_benchmark(
             .aggregate_input_base_count = 0,
             .query = std::string(query)};
     }
-    resource_tracker.observe_phase_boundary();
+    resource_tracker.observe_phase_boundary("fixture-ready");
 
     execute(
         data,
@@ -1820,7 +1463,7 @@ void execute_benchmark(
     const std::uint64_t oracle_rows =
         static_cast<std::uint64_t>(oracle.rows.rows());
     report.correctness_digest = oracle_digest.hex();
-    resource_tracker.observe_phase_boundary();
+    resource_tracker.observe_phase_boundary("disabled-oracle");
 
     execute(
         admin,
@@ -1840,7 +1483,7 @@ void execute_benchmark(
         oracle_digest, oracle_rows);
     require_producer(producer);
     report.cold_producer = std::move(producer);
-    resource_tracker.observe_phase_boundary();
+    resource_tracker.observe_phase_boundary("cold-producer");
 
     for (std::uint32_t warmup = 0;
          warmup < options.warmup_samples; ++warmup) {
@@ -1849,7 +1492,7 @@ void execute_benchmark(
             report.measurement_cohort, warmup,
             oracle_digest, oracle_rows);
         require_hit(discarded);
-        resource_tracker.observe_phase_boundary();
+        resource_tracker.observe_phase_boundary("warmup-cache-hit");
     }
 
     for (std::uint32_t sample = 0; sample < options.samples; ++sample) {
@@ -1859,7 +1502,8 @@ void execute_benchmark(
             oracle_digest, oracle_rows);
         require_hit(warm);
         report.samples.push_back(std::move(warm));
-        resource_tracker.observe_phase_boundary();
+        resource_tracker.observe_phase_boundary(
+            "measured-warm-cache-hit");
     }
     if (!combined) {
         record_migration_probe(
