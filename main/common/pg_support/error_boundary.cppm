@@ -289,6 +289,8 @@ struct pg_cpp_invoke_state {
     bool error_capture_failed = false;
 };
 
+static_assert(std::is_nothrow_destructible_v<pg_cpp_invoke_state>);
+
 /*
  * CopyErrorData can allocate and therefore can itself raise ERROR. Keep that
  * secondary ERROR behind a nested PostgreSQL exception frame so the erased
@@ -337,10 +339,18 @@ void capture_current_pg_error_as_cpp(
 inline void invoke_pg_as_cpp_erased(
         void* callback_context,
         PgCppInvokeBody body) {
-    auto* state = new pg_cpp_invoke_state{
-        .callback_context = callback_context,
-        .body = body,
-    };
+    /*
+     * Only the stable pointer may span PG_TRY: PostgreSQL ERROR longjmps
+     * across the frame, so release the C++ owner before entering and
+     * reacquire it immediately after PG_END_TRY.
+     */
+    auto* state =
+        std::make_unique<pg_cpp_invoke_state>(
+            pg_cpp_invoke_state{
+                .callback_context = callback_context,
+                .body = body,
+            })
+            .release();
     MemoryContext saved_context = CurrentMemoryContext;
     ResourceOwner saved_resource_owner = CurrentResourceOwner;
 
@@ -400,6 +410,7 @@ inline void invoke_pg_as_cpp_erased(
             saved_resource_owner);
     }
     PG_END_TRY();
+    std::unique_ptr<pg_cpp_invoke_state> state_owner{state};
 
     CurrentResourceOwner = saved_resource_owner;
     MemoryContextSwitchTo(saved_context);
@@ -414,28 +425,27 @@ inline void invoke_pg_as_cpp_erased(
 
     if (state->pg_error != nullptr) {
         ErrorData* error = std::exchange(state->pg_error, nullptr);
-        delete state;
         throw PostgresErrorAsCpp{error};
     }
     if (state->error_capture_failed) {
-        delete state;
         throw PostgresErrorCaptureFailure{};
     }
     if (state->cpp_error != nullptr) {
         std::exception_ptr error = std::move(state->cpp_error);
-        delete state;
         std::rethrow_exception(error);
     }
-    delete state;
 }
 
 inline void invoke_pg_across_transactions_as_cpp_erased(
         void* callback_context,
         PgCppInvokeBody body) {
-    auto* state = new pg_cpp_invoke_state{
-        .callback_context = callback_context,
-        .body = body,
-    };
+    auto* state =
+        std::make_unique<pg_cpp_invoke_state>(
+            pg_cpp_invoke_state{
+                .callback_context = callback_context,
+                .body = body,
+            })
+            .release();
     MemoryContext crossing_context =
         PortalContext != nullptr ? PortalContext : TopMemoryContext;
     MemoryContextSwitchTo(crossing_context);
@@ -473,6 +483,7 @@ inline void invoke_pg_across_transactions_as_cpp_erased(
             CurrentResourceOwner);
     }
     PG_END_TRY();
+    std::unique_ptr<pg_cpp_invoke_state> state_owner{state};
 
     MemoryContextSwitchTo(crossing_context);
     if (state->pg_error != nullptr
@@ -484,19 +495,15 @@ inline void invoke_pg_across_transactions_as_cpp_erased(
 
     if (state->pg_error != nullptr) {
         ErrorData* error = std::exchange(state->pg_error, nullptr);
-        delete state;
         throw PostgresErrorAsCpp{error};
     }
     if (state->error_capture_failed) {
-        delete state;
         throw PostgresErrorCaptureFailure{};
     }
     if (state->cpp_error != nullptr) {
         std::exception_ptr error = std::move(state->cpp_error);
-        delete state;
         std::rethrow_exception(error);
     }
-    delete state;
 }
 
 }  // namespace bioseq::pg_utils

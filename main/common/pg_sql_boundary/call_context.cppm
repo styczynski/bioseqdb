@@ -26,6 +26,7 @@ extern "C" {
 }
 
 #include <concepts>
+#include <memory>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -218,9 +219,8 @@ void capture_specialized_pg_error(
 }
 
 [[noreturn]] void throw_specialized_pg_error(
-        specialized_pg_error_state* state) {
-    ErrorData* error = state->error;
-    delete state;
+        std::unique_ptr<specialized_pg_error_state> state) {
+    ErrorData* error = std::exchange(state->error, nullptr);
     throw PostgresErrorAsCpp{error};
 }
 
@@ -446,11 +446,20 @@ void sql_call_context::rollback_transaction() {
 }
 
 sql_subtransaction sql_subtransaction::begin() {
-    auto* state = new specialized_pg_error_state{
-        .outer_context = CurrentMemoryContext,
-        .outer_owner = CurrentResourceOwner,
-        .outer_nest_level = GetCurrentTransactionNestLevel(),
-    };
+    /*
+     * Only the stable pointer may span PG_TRY: PostgreSQL ERROR longjmps
+     * across the frame, so release the C++ owner before entering and
+     * reacquire it immediately after PG_END_TRY.
+     */
+    auto* state =
+        std::make_unique<specialized_pg_error_state>(
+            specialized_pg_error_state{
+                .outer_context = CurrentMemoryContext,
+                .outer_owner = CurrentResourceOwner,
+                .outer_nest_level =
+                    GetCurrentTransactionNestLevel(),
+            })
+            .release();
 
     PG_TRY();
     {
@@ -474,10 +483,12 @@ sql_subtransaction sql_subtransaction::begin() {
         capture_specialized_pg_error(state);
     }
     PG_END_TRY();
+    std::unique_ptr<specialized_pg_error_state> state_owner{
+        state};
 
     if (state->error != nullptr) {
         rollback_failed_subtransaction(state);
-        throw_specialized_pg_error(state);
+        throw_specialized_pg_error(std::move(state_owner));
     }
     if (!subtransaction_is_current(
             GetCurrentTransactionNestLevel(),
@@ -494,7 +505,6 @@ sql_subtransaction sql_subtransaction::begin() {
         outer_context != nullptr
         ? outer_context
         : TopMemoryContext);
-    delete state;
     return sql_subtransaction{
         outer_context,
         outer_owner,
@@ -514,13 +524,16 @@ void sql_subtransaction::commit() {
             "SQL subtransaction is not the current subtransaction"};
     }
 
-    auto* state = new specialized_pg_error_state{
-        .outer_context = outer_context_,
-        .outer_owner = outer_owner_,
-        .outer_nest_level = outer_nest_level_,
-        .subtransaction_owner =
-            subtransaction_owner_,
-    };
+    auto* state =
+        std::make_unique<specialized_pg_error_state>(
+            specialized_pg_error_state{
+                .outer_context = outer_context_,
+                .outer_owner = outer_owner_,
+                .outer_nest_level = outer_nest_level_,
+                .subtransaction_owner =
+                    subtransaction_owner_,
+            })
+            .release();
 
     MemoryContextSwitchTo(
         state->outer_context != nullptr
@@ -549,16 +562,17 @@ void sql_subtransaction::commit() {
         capture_specialized_pg_error(state);
     }
     PG_END_TRY();
+    std::unique_ptr<specialized_pg_error_state> state_owner{
+        state};
 
     if (state->error != nullptr) {
         rollback_failed_subtransaction(state);
         active_ = false;
-        throw_specialized_pg_error(state);
+        throw_specialized_pg_error(std::move(state_owner));
     }
 
     restore_outer_subtransaction_state(state);
     active_ = false;
-    delete state;
 }
 
 void sql_subtransaction::rollback() {
@@ -573,13 +587,16 @@ void sql_subtransaction::rollback() {
             "SQL subtransaction is not the current subtransaction"};
     }
 
-    auto* state = new specialized_pg_error_state{
-        .outer_context = outer_context_,
-        .outer_owner = outer_owner_,
-        .outer_nest_level = outer_nest_level_,
-        .subtransaction_owner =
-            subtransaction_owner_,
-    };
+    auto* state =
+        std::make_unique<specialized_pg_error_state>(
+            specialized_pg_error_state{
+                .outer_context = outer_context_,
+                .outer_owner = outer_owner_,
+                .outer_nest_level = outer_nest_level_,
+                .subtransaction_owner =
+                    subtransaction_owner_,
+            })
+            .release();
 
     MemoryContextSwitchTo(
         state->outer_context != nullptr
@@ -595,16 +612,17 @@ void sql_subtransaction::rollback() {
         capture_specialized_pg_error(state);
     }
     PG_END_TRY();
+    std::unique_ptr<specialized_pg_error_state> state_owner{
+        state};
 
     if (state->error != nullptr) {
         rollback_failed_subtransaction(state);
         active_ = false;
-        throw_specialized_pg_error(state);
+        throw_specialized_pg_error(std::move(state_owner));
     }
 
     restore_outer_subtransaction_state(state);
     active_ = false;
-    delete state;
     safety_runtime_probe::record_cleanup_complete(
         "sql_subtransaction.rollback");
 }
