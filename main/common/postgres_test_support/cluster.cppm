@@ -6,11 +6,6 @@ module;
 #include <sys/socket.h>
 #include <unistd.h>
 
-#if defined(__APPLE__)
-#include <libproc.h>
-#include <sys/proc.h>
-#endif
-
 #include <charconv>
 #include <algorithm>
 #include <cerrno>
@@ -21,6 +16,7 @@ module;
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <set>
 #include <span>
@@ -259,6 +255,31 @@ require_initdb_shared_directory(const extension_stage& stage) {
     return false;
 }
 
+/// @brief Reads one complete positive postmaster PID from the owned PGDATA.
+[[nodiscard]] inline std::int64_t read_postmaster_pid(
+    const std::filesystem::path& data_directory) noexcept {
+    try {
+        std::ifstream input(data_directory / "postmaster.pid");
+        std::string first_line;
+        if (!std::getline(input, first_line)) {
+            return -1;
+        }
+        std::int64_t pid{};
+        const auto [end, error] = std::from_chars(
+            first_line.data(), first_line.data() + first_line.size(), pid);
+        if (error != std::errc{}
+            || end != first_line.data() + first_line.size()
+            || pid <= 1
+            || pid > static_cast<std::int64_t>(
+                std::numeric_limits<pid_t>::max())) {
+            return -1;
+        }
+        return pid;
+    } catch (...) {
+        return -1;
+    }
+}
+
 /// @brief Obtains an ephemeral local port; the server itself listens on Unix only.
 [[nodiscard]] inline int available_port() {
     const int descriptor = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -425,80 +446,21 @@ capture_process_tree(
     return std::nullopt;
 }
 
-/// @brief True when the exact captured process is kernel-stopped.
-[[nodiscard]] inline bool process_identity_stopped(
-    const supervised_process_record& process) noexcept try {
-    if (!process_identity_matches(process)) {
-        return false;
-    }
-#if defined(__linux__)
-    std::ifstream input(
-        std::filesystem::path("/proc")
-        / std::to_string(process.pid) / "stat");
-    std::string line;
-    if (!input || !std::getline(input, line)) {
-        return false;
-    }
-    const std::size_t command_end = line.rfind(')');
-    if (command_end == std::string::npos
-        || command_end + 2U >= line.size()) {
-        return false;
-    }
-    const char state = line[command_end + 2U];
-    return state == 'T' || state == 't';
-#elif defined(__APPLE__)
-    proc_bsdinfo information{};
-    return ::proc_pidinfo(
-               static_cast<int>(process.pid), PROC_PIDTBSDINFO, 0,
-               &information, sizeof(information))
-            == static_cast<int>(sizeof(information))
-        && information.pbi_status == SSTOP;
-#else
-    return false;
-#endif
-} catch (...) {
-    return false;
-}
-
-/// @brief Resumes every still-matching identity without group-wide signaling.
-inline void resume_processes(
-    const std::vector<supervised_process_record>& processes) noexcept {
-    for (const supervised_process_record& process : processes) {
-        if (process_identity_matches(process)) {
-            static_cast<void>(
-                ::kill(static_cast<pid_t>(process.pid), SIGCONT));
-        }
-    }
-}
-
-[[nodiscard]] inline bool signal_matching_process(
-    const supervised_process_record& process, int signal_number) noexcept;
-
-/// @brief Signals groups only while one exact captured member anchors each PGID.
+/// @brief Signals groups while a verified sentinel pins each PGID against reuse.
 [[nodiscard]] inline bool signal_anchored_process_groups(
-    const supervised_process_tree& tree, int signal_number) noexcept {
+    const supervised_process_tree& tree,
+    int signal_number,
+    spawned_process* owned_group_leader = nullptr) noexcept {
     bool succeeded = true;
-    const std::int64_t own_process_group =
-        static_cast<std::int64_t>(::getpgrp());
     for (const std::int64_t group : tree.process_groups) {
-        bool anchored = false;
-        for (const supervised_process_record& member : tree.members) {
-            const auto current = capture_supervised_process(
-                member.pid, {}, member.data_directory);
-            if (current && current->start_token == member.start_token
-                && current->process_group == group) {
-                anchored = true;
-                break;
-            }
-        }
-        if (!anchored) {
-            continue;
-        }
-        if (group <= 1 || group == own_process_group
-            || (::kill(-static_cast<pid_t>(group), signal_number) != 0
-                && errno != ESRCH)) {
-            succeeded = false;
-        }
+        const bool signaled =
+            owned_group_leader != nullptr
+                && owned_group_leader->process_group() == group
+            ? owned_group_leader
+                  ->signal_owned_group_while_unreaped(signal_number)
+            : signal_supervised_process_group(
+                  group, tree.members, signal_number);
+        succeeded = signaled && succeeded;
     }
     return succeeded;
 }
@@ -506,7 +468,8 @@ inline void resume_processes(
 /// @brief Freezes a stable anchored tree before any force-cleanup decision.
 [[nodiscard]] inline std::optional<supervised_process_tree>
 freeze_process_tree(
-    const supervised_process_record& anchor) noexcept {
+    const supervised_process_record& anchor,
+    spawned_process* owned_group_leader = nullptr) noexcept {
     std::vector<supervised_process_record> stopped;
     supervised_process_tree frozen;
     try {
@@ -514,7 +477,8 @@ freeze_process_tree(
         frozen.members.push_back(anchor);
         frozen.process_groups.push_back(anchor.process_group);
         stopped.push_back(anchor);
-        if (!signal_anchored_process_groups(frozen, SIGSTOP)) {
+        if (!signal_anchored_process_groups(
+                frozen, SIGSTOP, owned_group_leader)) {
             return std::nullopt;
         }
         for (int attempt = 0; attempt != 50; ++attempt) {
@@ -542,19 +506,12 @@ freeze_process_tree(
                     frozen.process_groups.push_back(member.process_group);
                 }
             }
-            if (!signal_anchored_process_groups(frozen, SIGSTOP)) {
+            if (!signal_anchored_process_groups(
+                    frozen, SIGSTOP, owned_group_leader)) {
                 static_cast<void>(
-                    signal_anchored_process_groups(frozen, SIGCONT));
-                resume_processes(stopped);
+                    signal_anchored_process_groups(
+                        frozen, SIGCONT, owned_group_leader));
                 return std::nullopt;
-            }
-            for (const supervised_process_record& member : tree->members) {
-                if (!signal_matching_process(member, SIGSTOP)) {
-                    static_cast<void>(
-                        signal_anchored_process_groups(frozen, SIGCONT));
-                    resume_processes(stopped);
-                    return std::nullopt;
-                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             const auto confirmation = capture_process_tree(anchor);
@@ -571,7 +528,8 @@ freeze_process_tree(
                     confirmation->members[index];
                 if (before.pid != after.pid
                     || before.start_token != after.start_token
-                    || !process_identity_stopped(after)) {
+                    || before.process_group != after.process_group
+                    || !supervised_process_stopped(after)) {
                     identical_and_stopped = false;
                     break;
                 }
@@ -581,31 +539,78 @@ freeze_process_tree(
             }
         }
         static_cast<void>(
-            signal_anchored_process_groups(frozen, SIGCONT));
-        resume_processes(stopped);
+            signal_anchored_process_groups(
+                frozen, SIGCONT, owned_group_leader));
         return std::nullopt;
     } catch (...) {
         static_cast<void>(
-            signal_anchored_process_groups(frozen, SIGCONT));
-        resume_processes(stopped);
+            signal_anchored_process_groups(
+                frozen, SIGCONT, owned_group_leader));
         return std::nullopt;
     }
+}
+
+/// @brief Freezes a previously captured tree after its postmaster has exited.
+[[nodiscard]] inline std::optional<supervised_process_tree>
+freeze_captured_process_tree(
+    const supervised_process_tree& captured,
+    spawned_process* owned_group_leader = nullptr) noexcept {
+    if (!signal_anchored_process_groups(
+            captured, SIGSTOP, owned_group_leader)) {
+        static_cast<void>(
+            signal_anchored_process_groups(
+                captured, SIGCONT, owned_group_leader));
+        return std::nullopt;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    for (const supervised_process_record& member : captured.members) {
+        if (process_identity_matches(member)
+            && !supervised_process_stopped(member)) {
+            static_cast<void>(
+                signal_anchored_process_groups(
+                    captured, SIGCONT, owned_group_leader));
+            return std::nullopt;
+        }
+    }
+    return captured;
+}
+
+/// @brief True only after every exact captured identity is gone.
+[[nodiscard]] inline bool process_tree_members_absent(
+    const supervised_process_tree& tree) noexcept {
+    return std::all_of(
+        tree.members.begin(), tree.members.end(),
+        [](const supervised_process_record& member) {
+            return !process_identity_matches(member);
+        });
 }
 
 /// @brief True only after every captured identity and process group is gone.
 [[nodiscard]] inline bool process_tree_absent(
     const supervised_process_tree& tree) noexcept {
-    const bool members_absent = std::all_of(
-        tree.members.begin(), tree.members.end(),
-        [](const supervised_process_record& member) {
-            return !process_identity_matches(member);
-        });
+    const bool members_absent =
+        process_tree_members_absent(tree);
     const bool groups_absent = std::all_of(
         tree.process_groups.begin(), tree.process_groups.end(),
         [](std::int64_t group) {
             return supervised_process_group_absent(group);
         });
     return members_absent && groups_absent;
+}
+
+/// @brief Waits a bounded interval for every captured identity to vanish.
+[[nodiscard]] inline bool wait_for_process_tree_members_absence(
+    const supervised_process_tree& tree,
+    std::chrono::milliseconds deadline) noexcept {
+    const auto finish = std::chrono::steady_clock::now()
+        + std::max(deadline, std::chrono::milliseconds::zero());
+    while (std::chrono::steady_clock::now() < finish) {
+        if (process_tree_members_absent(tree)) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return process_tree_members_absent(tree);
 }
 
 /// @brief Waits a bounded interval for the captured tree and groups to vanish.
@@ -623,48 +628,26 @@ freeze_process_tree(
     return process_tree_absent(tree);
 }
 
-/// @brief Sends a signal only while the captured PID still has its identity.
-[[nodiscard]] inline bool signal_matching_process(
-    const supervised_process_record& process, int signal_number) noexcept {
-    if (!process_identity_matches(process)) {
-        return true;
-    }
-    return ::kill(static_cast<pid_t>(process.pid), signal_number) == 0
-        || errno == ESRCH;
-}
-
-/// @brief Force-kills only groups anchored by a still-matching owned member.
+/// @brief Force-kills only frozen groups pinned against PGID reuse.
 [[nodiscard]] inline bool force_kill_process_tree(
-    const supervised_process_tree& tree) noexcept {
-    bool succeeded = true;
-    const std::int64_t own_process_group =
-        static_cast<std::int64_t>(::getpgrp());
-    for (const std::int64_t group : tree.process_groups) {
-        bool anchored = false;
-        for (const supervised_process_record& member : tree.members) {
-            const auto current = capture_supervised_process(
-                member.pid, {}, member.data_directory);
-            if (member.process_group == group && current
-                && current->start_token == member.start_token
-                && current->process_group == group) {
-                anchored = true;
-                break;
-            }
-        }
-        if (!anchored) {
-            continue;
-        }
-        if (group > 1 && group != own_process_group) {
-            if (::kill(-static_cast<pid_t>(group), SIGKILL) == 0
-                || errno == ESRCH) {
-                continue;
-            }
-            succeeded = false;
+    const supervised_process_tree& tree,
+    spawned_process* owned_group_leader = nullptr) noexcept {
+    for (const supervised_process_record& member : tree.members) {
+        if (process_identity_matches(member)
+            && !supervised_process_stopped(member)) {
+            return false;
         }
     }
-    for (const supervised_process_record& member : tree.members) {
-        succeeded =
-            signal_matching_process(member, SIGKILL) && succeeded;
+    bool succeeded = true;
+    for (const std::int64_t group : tree.process_groups) {
+        const bool signaled =
+            owned_group_leader != nullptr
+                && owned_group_leader->process_group() == group
+            ? owned_group_leader
+                  ->signal_owned_group_while_unreaped(SIGKILL)
+            : signal_supervised_process_group(
+                  group, tree.members, SIGKILL);
+        succeeded = signaled && succeeded;
     }
     return succeeded;
 }
@@ -720,6 +703,53 @@ export namespace bioseq::postgres_test {
             + cluster_detail::configuration_literal(value) + '\n';
     }
     return configuration;
+}
+
+/// @brief Polls PGDATA until one stable executable-bound postmaster is proven.
+[[nodiscard]] inline std::optional<supervised_process_record>
+capture_supervised_postmaster_identity(
+    const std::filesystem::path& expected_executable,
+    const std::filesystem::path& data_directory,
+    std::chrono::milliseconds deadline,
+    std::chrono::milliseconds poll_interval =
+        std::chrono::milliseconds{20}) noexcept {
+    try {
+        if (expected_executable.empty() || data_directory.empty()
+            || deadline < std::chrono::milliseconds::zero()
+            || poll_interval <= std::chrono::milliseconds::zero()) {
+            return std::nullopt;
+        }
+        const auto finish =
+            std::chrono::steady_clock::now() + deadline;
+        for (;;) {
+            const std::int64_t pid =
+                cluster_detail::read_postmaster_pid(data_directory);
+            if (pid > 1) {
+                auto process = capture_supervised_process(
+                    static_cast<std::uint64_t>(pid),
+                    expected_executable, data_directory);
+                if (process
+                    && cluster_detail::read_postmaster_pid(
+                           data_directory)
+                        == pid
+                    && supervised_postmaster_matches_data_directory(
+                        *process)) {
+                    return process;
+                }
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= finish) {
+                return std::nullopt;
+            }
+            std::this_thread::sleep_for(
+                std::min(
+                    poll_interval,
+                    std::chrono::duration_cast<
+                        std::chrono::milliseconds>(finish - now)));
+        }
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 /// @brief RAII owner of a staged, private PostgreSQL cluster.
@@ -817,6 +847,13 @@ public:
         }
         cleanup_error_.clear();
         causally_trusted_unanchored_start_ = false;
+        postmaster_termination_verified_ = false;
+        postmaster_cleanup_tree_.reset();
+        postmaster_spawn_attempted_ = false;
+        if (postmaster_process_) {
+            throw std::logic_error(
+                "start found an unreleased postmaster launch broker");
+        }
         std::error_code pidfile_error;
         const bool pidfile_exists = std::filesystem::exists(
             data_directory_ / "postmaster.pid", pidfile_error);
@@ -833,38 +870,80 @@ public:
                 .discover_postmaster_pid = true,
                 .postmaster_executable =
                     options_.postgres_bin_dir / "postgres"});
-            const auto exit = run_program(
-                "pg_ctl",
-                {"--pgdata", data_directory_.string(),
-                 "--log", (log_directory_ / "postgres.log").string(),
-                 "--wait",
-                 "--timeout", std::to_string(options_.startup_timeout.count()),
-                 "start"},
-                options_.startup_timeout + std::chrono::seconds(5),
-                log_directory_ / "pg_ctl_start.log");
-            if (!exit.succeeded()) {
-                throw process_error("pg_ctl start failed:\n"
-                                    + read_file(log_directory_
-                                                / "pg_ctl_start.log"));
-            }
-            const std::int64_t postmaster_pid = read_postmaster_pid();
-            for (int attempt = 0; attempt != 20; ++attempt) {
-                postmaster_identity_ = capture_supervised_process(
-                    static_cast<std::uint64_t>(postmaster_pid),
-                    options_.postgres_bin_dir / "postgres",
-                    data_directory_);
-                if (postmaster_identity_
-                    && read_postmaster_pid() == postmaster_pid
-                    && supervised_postmaster_matches_data_directory(
-                        *postmaster_identity_)) {
-                    break;
+            const std::filesystem::path postgres =
+                program("postgres");
+            postmaster_spawn_attempted_ = true;
+            postmaster_process_.emplace(
+                spawned_process::spawn(process_options{
+                    .executable = postgres,
+                    .arguments = {"-D", data_directory_.string()},
+                    .environment = options_.process_environment,
+                    .preferred_path_directory =
+                        options_.postgres_bin_dir,
+                    .output_file =
+                        log_directory_ / "postgres.log",
+                    .supervise = true,
+                    .supervision_data_directory =
+                        data_directory_}));
+            const auto startup_finish =
+                std::chrono::steady_clock::now()
+                + options_.startup_timeout;
+            std::string readiness_error;
+            while (std::chrono::steady_clock::now()
+                   < startup_finish) {
+                if (postmaster_process_
+                    ->leader_exited_unreaped()) {
+                    throw process_error(
+                        "postgres exited before readiness:\n"
+                        + postmaster_process_->captured_output());
                 }
-                postmaster_identity_.reset();
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                const auto remaining =
+                    std::chrono::duration_cast<
+                        std::chrono::milliseconds>(
+                        startup_finish
+                        - std::chrono::steady_clock::now());
+                const auto candidate =
+                    capture_supervised_postmaster_identity(
+                        options_.postgres_bin_dir / "postgres",
+                        data_directory_,
+                        std::min(
+                            remaining,
+                            std::chrono::milliseconds{50}),
+                        std::chrono::milliseconds{5});
+                if (!candidate) {
+                    continue;
+                }
+                if (candidate->process_group
+                    != postmaster_process_->process_group()) {
+                    postmaster_identity_ = candidate;
+                    throw process_error(
+                        "postmaster did not join its retained launch-broker "
+                        "process group");
+                }
+                try {
+                    static_cast<void>(connect(std::max(
+                        std::chrono::milliseconds{1},
+                        std::min(
+                            remaining,
+                            std::chrono::milliseconds{250}))));
+                    postmaster_identity_ = candidate;
+                    break;
+                } catch (const std::exception& error) {
+                    readiness_error = error.what();
+                } catch (...) {
+                    readiness_error =
+                        "unknown Unix-socket readiness failure";
+                }
             }
             if (!postmaster_identity_) {
                 throw process_error(
-                    "cannot persist the started postmaster identity");
+                    "cannot establish identity-verified Unix-socket "
+                    "postmaster readiness"
+                    + (readiness_error.empty()
+                           ? std::string{}
+                           : ": " + readiness_error)
+                    + "\n"
+                    + postmaster_process_->captured_output());
             }
             causally_trusted_unanchored_start_ = false;
             register_supervised_cluster(supervised_cluster_record{
@@ -901,57 +980,35 @@ public:
             throw process_error(
                 "started postmaster identity is unavailable for crash");
         }
+        spawned_process* const owned_group_leader =
+            owned_postmaster_group_leader();
+        if (owned_group_leader == nullptr) {
+            throw process_error(
+                "retained postmaster launch broker is unavailable for crash");
+        }
         const auto tree =
-            cluster_detail::freeze_process_tree(*postmaster_identity_);
+            cluster_detail::freeze_process_tree(
+                *postmaster_identity_, owned_group_leader);
         if (!tree) {
             throw process_error(
                 "cannot freeze a stable anchored postmaster tree for crash");
         }
-        if (!cluster_detail::signal_matching_process(
-                tree->postmaster, SIGKILL)) {
+        if (!cluster_detail::force_kill_process_tree(
+                *tree, owned_group_leader)) {
             static_cast<void>(
                 cluster_detail::signal_anchored_process_groups(
-                    *tree, SIGCONT));
-            cluster_detail::resume_processes(tree->members);
+                    *tree, SIGCONT, owned_group_leader));
             throw process_error(
-                "cannot SIGKILL identity-verified owned postmaster");
+                "cannot SIGKILL frozen identity-verified postmaster tree");
         }
-        static_cast<void>(cluster_detail::signal_matching_process(
-            tree->postmaster, SIGCONT));
-        static_cast<void>(
-            cluster_detail::signal_anchored_process_groups(
-                *tree, SIGCONT));
-        cluster_detail::resume_processes(tree->members);
-        bool absent = cluster_detail::wait_for_process_tree_absence(
-            *tree, std::chrono::seconds(2));
-        if (!absent) {
-            static_cast<void>(
-                cluster_detail::force_kill_process_tree(*tree));
-            absent = cluster_detail::wait_for_process_tree_absence(
-                *tree, options_.stop_timeout);
-        }
-        if (!absent) {
+        if (!finalize_postmaster_termination(
+                *tree, options_.stop_timeout)) {
             throw process_error(
                 "postmaster descendant or process group remains after "
                 "identity-verified force cleanup; PGDATA retained at "
                 + data_directory_.string());
         }
-        std::error_code pidfile_error;
-        std::filesystem::remove(
-            data_directory_ / "postmaster.pid", pidfile_error);
-        if (pidfile_error) {
-            throw process_error(
-                "cannot remove the verified-dead postmaster pidfile: "
-                + pidfile_error.message());
-        }
-        state_ = cluster_state::stopped;
-        postmaster_identity_.reset();
-        causally_trusted_unanchored_start_ = false;
-        register_supervised_cluster(supervised_cluster_record{
-            .root = root_,
-            .data_directory = data_directory_,
-            .postmaster_executable =
-                options_.postgres_bin_dir / "postgres"});
+        publish_stopped_state();
     }
 
     /// @brief Stops the owned postmaster; never throws from cleanup paths.
@@ -960,52 +1017,141 @@ public:
             return;
         }
         cleanup_error_.clear();
+        if (postmaster_cleanup_tree_) {
+            if (!cluster_detail::wait_for_process_tree_members_absence(
+                    *postmaster_cleanup_tree_,
+                    options_.stop_timeout)) {
+                cleanup_error_ =
+                    "signaled postmaster identities have not terminated; "
+                    "PGDATA retained at "
+                    + data_directory_.string();
+                return;
+            }
+            const bool supervision_released =
+                !postmaster_process_
+                || postmaster_process_
+                       ->reap_after_verified_target_termination(
+                           options_.stop_timeout);
+            const bool physically_absent =
+                cluster_detail::wait_for_process_tree_absence(
+                    *postmaster_cleanup_tree_,
+                    options_.stop_timeout);
+            postmaster_termination_verified_ =
+                physically_absent;
+            if (physically_absent && supervision_released) {
+                publish_stopped_state();
+            } else if (!physically_absent) {
+                cleanup_error_ =
+                    "terminated postmaster process group has not yet "
+                    "disappeared; PGDATA retained at "
+                    + data_directory_.string();
+            } else {
+                cleanup_error_ =
+                    "physically terminated postmaster launch broker remains "
+                    "in the supervision journal";
+            }
+            return;
+        }
+        if (postmaster_termination_verified_) {
+            const bool supervision_released =
+                !postmaster_process_
+                || postmaster_process_
+                       ->reap_after_verified_target_termination(
+                           std::chrono::milliseconds::zero());
+            if (supervision_released) {
+                publish_stopped_state();
+            } else {
+                cleanup_error_ =
+                    "physically terminated postmaster launch broker remains "
+                    "in the supervision journal";
+            }
+            return;
+        }
+        spawned_process* const owned_group_leader =
+            owned_postmaster_group_leader();
         if (!postmaster_identity_
             && causally_trusted_unanchored_start_) {
-            for (int attempt = 0; attempt != 20; ++attempt) {
-                const std::int64_t postmaster_pid =
-                    read_postmaster_pid();
-                if (postmaster_pid <= 1) {
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(20));
-                    continue;
-                }
-                postmaster_identity_ = capture_supervised_process(
-                    static_cast<std::uint64_t>(postmaster_pid),
+            postmaster_identity_ =
+                capture_supervised_postmaster_identity(
                     options_.postgres_bin_dir / "postgres",
-                    data_directory_);
-                if (postmaster_identity_
-                    && read_postmaster_pid() == postmaster_pid
-                    && supervised_postmaster_matches_data_directory(
-                        *postmaster_identity_)) {
-                    register_supervised_cluster(supervised_cluster_record{
-                        .root = root_,
-                        .data_directory = data_directory_,
-                        .postmaster_pid = postmaster_identity_->pid,
-                        .postmaster_start_token =
-                            postmaster_identity_->start_token,
-                        .postmaster_executable =
-                            postmaster_identity_->executable,
-                        .postmaster_process_group =
-                            postmaster_identity_->process_group});
-                    causally_trusted_unanchored_start_ = false;
-                    break;
-                }
-                postmaster_identity_.reset();
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(20));
+                    data_directory_, std::chrono::milliseconds{400});
+            if (postmaster_identity_) {
+                register_supervised_cluster(supervised_cluster_record{
+                    .root = root_,
+                    .data_directory = data_directory_,
+                    .postmaster_pid = postmaster_identity_->pid,
+                    .postmaster_start_token =
+                        postmaster_identity_->start_token,
+                    .postmaster_executable =
+                        postmaster_identity_->executable,
+                    .postmaster_process_group =
+                        postmaster_identity_->process_group});
+                causally_trusted_unanchored_start_ = false;
             }
         }
         if (!postmaster_identity_) {
-            cleanup_error_ =
-                "started postmaster identity is unavailable after trusted "
-                "launch recovery; PGDATA retained at "
-                + data_directory_.string();
+            if (owned_group_leader == nullptr
+                && !postmaster_spawn_attempted_) {
+                postmaster_termination_verified_ = true;
+                publish_stopped_state();
+                return;
+            }
+            if (owned_group_leader == nullptr
+                || owned_group_leader->process_group() <= 1) {
+                cleanup_error_ =
+                    "started postmaster identity and retained launch broker "
+                    "are unavailable after trusted launch recovery; PGDATA "
+                    "retained at "
+                    + data_directory_.string();
+                return;
+            }
+            cluster_detail::supervised_process_tree owned_tree;
+            owned_tree.process_groups.push_back(
+                owned_group_leader->process_group());
+            if (!owned_group_leader
+                     ->signal_owned_group_while_unreaped(SIGKILL)
+                || !finalize_postmaster_termination(
+                    owned_tree, options_.stop_timeout)) {
+                cleanup_error_ =
+                    "cannot terminate the causally owned postmaster launch "
+                    "group after startup identity recovery failed; PGDATA "
+                    "retained at "
+                    + data_directory_.string();
+                return;
+            }
+            publish_stopped_state();
             return;
         }
         const auto initial_tree =
             cluster_detail::capture_process_tree(*postmaster_identity_);
         if (!initial_tree) {
+            if (owned_group_leader != nullptr
+                && owned_group_leader->process_group()
+                    == postmaster_identity_->process_group) {
+                cluster_detail::supervised_process_tree owned_tree{
+                    .postmaster = *postmaster_identity_,
+                    .members = {*postmaster_identity_},
+                    .process_groups = {
+                        postmaster_identity_->process_group}};
+                const auto frozen =
+                    cluster_detail::freeze_captured_process_tree(
+                        owned_tree, owned_group_leader);
+                if (frozen) {
+                    if (cluster_detail::force_kill_process_tree(
+                            *frozen, owned_group_leader)) {
+                        if (finalize_postmaster_termination(
+                                *frozen, options_.stop_timeout)) {
+                            publish_stopped_state();
+                            return;
+                        }
+                    } else {
+                        static_cast<void>(
+                            cluster_detail::signal_anchored_process_groups(
+                                *frozen, SIGCONT,
+                                owned_group_leader));
+                    }
+                }
+            }
             cleanup_error_ =
                 "cannot capture a stable identity-verified postmaster tree; "
                 "PGDATA retained at "
@@ -1033,50 +1179,55 @@ public:
             cleanup_error_ = "unknown pg_ctl stop failure";
         }
 
-        bool absent = cluster_detail::wait_for_process_tree_absence(
+        const bool members_absent =
+            cluster_detail::wait_for_process_tree_members_absence(
             *initial_tree, options_.stop_timeout);
-        if (!absent) {
-            std::optional<cluster_detail::supervised_process_tree> force_tree;
-            if (cluster_detail::process_identity_matches(
-                    *postmaster_identity_)) {
-                force_tree = cluster_detail::freeze_process_tree(
-                    *postmaster_identity_);
-            } else {
-                force_tree = initial_tree;
+        if (members_absent
+            && finalize_postmaster_termination(
+                *initial_tree, options_.stop_timeout)) {
+            publish_stopped_state();
+            return;
+        }
+        if (postmaster_termination_verified_) {
+            if (cleanup_error_.empty()) {
+                cleanup_error_ =
+                    "postmaster ended but its launch-broker supervision "
+                    "journal entry remains dirty";
             }
-            if (force_tree) {
-                if (!cluster_detail::force_kill_process_tree(*force_tree)) {
-                    set_cleanup_error_noexcept(
-                        "cannot SIGKILL identity-verified postmaster tree");
-                }
+            return;
+        }
+
+        std::optional<cluster_detail::supervised_process_tree> force_tree;
+        if (cluster_detail::process_identity_matches(
+                *postmaster_identity_)) {
+            force_tree = cluster_detail::freeze_process_tree(
+                *postmaster_identity_, owned_group_leader);
+        } else {
+            force_tree =
+                cluster_detail::freeze_captured_process_tree(
+                    *initial_tree, owned_group_leader);
+        }
+        if (force_tree) {
+            if (!cluster_detail::force_kill_process_tree(
+                    *force_tree, owned_group_leader)) {
                 static_cast<void>(
                     cluster_detail::signal_anchored_process_groups(
-                        *force_tree, SIGCONT));
-                cluster_detail::resume_processes(force_tree->members);
-                absent = cluster_detail::wait_for_process_tree_absence(
-                    *force_tree, options_.stop_timeout);
-            } else {
-                absent = false;
+                        *force_tree, SIGCONT,
+                        owned_group_leader));
+                set_cleanup_error_noexcept(
+                    "cannot SIGKILL identity-verified postmaster tree");
+            } else if (finalize_postmaster_termination(
+                           *force_tree, options_.stop_timeout)) {
+                publish_stopped_state();
+                return;
             }
         }
-        if (absent) {
-            cleanup_error_.clear();
-            state_ = cluster_state::stopped;
-            postmaster_identity_.reset();
-            causally_trusted_unanchored_start_ = false;
-            register_supervised_cluster(supervised_cluster_record{
-                .root = root_,
-                .data_directory = data_directory_,
-                .postmaster_executable =
-                    options_.postgres_bin_dir / "postgres"});
-        } else {
-            cleanup_error_ +=
-                (cleanup_error_.empty() ? "" : "; ")
-                + std::string(
-                    "postmaster descendant or process group remains live; "
-                    "PGDATA retained at ")
-                + data_directory_.string();
-        }
+        cleanup_error_ +=
+            (cleanup_error_.empty() ? "" : "; ")
+            + std::string(
+                "postmaster descendant or process group remains live; "
+                "PGDATA retained at ")
+            + data_directory_.string();
     } catch (...) {
         set_cleanup_error_noexcept(
             "private cluster stop failed while recording diagnostics");
@@ -1182,6 +1333,82 @@ public:
     [[nodiscard]] int port() const noexcept { return port_; }
 
 private:
+    [[nodiscard]] spawned_process*
+    owned_postmaster_group_leader() noexcept {
+        return postmaster_process_
+            ? &*postmaster_process_ : nullptr;
+    }
+
+    /// @brief Reaps the retained broker only after its target tree is gone.
+    [[nodiscard]] bool finalize_postmaster_termination(
+        const cluster_detail::supervised_process_tree& tree,
+        std::chrono::milliseconds deadline) noexcept {
+        try {
+            postmaster_cleanup_tree_ = tree;
+        } catch (...) {
+            set_cleanup_error_noexcept(
+                "cannot retain the verified postmaster cleanup identity tree");
+            return false;
+        }
+        const auto finish = std::chrono::steady_clock::now()
+            + std::max(deadline, std::chrono::milliseconds::zero());
+        const auto remaining = [&finish] {
+            return std::max(
+                std::chrono::milliseconds::zero(),
+                std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                    finish - std::chrono::steady_clock::now()));
+        };
+        if (!cluster_detail::wait_for_process_tree_members_absence(
+                tree, remaining())) {
+            return false;
+        }
+        bool supervision_released = true;
+        if (postmaster_process_) {
+            supervision_released =
+                postmaster_process_
+                    ->reap_after_verified_target_termination(
+                        remaining());
+        }
+        const bool physically_absent =
+            cluster_detail::wait_for_process_tree_absence(
+                tree, remaining());
+        if (physically_absent) {
+            postmaster_termination_verified_ = true;
+        }
+        if (!supervision_released) {
+            set_cleanup_error_noexcept(
+                "postmaster launch broker ended but its supervision "
+                "journal entry could not be removed");
+        }
+        return physically_absent && supervision_released;
+    }
+
+    /// @brief Durably publishes the physically verified stopped state.
+    void publish_stopped_state() {
+        std::error_code pidfile_error;
+        std::filesystem::remove(
+            data_directory_ / "postmaster.pid", pidfile_error);
+        if (pidfile_error) {
+            throw process_error(
+                "cannot remove the verified-dead postmaster pidfile: "
+                + pidfile_error.message());
+        }
+        register_supervised_cluster(supervised_cluster_record{
+            .root = root_,
+            .data_directory = data_directory_,
+            .postmaster_executable =
+                options_.postgres_bin_dir / "postgres"});
+        state_ = cluster_state::stopped;
+        postmaster_identity_.reset();
+        postmaster_process_.reset();
+        postmaster_cleanup_tree_.reset();
+        postmaster_termination_verified_ = false;
+        postmaster_spawn_attempted_ = false;
+        causally_trusted_unanchored_start_ = false;
+        cleanup_error_.clear();
+    }
+
     /// @brief Requires one exact lifecycle state.
     void require_state(cluster_state expected, std::string_view operation) const {
         if (state_ != expected) {
@@ -1235,27 +1462,6 @@ private:
         configuration.close();
         if (!configuration) {
             throw std::runtime_error("failed writing private postgresql.conf");
-        }
-    }
-
-    /// @brief Reads the current postmaster pid from owned PGDATA.
-    [[nodiscard]] std::int64_t read_postmaster_pid() const noexcept {
-        try {
-            std::ifstream input(data_directory_ / "postmaster.pid");
-            std::string first_line;
-            if (!std::getline(input, first_line)) {
-                return -1;
-            }
-            std::int64_t pid{};
-            const auto [end, error] = std::from_chars(
-                first_line.data(), first_line.data() + first_line.size(), pid);
-            if (error != std::errc{}
-                || end != first_line.data() + first_line.size()) {
-                return -1;
-            }
-            return pid;
-        } catch (...) {
-            return -1;
         }
     }
 
@@ -1346,10 +1552,15 @@ private:
     std::filesystem::path log_directory_;
     std::optional<extension_stage> stage_;
     std::optional<supervised_process_record> postmaster_identity_;
+    std::optional<spawned_process> postmaster_process_;
+    std::optional<cluster_detail::supervised_process_tree>
+        postmaster_cleanup_tree_;
     int port_{};
     std::string cleanup_error_;
     bool cleanup_attempted_{};
     bool causally_trusted_unanchored_start_{};
+    bool postmaster_termination_verified_{};
+    bool postmaster_spawn_attempted_{};
     cluster_cleanup_result cleanup_result_;
 };
 

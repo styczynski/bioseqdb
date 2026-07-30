@@ -747,6 +747,84 @@ public:
         return static_cast<std::int64_t>(pid_);
     }
 
+    /// @brief Returns the PGID pinned by this still-unreaped direct child.
+    [[nodiscard]] std::int64_t process_group() const noexcept {
+        return static_cast<std::int64_t>(process_group_);
+    }
+
+    /// @brief Observes direct-child exit without reaping or releasing its PID.
+    [[nodiscard]] bool leader_exited_unreaped() const noexcept {
+        if (pid_ <= 1) {
+            return exit_.has_value();
+        }
+        siginfo_t information{};
+        int status{};
+        do {
+            status = ::waitid(
+                P_PID, static_cast<id_t>(pid_), &information,
+                WEXITED | WNOHANG | WNOWAIT);
+        } while (status != 0 && errno == EINTR);
+        return status == 0
+            && information.si_pid == pid_;
+    }
+
+    /// @brief Signals the owned PGID while its direct-child leader pins reuse.
+    [[nodiscard]] bool signal_owned_group_while_unreaped(
+        int signal_number) noexcept {
+        if (pid_ <= 1 || process_group_ <= 1
+            || process_group_ == ::getpgrp()) {
+            return false;
+        }
+        int status{};
+        do {
+            status = ::kill(-process_group_, signal_number);
+        } while (status != 0 && errno == EINTR);
+        return status == 0 || errno == ESRCH;
+    }
+
+    /// @brief Reaps only after the caller proves the owned target tree ended.
+    ///
+    /// Unlike try_wait(), this deliberately clears the recorded PGID at reap:
+    /// the caller has already established target-tree termination while the
+    /// unreaped direct child still prevented PID/PGID reuse.
+    [[nodiscard]] bool reap_after_verified_target_termination(
+        std::chrono::milliseconds deadline) noexcept {
+        const auto finish = std::chrono::steady_clock::now()
+            + std::max(deadline, std::chrono::milliseconds::zero());
+        for (;;) {
+            if (pid_ <= 1) {
+                process_group_ = -1;
+                release_supervision();
+                return !supervised_;
+            }
+            int status{};
+            pid_t waited{};
+            do {
+                waited = ::waitpid(pid_, &status, WNOHANG);
+            } while (waited < 0 && errno == EINTR);
+            if (waited == pid_) {
+                exit_ = decode_status(status);
+                pid_ = -1;
+                process_group_ = -1;
+                release_supervision();
+                return !supervised_;
+            }
+            if (waited < 0 && errno == ECHILD) {
+                exit_ = process_exit{};
+                pid_ = -1;
+                process_group_ = -1;
+                release_supervision();
+                return !supervised_;
+            }
+            if (waited < 0
+                || std::chrono::steady_clock::now() >= finish) {
+                return false;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(10));
+        }
+    }
+
 private:
     spawned_process(
         pid_t pid,

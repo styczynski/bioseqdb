@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -24,6 +25,7 @@
 
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 
 import bioseq.test.postgres;
@@ -136,6 +138,40 @@ public:
 
 private:
     std::filesystem::path root_;
+};
+
+class direct_child_guard {
+public:
+    explicit direct_child_guard(pid_t pid = -1) noexcept : pid_(pid) {}
+
+    direct_child_guard(const direct_child_guard&) = delete;
+    direct_child_guard& operator=(const direct_child_guard&) = delete;
+
+    direct_child_guard(direct_child_guard&& other) noexcept
+        : pid_(std::exchange(other.pid_, -1)) {}
+
+    ~direct_child_guard() noexcept {
+        terminate_and_reap();
+    }
+
+    [[nodiscard]] pid_t pid() const noexcept { return pid_; }
+
+    void terminate_and_reap() noexcept {
+        if (pid_ <= 1) {
+            return;
+        }
+        static_cast<void>(::kill(pid_, SIGCONT));
+        static_cast<void>(::kill(pid_, SIGKILL));
+        int status{};
+        pid_t waited{};
+        do {
+            waited = ::waitpid(pid_, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        pid_ = -1;
+    }
+
+private:
+    pid_t pid_{-1};
 };
 
 class temporary_preinstalled_stage_tree {
@@ -1102,6 +1138,79 @@ TEST_CASE("post-extension readiness probes require a bounded Boolean poll",
     }
 }
 
+TEST_CASE("private cluster construction removes its root on journal failure",
+          "[postgres-test-support][unit][cluster][cleanup][journal]") {
+    temporary_resource_journal_tree journal;
+    temporary_preinstalled_stage_tree stage;
+    configure_supervision_state(journal.state_directory());
+    const auto private_roots = [] {
+        std::set<std::filesystem::path> roots;
+        std::error_code error;
+        std::filesystem::directory_iterator iterator{
+            std::filesystem::temp_directory_path(), error};
+        const std::filesystem::directory_iterator end;
+        for (; !error && iterator != end; iterator.increment(error)) {
+            const std::filesystem::path path = iterator->path();
+            if (path.filename().string().starts_with(
+                    "bioseq-pg-test-")) {
+                roots.insert(path);
+            }
+        }
+        if (error) {
+            throw std::runtime_error(
+                "cannot inventory private-cluster roots: "
+                + error.message());
+        }
+        return roots;
+    };
+    const auto before = private_roots();
+
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::write);
+    CHECK_THROWS(static_cast<void>(private_cluster{cluster_options{
+        .postgres_bin_dir = stage.bin_directory(),
+        .preinstalled_stage_root = stage.stage_root(),
+        .preinstalled_stage_manifest = stage.manifest(),
+        .extensions = {stage.normal_artifact()}}}));
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::none);
+
+    CHECK(private_roots() == before);
+    REQUIRE(unregister_supervised_cluster(
+        journal.state_directory() / "never-registered-root"));
+    CHECK(supervision_registries_empty(
+        journal.state_directory()));
+}
+
+TEST_CASE("private cluster cleanup retains its root until unregister is durable",
+          "[postgres-test-support][unit][cluster][cleanup][journal][retry]") {
+    temporary_resource_journal_tree journal;
+    temporary_preinstalled_stage_tree stage;
+    configure_supervision_state(journal.state_directory());
+    private_cluster cluster{cluster_options{
+        .postgres_bin_dir = stage.bin_directory(),
+        .preinstalled_stage_root = stage.stage_root(),
+        .preinstalled_stage_manifest = stage.manifest(),
+        .extensions = {stage.normal_artifact()}}};
+    const std::filesystem::path root = cluster.root_directory();
+
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::write);
+    const cluster_cleanup_result& failed = cluster.cleanup();
+    CHECK_FALSE(failed.succeeded);
+    CHECK(std::filesystem::is_directory(root));
+    CHECK_FALSE(load_supervision_registries(
+        journal.state_directory()));
+
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::none);
+    const cluster_cleanup_result& recovered = cluster.cleanup();
+    CHECK(recovered.succeeded);
+    CHECK_FALSE(std::filesystem::exists(root));
+    CHECK(supervision_registries_empty(
+        journal.state_directory()));
+}
+
 TEST_CASE("preinstalled stage attestation consumes suite artifacts in place",
           "[postgres-test-support][unit][artifact][preinstalled-stage]") {
     temporary_preinstalled_stage_tree tree;
@@ -1945,6 +2054,76 @@ TEST_CASE("supervised spawn preserves exact argv zero and PostgreSQL PATH",
     CHECK(supervision_registries_empty(tree.state_directory()));
 }
 
+TEST_CASE("retained launch broker pins a foreground postmaster process group",
+          "[postgres-test-support][unit][process][supervision][pgid]") {
+    temporary_resource_journal_tree tree;
+    configure_supervision_state(tree.state_directory());
+    const std::filesystem::path executable =
+        std::filesystem::canonical(
+            std::filesystem::path{
+                BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH});
+    const std::filesystem::path canonical_data =
+        std::filesystem::canonical(tree.data_directory());
+    spawned_process broker = spawned_process::spawn(process_options{
+        .executable = executable,
+        .arguments = {
+            "--postmaster", "-D", canonical_data.string()},
+        .output_file =
+            tree.state_directory() / "foreground-postmaster.log",
+        .supervise = true,
+        .supervision_data_directory = canonical_data});
+
+    const auto identity = capture_supervised_postmaster_identity(
+        executable, canonical_data, 2s, 5ms);
+    REQUIRE(identity.has_value());
+    REQUIRE(broker.pid() > 1);
+    REQUIRE(broker.process_group() == broker.pid());
+    REQUIRE(identity->process_group == broker.process_group());
+    const pid_t broker_session =
+        ::getsid(static_cast<pid_t>(broker.pid()));
+    REQUIRE(broker_session > 1);
+    REQUIRE(::getsid(static_cast<pid_t>(identity->pid))
+            == broker_session);
+    REQUIRE_FALSE(broker.leader_exited_unreaped());
+
+    const auto wait_for_stopped = [&identity](bool expected) {
+        const auto finish =
+            std::chrono::steady_clock::now() + 1s;
+        do {
+            if (supervised_process_stopped(*identity) == expected) {
+                return true;
+            }
+            std::this_thread::sleep_for(5ms);
+        } while (std::chrono::steady_clock::now() < finish);
+        return supervised_process_stopped(*identity) == expected;
+    };
+    REQUIRE(broker.signal_owned_group_while_unreaped(SIGSTOP));
+    REQUIRE(wait_for_stopped(true));
+    REQUIRE(broker.signal_owned_group_while_unreaped(SIGCONT));
+    REQUIRE(wait_for_stopped(false));
+    REQUIRE(broker.signal_owned_group_while_unreaped(SIGKILL));
+    const auto target_finish =
+        std::chrono::steady_clock::now() + 2s;
+    while (supervised_process_matches(*identity)
+           && std::chrono::steady_clock::now() < target_finish) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE_FALSE(supervised_process_matches(*identity));
+    REQUIRE(broker.reap_after_verified_target_termination(2s));
+
+    const auto group_finish =
+        std::chrono::steady_clock::now() + 2s;
+    while (!supervised_process_group_absent(
+               identity->process_group)
+           && std::chrono::steady_clock::now() < group_finish) {
+        std::this_thread::sleep_for(5ms);
+    }
+    CHECK(supervised_process_group_absent(
+        identity->process_group));
+    CHECK(supervision_registries_empty(
+        tree.state_directory()));
+}
+
 TEST_CASE("supervised process identity rejects a changed start token",
           "[postgres-test-support][unit][supervision][identity]") {
     const auto process = capture_supervised_process(
@@ -1960,6 +2139,117 @@ TEST_CASE("supervised process identity rejects a changed start token",
     ++moved_group.process_group;
     CHECK(supervised_process_matches(moved_group));
     CHECK_FALSE(supervised_process_group_matches(moved_group));
+}
+
+TEST_CASE("group signaling refuses a stale anchor while the PGID stays live",
+          "[postgres-test-support][unit][supervision][identity][signal]") {
+    const pid_t anchor_pid = ::fork();
+    REQUIRE(anchor_pid >= 0);
+    if (anchor_pid == 0) {
+        if (::setpgid(0, 0) != 0) {
+            ::_exit(125);
+        }
+        for (;;) {
+            static_cast<void>(::pause());
+        }
+    }
+    direct_child_guard anchor{anchor_pid};
+    REQUIRE(::setpgid(anchor_pid, anchor_pid) == 0);
+
+    const pid_t replacement_pid = ::fork();
+    REQUIRE(replacement_pid >= 0);
+    if (replacement_pid == 0) {
+        if (::setpgid(0, anchor_pid) != 0) {
+            ::_exit(125);
+        }
+        for (;;) {
+            static_cast<void>(::pause());
+        }
+    }
+    direct_child_guard replacement{replacement_pid};
+    REQUIRE(::setpgid(replacement_pid, anchor_pid) == 0);
+
+    const auto anchor_identity = capture_supervised_process(
+        static_cast<std::uint64_t>(anchor_pid));
+    REQUIRE(anchor_identity.has_value());
+    REQUIRE(anchor_identity->process_group == anchor_pid);
+    anchor.terminate_and_reap();
+
+    const auto replacement_identity = capture_supervised_process(
+        static_cast<std::uint64_t>(replacement_pid));
+    REQUIRE(replacement_identity.has_value());
+    REQUIRE(replacement_identity->process_group == anchor_pid);
+    const std::array stale_anchors{*anchor_identity};
+    REQUIRE(signal_supervised_process_group(
+        anchor_pid, stale_anchors, SIGKILL));
+    CHECK(supervised_process_matches(*replacement_identity));
+    CHECK_FALSE(supervised_process_stopped(*replacement_identity));
+
+    const auto wait_for_stopped =
+        [&replacement_identity](bool expected) {
+            const auto finish =
+                std::chrono::steady_clock::now() + 1s;
+            do {
+                if (supervised_process_stopped(
+                        *replacement_identity)
+                    == expected) {
+                    return true;
+                }
+                std::this_thread::sleep_for(5ms);
+            } while (std::chrono::steady_clock::now() < finish);
+            return supervised_process_stopped(
+                       *replacement_identity)
+                == expected;
+        };
+    const std::array replacement_anchors{*replacement_identity};
+    REQUIRE(signal_supervised_process_group(
+        anchor_pid, replacement_anchors, SIGSTOP));
+    REQUIRE(wait_for_stopped(true));
+    REQUIRE(signal_supervised_process_group(
+        anchor_pid, replacement_anchors, SIGCONT));
+    REQUIRE(wait_for_stopped(false));
+    REQUIRE(signal_supervised_process_group(
+        anchor_pid, replacement_anchors, SIGKILL));
+    replacement.terminate_and_reap();
+}
+
+TEST_CASE("postmaster identity polling observes a delayed pidfile",
+          "[postgres-test-support][unit][supervision][start-window][retry]") {
+    temporary_resource_journal_tree tree;
+    const std::filesystem::path executable =
+        std::filesystem::canonical(std::filesystem::path{
+            BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH});
+    const std::filesystem::path canonical_data =
+        std::filesystem::canonical(tree.data_directory());
+    spawned_process child = spawned_process::spawn(process_options{
+        .executable = executable,
+        .arguments = {
+            "--hold", "-D", canonical_data.string()}});
+    std::atomic_bool published{false};
+    std::jthread publisher{
+        [&tree, &canonical_data, &child, &published] {
+            std::this_thread::sleep_for(60ms);
+            std::ofstream pidfile(
+                tree.data_directory() / "postmaster.pid",
+                std::ios::trunc);
+            pidfile << child.pid() << '\n'
+                    << canonical_data.string() << "\n1\n";
+            pidfile.close();
+            published.store(
+                static_cast<bool>(pidfile),
+                std::memory_order_release);
+        }};
+
+    const auto identity = capture_supervised_postmaster_identity(
+        executable, canonical_data, 1s, 5ms);
+    publisher.join();
+    REQUIRE(published.load(std::memory_order_acquire));
+    REQUIRE(identity.has_value());
+    CHECK(identity->pid
+          == static_cast<std::uint64_t>(child.pid()));
+    CHECK(supervised_postmaster_matches_data_directory(
+        *identity));
+    child.terminate(100ms);
 }
 
 TEST_CASE("startup discovery refuses pidfile identity without live PGDATA binding",
@@ -2147,4 +2437,84 @@ TEST_CASE("canonical row hash distinguishes NULL from empty text",
         normative.finalize().hex()
         == "48a1b931ccb6063e8f71c216c9f04d1c"
            "0bd426edf4ce8ee4c98601f6c603b206");
+}
+
+TEST_CASE("fixture terminal resource sampling is idempotent and cleanup-safe",
+          "[postgres-test-support][unit][fixture][resource]") {
+    static_assert(std::is_same_v<
+        decltype(std::declval<postgres_fixture&>()
+                     .finish_resource_sampling()),
+        resource_sampling_report>);
+
+    temporary_resource_journal_tree tree;
+    {
+        std::ofstream postmaster_pid(
+            tree.data_directory() / "postmaster.pid",
+            std::ios::trunc);
+        postmaster_pid << ::getpid() << '\n';
+        postmaster_pid.close();
+        REQUIRE(static_cast<bool>(postmaster_pid));
+    }
+    configure_supervision_state(tree.state_directory());
+    initialize_supervision_resource_journal();
+
+    resource_sampler sampler{
+        tree.owned_root(), tree.data_directory(), 1h, 1h};
+    sampler.observe_phase_boundary("fixture-contract");
+    const resource_sampling_report first = sampler.finish();
+    const resource_sampling_report repeated = sampler.finish();
+    resource_report cleanup_evidence;
+    cleanup_evidence.postgres = sampler.finish();
+
+    const auto require_same =
+        [](const resource_sampling_report& lhs,
+           const resource_sampling_report& rhs) {
+            REQUIRE(
+                rhs.peak_postmaster_process_tree_rss_bytes
+                == lhs.peak_postmaster_process_tree_rss_bytes);
+            REQUIRE(
+                rhs.peak_owned_root_bytes
+                == lhs.peak_owned_root_bytes);
+            REQUIRE(rhs.rss_samples == lhs.rss_samples);
+            REQUIRE(
+                rhs.owned_root_samples == lhs.owned_root_samples);
+            REQUIRE(
+                rhs.rss_sampling_failures
+                == lhs.rss_sampling_failures);
+            REQUIRE(
+                rhs.owned_root_sampling_failures
+                == lhs.owned_root_sampling_failures);
+            REQUIRE(
+                rhs.phase_boundaries.size()
+                == lhs.phase_boundaries.size());
+            for (std::size_t index = 0;
+                 index < lhs.phase_boundaries.size();
+                 ++index) {
+                const resource_phase_boundary& expected =
+                    lhs.phase_boundaries[index];
+                const resource_phase_boundary& observed =
+                    rhs.phase_boundaries[index];
+                REQUIRE(observed.ordinal == expected.ordinal);
+                REQUIRE(observed.phase == expected.phase);
+                REQUIRE(observed.elapsed == expected.elapsed);
+                REQUIRE(
+                    observed.postmaster_process_tree_rss_bytes
+                    == expected.postmaster_process_tree_rss_bytes);
+                REQUIRE(
+                    observed.owned_root_bytes
+                    == expected.owned_root_bytes);
+            }
+        };
+    require_same(first, repeated);
+    require_same(first, cleanup_evidence.postgres);
+    REQUIRE(first.rss_samples >= 2);
+    REQUIRE(first.owned_root_samples >= 2);
+    REQUIRE(first.rss_sampling_failures == 0);
+    REQUIRE(first.owned_root_sampling_failures == 0);
+    REQUIRE(first.phase_boundaries.size() == 1);
+    REQUIRE(
+        first.phase_boundaries.front()
+            .postmaster_process_tree_rss_bytes.has_value());
+    REQUIRE(
+        first.phase_boundaries.front().owned_root_bytes.has_value());
 }

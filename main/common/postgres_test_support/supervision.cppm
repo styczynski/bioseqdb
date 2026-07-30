@@ -3,10 +3,12 @@ module;
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/file.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
 #include <libproc.h>
+#include <sys/proc.h>
 #include <sys/sysctl.h>
 #endif
 
@@ -25,6 +27,7 @@ module;
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -377,6 +380,162 @@ private:
     int descriptor_{};
 };
 
+/// @brief Direct-child member that prevents one owned PGID from being reused.
+class process_group_pin {
+public:
+    process_group_pin(pid_t child, int release_descriptor) noexcept
+        : child_(child), release_descriptor_(release_descriptor) {}
+
+    process_group_pin(const process_group_pin&) = delete;
+    process_group_pin& operator=(const process_group_pin&) = delete;
+
+    process_group_pin(process_group_pin&& other) noexcept
+        : child_(std::exchange(other.child_, -1)),
+          release_descriptor_(
+              std::exchange(other.release_descriptor_, -1)) {}
+
+    process_group_pin& operator=(process_group_pin&&) = delete;
+
+    ~process_group_pin() noexcept {
+        release_and_reap();
+    }
+
+    /// @brief Resumes the sentinel after a group-wide stop before releasing it.
+    void resume_after_group_stop() noexcept {
+        if (child_ > 1) {
+            static_cast<void>(::kill(child_, SIGCONT));
+        }
+    }
+
+private:
+    void release_and_reap() noexcept {
+        if (release_descriptor_ >= 0) {
+            static_cast<void>(::close(release_descriptor_));
+            release_descriptor_ = -1;
+        }
+        if (child_ <= 1) {
+            return;
+        }
+        static_cast<void>(::kill(child_, SIGCONT));
+        int status{};
+        pid_t waited{};
+        for (int attempt = 0; attempt != 100; ++attempt) {
+            do {
+                waited = ::waitpid(child_, &status, WNOHANG);
+            } while (waited < 0 && errno == EINTR);
+            if (waited == child_ || (waited < 0 && errno == ECHILD)) {
+                child_ = -1;
+                return;
+            }
+            if (waited < 0) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        static_cast<void>(::kill(child_, SIGCONT));
+        static_cast<void>(::kill(child_, SIGKILL));
+        do {
+            waited = ::waitpid(child_, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited < 0 && errno != ECHILD) {
+            child_ = -1;
+            return;
+        }
+        child_ = -1;
+    }
+
+    pid_t child_{-1};
+    int release_descriptor_{-1};
+};
+
+/// @brief Joins a direct child to an existing same-session group and holds it.
+[[nodiscard]] inline std::optional<process_group_pin> pin_process_group(
+    std::int64_t process_group) noexcept {
+    if (process_group <= 1
+        || process_group
+            > static_cast<std::int64_t>(
+                std::numeric_limits<pid_t>::max())
+        || process_group == static_cast<std::int64_t>(::getpgrp())) {
+        return std::nullopt;
+    }
+    int ready[2]{-1, -1};
+    int release[2]{-1, -1};
+    if (::pipe(ready) != 0 || ::pipe(release) != 0) {
+        if (ready[0] >= 0) {
+            static_cast<void>(::close(ready[0]));
+            static_cast<void>(::close(ready[1]));
+        }
+        if (release[0] >= 0) {
+            static_cast<void>(::close(release[0]));
+            static_cast<void>(::close(release[1]));
+        }
+        return std::nullopt;
+    }
+    for (const int descriptor :
+         {ready[0], ready[1], release[0], release[1]}) {
+        const int flags = ::fcntl(descriptor, F_GETFD);
+        if (flags < 0
+            || ::fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) != 0) {
+            static_cast<void>(::close(ready[0]));
+            static_cast<void>(::close(ready[1]));
+            static_cast<void>(::close(release[0]));
+            static_cast<void>(::close(release[1]));
+            return std::nullopt;
+        }
+    }
+
+    const pid_t child = ::fork();
+    if (child < 0) {
+        static_cast<void>(::close(ready[0]));
+        static_cast<void>(::close(ready[1]));
+        static_cast<void>(::close(release[0]));
+        static_cast<void>(::close(release[1]));
+        return std::nullopt;
+    }
+    if (child == 0) {
+        static_cast<void>(::close(ready[0]));
+        static_cast<void>(::close(release[1]));
+        const char result =
+            ::setpgid(0, static_cast<pid_t>(process_group)) == 0
+            ? 'R' : 'E';
+        ssize_t written{};
+        do {
+            written = ::write(ready[1], &result, sizeof(result));
+        } while (written < 0 && errno == EINTR);
+        static_cast<void>(::close(ready[1]));
+        if (result != 'R' || written != 1) {
+            ::_exit(125);
+        }
+        char ignored{};
+        ssize_t consumed{};
+        do {
+            consumed = ::read(release[0], &ignored, sizeof(ignored));
+        } while (consumed < 0 && errno == EINTR);
+        static_cast<void>(::close(release[0]));
+        ::_exit(consumed < 0 ? 126 : 0);
+    }
+
+    static_cast<void>(::close(ready[1]));
+    static_cast<void>(::close(release[0]));
+    char result{};
+    ssize_t consumed{};
+    do {
+        consumed = ::read(ready[0], &result, sizeof(result));
+    } while (consumed < 0 && errno == EINTR);
+    static_cast<void>(::close(ready[0]));
+    if (consumed != 1 || result != 'R'
+        || ::getpgid(child) != static_cast<pid_t>(process_group)) {
+        static_cast<void>(::close(release[1]));
+        int status{};
+        pid_t waited{};
+        do {
+            waited = ::waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        return std::nullopt;
+    }
+    return process_group_pin{child, release[1]};
+}
+
 [[nodiscard]] inline std::optional<decision_lock_guard>
 acquire_decision_lock(
     const std::filesystem::path& directory,
@@ -692,6 +851,102 @@ capture_supervised_process(
     return current
         && current->start_token == process.start_token
         && current->process_group == process.process_group;
+}
+
+/// @brief True only while the exact captured process is kernel-stopped.
+[[nodiscard]] inline bool supervised_process_stopped(
+    const supervised_process_record& process) noexcept {
+    try {
+        if (!supervised_process_matches(process)) {
+            return false;
+        }
+#if defined(__linux__)
+        std::ifstream input(
+            std::filesystem::path("/proc")
+            / std::to_string(process.pid) / "stat");
+        std::string line;
+        if (!input || !std::getline(input, line)) {
+            return false;
+        }
+        const std::size_t command_end = line.rfind(')');
+        if (command_end == std::string::npos
+            || command_end + 2U >= line.size()) {
+            return false;
+        }
+        const char state = line[command_end + 2U];
+        return state == 'T' || state == 't';
+#elif defined(__APPLE__)
+        proc_bsdinfo information{};
+        return ::proc_pidinfo(
+                   static_cast<int>(process.pid), PROC_PIDTBSDINFO, 0,
+                   &information, sizeof(information))
+                == static_cast<int>(sizeof(information))
+            && information.pbi_status == SSTOP;
+#else
+        return false;
+#endif
+    } catch (...) {
+        return false;
+    }
+}
+
+/// @brief Signals a PGID while a verified direct-child sentinel prevents reuse.
+[[nodiscard]] inline bool signal_supervised_process_group(
+    std::int64_t process_group,
+    std::span<const supervised_process_record> anchors,
+    int signal_number) noexcept {
+    try {
+        if (process_group <= 1
+            || process_group
+                > static_cast<std::int64_t>(
+                    std::numeric_limits<pid_t>::max())
+            || process_group
+                == static_cast<std::int64_t>(::getpgrp())) {
+            return false;
+        }
+        int presence{};
+        do {
+            presence = ::kill(
+                -static_cast<pid_t>(process_group), 0);
+        } while (presence != 0 && errno == EINTR);
+        if (presence != 0 && errno == ESRCH) {
+            return true;
+        }
+        auto pin =
+            supervision_detail::pin_process_group(process_group);
+        if (!pin) {
+            return false;
+        }
+        const bool anchored = std::ranges::any_of(
+            anchors,
+            [process_group](
+                const supervised_process_record& anchor) {
+                if (anchor.process_group != process_group) {
+                    return false;
+                }
+                const auto current = capture_supervised_process(
+                    anchor.pid, anchor.executable,
+                    anchor.data_directory);
+                return current
+                    && current->start_token == anchor.start_token
+                    && current->process_group == process_group;
+            });
+        if (!anchored) {
+            return true;
+        }
+        int status{};
+        do {
+            status = ::kill(
+                -static_cast<pid_t>(process_group), signal_number);
+        } while (status != 0 && errno == EINTR);
+        const int signal_error = errno;
+        if (signal_number == SIGSTOP) {
+            pin->resume_after_group_stop();
+        }
+        return status == 0 || signal_error == ESRCH;
+    } catch (...) {
+        return false;
+    }
 }
 
 /// @brief Proves a live postgres identity is bound to this exact PGDATA.
@@ -1200,6 +1455,7 @@ inline void register_supervised_cluster(
     }
     state.clusters.swap(candidate);
     if (!supervision_detail::publish_registries_locked(state)) {
+        state.clusters.swap(candidate);
         throw std::runtime_error(
             "cannot durably publish live-resource registries");
     }
