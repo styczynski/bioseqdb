@@ -441,6 +441,18 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertNotIn("run_private_cluster_bench.py", cmake)
         cache_unit = server.MODES["cache-unit"]
         self.assertIn(
+            "bioseq_postgres_test_support_contract_tests",
+            cache_unit.targets,
+        )
+        self.assertIn(
+            [
+                "bioseq_postgres_test_support_contract_tests",
+                "--reporter",
+                "console::out=-::colour-mode=ansi",
+            ],
+            cache_unit.commands,
+        )
+        self.assertIn(
             "bioseq_cache_benchmark_report_contract_tests",
             cache_unit.targets,
         )
@@ -451,6 +463,28 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "console::out=-::colour-mode=ansi",
             ],
             cache_unit.commands,
+        )
+
+    def test_cache_unit_common_contract_binaries_share_runtime_directory(
+            self) -> None:
+        cmake = (
+            MAIN_DIR
+            / "common"
+            / "postgres_test_support"
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        runtime_directory = (
+            'RUNTIME_OUTPUT_DIRECTORY '
+            '"${CMAKE_BINARY_DIR}/bioseq_caching"'
+        )
+        self.assertEqual(cmake.count(runtime_directory), 2)
+        self.assertIn(
+            "add_executable(bioseq_postgres_test_process_contract_child",
+            cmake,
+        )
+        self.assertIn(
+            "add_executable(bioseq_postgres_test_support_contract_tests",
+            cmake,
         )
 
     def test_cache_runtime_modes_have_no_legacy_post_build_targets(

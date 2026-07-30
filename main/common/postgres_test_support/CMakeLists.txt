@@ -77,6 +77,7 @@ if(BUILD_TESTING)
       CXX_STANDARD 26
       CXX_STANDARD_REQUIRED ON
       CXX_EXTENSIONS ON
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bioseq_caching"
       INTERPROCEDURAL_OPTIMIZATION FALSE)
   add_executable(bioseq_postgres_test_support_contract_tests
     "${CMAKE_CURRENT_LIST_DIR}/contract_tests.cpp"
@@ -86,6 +87,7 @@ if(BUILD_TESTING)
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS ON
     CXX_MODULE_STD ON
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bioseq_caching"
     INTERPROCEDURAL_OPTIMIZATION FALSE)
   target_link_libraries(bioseq_postgres_test_support_contract_tests
     PRIVATE

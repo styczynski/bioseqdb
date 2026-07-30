@@ -1161,10 +1161,13 @@ MODES: Dict[str, ModeDefinition] = {
         targets=[
             "postgresql_bioseq_cache",
             "bioseq_cache_unit_tests",
+            "bioseq_postgres_test_support_contract_tests",
             "bioseq_cache_benchmark_report_contract_tests",
         ],
         commands=[
             ["bioseq_cache_unit_tests",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            ["bioseq_postgres_test_support_contract_tests",
              "--reporter", "console::out=-::colour-mode=ansi"],
             ["bioseq_cache_benchmark_report_contract_tests",
              "--reporter", "console::out=-::colour-mode=ansi"],
