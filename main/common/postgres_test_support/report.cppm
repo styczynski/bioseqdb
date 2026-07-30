@@ -10,10 +10,15 @@ module;
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <iomanip>
 #include <iterator>
+#include <limits>
+#include <locale>
 #include <mutex>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -382,6 +387,13 @@ inline void initialize_supervision_report_journals() noexcept {
         std::ofstream output(
             *directory / "sql-transcript.tsv", std::ios::trunc);
         output.close();
+        if (!output) {
+            return;
+        }
+        for (const sql_transcript_entry& entry :
+             process_sql_transcript_entries()) {
+            report_state_detail::append_crash_transcript(entry);
+        }
     } catch (...) {
     }
 }
@@ -576,6 +588,298 @@ struct integration_test_report {
     return reports;
 }
 
+}  // namespace bioseq::postgres_test
+
+namespace bioseq::postgres_test::report_snapshot_detail {
+
+[[nodiscard]] std::vector<std::string_view> fields(
+    std::string_view line) {
+    std::vector<std::string_view> result;
+    std::size_t begin = 0;
+    while (begin <= line.size()) {
+        const std::size_t end = line.find('\t', begin);
+        result.push_back(line.substr(
+            begin, end == std::string_view::npos
+                ? std::string_view::npos : end - begin));
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1U;
+    }
+    return result;
+}
+
+template <class Integer>
+[[nodiscard]] std::optional<Integer> integer(std::string_view text) {
+    Integer value{};
+    const auto [end, error] = std::from_chars(
+        text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] bool header(
+    std::istringstream& input,
+    std::string_view expected_kind,
+    std::size_t& count) {
+    std::string line;
+    if (!std::getline(input, line)) {
+        return false;
+    }
+    const auto values = fields(line);
+    const auto parsed_count =
+        values.size() == 3U ? integer<std::size_t>(values[2])
+                            : std::nullopt;
+    if (values.size() != 3U || values[0] != "bioseq-watchdog-v1"
+        || values[1] != expected_kind || !parsed_count
+        || *parsed_count > 1'000'000U) {
+        return false;
+    }
+    count = *parsed_count;
+    return true;
+}
+
+template <class Range, class Writer>
+[[nodiscard]] bool publish(
+    std::string_view file,
+    std::string_view kind,
+    const Range& records,
+    Writer&& writer) noexcept {
+    try {
+        std::ostringstream output;
+        output << "bioseq-watchdog-v1\t" << kind << '\t'
+               << records.size() << '\n';
+        for (const auto& record : records) {
+            std::invoke(writer, output, record);
+            output << '\n';
+        }
+        return publish_supervision_snapshot(file, output.str());
+    } catch (...) {
+        return false;
+    }
+}
+
+}  // namespace bioseq::postgres_test::report_snapshot_detail
+
+export namespace bioseq::postgres_test {
+
+[[nodiscard]] inline bool publish_supervision_test_case_reports(
+    std::span<const test_case_report> reports) noexcept {
+    return report_snapshot_detail::publish(
+        "cases.snapshot.tsv", "cases", reports,
+        [](std::ostream& output, const test_case_report& report) {
+            output << supervision_hex_encode(report.test_case) << '\t'
+                   << supervision_hex_encode(report.section) << '\t'
+                   << supervision_hex_encode(report.status) << '\t'
+                   << supervision_hex_encode(report.message) << '\t'
+                   << report.duration.count();
+        });
+}
+
+[[nodiscard]] inline std::optional<std::vector<test_case_report>>
+load_supervision_test_case_reports(
+    const std::filesystem::path& directory) noexcept {
+    try {
+        const auto payload = load_supervision_snapshot(
+            directory, "cases.snapshot.tsv");
+        if (!payload) {
+            return std::nullopt;
+        }
+        std::istringstream input(*payload);
+        std::size_t count{};
+        if (!report_snapshot_detail::header(input, "cases", count)) {
+            return std::nullopt;
+        }
+        std::vector<test_case_report> reports;
+        reports.reserve(count);
+        std::string line;
+        for (std::size_t index = 0; index < count; ++index) {
+            if (!std::getline(input, line)) {
+                return std::nullopt;
+            }
+            const auto values = report_snapshot_detail::fields(line);
+            if (values.size() != 5U) {
+                return std::nullopt;
+            }
+            const auto test_case = supervision_hex_decode(values[0]);
+            const auto section = supervision_hex_decode(values[1]);
+            const auto status = supervision_hex_decode(values[2]);
+            const auto message = supervision_hex_decode(values[3]);
+            const auto duration =
+                report_snapshot_detail::integer<std::int64_t>(values[4]);
+            if (!test_case || !section || !status || !message
+                || !duration || *duration < 0) {
+                return std::nullopt;
+            }
+            reports.push_back(test_case_report{
+                .test_case = std::move(*test_case),
+                .section = std::move(*section),
+                .status = std::move(*status),
+                .message = std::move(*message),
+                .duration = std::chrono::milliseconds(*duration)});
+        }
+        if (std::getline(input, line)) {
+            return std::nullopt;
+        }
+        return reports;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] inline bool publish_supervision_phase_duration_reports(
+    std::span<const phase_duration_report> reports) noexcept {
+    return report_snapshot_detail::publish(
+        "phases.snapshot.tsv", "phases", reports,
+        [](std::ostream& output, const phase_duration_report& report) {
+            output << report.ordinal << '\t'
+                   << supervision_hex_encode(report.test_case) << '\t'
+                   << supervision_hex_encode(report.section) << '\t'
+                   << supervision_hex_encode(report.phase) << '\t'
+                   << supervision_hex_encode(report.status) << '\t'
+                   << report.duration.count();
+        });
+}
+
+[[nodiscard]] inline std::optional<std::vector<phase_duration_report>>
+load_supervision_phase_duration_reports(
+    const std::filesystem::path& directory) noexcept {
+    try {
+        const auto payload = load_supervision_snapshot(
+            directory, "phases.snapshot.tsv");
+        if (!payload) {
+            return std::nullopt;
+        }
+        std::istringstream input(*payload);
+        std::size_t count{};
+        if (!report_snapshot_detail::header(input, "phases", count)) {
+            return std::nullopt;
+        }
+        std::vector<phase_duration_report> reports;
+        reports.reserve(count);
+        std::string line;
+        for (std::size_t index = 0; index < count; ++index) {
+            if (!std::getline(input, line)) {
+                return std::nullopt;
+            }
+            const auto values = report_snapshot_detail::fields(line);
+            if (values.size() != 6U) {
+                return std::nullopt;
+            }
+            const auto ordinal =
+                report_snapshot_detail::integer<std::uint64_t>(values[0]);
+            const auto test_case = supervision_hex_decode(values[1]);
+            const auto section = supervision_hex_decode(values[2]);
+            const auto phase = supervision_hex_decode(values[3]);
+            const auto status = supervision_hex_decode(values[4]);
+            const auto duration =
+                report_snapshot_detail::integer<std::int64_t>(values[5]);
+            if (!ordinal || !test_case || !section || !phase || !status
+                || !duration || *duration < 0) {
+                return std::nullopt;
+            }
+            reports.push_back(phase_duration_report{
+                .ordinal = *ordinal,
+                .test_case = std::move(*test_case),
+                .section = std::move(*section),
+                .phase = std::move(*phase),
+                .status = std::move(*status),
+                .duration = std::chrono::milliseconds(*duration)});
+        }
+        if (std::getline(input, line)) {
+            return std::nullopt;
+        }
+        return reports;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] inline bool publish_supervision_artifact_reports(
+    std::span<const artifact_report> reports) noexcept {
+    return report_snapshot_detail::publish(
+        "artifacts.snapshot.tsv", "artifacts", reports,
+        [](std::ostream& output, const artifact_report& report) {
+            output << supervision_hex_encode(report.name) << '\t'
+                   << supervision_hex_encode(
+                          report.control_file.string()) << '\t'
+                   << supervision_hex_encode(
+                          report.install_sql.string()) << '\t'
+                   << supervision_hex_encode(report.dso.string()) << '\t'
+                   << supervision_hex_encode(
+                          report.staged_control_file.string()) << '\t'
+                   << supervision_hex_encode(
+                          report.staged_install_sql.string()) << '\t'
+                   << supervision_hex_encode(
+                          report.staged_dso.string()) << '\t'
+                   << supervision_hex_encode(report.control_sha256) << '\t'
+                   << supervision_hex_encode(
+                          report.install_sql_sha256) << '\t'
+                   << supervision_hex_encode(report.dso_sha256) << '\t'
+                   << supervision_hex_encode(
+                          report.staged_control_sha256);
+        });
+}
+
+[[nodiscard]] inline std::optional<std::vector<artifact_report>>
+load_supervision_artifact_reports(
+    const std::filesystem::path& directory) noexcept {
+    try {
+        const auto payload = load_supervision_snapshot(
+            directory, "artifacts.snapshot.tsv");
+        if (!payload) {
+            return std::nullopt;
+        }
+        std::istringstream input(*payload);
+        std::size_t count{};
+        if (!report_snapshot_detail::header(
+                input, "artifacts", count)) {
+            return std::nullopt;
+        }
+        std::vector<artifact_report> reports;
+        reports.reserve(count);
+        std::string line;
+        for (std::size_t index = 0; index < count; ++index) {
+            if (!std::getline(input, line)) {
+                return std::nullopt;
+            }
+            const auto values = report_snapshot_detail::fields(line);
+            if (values.size() != 11U) {
+                return std::nullopt;
+            }
+            std::vector<std::string> decoded;
+            decoded.reserve(values.size());
+            for (const std::string_view value : values) {
+                auto field = supervision_hex_decode(value);
+                if (!field) {
+                    return std::nullopt;
+                }
+                decoded.push_back(std::move(*field));
+            }
+            reports.push_back(artifact_report{
+                .name = std::move(decoded[0]),
+                .control_file = std::move(decoded[1]),
+                .install_sql = std::move(decoded[2]),
+                .dso = std::move(decoded[3]),
+                .staged_control_file = std::move(decoded[4]),
+                .staged_install_sql = std::move(decoded[5]),
+                .staged_dso = std::move(decoded[6]),
+                .control_sha256 = std::move(decoded[7]),
+                .install_sql_sha256 = std::move(decoded[8]),
+                .dso_sha256 = std::move(decoded[9]),
+                .staged_control_sha256 = std::move(decoded[10])});
+        }
+        if (std::getline(input, line)) {
+            return std::nullopt;
+        }
+        return reports;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 /// @brief Samples runner peak RSS and exact bytes below selected temp roots.
 [[nodiscard]] inline resource_report capture_resource_report(
     std::span<const std::filesystem::path> temp_roots = {}) {
@@ -671,6 +975,8 @@ inline void record_phase_duration(
             .phase = std::string(phase),
             .status = completed ? "completed" : "interrupted",
             .duration = duration});
+        static_cast<void>(
+            publish_supervision_phase_duration_reports(state.reports));
     } catch (...) {
     }
 }
@@ -735,6 +1041,8 @@ inline void record_artifact_stage(
             state.reports.end(),
             std::make_move_iterator(reports.begin()),
             std::make_move_iterator(reports.end()));
+        static_cast<void>(
+            publish_supervision_artifact_reports(state.reports));
     } catch (...) {
     }
 }
@@ -1053,6 +1361,9 @@ inline void write_integration_test_report(
         throw std::runtime_error("cannot create integration report: "
                                  + temporary.string());
     }
+    output.imbue(std::locale::classic());
+    output << std::setprecision(
+        std::numeric_limits<double>::max_digits10);
     output.put('{');
     bool first = true;
     const auto string_field =
@@ -1180,6 +1491,71 @@ inline void write_integration_test_report(
         output.put(',');
         report_detail::key(output, "logical_cores");
         output << qualification.logical_cores;
+        output.put(',');
+        report_detail::key(output, "host_total_ram_bytes");
+        output << qualification.host_total_ram_bytes;
+        output.put(',');
+        report_detail::key(output, "host_available_ram_bytes");
+        output << qualification.host_available_ram_bytes;
+        output.put(',');
+        report_detail::key(output, "effective_total_ram_bytes");
+        output << qualification.effective_total_ram_bytes;
+        output.put(',');
+        report_detail::key(output, "effective_available_ram_bytes");
+        output << qualification.effective_available_ram_bytes;
+        output.put(',');
+        report_detail::key(output, "cgroup_memory_total_limit_bytes");
+        output << qualification.cgroup_memory_total_limit_bytes;
+        output.put(',');
+        report_detail::key(output, "cgroup_memory_headroom_limit_bytes");
+        output << qualification.cgroup_memory_headroom_limit_bytes;
+        output.put(',');
+        report_detail::key(output, "cgroup_memory_current_bytes");
+        output << qualification.cgroup_memory_current_bytes;
+        output.put(',');
+        report_detail::key(output, "cgroup_memory_headroom_bytes");
+        output << qualification.cgroup_memory_headroom_bytes;
+        output.put(',');
+        report_detail::key(output, "cgroup_memory_version");
+        report_detail::write_string(
+            output, qualification.cgroup_memory_version);
+        output.put(',');
+        report_detail::key(output, "cgroup_memory_total_source");
+        report_detail::write_string(
+            output, qualification.cgroup_memory_total_source);
+        output.put(',');
+        report_detail::key(output, "cgroup_memory_headroom_source");
+        report_detail::write_string(
+            output, qualification.cgroup_memory_headroom_source);
+        output.put(',');
+        report_detail::key(output, "host_logical_cores");
+        output << qualification.host_logical_cores;
+        output.put(',');
+        report_detail::key(output, "affinity_logical_cores");
+        output << qualification.affinity_logical_cores;
+        output.put(',');
+        report_detail::key(output, "cpuset_logical_cores");
+        output << qualification.cpuset_logical_cores;
+        output.put(',');
+        report_detail::key(output, "cgroup_cpu_quota_microseconds");
+        output << qualification.cgroup_cpu_quota_microseconds;
+        output.put(',');
+        report_detail::key(output, "cgroup_cpu_period_microseconds");
+        output << qualification.cgroup_cpu_period_microseconds;
+        output.put(',');
+        report_detail::key(output, "cgroup_cpu_quota_cores");
+        output << qualification.cgroup_cpu_quota_cores;
+        output.put(',');
+        report_detail::key(output, "effective_cpu_cores");
+        output << qualification.effective_cpu_cores;
+        output.put(',');
+        report_detail::key(output, "cgroup_cpu_version");
+        report_detail::write_string(
+            output, qualification.cgroup_cpu_version);
+        output.put(',');
+        report_detail::key(output, "cgroup_cpu_source");
+        report_detail::write_string(
+            output, qualification.cgroup_cpu_source);
         output.put(',');
         report_detail::key(output, "required_total_ram_bytes");
         output << qualification.required_total_ram_bytes;

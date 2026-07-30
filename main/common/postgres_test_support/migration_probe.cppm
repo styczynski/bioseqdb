@@ -2,11 +2,15 @@ module;
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -14,6 +18,8 @@ module;
 #include <vector>
 
 export module bioseq.test.postgres:migration_probe;
+
+import :supervision;
 
 export namespace bioseq::postgres_test {
 
@@ -79,6 +85,44 @@ inline void validate_stable_id(std::string_view stable_id) {
                                         + std::string(stable_id));
         }
     }
+}
+
+[[nodiscard]] bool publish_snapshot(
+    std::span<const migration_probe_record> records) noexcept {
+    try {
+        std::ostringstream output;
+        output << "bioseq-watchdog-v1\tmigration-probes\t"
+               << records.size() << '\n';
+        for (const migration_probe_record& record : records) {
+            output << supervision_hex_encode(record.stable_id) << '\t'
+                   << supervision_hex_encode(record.test_case) << '\t'
+                   << supervision_hex_encode(record.section) << '\t'
+                   << supervision_hex_encode(record.permutation) << '\t'
+                   << (record.passed ? 1 : 0) << '\t'
+                   << record.ordinal << '\n';
+        }
+        return publish_supervision_snapshot(
+            "migration-probes.snapshot.tsv", output.str());
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] std::vector<std::string_view> snapshot_fields(
+    std::string_view line) {
+    std::vector<std::string_view> values;
+    std::size_t begin = 0;
+    while (begin <= line.size()) {
+        const std::size_t end = line.find('\t', begin);
+        values.push_back(line.substr(
+            begin, end == std::string_view::npos
+                ? std::string_view::npos : end - begin));
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1U;
+    }
+    return values;
 }
 
 }  // namespace bioseq::postgres_test::migration_probe_detail
@@ -158,8 +202,9 @@ inline void record_migration_probe(std::string_view stable_id) {
                 && record.permutation == context.permutation;
         });
     if (duplicate != registry.records.end()) {
-        throw migration_probe_error("duplicate migration probe emission: "
-                                    + std::string(stable_id));
+        throw migration_probe_error(
+            "duplicate migration probe emission: "
+            + std::string(stable_id));
     }
     registry.records.push_back(migration_probe_record{
         .stable_id = std::string(stable_id),
@@ -168,6 +213,8 @@ inline void record_migration_probe(std::string_view stable_id) {
         .permutation = context.permutation,
         .passed = true,
         .ordinal = registry.next_ordinal++});
+    static_cast<void>(
+        migration_probe_detail::publish_snapshot(registry.records));
 }
 
 /// @brief Returns a stable ordinal-ordered snapshot of all emitted probes.
@@ -193,6 +240,9 @@ inline void reconcile_migration_probe_case(
                 record.passed = false;
             }
         }
+        static_cast<void>(
+            migration_probe_detail::publish_snapshot(
+                registry.records));
     } catch (...) {
     }
 }
@@ -205,8 +255,87 @@ inline void clear_migration_probes() {
     registry.next_ordinal = 0;
 }
 
-/// @brief Requires exact per-id counts and rejects unlisted emitted probes.
-inline void validate_migration_probes(
+[[nodiscard]] inline bool publish_supervision_migration_probe_records(
+    std::span<const migration_probe_record> records) noexcept {
+    return migration_probe_detail::publish_snapshot(records);
+}
+
+[[nodiscard]] inline std::optional<std::vector<migration_probe_record>>
+load_supervision_migration_probe_records(
+    const std::filesystem::path& directory) noexcept {
+    try {
+        const auto payload = load_supervision_snapshot(
+            directory, "migration-probes.snapshot.tsv");
+        if (!payload) {
+            return std::nullopt;
+        }
+        std::istringstream input(*payload);
+        std::string line;
+        if (!std::getline(input, line)) {
+            return std::nullopt;
+        }
+        const auto header =
+            migration_probe_detail::snapshot_fields(line);
+        std::size_t count{};
+        if (header.size() != 3U
+            || header[0] != "bioseq-watchdog-v1"
+            || header[1] != "migration-probes") {
+            return std::nullopt;
+        }
+        const auto [count_end, count_error] = std::from_chars(
+            header[2].data(), header[2].data() + header[2].size(),
+            count);
+        if (count_error != std::errc{}
+            || count_end != header[2].data() + header[2].size()
+            || count > 1'000'000U) {
+            return std::nullopt;
+        }
+        std::vector<migration_probe_record> records;
+        records.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            if (!std::getline(input, line)) {
+                return std::nullopt;
+            }
+            const auto fields =
+                migration_probe_detail::snapshot_fields(line);
+            if (fields.size() != 6U
+                || (fields[4] != "0" && fields[4] != "1")) {
+                return std::nullopt;
+            }
+            const auto stable_id = supervision_hex_decode(fields[0]);
+            const auto test_case = supervision_hex_decode(fields[1]);
+            const auto section = supervision_hex_decode(fields[2]);
+            const auto permutation = supervision_hex_decode(fields[3]);
+            std::uint64_t ordinal{};
+            const auto [ordinal_end, ordinal_error] = std::from_chars(
+                fields[5].data(),
+                fields[5].data() + fields[5].size(), ordinal);
+            if (!stable_id || !test_case || !section || !permutation
+                || ordinal_error != std::errc{}
+                || ordinal_end
+                    != fields[5].data() + fields[5].size()) {
+                return std::nullopt;
+            }
+            records.push_back(migration_probe_record{
+                .stable_id = std::move(*stable_id),
+                .test_case = std::move(*test_case),
+                .section = std::move(*section),
+                .permutation = std::move(*permutation),
+                .passed = fields[4] == "1",
+                .ordinal = ordinal});
+        }
+        if (std::getline(input, line)) {
+            return std::nullopt;
+        }
+        return records;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+/// @brief Requires exact per-id counts for one explicitly selected probe set.
+inline void validate_migration_probe_records(
+    std::span<const migration_probe_record> records,
     std::span<const expected_migration_probe> expected) {
     std::map<std::string, std::size_t, std::less<>> expected_counts;
     for (const expected_migration_probe& item : expected) {
@@ -220,7 +349,7 @@ inline void validate_migration_probes(
         }
     }
     std::map<std::string, std::size_t, std::less<>> actual_counts;
-    for (const migration_probe_record& record : migration_probe_records()) {
+    for (const migration_probe_record& record : records) {
         if (!record.passed) {
             throw migration_probe_error("non-passing migration probe: "
                                         + record.stable_id);
@@ -251,6 +380,13 @@ inline void validate_migration_probes(
                 + std::to_string(observed));
         }
     }
+}
+
+/// @brief Validates every process-wide probe for compatibility callers.
+inline void validate_migration_probes(
+    std::span<const expected_migration_probe> expected) {
+    validate_migration_probe_records(
+        migration_probe_records(), expected);
 }
 
 }  // namespace bioseq::postgres_test

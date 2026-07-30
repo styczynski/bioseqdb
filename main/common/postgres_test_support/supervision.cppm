@@ -1,19 +1,36 @@
 module;
 
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/file.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <sys/sysctl.h>
+#endif
+
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
+#include <iterator>
+#include <limits>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -21,12 +38,48 @@ export module bioseq.test.postgres:supervision;
 
 export namespace bioseq::postgres_test {
 
+/// @brief Process identity stable across PID reuse and safe to signal.
+struct supervised_process_record {
+    std::uint64_t pid{};
+    std::string start_token;
+    std::filesystem::path executable;
+    std::int64_t process_group{};
+    std::filesystem::path data_directory;
+};
+
 /// @brief One cluster identity persisted for an out-of-process watchdog.
 struct supervised_cluster_record {
     std::filesystem::path root;
     std::filesystem::path data_directory;
     std::uint64_t postmaster_pid{};
     bool discover_postmaster_pid{};
+    std::string postmaster_start_token;
+    std::filesystem::path postmaster_executable;
+    std::int64_t postmaster_process_group{};
+};
+
+/// @brief Test-only fault stage for fail-closed registry contracts.
+enum class supervision_journal_fault {
+    none,
+    open,
+    write,
+    rename,
+    fsync,
+    close,
+    directory_sync
+};
+
+/// @brief One generation-consistent live-resource registry snapshot.
+struct supervised_registry_snapshot {
+    std::uint64_t generation{};
+    std::vector<supervised_cluster_record> clusters;
+    std::vector<supervised_process_record> processes;
+};
+
+/// @brief Opaque durable intent created before a supervised posix_spawn.
+struct supervised_process_launch_intent {
+    std::uint64_t id{};
+    bool supervision_required{};
 };
 
 }  // namespace bioseq::postgres_test
@@ -37,12 +90,27 @@ struct supervision_state {
     std::mutex mutex;
     std::optional<std::filesystem::path> directory;
     std::vector<supervised_cluster_record> clusters;
-    std::vector<std::uint64_t> processes;
+    std::vector<supervised_process_record> processes;
+    std::uint64_t generation{};
+    std::uint64_t next_launch_id{};
+    std::vector<std::uint64_t> pending_process_launches;
 };
 
 [[nodiscard]] inline supervision_state& process_state() {
     static supervision_state state;
     return state;
+}
+
+[[nodiscard]] inline std::mutex& snapshot_publish_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+[[nodiscard]] inline std::atomic<supervision_journal_fault>&
+journal_fault() {
+    static std::atomic<supervision_journal_fault> fault{
+        supervision_journal_fault::none};
+    return fault;
 }
 
 [[nodiscard]] inline std::string hex_encode(std::string_view value) {
@@ -86,67 +154,417 @@ struct supervision_state {
     return decoded;
 }
 
-void publish_clusters_locked(supervision_state& state) {
-    if (!state.directory) {
-        return;
+[[nodiscard]] std::optional<std::string> process_start_token(
+    std::uint64_t pid) {
+#if defined(__linux__)
+    std::ifstream input(
+        std::filesystem::path("/proc") / std::to_string(pid) / "stat");
+    std::string line;
+    if (!input || !std::getline(input, line)) {
+        return std::nullopt;
     }
-    const std::filesystem::path path = *state.directory / "clusters.tsv";
-    const std::filesystem::path partial =
-        *state.directory / "clusters.tsv.partial";
-    std::ofstream output(partial, std::ios::trunc);
-    if (!output) {
-        return;
+    const std::size_t command_end = line.rfind(')');
+    if (command_end == std::string::npos
+        || command_end + 2U >= line.size()) {
+        return std::nullopt;
     }
+    std::istringstream fields(line.substr(command_end + 2U));
+    std::string value;
+    for (int field = 3; field <= 21; ++field) {
+        fields >> value;
+    }
+    fields >> value;
+    if (!fields || value.empty()) {
+        return std::nullopt;
+    }
+    return value;
+#elif defined(__APPLE__)
+    proc_bsdinfo information{};
+    if (::proc_pidinfo(
+            static_cast<int>(pid), PROC_PIDTBSDINFO, 0,
+            &information, sizeof(information))
+        != static_cast<int>(sizeof(information))) {
+        return std::nullopt;
+    }
+    return std::to_string(information.pbi_start_tvsec) + ":"
+        + std::to_string(information.pbi_start_tvusec);
+#else
+    static_cast<void>(pid);
+    return std::nullopt;
+#endif
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> process_executable(
+    std::uint64_t pid) {
+    try {
+#if defined(__linux__)
+        return std::filesystem::canonical(
+            std::filesystem::path("/proc") / std::to_string(pid) / "exe");
+#elif defined(__APPLE__)
+        std::vector<char> path(PROC_PIDPATHINFO_MAXSIZE);
+        const int length = ::proc_pidpath(
+            static_cast<int>(pid), path.data(),
+            static_cast<std::uint32_t>(path.size()));
+        if (length <= 0) {
+            return std::nullopt;
+        }
+        return std::filesystem::canonical(path.data());
+#else
+        static_cast<void>(pid);
+        return std::nullopt;
+#endif
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> canonical_expected(
+    const std::filesystem::path& path) {
+    if (path.empty()) {
+        return std::nullopt;
+    }
+    try {
+        return std::filesystem::canonical(path);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] std::optional<std::vector<std::string>> process_arguments(
+    std::uint64_t pid) {
+    try {
+#if defined(__linux__)
+        std::ifstream input(
+            std::filesystem::path("/proc") / std::to_string(pid)
+                / "cmdline",
+            std::ios::binary);
+        if (!input) {
+            return std::nullopt;
+        }
+        const std::string payload{
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
+        if (input.bad() || payload.size() > 1024U * 1024U) {
+            return std::nullopt;
+        }
+        std::vector<std::string> arguments;
+        std::size_t begin = 0;
+        while (begin < payload.size()) {
+            const std::size_t end = payload.find('\0', begin);
+            if (end == std::string::npos) {
+                return std::nullopt;
+            }
+            arguments.emplace_back(
+                payload.substr(begin, end - begin));
+            begin = end + 1U;
+        }
+        return arguments;
+#elif defined(__APPLE__)
+        if (pid > static_cast<std::uint64_t>(
+                std::numeric_limits<int>::max())) {
+            return std::nullopt;
+        }
+        int query[] = {
+            CTL_KERN, KERN_PROCARGS2, static_cast<int>(pid)};
+        std::size_t size{};
+        if (::sysctl(query, 3, nullptr, &size, nullptr, 0) != 0
+            || size < sizeof(int) || size > 1024U * 1024U) {
+            return std::nullopt;
+        }
+        std::vector<char> payload(size);
+        if (::sysctl(
+                query, 3, payload.data(), &size, nullptr, 0)
+            != 0
+            || size < sizeof(int)) {
+            return std::nullopt;
+        }
+        int argument_count{};
+        std::memcpy(
+            &argument_count, payload.data(), sizeof(argument_count));
+        if (argument_count <= 0 || argument_count > 4096) {
+            return std::nullopt;
+        }
+        std::size_t cursor = sizeof(argument_count);
+        while (cursor < size && payload[cursor] != '\0') {
+            ++cursor;
+        }
+        while (cursor < size && payload[cursor] == '\0') {
+            ++cursor;
+        }
+        std::vector<std::string> arguments;
+        arguments.reserve(static_cast<std::size_t>(argument_count));
+        for (int index = 0; index < argument_count; ++index) {
+            const std::size_t begin = cursor;
+            while (cursor < size && payload[cursor] != '\0') {
+                ++cursor;
+            }
+            if (cursor >= size) {
+                return std::nullopt;
+            }
+            arguments.emplace_back(
+                payload.data() + begin, cursor - begin);
+            while (cursor < size && payload[cursor] == '\0') {
+                ++cursor;
+            }
+        }
+        return arguments;
+#else
+        static_cast<void>(pid);
+        return std::nullopt;
+#endif
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] bool process_uses_data_directory(
+    std::uint64_t pid,
+    const std::filesystem::path& data_directory) {
+    const auto arguments = process_arguments(pid);
+    const auto canonical_data = canonical_expected(data_directory);
+    if (!arguments || !canonical_data) {
+        return false;
+    }
+    for (std::size_t index = 0; index < arguments->size(); ++index) {
+        std::optional<std::filesystem::path> supplied;
+        if ((*arguments)[index] == "-D"
+            && index + 1U < arguments->size()) {
+            supplied = (*arguments)[index + 1U];
+        } else if ((*arguments)[index].starts_with("-D")
+                   && (*arguments)[index].size() > 2U) {
+            supplied = (*arguments)[index].substr(2U);
+        }
+        if (supplied) {
+            const auto canonical_supplied =
+                canonical_expected(*supplied);
+            return canonical_supplied
+                && *canonical_supplied == *canonical_data;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool sync_directory(
+    const std::filesystem::path& directory) noexcept {
+    const int descriptor = ::open(directory.c_str(), O_RDONLY);
+    if (descriptor < 0) {
+        return false;
+    }
+    const bool succeeded = ::fsync(descriptor) == 0;
+    const bool closed = ::close(descriptor) == 0;
+    return succeeded && closed;
+}
+
+class decision_lock_guard {
+public:
+    explicit decision_lock_guard(int descriptor) noexcept
+        : descriptor_(descriptor) {}
+
+    decision_lock_guard(const decision_lock_guard&) = delete;
+    decision_lock_guard& operator=(const decision_lock_guard&) = delete;
+
+    decision_lock_guard(decision_lock_guard&& other) noexcept
+        : descriptor_(std::exchange(other.descriptor_, -1)) {}
+
+    ~decision_lock_guard() noexcept {
+        if (descriptor_ >= 0) {
+            static_cast<void>(::flock(descriptor_, LOCK_UN));
+            static_cast<void>(::close(descriptor_));
+        }
+    }
+
+private:
+    int descriptor_{};
+};
+
+[[nodiscard]] inline std::optional<decision_lock_guard>
+acquire_decision_lock(
+    const std::filesystem::path& directory,
+    int operation) noexcept {
+    const int descriptor = ::open(
+        (directory / ".decision.lock").c_str(),
+        O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (descriptor < 0) {
+        return std::nullopt;
+    }
+    int status{};
+    do {
+        status = ::flock(descriptor, operation);
+    } while (status != 0 && errno == EINTR);
+    if (status != 0) {
+        static_cast<void>(::close(descriptor));
+        return std::nullopt;
+    }
+    return decision_lock_guard{descriptor};
+}
+
+[[nodiscard]] inline bool valid_decision_file(
+    const std::filesystem::path& path) noexcept {
+    try {
+        std::error_code size_error;
+        const std::uintmax_t size =
+            std::filesystem::file_size(path, size_error);
+        if (size_error || size == 0 || size > 1024U) {
+            return false;
+        }
+        std::ifstream input(path, std::ios::binary);
+        const std::string payload{
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
+        constexpr std::string_view prefix{
+            "bioseq-supervision-decision-v1\t"};
+        if (!input || input.bad() || !payload.starts_with(prefix)
+            || payload.back() != '\n'
+            || payload.find('\n') != payload.size() - 1U) {
+            return false;
+        }
+        const std::string_view encoded(payload.data() + prefix.size(),
+                                       payload.size() - prefix.size() - 1U);
+        const auto owner = hex_decode(encoded);
+        return owner && !owner->empty() && owner->size() <= 256U;
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] inline bool write_durable_file(
+    const std::filesystem::path& path,
+    std::string_view payload,
+    bool inject_fault) noexcept {
+    try {
+        const supervision_journal_fault fault = inject_fault
+            ? journal_fault().load(std::memory_order_relaxed)
+            : supervision_journal_fault::none;
+        if (fault == supervision_journal_fault::open) {
+            return false;
+        }
+        const std::filesystem::path partial =
+            path.parent_path()
+            / (path.filename().string() + ".partial");
+        const int descriptor = ::open(
+            partial.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (descriptor < 0) {
+            return false;
+        }
+        bool succeeded = fault != supervision_journal_fault::write;
+        std::size_t offset = 0;
+        while (succeeded && offset < payload.size()) {
+            const ssize_t written = ::write(
+                descriptor, payload.data() + offset,
+                payload.size() - offset);
+            if (written <= 0) {
+                succeeded = false;
+            } else {
+                offset += static_cast<std::size_t>(written);
+            }
+        }
+        succeeded = succeeded && ::fsync(descriptor) == 0;
+        succeeded = ::close(descriptor) == 0 && succeeded;
+        if (!succeeded
+            || fault == supervision_journal_fault::rename) {
+            return false;
+        }
+        std::error_code rename_error;
+        std::filesystem::rename(partial, path, rename_error);
+        return !rename_error && sync_directory(path.parent_path());
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] inline std::string registry_header(
+    std::uint64_t generation) {
+    return "bioseq-supervision-registry-v1\t"
+        + std::to_string(generation) + "\n";
+}
+
+[[nodiscard]] inline std::string serialize_clusters(
+    const supervision_state& state) {
+    std::ostringstream output;
+    output << registry_header(state.generation);
     for (const supervised_cluster_record& cluster : state.clusters) {
         output << hex_encode(cluster.root.string()) << '\t'
                << hex_encode(cluster.data_directory.string()) << '\t'
                << cluster.postmaster_pid << '\t'
-               << (cluster.discover_postmaster_pid ? 1 : 0) << '\n';
+               << (cluster.discover_postmaster_pid ? 1 : 0) << '\t'
+               << hex_encode(cluster.postmaster_start_token) << '\t'
+               << hex_encode(cluster.postmaster_executable.string()) << '\t'
+               << cluster.postmaster_process_group << '\n';
     }
-    output.close();
-    if (!output) {
-        return;
-    }
-    std::error_code error;
-    std::filesystem::rename(partial, path, error);
-    if (error) {
-        std::filesystem::remove(path, error);
-        error.clear();
-        std::filesystem::rename(partial, path, error);
-    }
+    return output.str();
 }
 
-void publish_processes_locked(supervision_state& state) {
-    if (!state.directory) {
-        return;
+[[nodiscard]] inline std::string serialize_processes(
+    const supervision_state& state) {
+    std::ostringstream output;
+    output << registry_header(state.generation);
+    for (const supervised_process_record& process : state.processes) {
+        output << process.pid << '\t'
+               << hex_encode(process.start_token) << '\t'
+               << hex_encode(process.executable.string()) << '\t'
+               << process.process_group << '\t'
+               << hex_encode(process.data_directory.string()) << '\n';
     }
-    const std::filesystem::path path =
-        *state.directory / "processes.tsv";
-    const std::filesystem::path partial =
-        *state.directory / "processes.tsv.partial";
-    std::ofstream output(partial, std::ios::trunc);
-    if (!output) {
-        return;
+    return output.str();
+}
+
+[[nodiscard]] inline bool begin_registry_update_locked(
+    supervision_state& state) noexcept {
+    if (!state.directory
+        || state.generation
+            == std::numeric_limits<std::uint64_t>::max()) {
+        return false;
     }
-    for (const std::uint64_t pid : state.processes) {
-        output << pid << '\n';
+    const std::uint64_t generation = state.generation + 1U;
+    if (!write_durable_file(
+            *state.directory / "registries.dirty",
+            std::to_string(generation) + "\n", false)) {
+        return false;
     }
-    output.close();
-    if (!output) {
-        return;
-    }
-    std::error_code error;
-    std::filesystem::rename(partial, path, error);
-    if (error) {
-        std::filesystem::remove(path, error);
-        error.clear();
-        std::filesystem::rename(partial, path, error);
+    state.generation = generation;
+    return true;
+}
+
+[[nodiscard]] inline bool publish_registries_locked(
+    supervision_state& state) noexcept {
+    try {
+        if (!state.directory
+            || !write_durable_file(
+                *state.directory / "clusters.tsv",
+                serialize_clusters(state), true)
+            || !write_durable_file(
+                *state.directory / "processes.tsv",
+                serialize_processes(state), true)) {
+            return false;
+        }
+        if (!state.pending_process_launches.empty()) {
+            return true;
+        }
+        if (!write_durable_file(
+                *state.directory / "registries.clean",
+                registry_header(state.generation), true)) {
+            return false;
+        }
+        std::error_code remove_error;
+        const bool removed = std::filesystem::remove(
+            *state.directory / "registries.dirty", remove_error);
+        return removed && !remove_error
+            && sync_directory(*state.directory);
+    } catch (...) {
+        return false;
     }
 }
 
 }  // namespace bioseq::postgres_test::supervision_detail
 
 export namespace bioseq::postgres_test {
+
+/// @brief Selects one deterministic registry I/O failure for contracts.
+inline void set_supervision_journal_fault_for_testing(
+    supervision_journal_fault fault) noexcept {
+    supervision_detail::journal_fault().store(
+        fault, std::memory_order_relaxed);
+}
 
 /// @brief Encodes arbitrary journal text without delimiter ambiguity.
 [[nodiscard]] inline std::string supervision_hex_encode(
@@ -164,21 +582,27 @@ export namespace bioseq::postgres_test {
 inline void configure_supervision_state(
     const std::filesystem::path& directory) {
     std::filesystem::create_directories(directory);
-    std::ofstream marker(
-        directory / ".bioseq-watchdog-state", std::ios::trunc);
-    marker << ::getpid() << '\n';
-    marker.close();
-    if (!marker) {
+    const std::filesystem::path absolute =
+        std::filesystem::absolute(directory);
+    if (!supervision_detail::write_durable_file(
+            absolute / ".bioseq-watchdog-state",
+            std::to_string(::getpid()) + "\n", false)) {
         throw std::runtime_error(
             "cannot create watchdog-state ownership marker");
     }
     auto& state = supervision_detail::process_state();
     std::scoped_lock lock(state.mutex);
-    state.directory = std::filesystem::absolute(directory);
+    state.directory = absolute;
     state.clusters.clear();
     state.processes.clear();
-    supervision_detail::publish_clusters_locked(state);
-    supervision_detail::publish_processes_locked(state);
+    state.generation = 0;
+    state.next_launch_id = 0;
+    state.pending_process_launches.clear();
+    if (!supervision_detail::begin_registry_update_locked(state)
+        || !supervision_detail::publish_registries_locked(state)) {
+        throw std::runtime_error(
+            "cannot initialize durable live-resource registries");
+    }
 }
 
 /// @brief Disables journals without removing watchdog-owned evidence.
@@ -189,6 +613,9 @@ inline void disable_supervision_state() noexcept {
         state.directory.reset();
         state.clusters.clear();
         state.processes.clear();
+        state.generation = 0;
+        state.next_launch_id = 0;
+        state.pending_process_launches.clear();
     } catch (...) {
     }
 }
@@ -201,160 +628,863 @@ supervision_state_directory() {
     return state.directory;
 }
 
-/// @brief Publishes one shell-free lifecycle child for timeout cleanup.
-inline void register_supervised_process(std::uint64_t pid) noexcept {
+/// @brief Captures a PID-reuse-resistant identity and verifies its executable.
+[[nodiscard]] inline std::optional<supervised_process_record>
+capture_supervised_process(
+    std::uint64_t pid,
+    const std::filesystem::path& expected_executable = {},
+    const std::filesystem::path& data_directory = {}) noexcept {
     try {
-        if (pid <= 1) {
-            return;
+        if (pid <= 1
+            || pid > static_cast<std::uint64_t>(
+                std::numeric_limits<pid_t>::max())) {
+            return std::nullopt;
+        }
+        const auto start_token =
+            supervision_detail::process_start_token(pid);
+        const auto executable =
+            supervision_detail::process_executable(pid);
+        const pid_t group = ::getpgid(static_cast<pid_t>(pid));
+        if (!start_token || start_token->empty() || !executable
+            || group <= 1) {
+            return std::nullopt;
+        }
+        if (!expected_executable.empty()) {
+            const auto canonical_expected =
+                supervision_detail::canonical_expected(
+                    expected_executable);
+            if (!canonical_expected || *canonical_expected != *executable) {
+                return std::nullopt;
+            }
+        }
+        return supervised_process_record{
+            .pid = pid,
+            .start_token = *start_token,
+            .executable = *executable,
+            .process_group = static_cast<std::int64_t>(group),
+            .data_directory = data_directory};
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+/// @brief True only while the PID still denotes the captured executable/run.
+[[nodiscard]] inline bool supervised_process_matches(
+    const supervised_process_record& process) noexcept {
+    if (process.pid <= 1 || process.start_token.empty()
+        || process.executable.empty() || process.process_group <= 1) {
+        return false;
+    }
+    const auto current = capture_supervised_process(
+        process.pid, process.executable, process.data_directory);
+    return current
+        && current->start_token == process.start_token;
+}
+
+/// @brief True only while the identity remains in its captured process group.
+[[nodiscard]] inline bool supervised_process_group_matches(
+    const supervised_process_record& process) noexcept {
+    if (!supervised_process_matches(process)) {
+        return false;
+    }
+    const auto current = capture_supervised_process(
+        process.pid, process.executable, process.data_directory);
+    return current
+        && current->start_token == process.start_token
+        && current->process_group == process.process_group;
+}
+
+/// @brief Proves a live postgres identity is bound to this exact PGDATA.
+///
+/// The proof requires identity continuity, a stable postmaster.pid whose
+/// first two fields name the PID and canonical PGDATA, a valid start-time
+/// field, and an OS-observed `-D` argument naming the same directory.
+[[nodiscard]] inline bool supervised_postmaster_matches_data_directory(
+    const supervised_process_record& process) noexcept {
+    try {
+        if (process.data_directory.empty()
+            || !supervised_process_matches(process)
+            || !supervision_detail::process_uses_data_directory(
+                process.pid, process.data_directory)) {
+            return false;
+        }
+        std::ifstream input(
+            process.data_directory / "postmaster.pid");
+        std::string pid_line;
+        std::string data_line;
+        std::string start_line;
+        if (!std::getline(input, pid_line)
+            || !std::getline(input, data_line)
+            || !std::getline(input, start_line)) {
+            return false;
+        }
+        std::uint64_t pid{};
+        const auto [pid_end, pid_error] = std::from_chars(
+            pid_line.data(), pid_line.data() + pid_line.size(), pid);
+        std::uint64_t start_time{};
+        const auto [start_end, start_error] = std::from_chars(
+            start_line.data(),
+            start_line.data() + start_line.size(), start_time);
+        if (pid_error != std::errc{}
+            || pid_end != pid_line.data() + pid_line.size()
+            || pid != process.pid || start_error != std::errc{}
+            || start_end != start_line.data() + start_line.size()
+            || start_time == 0) {
+            return false;
+        }
+        const auto canonical_data =
+            supervision_detail::canonical_expected(
+                process.data_directory);
+        const auto canonical_pidfile_data =
+            supervision_detail::canonical_expected(
+                std::filesystem::path(data_line));
+        return canonical_data && canonical_pidfile_data
+            && *canonical_data == *canonical_pidfile_data;
+    } catch (...) {
+        return false;
+    }
+}
+
+/// @brief True only when no process remains in the recorded process group.
+[[nodiscard]] inline bool supervised_process_group_absent(
+    std::int64_t process_group) noexcept {
+    if (process_group <= 1
+        || process_group
+            > static_cast<std::int64_t>(
+                std::numeric_limits<pid_t>::max())) {
+        return true;
+    }
+    if (::kill(-static_cast<pid_t>(process_group), 0) == 0) {
+        return false;
+    }
+    return errno == ESRCH;
+}
+
+/// @brief Atomically elects disarm or timeout ownership for one watchdog.
+[[nodiscard]] inline bool try_claim_supervision_decision(
+    const std::filesystem::path& directory,
+    std::string_view owner) noexcept {
+    try {
+        if (owner.empty() || owner.size() > 256U
+            || !std::filesystem::is_regular_file(
+                directory / ".bioseq-watchdog-state")) {
+            return false;
+        }
+        const auto decision_lock =
+            supervision_detail::acquire_decision_lock(
+                directory, LOCK_EX);
+        if (!decision_lock) {
+            return false;
+        }
+        const std::filesystem::path decision =
+            directory / "decision";
+        std::error_code decision_error;
+        if (std::filesystem::exists(decision, decision_error)) {
+            if (decision_error
+                || supervision_detail::valid_decision_file(
+                    decision)) {
+                return false;
+            }
+            if (!std::filesystem::remove(
+                    decision, decision_error)
+                || decision_error
+                || !supervision_detail::sync_directory(directory)) {
+                return false;
+            }
+        } else if (decision_error) {
+            return false;
+        }
+        const supervision_journal_fault fault =
+            supervision_detail::journal_fault().load(
+                std::memory_order_relaxed);
+        if (fault == supervision_journal_fault::open) {
+            return false;
+        }
+        std::string pattern =
+            (directory / ".decision-XXXXXX").string();
+        std::vector<char> writable(
+            pattern.begin(), pattern.end());
+        writable.push_back('\0');
+        const int descriptor = ::mkstemp(writable.data());
+        if (descriptor < 0) {
+            return false;
+        }
+        const std::filesystem::path staged{writable.data()};
+        if (::fcntl(descriptor, F_SETFD, FD_CLOEXEC) != 0) {
+            static_cast<void>(::close(descriptor));
+            std::error_code remove_error;
+            static_cast<void>(
+                std::filesystem::remove(staged, remove_error));
+            static_cast<void>(
+                supervision_detail::sync_directory(directory));
+            return false;
+        }
+        const std::string payload =
+            "bioseq-supervision-decision-v1\t"
+            + supervision_detail::hex_encode(owner) + "\n";
+        bool succeeded =
+            fault != supervision_journal_fault::write;
+        std::size_t offset = 0;
+        while (succeeded && offset < payload.size()) {
+            const ssize_t written = ::write(
+                descriptor, payload.data() + offset,
+                payload.size() - offset);
+            if (written < 0 && errno == EINTR) {
+                continue;
+            }
+            if (written <= 0) {
+                succeeded = false;
+            } else {
+                offset += static_cast<std::size_t>(written);
+            }
+        }
+        if (succeeded) {
+            if (fault == supervision_journal_fault::fsync) {
+                succeeded = false;
+            } else {
+                int sync_status{};
+                do {
+                    sync_status = ::fsync(descriptor);
+                } while (sync_status != 0 && errno == EINTR);
+                succeeded = sync_status == 0;
+            }
+        }
+        const int close_status = ::close(descriptor);
+        succeeded =
+            close_status == 0
+            && fault != supervision_journal_fault::close
+            && succeeded;
+        if (!succeeded) {
+            std::error_code remove_error;
+            static_cast<void>(
+                std::filesystem::remove(staged, remove_error));
+            static_cast<void>(
+                supervision_detail::sync_directory(directory));
+            return false;
+        }
+        if (fault == supervision_journal_fault::rename
+            || ::link(staged.c_str(), decision.c_str()) != 0) {
+            std::error_code remove_error;
+            static_cast<void>(
+                std::filesystem::remove(staged, remove_error));
+            static_cast<void>(
+                supervision_detail::sync_directory(directory));
+            return false;
+        }
+        std::error_code staged_remove_error;
+        const bool staged_removed = std::filesystem::remove(
+            staged, staged_remove_error);
+        if (fault == supervision_journal_fault::directory_sync) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(200));
+            succeeded = false;
+        } else {
+            succeeded =
+                staged_removed && !staged_remove_error
+                && supervision_detail::sync_directory(directory);
+        }
+        if (!succeeded) {
+            std::error_code remove_error;
+            const bool decision_removed =
+                std::filesystem::remove(decision, remove_error);
+            const bool decision_absent =
+                decision_removed || !remove_error;
+            remove_error.clear();
+            static_cast<void>(
+                std::filesystem::remove(staged, remove_error));
+            static_cast<void>(
+                supervision_detail::sync_directory(directory));
+            return !decision_absent
+                && supervision_detail::valid_decision_file(decision);
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+/// @brief Reports whether either side has already claimed the watchdog.
+[[nodiscard]] inline bool supervision_decision_claimed(
+    const std::filesystem::path& directory) noexcept {
+    try {
+        if (!std::filesystem::is_regular_file(
+                directory / ".bioseq-watchdog-state")) {
+            return false;
+        }
+        const auto decision_lock =
+            supervision_detail::acquire_decision_lock(
+                directory, LOCK_SH);
+        return decision_lock
+            && supervision_detail::valid_decision_file(
+                directory / "decision");
+    } catch (...) {
+        return false;
+    }
+}
+
+/// @brief Atomically replaces one bounded watchdog evidence snapshot.
+[[nodiscard]] inline bool publish_supervision_snapshot(
+    std::string_view basename,
+    std::string_view payload) noexcept {
+    try {
+        if (basename.empty() || basename.size() > 80U
+            || payload.size() > 64U * 1024U * 1024U) {
+            return false;
+        }
+        for (const char character : basename) {
+            const bool valid =
+                (character >= 'a' && character <= 'z')
+                || (character >= '0' && character <= '9')
+                || character == '-' || character == '.';
+            if (!valid) {
+                return false;
+            }
+        }
+        std::scoped_lock publish_lock(
+            supervision_detail::snapshot_publish_mutex());
+        const auto directory = supervision_state_directory();
+        if (!directory) {
+            return false;
+        }
+        const std::filesystem::path destination =
+            *directory / std::string(basename);
+        const std::filesystem::path partial =
+            *directory / (std::string(basename) + ".partial");
+        std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            return false;
+        }
+        output.write(
+            payload.data(), static_cast<std::streamsize>(payload.size()));
+        output.close();
+        if (!output) {
+            std::error_code remove_error;
+            std::filesystem::remove(partial, remove_error);
+            return false;
+        }
+        std::error_code rename_error;
+        std::filesystem::rename(partial, destination, rename_error);
+        if (rename_error) {
+            std::error_code remove_error;
+            std::filesystem::remove(partial, remove_error);
+            return false;
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+/// @brief Loads only a complete final watchdog evidence snapshot.
+[[nodiscard]] inline std::optional<std::string>
+load_supervision_snapshot(
+    const std::filesystem::path& directory,
+    std::string_view basename) noexcept {
+    try {
+        if (basename.empty() || basename.size() > 80U) {
+            return std::nullopt;
+        }
+        for (const char character : basename) {
+            const bool valid =
+                (character >= 'a' && character <= 'z')
+                || (character >= '0' && character <= '9')
+                || character == '-' || character == '.';
+            if (!valid) {
+                return std::nullopt;
+            }
+        }
+        const std::filesystem::path path =
+            directory / std::string(basename);
+        std::error_code size_error;
+        const std::uintmax_t size =
+            std::filesystem::file_size(path, size_error);
+        if (size_error || size > 64U * 1024U * 1024U) {
+            return std::nullopt;
+        }
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            return std::nullopt;
+        }
+        std::string payload{
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
+        if (input.bad()) {
+            return std::nullopt;
+        }
+        return payload;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+/// @brief Durably marks a supervised child launch before posix_spawn.
+[[nodiscard]] inline std::optional<supervised_process_launch_intent>
+begin_supervised_process_launch() noexcept {
+    try {
+        auto& state = supervision_detail::process_state();
+        std::scoped_lock lock(state.mutex);
+        if (!state.directory) {
+            return supervised_process_launch_intent{};
+        }
+        if (state.next_launch_id
+                == std::numeric_limits<std::uint64_t>::max()
+            || !supervision_detail::begin_registry_update_locked(
+                state)) {
+            return std::nullopt;
+        }
+        const std::uint64_t id = ++state.next_launch_id;
+        state.pending_process_launches.push_back(id);
+        return supervised_process_launch_intent{
+            .id = id,
+            .supervision_required = true};
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+/// @brief Commits the exact spawned child into its pre-launch dirty generation.
+inline bool commit_supervised_process_launch(
+    supervised_process_launch_intent intent,
+    std::uint64_t pid,
+    const std::filesystem::path& executable = {},
+    const std::filesystem::path& data_directory = {}) noexcept {
+    try {
+        if (!intent.supervision_required) {
+            return true;
+        }
+        if (intent.id == 0 || pid <= 1) {
+            return false;
+        }
+        auto& state = supervision_detail::process_state();
+        std::scoped_lock lock(state.mutex);
+        const auto pending = std::ranges::find(
+            state.pending_process_launches, intent.id);
+        if (!state.directory
+            || pending == state.pending_process_launches.end()) {
+            return false;
+        }
+        const auto process =
+            capture_supervised_process(pid, executable, data_directory);
+        if (!process) {
+            return false;
+        }
+        state.processes.erase(
+            std::remove_if(
+                state.processes.begin(), state.processes.end(),
+                [pid](const supervised_process_record& current) {
+                    return current.pid == pid;
+                }),
+            state.processes.end());
+        state.processes.push_back(*process);
+        state.pending_process_launches.erase(pending);
+        return !state.pending_process_launches.empty()
+            || supervision_detail::publish_registries_locked(state);
+    } catch (...) {
+        return false;
+    }
+}
+
+/// @brief Cancels one failed launch while preserving dirty state on I/O error.
+inline bool cancel_supervised_process_launch(
+    supervised_process_launch_intent intent,
+    std::uint64_t pid = 0) noexcept {
+    try {
+        if (!intent.supervision_required) {
+            return true;
         }
         auto& state = supervision_detail::process_state();
         std::scoped_lock lock(state.mutex);
         if (!state.directory) {
-            return;
+            return false;
         }
-        if (std::find(
-                state.processes.begin(), state.processes.end(), pid)
-            == state.processes.end()) {
-            state.processes.push_back(pid);
+        const auto pending = std::ranges::find(
+            state.pending_process_launches, intent.id);
+        if (pending != state.pending_process_launches.end()) {
+            state.pending_process_launches.erase(pending);
         }
-        supervision_detail::publish_processes_locked(state);
+        if (pid > 1) {
+            state.processes.erase(
+                std::remove_if(
+                    state.processes.begin(), state.processes.end(),
+                    [pid](const supervised_process_record& current) {
+                        return current.pid == pid;
+                    }),
+                state.processes.end());
+        }
+        return !state.pending_process_launches.empty()
+            || supervision_detail::publish_registries_locked(state);
     } catch (...) {
+        return false;
     }
 }
 
 /// @brief Removes one reaped lifecycle child from timeout ownership.
-inline void unregister_supervised_process(std::uint64_t pid) noexcept {
+inline bool unregister_supervised_process(std::uint64_t pid) noexcept {
     try {
         auto& state = supervision_detail::process_state();
         std::scoped_lock lock(state.mutex);
         if (!state.directory) {
-            return;
+            return true;
         }
-        state.processes.erase(
-            std::remove(
-                state.processes.begin(), state.processes.end(), pid),
-            state.processes.end());
-        supervision_detail::publish_processes_locked(state);
+        if (std::ranges::none_of(
+                state.processes,
+                [pid](const supervised_process_record& current) {
+                    return current.pid == pid;
+                })) {
+            return supervision_detail::begin_registry_update_locked(state)
+                && supervision_detail::publish_registries_locked(state);
+        }
+        auto candidate = state.processes;
+        candidate.erase(
+            std::remove_if(
+                candidate.begin(), candidate.end(),
+                [pid](const supervised_process_record& current) {
+                    return current.pid == pid;
+                }),
+            candidate.end());
+        if (!supervision_detail::begin_registry_update_locked(state)) {
+            return false;
+        }
+        state.processes.swap(candidate);
+        if (supervision_detail::publish_registries_locked(state)) {
+            return true;
+        }
+        state.processes.swap(candidate);
+        return false;
     } catch (...) {
+        return false;
     }
-}
-
-/// @brief Loads lifecycle process groups that were live at runner freeze.
-[[nodiscard]] inline std::vector<std::uint64_t>
-load_supervised_processes(const std::filesystem::path& directory) {
-    std::ifstream input(directory / "processes.tsv");
-    std::vector<std::uint64_t> processes;
-    std::string line;
-    while (std::getline(input, line)) {
-        std::uint64_t pid{};
-        const auto [end, error] = std::from_chars(
-            line.data(), line.data() + line.size(), pid);
-        if (error == std::errc{} && end == line.data() + line.size()
-            && pid > 1) {
-            processes.push_back(pid);
-        }
-    }
-    return processes;
 }
 
 /// @brief Atomically publishes one live private cluster for its watchdog.
 inline void register_supervised_cluster(
-    supervised_cluster_record cluster) noexcept {
-    try {
-        auto& state = supervision_detail::process_state();
-        std::scoped_lock lock(state.mutex);
-        if (!state.directory) {
-            return;
+    supervised_cluster_record cluster) {
+    auto& state = supervision_detail::process_state();
+    std::scoped_lock lock(state.mutex);
+    if (!state.directory) {
+        return;
+    }
+    if (cluster.postmaster_pid > 1
+        && cluster.postmaster_start_token.empty()) {
+        if (const auto process = capture_supervised_process(
+                cluster.postmaster_pid,
+                cluster.postmaster_executable,
+                cluster.data_directory);
+            process
+            && supervised_postmaster_matches_data_directory(
+                *process)) {
+            cluster.postmaster_start_token = process->start_token;
+            cluster.postmaster_executable = process->executable;
+            cluster.postmaster_process_group =
+                process->process_group;
         }
-        state.clusters.erase(
-            std::remove_if(
-                state.clusters.begin(), state.clusters.end(),
-                [&cluster](const supervised_cluster_record& current) {
-                    return current.root == cluster.root;
-                }),
-            state.clusters.end());
-        state.clusters.push_back(std::move(cluster));
-        supervision_detail::publish_clusters_locked(state);
-    } catch (...) {
+    }
+    if (cluster.postmaster_pid > 1
+        && cluster.postmaster_start_token.empty()
+        && !cluster.discover_postmaster_pid) {
+        throw std::runtime_error(
+            "cannot journal an unverified postmaster identity");
+    }
+    auto candidate = state.clusters;
+    candidate.erase(
+        std::remove_if(
+            candidate.begin(), candidate.end(),
+            [&cluster](const supervised_cluster_record& current) {
+                return current.root == cluster.root;
+            }),
+        candidate.end());
+    candidate.push_back(std::move(cluster));
+    if (!supervision_detail::begin_registry_update_locked(state)) {
+        throw std::runtime_error(
+            "cannot mark live-resource registries dirty");
+    }
+    state.clusters.swap(candidate);
+    if (!supervision_detail::publish_registries_locked(state)) {
+        throw std::runtime_error(
+            "cannot durably publish live-resource registries");
     }
 }
 
 /// @brief Removes one stopped/cleaned cluster from the watchdog registry.
-inline void unregister_supervised_cluster(
+inline bool unregister_supervised_cluster(
     const std::filesystem::path& root) noexcept {
     try {
         auto& state = supervision_detail::process_state();
         std::scoped_lock lock(state.mutex);
         if (!state.directory) {
-            return;
+            return true;
         }
-        state.clusters.erase(
+        if (std::ranges::none_of(
+                state.clusters,
+                [&root](const supervised_cluster_record& current) {
+                    return current.root == root;
+                })) {
+            return supervision_detail::begin_registry_update_locked(state)
+                && supervision_detail::publish_registries_locked(state);
+        }
+        auto candidate = state.clusters;
+        candidate.erase(
             std::remove_if(
-                state.clusters.begin(), state.clusters.end(),
+                candidate.begin(), candidate.end(),
                 [&root](const supervised_cluster_record& current) {
                     return current.root == root;
                 }),
-            state.clusters.end());
-        supervision_detail::publish_clusters_locked(state);
+            candidate.end());
+        if (!supervision_detail::begin_registry_update_locked(state)) {
+            return false;
+        }
+        state.clusters.swap(candidate);
+        if (supervision_detail::publish_registries_locked(state)) {
+            return true;
+        }
+        state.clusters.swap(candidate);
+        return false;
     } catch (...) {
+        return false;
     }
 }
 
-/// @brief Loads the last complete live-cluster registry for a watchdog.
-[[nodiscard]] inline std::vector<supervised_cluster_record>
-load_supervised_clusters(const std::filesystem::path& directory) {
-    std::ifstream input(directory / "clusters.tsv");
-    std::vector<supervised_cluster_record> clusters;
-    std::string line;
-    while (std::getline(input, line)) {
-        const std::size_t first = line.find('\t');
-        const std::size_t second =
-            first == std::string::npos
-            ? std::string::npos : line.find('\t', first + 1U);
-        const std::size_t third =
-            second == std::string::npos
-            ? std::string::npos : line.find('\t', second + 1U);
-        if (first == std::string::npos
-            || second == std::string::npos
-            || third == std::string::npos) {
-            continue;
+/// @brief Strictly loads one clean, generation-consistent registry pair.
+[[nodiscard]] inline std::optional<supervised_registry_snapshot>
+load_supervision_registries(
+    const std::filesystem::path& directory) noexcept {
+    try {
+        std::error_code marker_error;
+        if (!std::filesystem::is_regular_file(
+                directory / ".bioseq-watchdog-state",
+                marker_error)
+            || marker_error) {
+            return std::nullopt;
         }
-        const auto root =
-            supervision_hex_decode(std::string_view(line).substr(0, first));
-        const auto data = supervision_hex_decode(
-            std::string_view(line).substr(
-                first + 1U, second - first - 1U));
-        std::uint64_t pid{};
-        const std::string_view pid_text =
-            std::string_view(line).substr(
-                second + 1U, third - second - 1U);
-        const std::string_view discover_text =
-            std::string_view(line).substr(third + 1U);
-        const auto [end, error] = std::from_chars(
-            pid_text.data(), pid_text.data() + pid_text.size(), pid);
-        if (!root || !data || error != std::errc{}
-            || end != pid_text.data() + pid_text.size() || pid == 1) {
-            continue;
+        std::error_code dirty_error;
+        const bool dirty = std::filesystem::exists(
+            directory / "registries.dirty", dirty_error);
+        if (dirty_error || dirty) {
+            return std::nullopt;
         }
-        clusters.push_back(supervised_cluster_record{
-            .root = *root,
-            .data_directory = *data,
-            .postmaster_pid = pid,
-            .discover_postmaster_pid = discover_text == "1"});
+        for (const std::string_view partial :
+             {std::string_view{"registries.dirty.partial"},
+              std::string_view{"registries.clean.partial"},
+              std::string_view{"clusters.tsv.partial"},
+              std::string_view{"processes.tsv.partial"}}) {
+            std::error_code partial_error;
+            const bool partial_exists = std::filesystem::exists(
+                directory / std::string(partial), partial_error);
+            if (partial_error || partial_exists) {
+                return std::nullopt;
+            }
+        }
+        const auto clean = load_supervision_snapshot(
+            directory, "registries.clean");
+        const auto cluster_payload = load_supervision_snapshot(
+            directory, "clusters.tsv");
+        const auto process_payload = load_supervision_snapshot(
+            directory, "processes.tsv");
+        if (!clean || !cluster_payload || !process_payload) {
+            return std::nullopt;
+        }
+        constexpr std::string_view prefix{
+            "bioseq-supervision-registry-v1\t"};
+        const auto parse_header =
+            [prefix](std::string_view line)
+                -> std::optional<std::uint64_t> {
+            if (!line.starts_with(prefix)) {
+                return std::nullopt;
+            }
+            line.remove_prefix(prefix.size());
+            std::uint64_t generation{};
+            const auto [end, error] = std::from_chars(
+                line.data(), line.data() + line.size(), generation);
+            if (error != std::errc{}
+                || end != line.data() + line.size()
+                || generation == 0) {
+                return std::nullopt;
+            }
+            return generation;
+        };
+        if (clean->empty() || clean->back() != '\n'
+            || clean->find('\n') != clean->size() - 1U) {
+            return std::nullopt;
+        }
+        const auto generation = parse_header(
+            std::string_view(*clean).substr(0, clean->size() - 1U));
+        if (!generation) {
+            return std::nullopt;
+        }
+        const auto journal_rows =
+            [&parse_header, generation](
+                const std::string& payload)
+                -> std::optional<std::vector<std::string_view>> {
+            if (payload.empty() || payload.back() != '\n') {
+                return std::nullopt;
+            }
+            const std::size_t header_end = payload.find('\n');
+            if (header_end == std::string::npos
+                || parse_header(std::string_view(payload).substr(
+                       0, header_end))
+                    != generation) {
+                return std::nullopt;
+            }
+            std::vector<std::string_view> rows;
+            std::size_t begin = header_end + 1U;
+            while (begin < payload.size()) {
+                const std::size_t end = payload.find('\n', begin);
+                if (end == std::string::npos || end == begin) {
+                    return std::nullopt;
+                }
+                rows.push_back(
+                    std::string_view(payload).substr(
+                        begin, end - begin));
+                begin = end + 1U;
+            }
+            return rows;
+        };
+        const auto cluster_rows = journal_rows(*cluster_payload);
+        const auto process_rows = journal_rows(*process_payload);
+        if (!cluster_rows || !process_rows) {
+            return std::nullopt;
+        }
+        const auto split_fields =
+            [](std::string_view line) {
+            std::vector<std::string_view> fields;
+            std::size_t begin = 0;
+            while (begin <= line.size()) {
+                const std::size_t end = line.find('\t', begin);
+                fields.push_back(line.substr(
+                    begin,
+                    end == std::string::npos
+                        ? std::string::npos : end - begin));
+                if (end == std::string::npos) {
+                    break;
+                }
+                begin = end + 1U;
+            }
+            return fields;
+        };
+
+        supervised_registry_snapshot snapshot{
+            .generation = *generation};
+        snapshot.clusters.reserve(cluster_rows->size());
+        for (const std::string_view row : *cluster_rows) {
+            const auto fields = split_fields(row);
+            if (fields.size() != 7U) {
+                return std::nullopt;
+            }
+            const auto root = supervision_hex_decode(fields[0]);
+            const auto data = supervision_hex_decode(fields[1]);
+            const auto start_token = supervision_hex_decode(fields[4]);
+            const auto executable = supervision_hex_decode(fields[5]);
+            std::uint64_t pid{};
+            const auto [pid_end, pid_error] = std::from_chars(
+                fields[2].data(),
+                fields[2].data() + fields[2].size(), pid);
+            std::int64_t process_group{};
+            const auto [group_end, group_error] = std::from_chars(
+                fields[6].data(),
+                fields[6].data() + fields[6].size(),
+                process_group);
+            if (!root || root->empty() || !data || data->empty()
+                || !start_token || !executable
+                || pid_error != std::errc{}
+                || pid_end != fields[2].data() + fields[2].size()
+                || (fields[3] != "0" && fields[3] != "1")
+                || group_error != std::errc{}
+                || group_end
+                    != fields[6].data() + fields[6].size()
+                || pid == 1
+                || pid > static_cast<std::uint64_t>(
+                    std::numeric_limits<pid_t>::max())
+                || process_group < 0
+                || process_group > static_cast<std::int64_t>(
+                    std::numeric_limits<pid_t>::max())
+                || (pid > 1 && fields[3] == "0"
+                    && (start_token->empty() || executable->empty()
+                        || process_group <= 1))
+                || std::ranges::any_of(
+                    snapshot.clusters,
+                    [&root](const supervised_cluster_record& current) {
+                        return current.root == *root;
+                    })) {
+                return std::nullopt;
+            }
+            snapshot.clusters.push_back(supervised_cluster_record{
+                .root = *root,
+                .data_directory = *data,
+                .postmaster_pid = pid,
+                .discover_postmaster_pid = fields[3] == "1",
+                .postmaster_start_token = std::move(*start_token),
+                .postmaster_executable = std::move(*executable),
+                .postmaster_process_group = process_group});
+        }
+        snapshot.processes.reserve(process_rows->size());
+        for (const std::string_view row : *process_rows) {
+            const auto fields = split_fields(row);
+            if (fields.size() != 5U) {
+                return std::nullopt;
+            }
+            std::uint64_t pid{};
+            const auto [pid_end, pid_error] = std::from_chars(
+                fields[0].data(),
+                fields[0].data() + fields[0].size(), pid);
+            std::int64_t process_group{};
+            const auto [group_end, group_error] = std::from_chars(
+                fields[3].data(),
+                fields[3].data() + fields[3].size(),
+                process_group);
+            const auto start_token = supervision_hex_decode(fields[1]);
+            const auto executable = supervision_hex_decode(fields[2]);
+            const auto data_directory =
+                supervision_hex_decode(fields[4]);
+            if (pid_error != std::errc{}
+                || pid_end != fields[0].data() + fields[0].size()
+                || group_error != std::errc{}
+                || group_end
+                    != fields[3].data() + fields[3].size()
+                || pid <= 1
+                || pid > static_cast<std::uint64_t>(
+                    std::numeric_limits<pid_t>::max())
+                || process_group <= 1
+                || process_group > static_cast<std::int64_t>(
+                    std::numeric_limits<pid_t>::max())
+                || !start_token || start_token->empty()
+                || !executable || executable->empty()
+                || !data_directory
+                || std::ranges::any_of(
+                    snapshot.processes,
+                    [pid](const supervised_process_record& current) {
+                        return current.pid == pid;
+                    })) {
+                return std::nullopt;
+            }
+            snapshot.processes.push_back(supervised_process_record{
+                .pid = pid,
+                .start_token = std::move(*start_token),
+                .executable = std::move(*executable),
+                .process_group = process_group,
+                .data_directory = std::move(*data_directory)});
+        }
+        return snapshot;
+    } catch (...) {
+        return std::nullopt;
     }
-    return clusters;
 }
 
-/// @brief Removes only an exact watchdog state bearing its ownership marker.
+/// @brief Proves both live-resource journals are clean, valid, and empty.
+[[nodiscard]] inline bool supervision_registries_empty(
+    const std::filesystem::path& directory) noexcept {
+    const auto snapshot = load_supervision_registries(directory);
+    return snapshot && snapshot->clusters.empty()
+        && snapshot->processes.empty();
+}
+
+/// @brief Removes only a clean state with no registered live resources.
 inline bool remove_supervision_state(
     const std::filesystem::path& directory) noexcept {
     try {
-        std::error_code error;
-        if (!std::filesystem::is_regular_file(
-                directory / ".bioseq-watchdog-state", error)
-            || error) {
+        if (!supervision_registries_empty(directory)) {
             return false;
         }
+        std::error_code error;
         std::filesystem::remove_all(directory, error);
         return !error;
     } catch (...) {

@@ -32,6 +32,7 @@ struct runner_configuration {
     std::optional<std::filesystem::path> provider_peer_test_dso;
     std::filesystem::path report;
     std::chrono::seconds case_timeout{480};
+    std::chrono::seconds large_case_timeout{6300};
 };
 
 /// @brief Supported sibling-DSO preload orders for coexistence tests.
@@ -100,8 +101,10 @@ inline void set_runner_configuration(runner_configuration configuration) {
     detail::require_artifact(configuration.cache_install_sql,
                              "cache install SQL");
     detail::require_artifact(configuration.cache_dso, "cache DSO");
-    if (configuration.case_timeout <= std::chrono::seconds::zero()) {
-        throw std::invalid_argument("case timeout must be positive");
+    if (configuration.case_timeout <= std::chrono::seconds::zero()
+        || configuration.large_case_timeout
+            <= std::chrono::seconds::zero()) {
+        throw std::invalid_argument("case timeouts must be positive");
     }
     detail::configuration_storage() = std::move(configuration);
 }

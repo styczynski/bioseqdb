@@ -5,6 +5,7 @@ module;
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -16,6 +17,7 @@ module;
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -31,6 +33,160 @@ extern char** environ;
 export module bioseq.test.postgres:process;
 
 import :supervision;
+
+namespace bioseq::postgres_test::process_detail {
+
+#if !defined(BIOSEQ_POSTGRES_TEST_LAUNCH_BROKER_PATH)
+#error "BIOSEQ_POSTGRES_TEST_LAUNCH_BROKER_PATH must name the launch broker"
+#endif
+
+[[nodiscard]] inline std::filesystem::path launch_broker_executable() {
+    return std::filesystem::path{
+        BIOSEQ_POSTGRES_TEST_LAUNCH_BROKER_PATH};
+}
+
+inline void close_descriptor(int& descriptor) noexcept {
+    if (descriptor >= 0) {
+        static_cast<void>(::close(descriptor));
+        descriptor = -1;
+    }
+}
+
+/// @brief Serializes the portable pipe+fcntl fallback with every local spawn.
+[[nodiscard]] inline std::mutex& spawn_serialization_mutex() noexcept {
+    static std::mutex mutex;
+    return mutex;
+}
+
+/// @brief Creates a pipe whose endpoints cannot leak across an exec.
+[[nodiscard]] inline bool create_cloexec_pipe(
+    int (&descriptors)[2]) noexcept {
+#if defined(__linux__) && defined(O_CLOEXEC)
+    if (::pipe2(descriptors, O_CLOEXEC) == 0) {
+        return true;
+    }
+    if (errno != ENOSYS) {
+        return false;
+    }
+#endif
+    if (::pipe(descriptors) != 0) {
+        return false;
+    }
+    for (int descriptor : descriptors) {
+        const int flags = ::fcntl(descriptor, F_GETFD);
+        if (flags < 0
+            || ::fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) != 0) {
+            const int failure = errno == 0 ? EIO : errno;
+            static_cast<void>(::close(descriptors[0]));
+            static_cast<void>(::close(descriptors[1]));
+            descriptors[0] = -1;
+            descriptors[1] = -1;
+            errno = failure;
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] inline bool normalize_cloexec_pipe_descriptor(
+    int& descriptor) noexcept {
+    if (descriptor > STDERR_FILENO) {
+        return true;
+    }
+#if defined(F_DUPFD_CLOEXEC)
+    const int replacement =
+        ::fcntl(descriptor, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+#else
+    const int replacement =
+        ::fcntl(descriptor, F_DUPFD, STDERR_FILENO + 1);
+#endif
+    if (replacement < 0) {
+        return false;
+    }
+#if !defined(F_DUPFD_CLOEXEC)
+    const int flags = ::fcntl(replacement, F_GETFD);
+    if (flags < 0
+        || ::fcntl(replacement, F_SETFD, flags | FD_CLOEXEC) != 0) {
+        const int failure = errno == 0 ? EIO : errno;
+        static_cast<void>(::close(replacement));
+        errno = failure;
+        return false;
+    }
+#endif
+    static_cast<void>(::close(descriptor));
+    descriptor = replacement;
+    return true;
+}
+
+[[nodiscard]] inline int duplicate_cloexec_descriptor(
+    int descriptor) noexcept {
+#if defined(F_DUPFD_CLOEXEC)
+    return ::fcntl(descriptor, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+#else
+    const int duplicate =
+        ::fcntl(descriptor, F_DUPFD, STDERR_FILENO + 1);
+    if (duplicate < 0) {
+        return -1;
+    }
+    const int flags = ::fcntl(duplicate, F_GETFD);
+    if (flags < 0
+        || ::fcntl(duplicate, F_SETFD, flags | FD_CLOEXEC) != 0) {
+        const int failure = errno == 0 ? EIO : errno;
+        static_cast<void>(::close(duplicate));
+        errno = failure;
+        return -1;
+    }
+    return duplicate;
+#endif
+}
+
+/// @brief Writes one broker release byte without leaking SIGPIPE to callers.
+[[nodiscard]] inline bool release_launch_broker(int descriptor) noexcept {
+    if (descriptor < 0) {
+        return false;
+    }
+    sigset_t blocked;
+    sigset_t previous;
+    sigset_t pending;
+    if (sigemptyset(&blocked) != 0
+        || sigaddset(&blocked, SIGPIPE) != 0) {
+        return false;
+    }
+    if (::pthread_sigmask(SIG_BLOCK, &blocked, &previous) != 0) {
+        return false;
+    }
+    if (::sigpending(&pending) != 0) {
+        static_cast<void>(
+            ::pthread_sigmask(SIG_SETMASK, &previous, nullptr));
+        return false;
+    }
+    const int was_pending = sigismember(&pending, SIGPIPE);
+    if (was_pending < 0) {
+        static_cast<void>(
+            ::pthread_sigmask(SIG_SETMASK, &previous, nullptr));
+        return false;
+    }
+
+    constexpr char release = 'G';
+    ssize_t written = -1;
+    do {
+        written = ::write(descriptor, &release, sizeof(release));
+    } while (written < 0 && errno == EINTR);
+    const int write_error = errno;
+    if (written < 0 && write_error == EPIPE && was_pending == 0) {
+        sigset_t generated;
+        if (::sigpending(&generated) == 0
+            && sigismember(&generated, SIGPIPE) == 1) {
+            int delivered = 0;
+            static_cast<void>(::sigwait(&blocked, &delivered));
+        }
+    }
+    const bool restored =
+        ::pthread_sigmask(SIG_SETMASK, &previous, nullptr) == 0;
+    return written == 1 && restored;
+}
+
+}  // namespace bioseq::postgres_test::process_detail
 
 export namespace bioseq::postgres_test {
 
@@ -53,6 +209,7 @@ struct process_options {
     std::vector<std::pair<std::string, std::string>> environment;
     std::optional<std::filesystem::path> output_file;
     bool supervise{};
+    std::optional<std::filesystem::path> supervision_data_directory;
 };
 
 /// @brief Decoded child exit status.
@@ -120,6 +277,8 @@ class spawned_process {
 public:
     /// @brief Spawns an absolute executable in a new process group without a shell.
     [[nodiscard]] static spawned_process spawn(const process_options& options) {
+        std::scoped_lock spawn_lock{
+            process_detail::spawn_serialization_mutex()};
         if (options.executable.empty() || !options.executable.is_absolute()) {
             throw process_error("process executable must be an absolute path");
         }
@@ -169,6 +328,35 @@ public:
         }
         environment.push_back(nullptr);
 
+        std::filesystem::path spawn_executable = options.executable;
+        std::vector<std::string> broker_argument_storage;
+        std::vector<char*> broker_arguments;
+        int control_read = -1;
+        int control_write = -1;
+        int broker_control = -1;
+        const auto close_control_descriptors =
+            [&control_read, &control_write, &broker_control]() noexcept {
+                process_detail::close_descriptor(control_read);
+                process_detail::close_descriptor(control_write);
+                process_detail::close_descriptor(broker_control);
+            };
+        if (options.supervise) {
+            spawn_executable =
+                process_detail::launch_broker_executable();
+            file_error.clear();
+            if (!spawn_executable.is_absolute()
+                || !std::filesystem::is_regular_file(
+                    spawn_executable, file_error)
+                || file_error) {
+                if (remove_log) {
+                    std::filesystem::remove(output, file_error);
+                }
+                throw process_error(
+                    "supervised launch broker is unavailable: "
+                    + spawn_executable.string());
+            }
+        }
+
         posix_spawn_file_actions_t actions{};
         posix_spawnattr_t attributes{};
         bool actions_ready = false;
@@ -210,24 +398,201 @@ public:
         if (status == 0) {
             status = posix_spawnattr_setpgroup(&attributes, 0);
         }
+        std::optional<supervised_process_launch_intent> launch_intent;
+        if (status == 0 && options.supervise) {
+            launch_intent = begin_supervised_process_launch();
+            if (!launch_intent) {
+                destroy();
+                if (remove_log) {
+                    std::filesystem::remove(output, file_error);
+                }
+                throw process_error(
+                    "cannot durably journal supervised launch intent");
+            }
+            try {
+                int descriptors[2]{-1, -1};
+                if (process_detail::create_cloexec_pipe(descriptors)) {
+                    control_read = descriptors[0];
+                    control_write = descriptors[1];
+                    if (!process_detail::normalize_cloexec_pipe_descriptor(
+                            control_read)
+                        || !process_detail::normalize_cloexec_pipe_descriptor(
+                            control_write)) {
+                        status = errno == 0 ? EMFILE : errno;
+                    }
+                    if (status == 0) {
+                        broker_control =
+                            process_detail::duplicate_cloexec_descriptor(
+                                control_read);
+                        if (broker_control < 0) {
+                            status = errno == 0 ? EMFILE : errno;
+                        }
+                    }
+                } else {
+                    status = errno == 0 ? EMFILE : errno;
+                }
+                if (status == 0) {
+                    status = posix_spawn_file_actions_adddup2(
+                        &actions, control_read, broker_control);
+                }
+                if (status == 0) {
+                    status = posix_spawn_file_actions_addclose(
+                        &actions, control_read);
+                }
+                if (status == 0) {
+                    status = posix_spawn_file_actions_addclose(
+                        &actions, control_write);
+                }
+                if (status == 0) {
+                    broker_argument_storage.reserve(
+                        argument_storage.size() + 3U);
+                    broker_argument_storage.push_back(
+                        spawn_executable.filename().string());
+                    broker_argument_storage.push_back(
+                        std::to_string(broker_control));
+                    broker_argument_storage.push_back(
+                        options.executable.string());
+                    broker_argument_storage.insert(
+                        broker_argument_storage.end(),
+                        argument_storage.begin(),
+                        argument_storage.end());
+                    broker_arguments.reserve(
+                        broker_argument_storage.size() + 1U);
+                    for (std::string& argument :
+                         broker_argument_storage) {
+                        broker_arguments.push_back(argument.data());
+                    }
+                    broker_arguments.push_back(nullptr);
+                }
+            } catch (...) {
+                close_control_descriptors();
+                static_cast<void>(
+                    cancel_supervised_process_launch(*launch_intent));
+                destroy();
+                if (remove_log) {
+                    std::filesystem::remove(output, file_error);
+                }
+                throw;
+            }
+        }
         pid_t child = -1;
         if (status == 0) {
             status = ::posix_spawn(
-                &child, options.executable.c_str(), &actions, &attributes,
-                arguments.data(), environment.data());
+                &child, spawn_executable.c_str(), &actions, &attributes,
+                options.supervise ? broker_arguments.data()
+                                  : arguments.data(),
+                environment.data());
         }
+        process_detail::close_descriptor(control_read);
+        process_detail::close_descriptor(broker_control);
         destroy();
         if (status != 0) {
+            process_detail::close_descriptor(control_write);
+            if (launch_intent) {
+                static_cast<void>(
+                    cancel_supervised_process_launch(*launch_intent));
+            }
             if (remove_log) {
                 std::filesystem::remove(output, file_error);
             }
             throw process_error("posix_spawn failed for "
-                                + options.executable.string() + ": "
+                                + spawn_executable.string() + ": "
                                 + std::strerror(status));
         }
+
+        const auto stop_unreleased_broker =
+            [&control_write, child]() noexcept {
+                process_detail::close_descriptor(control_write);
+                bool child_reaped = false;
+                bool group_absent = false;
+                int child_status{};
+                const auto graceful_deadline =
+                    std::chrono::steady_clock::now()
+                    + std::chrono::seconds(2);
+                while (std::chrono::steady_clock::now()
+                       < graceful_deadline) {
+                    if (!child_reaped) {
+                        const pid_t waited =
+                            ::waitpid(child, &child_status, WNOHANG);
+                        if (waited == child
+                            || (waited < 0 && errno == ECHILD)) {
+                            child_reaped = true;
+                        }
+                    }
+                    if (!group_absent
+                        && ::kill(-child, 0) != 0 && errno == ESRCH) {
+                        group_absent = true;
+                    }
+                    if (child_reaped && group_absent) {
+                        return true;
+                    }
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(10));
+                }
+                static_cast<void>(::kill(-child, SIGKILL));
+                static_cast<void>(::kill(child, SIGKILL));
+                const auto force_deadline =
+                    std::chrono::steady_clock::now()
+                    + std::chrono::seconds(2);
+                while (std::chrono::steady_clock::now()
+                       < force_deadline) {
+                    if (!child_reaped) {
+                        const pid_t waited =
+                            ::waitpid(child, &child_status, WNOHANG);
+                        if (waited == child
+                            || (waited < 0 && errno == ECHILD)) {
+                            child_reaped = true;
+                        }
+                    }
+                    if (!group_absent
+                        && ::kill(-child, 0) != 0 && errno == ESRCH) {
+                        group_absent = true;
+                    }
+                    if (child_reaped && group_absent) {
+                        return true;
+                    }
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(10));
+                }
+                return child_reaped && group_absent;
+            };
+
+        if (options.supervise
+            && !commit_supervised_process_launch(
+                *launch_intent,
+                static_cast<std::uint64_t>(child),
+                spawn_executable,
+                options.supervision_data_directory.value_or(
+                    std::filesystem::path{}))) {
+            if (stop_unreleased_broker()) {
+                static_cast<void>(
+                    cancel_supervised_process_launch(
+                        *launch_intent,
+                        static_cast<std::uint64_t>(child)));
+            }
+            if (remove_log) {
+                std::filesystem::remove(output, file_error);
+            }
+            throw process_error(
+                "cannot durably register supervised child process");
+        }
         if (options.supervise) {
-            register_supervised_process(
-                static_cast<std::uint64_t>(child));
+            const bool released =
+                process_detail::release_launch_broker(control_write);
+            process_detail::close_descriptor(control_write);
+            if (!released) {
+                if (stop_unreleased_broker()) {
+                    static_cast<void>(
+                        cancel_supervised_process_launch(
+                            *launch_intent,
+                            static_cast<std::uint64_t>(child)));
+                }
+                if (remove_log) {
+                    std::filesystem::remove(output, file_error);
+                }
+                throw process_error(
+                    "cannot release durably registered launch broker");
+            }
         }
         return spawned_process(
             child, std::move(output), remove_log, options.supervise);
@@ -238,6 +603,8 @@ public:
 
     spawned_process(spawned_process&& other) noexcept
         : pid_(std::exchange(other.pid_, -1)),
+          process_group_(std::exchange(other.process_group_, -1)),
+          supervision_pid_(std::exchange(other.supervision_pid_, -1)),
           output_file_(std::move(other.output_file_)),
           remove_output_(std::exchange(other.remove_output_, false)),
           supervised_(std::exchange(other.supervised_, false)),
@@ -248,6 +615,10 @@ public:
             terminate(std::chrono::seconds(2));
             remove_owned_log();
             pid_ = std::exchange(other.pid_, -1);
+            process_group_ =
+                std::exchange(other.process_group_, -1);
+            supervision_pid_ =
+                std::exchange(other.supervision_pid_, -1);
             output_file_ = std::move(other.output_file_);
             remove_output_ = std::exchange(other.remove_output_, false);
             supervised_ = std::exchange(other.supervised_, false);
@@ -284,44 +655,26 @@ public:
         return wait_until(std::chrono::steady_clock::now() + budget);
     }
 
-    /// @brief Polls and reaps the process once it exits.
+    /// @brief Polls until the leader is reaped and its owned group is absent.
     [[nodiscard]] std::optional<process_exit> try_wait() noexcept {
-        if (exit_) {
-            return exit_;
-        }
-        if (pid_ <= 0) {
+        poll_leader();
+        if (!exit_ || !owned_group_absent()) {
             return std::nullopt;
         }
-        int status = 0;
-        const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
-        if (waited == 0) {
-            return std::nullopt;
-        }
-        if (waited < 0) {
-            if (errno == EINTR) {
-                return std::nullopt;
-            }
-            if (errno == ECHILD) {
-                release_supervision();
-                pid_ = -1;
-            }
-            return std::nullopt;
-        }
-        exit_ = decode_status(status);
         release_supervision();
-        pid_ = -1;
+        if (supervised_) {
+            return std::nullopt;
+        }
         return exit_;
     }
 
     /// @brief Sends SIGTERM to the child group, then SIGKILLs bounded survivors.
     void terminate(std::chrono::milliseconds grace) noexcept {
-        if (pid_ <= 0 || exit_) {
+        if (try_wait()) {
             return;
         }
-        const pid_t group = -pid_;
-        if (::kill(group, SIGTERM) != 0 && errno != ESRCH) {
-            static_cast<void>(::kill(pid_, SIGTERM));
-        }
+        signal_owned_group(SIGTERM);
+        signal_unreaped_leader(SIGTERM);
         const auto deadline = std::chrono::steady_clock::now()
             + std::max(grace, std::chrono::milliseconds::zero());
         while (std::chrono::steady_clock::now() < deadline) {
@@ -330,25 +683,18 @@ public:
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        if (::kill(group, SIGKILL) != 0 && errno != ESRCH) {
-            static_cast<void>(::kill(pid_, SIGKILL));
-        }
-        for (;;) {
-            int status = 0;
-            const pid_t waited = ::waitpid(pid_, &status, 0);
-            if (waited == pid_) {
-                exit_ = decode_status(status);
-                release_supervision();
-                pid_ = -1;
+        signal_owned_group(SIGKILL);
+        signal_unreaped_leader(SIGKILL);
+        const auto force_deadline =
+            std::chrono::steady_clock::now()
+            + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < force_deadline) {
+            if (try_wait()) {
                 return;
             }
-            if (waited < 0 && errno == EINTR) {
-                continue;
-            }
-            release_supervision();
-            pid_ = -1;
-            return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+        static_cast<void>(try_wait());
     }
 
     /// @brief Returns all captured combined stdout/stderr currently on disk.
@@ -378,17 +724,66 @@ private:
         bool remove_output,
         bool supervised)
         : pid_(pid),
+          process_group_(pid),
+          supervision_pid_(pid),
           output_file_(std::move(output)),
           remove_output_(remove_output),
           supervised_(supervised) {}
 
-    void release_supervision() noexcept {
-        if (!supervised_ || pid_ <= 1) {
+    void poll_leader() noexcept {
+        if (pid_ <= 0 || exit_) {
             return;
         }
-        unregister_supervised_process(
-            static_cast<std::uint64_t>(pid_));
-        supervised_ = false;
+        int status = 0;
+        const pid_t waited = ::waitpid(pid_, &status, WNOHANG);
+        if (waited == pid_) {
+            exit_ = decode_status(status);
+            pid_ = -1;
+        } else if (waited < 0 && errno == ECHILD) {
+            exit_ = process_exit{};
+            pid_ = -1;
+        }
+    }
+
+    [[nodiscard]] bool owned_group_absent() noexcept {
+        if (process_group_ <= 1) {
+            return true;
+        }
+        if (process_group_ == ::getpgrp()) {
+            return false;
+        }
+        if (::kill(-process_group_, 0) == 0 || errno != ESRCH) {
+            return false;
+        }
+        process_group_ = -1;
+        return true;
+    }
+
+    void signal_owned_group(int signal) noexcept {
+        if (process_group_ <= 1
+            || process_group_ == ::getpgrp()) {
+            return;
+        }
+        if (::kill(-process_group_, signal) != 0
+            && errno == ESRCH) {
+            process_group_ = -1;
+        }
+    }
+
+    void signal_unreaped_leader(int signal) const noexcept {
+        if (pid_ > 1) {
+            static_cast<void>(::kill(pid_, signal));
+        }
+    }
+
+    void release_supervision() noexcept {
+        if (!supervised_ || supervision_pid_ <= 1) {
+            return;
+        }
+        if (unregister_supervised_process(
+                static_cast<std::uint64_t>(supervision_pid_))) {
+            supervised_ = false;
+        }
     }
 
     /// @brief Creates and closes a unique private capture file.
@@ -429,6 +824,8 @@ private:
     }
 
     pid_t pid_{-1};
+    pid_t process_group_{-1};
+    pid_t supervision_pid_{-1};
     std::filesystem::path output_file_;
     bool remove_output_{};
     bool supervised_{};

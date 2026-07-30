@@ -293,7 +293,9 @@ void append_journal(
     std::string_view kind,
     std::optional<std::uint64_t> value = std::nullopt,
     std::string_view phase = {},
-    std::chrono::milliseconds elapsed = {}) noexcept {
+    std::chrono::milliseconds elapsed = {},
+    std::optional<std::uint64_t> boundary_owned_root_bytes =
+        std::nullopt) noexcept {
     try {
         const auto directory = supervision_state_directory();
         if (!directory) {
@@ -309,7 +311,16 @@ void append_journal(
             output << '-';
         }
         output << '\t' << supervision_hex_encode(phase)
-               << '\t' << elapsed.count() << '\n';
+               << '\t' << elapsed.count();
+        if (kind == "phase") {
+            output << '\t';
+            if (boundary_owned_root_bytes) {
+                output << *boundary_owned_root_bytes;
+            } else {
+                output << '-';
+            }
+        }
+        output << '\n';
         output.flush();
     } catch (...) {
     }
@@ -391,6 +402,9 @@ load_supervision_resource_report(
         const std::size_t third =
             second == std::string::npos
             ? std::string::npos : line.find('\t', second + 1U);
+        const std::size_t fourth =
+            third == std::string::npos
+            ? std::string::npos : line.find('\t', third + 1U);
         if (first == std::string::npos || second == std::string::npos
             || third == std::string::npos) {
             continue;
@@ -404,7 +418,14 @@ load_supervision_resource_report(
             std::string_view(line).substr(
                 second + 1U, third - second - 1U);
         const std::string_view elapsed_text =
-            std::string_view(line).substr(third + 1U);
+            std::string_view(line).substr(
+                third + 1U,
+                fourth == std::string::npos
+                    ? std::string::npos : fourth - third - 1U);
+        const std::string_view boundary_owned_root_text =
+            fourth == std::string::npos
+            ? std::string_view{}
+            : std::string_view(line).substr(fourth + 1U);
         std::optional<std::uint64_t> value;
         if (value_text != "-") {
             std::uint64_t parsed{};
@@ -445,10 +466,29 @@ load_supervision_resource_report(
                 || end != elapsed_text.data() + elapsed_text.size()) {
                 continue;
             }
+            std::optional<std::uint64_t> boundary_owned_root_bytes;
+            if (!boundary_owned_root_text.empty()
+                && boundary_owned_root_text != "-") {
+                std::uint64_t parsed{};
+                const auto [root_end, root_error] = std::from_chars(
+                    boundary_owned_root_text.data(),
+                    boundary_owned_root_text.data()
+                        + boundary_owned_root_text.size(),
+                    parsed);
+                if (root_error != std::errc{}
+                    || root_end
+                        != boundary_owned_root_text.data()
+                            + boundary_owned_root_text.size()) {
+                    continue;
+                }
+                boundary_owned_root_bytes = parsed;
+            }
             report.phase_boundaries.push_back(resource_phase_boundary{
                 .ordinal = report.phase_boundaries.size(),
                 .phase = *phase,
-                .elapsed = std::chrono::milliseconds(elapsed)});
+                .elapsed = std::chrono::milliseconds(elapsed),
+                .postmaster_process_tree_rss_bytes = value,
+                .owned_root_bytes = boundary_owned_root_bytes});
         }
     }
     return report;
@@ -513,8 +553,8 @@ public:
                 .postmaster_process_tree_rss_bytes = rss,
                 .owned_root_bytes = root});
             resource_detail::append_journal(
-                "phase", std::nullopt, phase,
-                report_.phase_boundaries.back().elapsed);
+                "phase", rss, phase,
+                report_.phase_boundaries.back().elapsed, root);
         } catch (...) {
         }
     }

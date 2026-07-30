@@ -62,11 +62,13 @@ add_dependencies(
   postgresql_bioseq_cache_test_support
   postgresql_bioseq)
 
-# Eight Catch cases share this executable, including the 2 Gbp acceptance case.
-# Keep the aggregate CTest ceiling above 8 * 6300 seconds so CTest cannot
-# preempt a later case's external watchdog.
-set(_bioseq_cache_bioseq_case_timeout_seconds 6300)
-set(_bioseq_cache_bioseq_suite_timeout_seconds 57600)
+# Ordinary combined cases retain the cache suite's eight-minute watchdog.
+# Only the literal [2gbp] acceptance case receives the 105-minute budget.
+# Seven ordinary cases plus the large case total 9,660 seconds; retain bounded
+# headroom without letting the aggregate CTest timeout mask a stalled runner.
+set(_bioseq_cache_bioseq_case_timeout_seconds 480)
+set(_bioseq_cache_bioseq_large_case_timeout_seconds 6300)
+set(_bioseq_cache_bioseq_suite_timeout_seconds 12000)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/reports")
 add_test(
@@ -92,7 +94,9 @@ add_test(
     --report
       "${CMAKE_BINARY_DIR}/reports/bioseq-cache-bioseq-integration.json"
     --case-timeout-seconds
-      "${_bioseq_cache_bioseq_case_timeout_seconds}")
+      "${_bioseq_cache_bioseq_case_timeout_seconds}"
+    --large-case-timeout-seconds
+      "${_bioseq_cache_bioseq_large_case_timeout_seconds}")
 set_tests_properties(bioseq_cache_bioseq_integration_tests PROPERTIES
   LABELS "cache;integration;bioseq;2gbp"
   RESOURCE_LOCK "bioseq_private_postgres"
