@@ -244,9 +244,54 @@ def _verify_manifest(manifest_path: Path, hash_path: Path, *, bindir: Path,
     assert hash_path.read_text() == expected + "\n"
 
 
+def _verify_vector_manifest(manifest_path: Path, hash_path: Path, *,
+                            artifacts: list[dict[str, str | Path]],
+                            staged_share: Path, staged_pkglib: Path) -> None:
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["schema"] == "stage_manifest/v2"
+    entries = manifest["extension_artifacts"]["artifacts"]
+    assert [entry["name"] for entry in entries] == [
+        artifact["name"] for artifact in artifacts
+    ]
+    by_name = {entry["name"]: entry for entry in entries}
+    record = ""
+    for artifact in sorted(artifacts, key=lambda item: str(item["name"])):
+        name = str(artifact["name"])
+        control = Path(artifact["control"])
+        install_sql = Path(artifact["install_sql"])
+        library = Path(artifact["library"])
+        override = str(artifact.get("module_pathname_override", ""))
+        staged_control = staged_share / "extension" / control.name
+        staged_sql = staged_share / "extension" / install_sql.name
+        staged_library = staged_pkglib / library.name
+        entry = by_name[name]
+        assert entry["module_pathname_override"] == (override or None)
+        assert entry["effective_module_name"] == (
+            override or library.name.split(".", 1)[0]
+        )
+        assert entry["control"]["source"] == str(control)
+        assert entry["install_sql"]["source"] == str(install_sql)
+        assert entry["library"]["source"] == str(library)
+        assert entry["control"]["source_sha256"] == _sha256(control)
+        assert entry["control"]["sha256"] == _sha256(staged_control)
+        assert entry["install_sql"]["sha256"] == _sha256(staged_sql)
+        assert entry["library"]["sha256"] == _sha256(staged_library)
+        record += (
+            f"artifact:{name}\n"
+            f"module_pathname_override:{override}\n"
+            f"control:{control.name}:{_sha256(staged_control)}\n"
+            f"install_sql:{install_sql.name}:{_sha256(staged_sql)}\n"
+            f"library:{library.name}:{_sha256(staged_library)}\n"
+        )
+    expected = hashlib.sha256(record.encode()).hexdigest()
+    assert manifest["extension_artifacts"]["aggregate_sha256"] == expected
+    assert hash_path.read_text() == expected + "\n"
+
+
 def _run_layout_case(cmake: str, stage_script: Path, scratch: Path,
-                     cc: str, layout: str) -> None:
-    case_root = scratch / layout
+                     cc: str, layout: str, *, vector: bool = False) -> None:
+    case_name = f"{layout}-vector" if vector else layout
+    case_root = scratch / case_name
     source_root = case_root / "source"
     if layout == "nested-runtime":
         prefix = source_root / "Postgres.app" / "Contents" / "Versions" / "17"
@@ -282,7 +327,11 @@ def _run_layout_case(cmake: str, stage_script: Path, scratch: Path,
     artifact_dir.mkdir(parents=True)
     control = artifact_dir / "bioseq.control"
     install_sql = artifact_dir / "bioseq--1.0.sql"
-    _write(control, "default_version = '1.0'\n")
+    _write(
+        control,
+        "default_version = '1.0'\n"
+        "module_pathname = '$libdir/bioseq'\n",
+    )
     _write(install_sql, "SELECT 1;\n")
     module_runtime_dir = pkglibdir.parent
     library, module_dependency_name, module_probe = _compile_extension_fixture(
@@ -291,19 +340,65 @@ def _run_layout_case(cmake: str, stage_script: Path, scratch: Path,
     stage_root = case_root / "stage"
     manifest = case_root / "stage-manifest.json"
     hash_path = case_root / "staged-extension.sha256"
-    result = _run([
+    command = [
         cmake,
         "-DPG_CONFIG=" + str(pg_config),
         "-DSTAGE_ROOT=" + str(stage_root),
         "-DSTAGE_PARENT=" + str(case_root),
-        "-DCONTROL_FILE=" + str(control),
-        "-DINSTALL_SQL=" + str(install_sql),
-        "-DLIBRARY_FILE=" + str(library),
-        "-DEXTENSION_VERSION=1.0",
         "-DMANIFEST_OUT=" + str(manifest),
         "-DHASH_OUT=" + str(hash_path),
-        "-P", str(stage_script),
-    ])
+    ]
+    vector_artifacts: list[dict[str, str | Path]] = []
+    if vector:
+        cache_control = artifact_dir / "bioseq_cache.control"
+        cache_install_sql = artifact_dir / "bioseq_cache--1.0.sql"
+        cache_library = artifact_dir / library.name.replace(
+            "bioseq", "bioseq_cache", 1
+        )
+        _write(
+            cache_control,
+            "default_version = '1.0'\n"
+            "comment = 'preserve this byte-for-byte'\n"
+            "module_pathname = '$libdir/not_the_staged_module'\n",
+        )
+        _write(cache_install_sql, "SELECT 2;\n")
+        shutil.copy2(library, cache_library)
+        vector_artifacts = [
+            {
+                "name": "bioseq",
+                "control": control,
+                "install_sql": install_sql,
+                "library": library,
+            },
+            {
+                "name": "bioseq_cache",
+                "control": cache_control,
+                "install_sql": cache_install_sql,
+                "library": cache_library,
+                "module_pathname_override": "bioseq_cache",
+            },
+        ]
+        artifact_spec = case_root / "extension-artifacts.json"
+        _write(
+            artifact_spec,
+            json.dumps({
+                "schema": "bioseq_private_postgres_artifacts/v1",
+                "artifacts": [
+                    {key: str(value) for key, value in artifact.items()}
+                    for artifact in vector_artifacts
+                ],
+            }, indent=2) + "\n",
+        )
+        command.append("-DARTIFACT_SPEC=" + str(artifact_spec))
+    else:
+        command.extend([
+            "-DCONTROL_FILE=" + str(control),
+            "-DINSTALL_SQL=" + str(install_sql),
+            "-DLIBRARY_FILE=" + str(library),
+            "-DEXTENSION_VERSION=1.0",
+        ])
+    command.extend(["-P", str(stage_script)])
+    result = _run(command)
     assert "stage_private_postgres: staged PostgreSQL 17.fixture" in result.stdout
 
     staged_bindir = _staged_path(stage_root, bindir)
@@ -322,11 +417,40 @@ def _run_layout_case(cmake: str, stage_script: Path, scratch: Path,
     assert (staged_pkglib / library.name).read_bytes() == library.read_bytes()
     assert (staged_pkglib / "plpgsql.fixture").is_file()
 
-    _verify_manifest(
-        manifest, hash_path, bindir=bindir, sharedir=sharedir,
-        pkglibdir=pkglibdir, control=control, install_sql=install_sql,
-        library=library,
-    )
+    if vector:
+        cache_artifact = vector_artifacts[1]
+        cache_control = Path(cache_artifact["control"])
+        cache_install_sql = Path(cache_artifact["install_sql"])
+        cache_library = Path(cache_artifact["library"])
+        assert cache_control.read_text().endswith(
+            "module_pathname = '$libdir/not_the_staged_module'\n"
+        )
+        assert (
+            staged_share / "extension" / cache_control.name
+        ).read_text() == (
+            "default_version = '1.0'\n"
+            "comment = 'preserve this byte-for-byte'\n"
+            "module_pathname = 'bioseq_cache'\n"
+        )
+        assert (
+            staged_share / "extension" / cache_install_sql.name
+        ).read_bytes() == cache_install_sql.read_bytes()
+        assert (
+            staged_pkglib / cache_library.name
+        ).read_bytes() == cache_library.read_bytes()
+        _verify_vector_manifest(
+            manifest,
+            hash_path,
+            artifacts=vector_artifacts,
+            staged_share=staged_share,
+            staged_pkglib=staged_pkglib,
+        )
+    else:
+        _verify_manifest(
+            manifest, hash_path, bindir=bindir, sharedir=sharedir,
+            pkglibdir=pkglibdir, control=control, install_sql=install_sql,
+            library=library,
+        )
 
     hidden_source = case_root / "source-hidden"
     source_root.rename(hidden_source)
@@ -335,6 +459,13 @@ def _run_layout_case(cmake: str, stage_script: Path, scratch: Path,
         assert completed.stdout == "fixture-postgres 42\n"
     loaded = _run([str(module_probe), str(staged_pkglib / library.name)])
     assert loaded.stdout == "fixture-module 84\n"
+    if vector:
+        cache_library = Path(vector_artifacts[1]["library"])
+        loaded = _run([
+            str(module_probe),
+            str(staged_pkglib / cache_library.name),
+        ])
+        assert loaded.stdout == "fixture-module 84\n"
 
 
 def _run_symlink_parent_guard_case(
@@ -432,7 +563,23 @@ def main() -> int:
         except Exception as error:  # noqa: BLE001
             failures += 1
             print(f"not ok - {layout}: {type(error).__name__}: {error}")
-    print(f"{3 - failures}/3 private-stage relocation tests passed")
+    try:
+        _run_layout_case(
+            args.cmake,
+            stage_script,
+            scratch,
+            args.cc,
+            "nested-runtime",
+            vector=True,
+        )
+        print("ok - nested-runtime-vector")
+    except Exception as error:  # noqa: BLE001
+        failures += 1
+        print(
+            "not ok - nested-runtime-vector: "
+            f"{type(error).__name__}: {error}"
+        )
+    print(f"{4 - failures}/4 private-stage relocation tests passed")
     return 1 if failures else 0
 
 
