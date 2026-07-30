@@ -406,6 +406,7 @@ int main(int argc, char* argv[]) {
     std::string bioseq_control;
     std::string bioseq_install_sql;
     std::string bioseq_dso;
+    std::string provider_peer_test_dso;
     std::string migration_ledger;
     std::string report;
     int case_timeout_seconds = 480;
@@ -425,6 +426,9 @@ int main(int argc, char* argv[]) {
               ["--bioseq-install-sql"]("optional Bioseq generated install SQL")
         | Catch::Clara::Opt(bioseq_dso, "PATH")
               ["--bioseq-dso"]("optional Bioseq DSO")
+        | Catch::Clara::Opt(provider_peer_test_dso, "PATH")
+              ["--provider-peer-test-dso"](
+                  "optional incompatible provider-peer test DSO")
         | Catch::Clara::Opt(migration_ledger, "PATH")
               ["--migration-ledger"]("legacy migration ledger TSV")
         | Catch::Clara::Opt(report, "PATH")
@@ -473,6 +477,13 @@ int main(int argc, char* argv[]) {
         configuration.bioseq_control = bioseq_control;
         configuration.bioseq_install_sql = bioseq_install_sql;
         configuration.bioseq_dso = bioseq_dso;
+    }
+    if (!provider_peer_test_dso.empty()) {
+        if (!all_bioseq) {
+            return 2;
+        }
+        configuration.provider_peer_test_dso =
+            provider_peer_test_dso;
     }
     bioseq::cache_test::set_runner_configuration(std::move(configuration));
     bioseq::postgres_test::clear_migration_probes();

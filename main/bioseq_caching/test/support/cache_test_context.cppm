@@ -29,6 +29,7 @@ struct runner_configuration {
     std::optional<std::filesystem::path> bioseq_control;
     std::optional<std::filesystem::path> bioseq_install_sql;
     std::optional<std::filesystem::path> bioseq_dso;
+    std::optional<std::filesystem::path> provider_peer_test_dso;
     std::filesystem::path report;
     std::chrono::seconds case_timeout{480};
 };
