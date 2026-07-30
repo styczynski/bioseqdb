@@ -101,7 +101,11 @@ enum class MappingFault : std::uint16_t {
     DecoratedBoundarySchemaMismatch,
     DecoratedLineageSchemaMismatch,
     ProviderError,
+    ProviderUnsupported,
+    ProviderStatusError,
+    ProviderQueryCanceled,
     LateFetchErrorOnce,
+    LateFetchPartialStatusErrorOnce,
     PersistedWrongTopTag,
     PersistedShortTop,
     PersistedLongTop,
@@ -1437,7 +1441,7 @@ void shutdown_provider() noexcept {
         const char* name;
         MappingFault value;
     };
-    static constexpr std::array<NamedFault, 40> faults{{
+    static constexpr std::array<NamedFault, 44> faults{{
         {"none", MappingFault::None},
         {"null_pointer_nonzero_count", MappingFault::NullPointerNonzeroCount},
         {"short_boundary_map", MappingFault::ShortBoundaryMap},
@@ -1461,7 +1465,11 @@ void shutdown_provider() noexcept {
         {"decorated_boundary_schema_mismatch", MappingFault::DecoratedBoundarySchemaMismatch},
         {"decorated_lineage_schema_mismatch", MappingFault::DecoratedLineageSchemaMismatch},
         {"provider_error", MappingFault::ProviderError},
+        {"provider_unsupported", MappingFault::ProviderUnsupported},
+        {"provider_status_error", MappingFault::ProviderStatusError},
+        {"provider_query_canceled", MappingFault::ProviderQueryCanceled},
         {"late_fetch_error_once", MappingFault::LateFetchErrorOnce},
+        {"late_fetch_partial_status_error_once", MappingFault::LateFetchPartialStatusErrorOnce},
         {"persisted_wrong_top_tag", MappingFault::PersistedWrongTopTag},
         {"persisted_short_top", MappingFault::PersistedShortTop},
         {"persisted_long_top", MappingFault::PersistedLongTop},
@@ -1867,6 +1875,7 @@ void emit_batch_failure_statuses(
         palloc0(occurrence_count * sizeof(bool)));
     auto* terminal = static_cast<BioseqCacheStatusV2*>(palloc(
         occurrence_count * sizeof(BioseqCacheStatusV2)));
+    bool injected_partial_status_error = false;
     for (std::size_t index = 0; index < occurrence_count; ++index) {
         terminal[index] = BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
@@ -1949,7 +1958,20 @@ void emit_batch_failure_statuses(
                 }
                 ++g_counters.late_fetch_values;
                 g_counters.late_fetch_bytes += value_bytes;
+                if (g_mapping_fault
+                    == MappingFault::LateFetchPartialStatusErrorOnce) {
+                    g_mapping_fault = MappingFault::None;
+                    ++g_counters.late_fetch_errors;
+                    injected_partial_status_error = true;
+                    break;
+                }
             }
+            if (injected_partial_status_error) {
+                break;
+            }
+        }
+        if (injected_partial_status_error) {
+            break;
         }
         ExecClearTuple(slot);
     }
@@ -1957,6 +1979,11 @@ void emit_batch_failure_statuses(
     ExecDropSingleTupleTableSlot(slot);
     table_endscan(scan);
     table_close(relation, NoLock);
+    if (injected_partial_status_error) {
+        pfree(terminal);
+        pfree(found);
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
     bool all_valid = true;
     for (std::size_t index = 0; index < occurrence_count; ++index) {
         sink->emit_reference_status(sink->opaque, index, terminal[index]);
@@ -2311,7 +2338,11 @@ void apply_mapping_fault(
         case MappingFault::None:
         case MappingFault::DecoratedBoundarySchemaMismatch:
         case MappingFault::DecoratedLineageSchemaMismatch:
+        case MappingFault::ProviderUnsupported:
+        case MappingFault::ProviderStatusError:
+        case MappingFault::ProviderQueryCanceled:
         case MappingFault::LateFetchErrorOnce:
+        case MappingFault::LateFetchPartialStatusErrorOnce:
         case MappingFault::PersistedWrongTopTag:
         case MappingFault::PersistedShortTop:
         case MappingFault::PersistedLongTop:
@@ -2432,6 +2463,17 @@ void apply_mapping_fault(
         ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
              errmsg("injected generic cache-provider mapping error")));
+    }
+    if (g_mapping_fault == MappingFault::ProviderQueryCanceled) {
+        ereport(ERROR,
+            (errcode(ERRCODE_QUERY_CANCELED),
+             errmsg("injected generic cache-provider query cancellation")));
+    }
+    if (g_mapping_fault == MappingFault::ProviderUnsupported) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    if (g_mapping_fault == MappingFault::ProviderStatusError) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
     }
     if (consumer == nullptr || source == nullptr || output == nullptr
         || output->struct_size < sizeof(*output)

@@ -1,5 +1,5 @@
 /**
- * @file bioseq_caching/pg/reusable_planning.cppm
+ * @file bioseq_caching/core/reusable_planning.cppm
  * @brief Bounded, provider-neutral reusable-coverage planning primitives.
  *
  * This module intentionally has no PostgreSQL header dependency.  It owns the
@@ -20,9 +20,13 @@ module;
 #include <span>
 #include <type_traits>
 
-export module bioseq.cache.pg.reusable_planning;
+export module bioseq.cache.core:reusable_planning;
 
-import bioseq.cache.core;
+import bioseq.cache.provider_api;
+import :coverage;
+import :provider_validation;
+import :reusable_registry;
+import :wire;
 
 export namespace bioseq::cache::pg::reuse {
 

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * provider_registry.cppm
+ * provider/registry.cppm
  *     Backend-local V2 provider registry and rendezvous publication.
  *
  * Provider descriptors and names are copied into stable, never-compacted
@@ -25,7 +25,7 @@ extern "C" {
 #include <limits>
 #include <type_traits>
 
-export module bioseq.cache.pg.provider_registry;
+export module bioseq.cache.pg.provider:registry;
 
 import bioseq.cache.provider_api;
 
@@ -83,6 +83,10 @@ using PlannerBridgeObserverV2 = void (*)(
     RangeTblEntry* rte,
     const ProviderV2* provider) noexcept;
 
+/** Cache-owned observer for a provider's fully mutated PlannedStmt. */
+using FinalizedPlanBridgeObserverV2 = void (*)(
+    PlannedStmt* statement) noexcept;
+
 [[nodiscard]] bool validate_provider_v2(const ProviderV2* provider) noexcept;
 [[nodiscard]] BioseqCacheStatusV2 register_provider_v2(
     const ProviderV2* provider,
@@ -124,6 +128,9 @@ void after_provider_rel_paths_v2(
     unsigned int rti,
     RangeTblEntry* rte,
     const ProviderV2* provider) noexcept;
+void install_finalized_plan_bridge_observer_v2(
+    FinalizedPlanBridgeObserverV2 observer) noexcept;
+void after_planned_statement_v2(PlannedStmt* statement) noexcept;
 
 /** Validate publication ownership and the optional peer before mutation. */
 [[nodiscard]] bool preflight_provider_registry_v2() noexcept;
@@ -178,8 +185,12 @@ inline std::uint64_t g_registry_cookie = 0;
 inline std::uint32_t g_active_callback_count = 0;
 inline RelationWriteObserverV2 g_relation_write_observer = nullptr;
 inline PlannerBridgeObserverV2 g_planner_bridge_observer = nullptr;
+inline FinalizedPlanBridgeObserverV2
+    g_finalized_plan_bridge_observer = nullptr;
 inline const ProviderDirectoryV2* g_preflight_directory = nullptr;
 inline bool g_preflight_directory_compatible = false;
+inline void** g_cache_api_rendezvous_slot = nullptr;
+inline void** g_provider_directory_rendezvous_slot = nullptr;
 
 inline constexpr std::uint32_t kKnownProviderFlags =
     static_cast<std::uint32_t>(
@@ -443,11 +454,16 @@ void bridge_after_provider_rel_paths(
     after_provider_rel_paths_v2(root, rel, rti, rte, provider);
 }
 
+void bridge_after_planned_statement(PlannedStmt* statement) noexcept {
+    after_planned_statement_v2(statement);
+}
+
 inline constinit PlannerBridgeV2 g_planner_bridge_v2{
     static_cast<std::uint32_t>(sizeof(PlannerBridgeV2)),
     bioseq::cache::kProviderAbiVersion,
     kPostgresMajorVersion,
     &bridge_after_provider_rel_paths,
+    &bridge_after_planned_statement,
 };
 
 inline CacheApiV2 g_cache_api_v2{
@@ -776,46 +792,65 @@ void after_provider_rel_paths_v2(
     observer(root, rel, rti, rte, registered);
 }
 
+void install_finalized_plan_bridge_observer_v2(
+        FinalizedPlanBridgeObserverV2 observer) noexcept {
+    detail::g_finalized_plan_bridge_observer = observer;
+}
+
+void after_planned_statement_v2(PlannedStmt* statement) noexcept {
+    const FinalizedPlanBridgeObserverV2 observer =
+        detail::g_finalized_plan_bridge_observer;
+    if (observer != nullptr && statement != nullptr) {
+        observer(statement);
+    }
+}
+
 bool preflight_provider_registry_v2() noexcept {
-    void** const api_slot = find_rendezvous_variable(
+    detail::g_cache_api_rendezvous_slot = find_rendezvous_variable(
         bioseq::cache::kCacheApiRendezvousName);
-    if (api_slot == nullptr
-        || (*api_slot != nullptr
-            && *api_slot != static_cast<void*>(&detail::g_cache_api_v2))) {
+    if (detail::g_cache_api_rendezvous_slot == nullptr
+        || (*detail::g_cache_api_rendezvous_slot != nullptr
+            && *detail::g_cache_api_rendezvous_slot
+                != static_cast<void*>(&detail::g_cache_api_v2))) {
         return false;
     }
-    void** const directory_slot = find_rendezvous_variable(
-        bioseq::cache::kProviderDirectoryRendezvousName);
+    detail::g_provider_directory_rendezvous_slot =
+        find_rendezvous_variable(
+            bioseq::cache::kProviderDirectoryRendezvousName);
     detail::g_preflight_directory =
-        directory_slot == nullptr || *directory_slot == nullptr
+        detail::g_provider_directory_rendezvous_slot == nullptr
+            || *detail::g_provider_directory_rendezvous_slot == nullptr
         ? nullptr
-        : static_cast<const ProviderDirectoryV2*>(*directory_slot);
+        : static_cast<const ProviderDirectoryV2*>(
+            *detail::g_provider_directory_rendezvous_slot);
     detail::g_preflight_directory_compatible =
         detail::g_preflight_directory != nullptr
         && detail::directory_valid(detail::g_preflight_directory);
-    return true;
-}
-
-bool initialize_provider_registry_v2() noexcept {
-    if (!preflight_provider_registry_v2()) {
-        return false;
-    }
-    void** const api_slot = find_rendezvous_variable(
-        bioseq::cache::kCacheApiRendezvousName);
     if (detail::g_cache_api_v2.instance_cookie == 0) {
         detail::g_cache_api_v2.instance_cookie =
             detail::mix_cookie(
                 detail::process_cookie() ^ 0x76325f6361636865ULL);
     }
-    *api_slot = static_cast<void*>(&detail::g_cache_api_v2);
+    return true;
+}
 
-    void** const directory_slot = find_rendezvous_variable(
-        bioseq::cache::kProviderDirectoryRendezvousName);
-    if (directory_slot == nullptr || *directory_slot == nullptr) {
+bool initialize_provider_registry_v2() noexcept {
+    if (detail::g_cache_api_rendezvous_slot == nullptr
+        || (*detail::g_cache_api_rendezvous_slot != nullptr
+            && *detail::g_cache_api_rendezvous_slot
+                != static_cast<void*>(&detail::g_cache_api_v2))) {
+        return false;
+    }
+    *detail::g_cache_api_rendezvous_slot =
+        static_cast<void*>(&detail::g_cache_api_v2);
+
+    if (detail::g_provider_directory_rendezvous_slot == nullptr
+        || *detail::g_provider_directory_rendezvous_slot == nullptr) {
         return true;
     }
     const auto* directory =
-        static_cast<const ProviderDirectoryV2*>(*directory_slot);
+        static_cast<const ProviderDirectoryV2*>(
+            *detail::g_provider_directory_rendezvous_slot);
     const bool preflight_matches =
         directory == detail::g_preflight_directory;
     if (!preflight_matches

@@ -1,18 +1,17 @@
 /*-------------------------------------------------------------------------
  *
- * reusable_adapter.cppm
+ * provider/reusable_adapter.cppm
  *     PostgreSQL planner/executor adapters for provider-neutral reuse.
  *
- * Provider callbacks run in disposable child contexts.  PostgreSQL ERROR is
- * converted to an optional-candidate rejection, while cancellation and
- * shutdown retain their normal semantics.  No C++ destructor is relied upon
- * for a reference, gate, or MemoryContext correctness action.
+ * Provider callbacks run in disposable child contexts. Explicit provider
+ * status failures reject an optional candidate; every PostgreSQL ERROR is
+ * rethrown with its original SQLSTATE after callback/reference cleanup. No
+ * C++ destructor is relied upon for a reference, gate, or MemoryContext
+ * correctness action.
  *
  *-------------------------------------------------------------------------
  */
 module;
-
-#include <cstdlib>
 
 extern "C" {
 #include "postgres.h"
@@ -29,6 +28,7 @@ extern "C" {
 #include "nodes/plannodes.h"
 #include "optimizer/paramassign.h"
 #include "optimizer/pathnode.h"
+#include "utils/datum.h"
 #include "utils/elog.h"
 #include "utils/errcodes.h"
 #include "utils/memutils.h"
@@ -40,12 +40,12 @@ extern "C" {
 #include <cstring>
 #include <limits>
 #include <span>
+#include <type_traits>
 
-export module bioseq.cache.pg.reusable_adapter;
+export module bioseq.cache.pg.provider:reusable_adapter;
 
 import bioseq.cache.core;
-import bioseq.cache.pg.provider_registry;
-import bioseq.cache.pg.reusable_planning;
+import :registry;
 import bioseq.pg_support;
 
 export namespace bioseq::cache::pg::reuse {
@@ -311,13 +311,6 @@ register_candidate_context_cleanup(
 
 namespace bioseq::cache::pg::reuse::detail {
 
-[[nodiscard]] bool interrupt_error(int sqlstate) noexcept {
-    return sqlstate == ERRCODE_QUERY_CANCELED
-        || sqlstate == ERRCODE_ADMIN_SHUTDOWN
-        || sqlstate == ERRCODE_CRASH_SHUTDOWN
-        || ProcDiePending;
-}
-
 void set_diagnostic(
     ProviderCallDiagnosticV1* diagnostic,
     ProviderCallFailureV1 failure,
@@ -328,6 +321,21 @@ void set_diagnostic(
         diagnostic->provider_status = provider_status;
         diagnostic->sqlstate = sqlstate;
     }
+}
+
+/** Classify a provider's explicit non-OK status before inspecting its output. */
+[[nodiscard]] constexpr ProviderCallFailureV1 provider_status_failure(
+        BioseqCacheStatusV2 status) noexcept {
+    return status == BIOSEQ_CACHE_STATUS_UNSUPPORTED
+        ? ProviderCallFailureV1::Unsupported
+        : ProviderCallFailureV1::CallbackError;
+}
+
+/** Zero one imported C ABI record without Clang aggregate-assignment codegen. */
+template<class Value>
+void reset_abi_pod(Value& value) noexcept {
+    static_assert(std::is_trivially_copyable_v<Value>);
+    std::memset(&value, 0, sizeof(value));
 }
 
 [[nodiscard]] bool provider_available(
@@ -822,13 +830,15 @@ struct SemanticDigestBodyV1 {
 [[nodiscard]] bool semantic_digest_body(
         void* opaque, BioseqCacheStatusV2 status) {
     auto& body = *static_cast<SemanticDigestBodyV1*>(opaque);
-    if (status != BIOSEQ_CACHE_STATUS_OK || body.buffer.failed
-        || body.buffer.size == 0) {
+    if (status != BIOSEQ_CACHE_STATUS_OK) {
+        set_diagnostic(
+            body.diagnostic, provider_status_failure(status), status);
+        return false;
+    }
+    if (body.buffer.failed || body.buffer.size == 0) {
         set_diagnostic(
             body.diagnostic,
-            status == BIOSEQ_CACHE_STATUS_UNSUPPORTED
-                ? ProviderCallFailureV1::Unsupported
-                : ProviderCallFailureV1::MalformedOutput,
+            ProviderCallFailureV1::MalformedOutput,
             status);
         return false;
     }
@@ -864,13 +874,15 @@ struct SemanticDigestBodyV1 {
 [[nodiscard]] bool runtime_body(
         void* opaque, BioseqCacheStatusV2 status) {
     auto& body = *static_cast<RuntimeBodyV1*>(opaque);
-    if (status != BIOSEQ_CACHE_STATUS_OK || body.buffer.failed
-        || body.buffer.size != body.actual.size()) {
+    if (status != BIOSEQ_CACHE_STATUS_OK) {
+        set_diagnostic(
+            body.diagnostic, provider_status_failure(status), status);
+        return false;
+    }
+    if (body.buffer.failed || body.buffer.size != body.actual.size()) {
         set_diagnostic(
             body.diagnostic,
-            status == BIOSEQ_CACHE_STATUS_UNSUPPORTED
-                ? ProviderCallFailureV1::Unsupported
-                : ProviderCallFailureV1::MalformedOutput,
+            ProviderCallFailureV1::MalformedOutput,
             status);
         return false;
     }
@@ -899,16 +911,18 @@ struct ExtractOccurrenceBodyV2 {
 [[nodiscard]] bool extract_occurrence_body(
         void* opaque, BioseqCacheStatusV2 status) {
     auto& body = *static_cast<ExtractOccurrenceBodyV2*>(opaque);
-    if (status != BIOSEQ_CACHE_STATUS_OK
-        || body.raw.struct_size
+    if (status != BIOSEQ_CACHE_STATUS_OK) {
+        set_diagnostic(
+            body.diagnostic, provider_status_failure(status), status);
+        return false;
+    }
+    if (body.raw.struct_size
             < offsetof(BioseqCacheOccurrenceV2, capability_mask)
                 + sizeof(body.raw.capability_mask)
         || body.raw.reserved != 0) {
         set_diagnostic(
             body.diagnostic,
-            status == BIOSEQ_CACHE_STATUS_UNSUPPORTED
-                ? ProviderCallFailureV1::Unsupported
-                : ProviderCallFailureV1::MalformedOutput,
+            ProviderCallFailureV1::MalformedOutput,
             status);
         return false;
     }
@@ -939,6 +953,70 @@ struct LateFetchBodyV2 {
     BioseqCacheLateFetchSinkV2 sink{};
 };
 
+/**
+ * Consume provider Datums synchronously while slot-owned by-reference storage
+ * is still valid. The copies remain private to the disposable callback
+ * context until the provider reports OK and every terminal is validated.
+ */
+[[nodiscard]] BioseqCacheStatusV2 stage_late_fetch_value(
+        void* opaque,
+        std::size_t reference_index,
+        std::size_t requested_attribute_index,
+        std::uintptr_t datum,
+        bool is_null) noexcept {
+    auto* body = static_cast<LateFetchBodyV2*>(opaque);
+    if (body == nullptr) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    const BioseqCacheStatusV2 staged = late_fetch_emit_value(
+        &body->staging,
+        reference_index,
+        requested_attribute_index,
+        datum,
+        is_null);
+    if (staged != BIOSEQ_CACHE_STATUS_OK || is_null) {
+        return staged;
+    }
+    if (requested_attribute_index >= body->attribute_count
+        || body->attribute_numbers == nullptr
+        || body->output_descriptor == nullptr) {
+        body->staging.malformed = true;
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    const AttrNumber attno =
+        body->attribute_numbers[requested_attribute_index];
+    if (attno <= 0 || attno > body->output_descriptor->natts) {
+        body->staging.malformed = true;
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    const Form_pg_attribute column =
+        TupleDescAttr(body->output_descriptor, attno - 1);
+    const Datum source = static_cast<Datum>(datum);
+    if (column->attisdropped
+        || (!column->attbyval && DatumGetPointer(source) == nullptr)) {
+        body->staging.malformed = true;
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    const std::size_t value_index =
+        reference_index * body->attribute_count
+        + requested_attribute_index;
+    body->values[value_index] = static_cast<std::uintptr_t>(
+        datumCopy(source, column->attbyval, column->attlen));
+    return BIOSEQ_CACHE_STATUS_OK;
+}
+
+/** Record one terminal against the same private staging ledger. */
+void stage_late_fetch_reference_status(
+        void* opaque,
+        std::size_t reference_index,
+        BioseqCacheStatusV2 status) noexcept {
+    auto* body = static_cast<LateFetchBodyV2*>(opaque);
+    if (body != nullptr) {
+        late_fetch_emit_reference_status(
+            &body->staging, reference_index, status);
+    }
+}
+
 [[nodiscard]] bool prepare_late_fetch_body(void* opaque) {
     auto& body = *static_cast<LateFetchBodyV2*>(opaque);
     if (body.occurrence_count == 0 || body.attribute_count == 0
@@ -955,6 +1033,15 @@ struct LateFetchBodyV2 {
         || body.output->values.size() < value_count
         || body.output->nulls.size() < value_count) {
         return false;
+    }
+    for (std::size_t index = 0; index < body.attribute_count; ++index) {
+        const AttrNumber attno = body.attribute_numbers[index];
+        if (attno <= 0 || body.output_descriptor == nullptr
+            || attno > body.output_descriptor->natts
+            || TupleDescAttr(body.output_descriptor, attno - 1)
+                ->attisdropped) {
+            return false;
+        }
     }
     body.terminal_status = static_cast<std::uint8_t*>(
         palloc(body.occurrence_count * sizeof(std::uint8_t)));
@@ -983,20 +1070,27 @@ struct LateFetchBodyV2 {
     if (!initialize_late_fetch_sink_state(body.staging)) {
         return false;
     }
-    body.sink = make_late_fetch_sink(body.staging);
+    reset_abi_pod(body.sink);
+    body.sink.struct_size = sizeof(BioseqCacheLateFetchSinkV2);
+    body.sink.opaque = &body;
+    body.sink.emit_value = &stage_late_fetch_value;
+    body.sink.emit_reference_status =
+        &stage_late_fetch_reference_status;
     return true;
 }
 
 [[nodiscard]] bool late_fetch_body(
         void* opaque, BioseqCacheStatusV2 status) {
     auto& body = *static_cast<LateFetchBodyV2*>(opaque);
-    if (status != BIOSEQ_CACHE_STATUS_OK
-        || !late_fetch_complete_and_valid(body.staging)) {
+    if (status != BIOSEQ_CACHE_STATUS_OK) {
+        set_diagnostic(
+            body.diagnostic, provider_status_failure(status), status);
+        return false;
+    }
+    if (!late_fetch_complete_and_valid(body.staging)) {
         set_diagnostic(
             body.diagnostic,
-            status == BIOSEQ_CACHE_STATUS_UNSUPPORTED
-                ? ProviderCallFailureV1::Unsupported
-                : ProviderCallFailureV1::MalformedOutput,
+            ProviderCallFailureV1::MalformedOutput,
             status);
         return false;
     }
@@ -1014,30 +1108,22 @@ struct LateFetchBodyV2 {
                 reference * body.attribute_count + attribute_index;
             const std::int16_t attno =
                 body.attribute_numbers[attribute_index];
-            if (attno <= 0
-                || body.output_descriptor == nullptr
-                || attno > body.output_descriptor->natts) {
-                MemoryContextSwitchTo(previous);
-                return false;
-            }
             const bool is_null = body.nulls[value_index] != 0;
             body.copied_nulls[value_index] = is_null;
             if (is_null) {
                 body.copied_values[value_index] =
                     static_cast<Datum>(0);
+                body.values[value_index] = std::uintptr_t{0};
                 continue;
             }
             const Form_pg_attribute column = TupleDescAttr(
                 body.output_descriptor, attno - 1);
-            const Datum datum = static_cast<Datum>(
+            const Datum staged_datum = static_cast<Datum>(
                 body.values[value_index]);
-            if (!column->attbyval
-                && DatumGetPointer(datum) == nullptr) {
-                MemoryContextSwitchTo(previous);
-                return false;
-            }
             body.copied_values[value_index] = datumCopy(
-                datum, column->attbyval, column->attlen);
+                staged_datum, column->attbyval, column->attlen);
+            body.values[value_index] = static_cast<std::uintptr_t>(
+                body.copied_values[value_index]);
         }
     }
     MemoryContextSwitchTo(previous);
@@ -1200,12 +1286,15 @@ struct ExplainBodyV2 {
 [[nodiscard]] bool explain_body(
         void* opaque, BioseqCacheStatusV2 status) {
     auto& body = *static_cast<ExplainBodyV2*>(opaque);
-    if (status != BIOSEQ_CACHE_STATUS_OK || body.ledger.failed) {
+    if (status != BIOSEQ_CACHE_STATUS_OK) {
+        set_diagnostic(
+            body.diagnostic, provider_status_failure(status), status);
+        return false;
+    }
+    if (body.ledger.failed) {
         set_diagnostic(
             body.diagnostic,
-            status == BIOSEQ_CACHE_STATUS_UNSUPPORTED
-                ? ProviderCallFailureV1::Unsupported
-                : ProviderCallFailureV1::MalformedOutput,
+            ProviderCallFailureV1::MalformedOutput,
             status);
         return false;
     }
@@ -1260,7 +1349,8 @@ provider_call_result invoke_provider_callback(
     volatile BioseqCacheStatusV2 callback_status =
         BIOSEQ_CACHE_STATUS_ERROR;
     volatile int callback_sqlstate = 0;
-    ErrorData* interrupt_data = nullptr;
+    ErrorData* postgres_error_data = nullptr;
+    bool postgres_error_capture_failed = false;
 
     try {
         bioseq::pg_utils::invoke_pg_as_cpp(
@@ -1269,10 +1359,12 @@ provider_call_result invoke_provider_callback(
              &child_context,
              &accepted,
              &callback_status] {
-                child_context = AllocSetContextCreate(
+                child_context = AllocSetContextCreateInternal(
                     input.parent_context,
                     "bioseq cache provider callback",
-                    ALLOCSET_SMALL_SIZES);
+                    ALLOCSET_SMALL_MINSIZE,
+                    ALLOCSET_SMALL_INITSIZE,
+                    ALLOCSET_SMALL_MAXSIZE);
                 MemoryContextSetIdentifier(
                     child_context, input.context_name);
                 MemoryContextSwitchTo(child_context);
@@ -1447,9 +1539,11 @@ provider_call_result invoke_provider_callback(
             });
     } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
         callback_sqlstate = error.sqlerrcode();
-        if (detail::interrupt_error(callback_sqlstate)) {
-            interrupt_data = error.release_error_data();
-        }
+        postgres_error_data = error.release_error_data();
+        callback_status = BIOSEQ_CACHE_STATUS_ERROR;
+        accepted = false;
+    } catch (const bioseq::pg_utils::PostgresErrorCaptureFailure&) {
+        postgres_error_capture_failed = true;
         callback_status = BIOSEQ_CACHE_STATUS_ERROR;
         accepted = false;
     } catch (...) {
@@ -1463,12 +1557,22 @@ provider_call_result invoke_provider_callback(
         release_candidate_reference_noerror(
             *input.candidate_reference);
     }
-    if (interrupt_data != nullptr) {
+    if (postgres_error_data != nullptr) {
         if (child_context != nullptr) {
             MemoryContextDelete(child_context);
             child_context = nullptr;
         }
-        ReThrowError(interrupt_data);
+        bioseq::pg_utils::rethrow_postgres_error_after_cleanup(
+            postgres_error_data);
+    }
+    if (postgres_error_capture_failed) {
+        if (child_context != nullptr) {
+            MemoryContextDelete(child_context);
+            child_context = nullptr;
+        }
+        bioseq::pg_utils::emit_postgres_error_after_cleanup(
+            ERRCODE_INTERNAL_ERROR,
+            "bioseq cache could not preserve a provider PostgreSQL error");
     }
 
     result.accepted = accepted;
@@ -1564,7 +1668,7 @@ bool invoke_analyze_query_fail_open(
         return false;
     }
     out->owner_context = nullptr;
-    out->value = {};
+    detail::reset_abi_pod(out->value);
     detail::AnalyzeBodyV1 body{provider, query, out, diagnostic};
     MemoryContext accepted = nullptr;
     if (!detail::run_provider_boundary(
@@ -1601,7 +1705,7 @@ bool invoke_describe_path_fail_open(
         return false;
     }
     out->owner_context = nullptr;
-    out->value = {};
+    detail::reset_abi_pod(out->value);
     detail::DescribeBodyV1 body{
         provider, root, rel, provider_path, intent, out, diagnostic};
     MemoryContext accepted = nullptr;
@@ -1642,7 +1746,7 @@ bool invoke_map_source_fail_open(
         return false;
     }
     out->owner_context = nullptr;
-    out->value = {};
+    detail::reset_abi_pod(out->value);
     detail::MapBodyV1 body{
         provider, root, consumer_domain, source, out, diagnostic};
     MemoryContext accepted = nullptr;
@@ -1686,7 +1790,7 @@ bool invoke_decorate_path_fail_open(
         return false;
     }
     out->owner_context = nullptr;
-    out->value = {};
+    detail::reset_abi_pod(out->value);
     detail::DecorateBodyV1 body{
         provider,
         root,
@@ -1730,7 +1834,7 @@ bool invoke_build_recipe_fail_open(
         return false;
     }
     out->owner_context = nullptr;
-    out->value = {};
+    detail::reset_abi_pod(out->value);
     out->serialized_bytes = 0;
     out->node_count = 0;
     detail::RecipeBodyV1 body{

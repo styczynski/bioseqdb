@@ -8,7 +8,6 @@
 #include <vector>
 
 import bioseq.cache.core;
-import bioseq.cache.pg.reusable_planning;
 
 using namespace bioseq::cache;
 using namespace bioseq::cache::pg::reuse;

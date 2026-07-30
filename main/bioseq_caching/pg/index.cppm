@@ -94,7 +94,6 @@ PG_MODULE_MAGIC;
 #include <expected>
 #include <fcntl.h>
 #include <limits>
-#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -109,11 +108,11 @@ export module bioseq.cache.pg;
 
 import bioseq.cache.core;
 import bioseq.cache.pg.dependency_runtime;
+import bioseq.cache.pg.executor;
 import bioseq.cache.pg.maintenance;
 import bioseq.cache.pg.object_dependency_hooks;
-import bioseq.cache.pg.provider_registry;
-import bioseq.cache.pg.reusable_adapter;
-import bioseq.cache.pg.reusable_planning;
+import bioseq.cache.pg.planner;
+import bioseq.cache.pg.provider;
 import bioseq.cache.pg.shared_registry;
 import bioseq.cache.pg.storage;
 import bioseq.cache.pg.sql.rows;
@@ -672,6 +671,7 @@ struct PlannerFrame {
     std::size_t provider_intent_count = 0;
     std::size_t nested_intent_count = 0;
     std::size_t selected_coverage_gate_count = 0;
+    PlannedStmt* bridge_finalized_statement = nullptr;
     bool selected_coverage_gate_overflow = false;
     bool nested_coverage_path_created = false;
     bool eligible = false;
@@ -5998,14 +5998,12 @@ void reusable_registry_janitor_sweep_v1() noexcept {
         || ProcGlobal == nullptr) {
         return;
     }
-    void* workspace_memory = palloc_extended(
-        sizeof(ReusableJanitorLivenessWorkspaceV1),
-        MCXT_ALLOC_NO_OOM);
-    if (workspace_memory == nullptr) {
+    auto* workspace =
+        executor::try_construct_context_owned<
+            ReusableJanitorLivenessWorkspaceV1>(CurrentMemoryContext);
+    if (workspace == nullptr) {
         return;
     }
-    auto* workspace = ::new (workspace_memory)
-        ReusableJanitorLivenessWorkspaceV1{};
     LWLockAcquire(g_reusable_membership_lock, LW_SHARED);
     const ReusableJanitorLivenessSnapshotV1 liveness_snapshot =
         snapshot_reusable_janitor_liveness(
@@ -6131,8 +6129,7 @@ void reusable_registry_janitor_sweep_v1() noexcept {
             ConditionVariableBroadcast(&g_reusable_wait_slots[index]);
         }
     }
-    workspace->~ReusableJanitorLivenessWorkspaceV1();
-    pfree(workspace_memory);
+    executor::destroy_context_owned(workspace);
 }
 
 #if defined(BIOSEQ_CACHE_TESTING)
@@ -6987,12 +6984,9 @@ void validate_binary_schema(const TupleDesc descriptor) {
 }
 
 void destroy_column_builder(BioseqCacheState& state) noexcept {
-    delete state.column_builder;
-    state.column_builder = nullptr;
-    delete state.column_sink;
-    state.column_sink = nullptr;
-    delete state.column_checksum_policy;
-    state.column_checksum_policy = nullptr;
+    executor::destroy_context_owned(state.column_builder);
+    executor::destroy_context_owned(state.column_sink);
+    executor::destroy_context_owned(state.column_checksum_policy);
     if (state.send_functions != nullptr) {
         pfree(state.send_functions);
         state.send_functions = nullptr;
@@ -8910,168 +8904,22 @@ void recycle_registry_entry_locked(CacheEntry& entry) noexcept {
     return decision;
 }
 
-/** Resolve one exact key in the unified DSA registry. */
-struct ExactDependencyEvidenceV1 {
-    bool references_relation = false;
-    bool complete_provider = false;
-    std::uint32_t provider_id = 0;
-    std::uint32_t provider_abi_version = 0;
-    bool provider_ambiguous = false;
-};
+using ExactDependencyEvidenceV1 = planner::ExactDependencyEvidenceV1;
 
-[[nodiscard]] bool exact_scan_references_relation(
-        const Plan* plan, EState* estate, Oid relation_oid) noexcept {
-    if (plan == nullptr || estate == nullptr || !OidIsValid(relation_oid)) {
-        return false;
-    }
-    bool scan_node = false;
-    switch (nodeTag(plan)) {
-        case T_SeqScan:
-        case T_SampleScan:
-        case T_IndexScan:
-        case T_IndexOnlyScan:
-        case T_BitmapIndexScan:
-        case T_BitmapHeapScan:
-        case T_TidScan:
-        case T_TidRangeScan:
-        case T_SubqueryScan:
-        case T_FunctionScan:
-        case T_TableFuncScan:
-        case T_ValuesScan:
-        case T_CteScan:
-        case T_NamedTuplestoreScan:
-        case T_WorkTableScan:
-        case T_ForeignScan:
-        case T_CustomScan:
-            scan_node = true;
-            break;
-        default:
-            break;
-    }
-    if (!scan_node) {
-        return false;
-    }
-    const Index range_index = reinterpret_cast<const Scan*>(plan)->scanrelid;
-    if (range_index == 0 || estate->es_range_table == NIL
-        || range_index > static_cast<Index>(
-            list_length(estate->es_range_table))) {
-        return false;
-    }
-    const RangeTblEntry* range = exec_rt_fetch(range_index, estate);
-    return range != nullptr && range->rtekind == RTE_RELATION
-        && range->relid == relation_oid;
-}
-
-/** Associate a complete provider wrapper with every relation in its subtree. */
+/** Associate complete provider wrappers with one relation-bearing subtree. */
 [[nodiscard]] ExactDependencyEvidenceV1 exact_dependency_evidence(
         const Plan* plan,
         EState* estate,
         Oid relation_oid,
         const provider_registry::ProviderSnapshotV2& providers,
         std::size_t& visited) noexcept {
-    ExactDependencyEvidenceV1 result{};
-    if (plan == nullptr || visited >= kMaximumExactPlanWalkNodesV1) {
-        return result;
-    }
-    ++visited;
-    result.references_relation = exact_scan_references_relation(
-        plan, estate, relation_oid);
-
-    const auto merge = [&result](ExactDependencyEvidenceV1 child) noexcept {
-        result.references_relation = result.references_relation
-            || child.references_relation;
-        result.complete_provider = result.complete_provider
-            || child.complete_provider;
-        if (child.provider_ambiguous) {
-            result.provider_ambiguous = true;
-        }
-        if (child.provider_id != 0) {
-            if (result.provider_id != 0
-                && result.provider_id != child.provider_id) {
-                result.provider_ambiguous = true;
-            } else {
-                result.provider_id = child.provider_id;
-                result.provider_abi_version = child.provider_abi_version;
-            }
-        }
-    };
-    merge(exact_dependency_evidence(
-        outerPlan(plan), estate, relation_oid, providers, visited));
-    merge(exact_dependency_evidence(
-        innerPlan(plan), estate, relation_oid, providers, visited));
-    const auto merge_list = [&](const List* plans) noexcept {
-        const ListCell* cell = nullptr;
-        foreach(cell, plans) {
-            merge(exact_dependency_evidence(
-                static_cast<const Plan*>(lfirst(cell)),
-                estate, relation_oid, providers, visited));
-        }
-    };
-    switch (nodeTag(plan)) {
-        case T_SubqueryScan:
-            merge(exact_dependency_evidence(
-                reinterpret_cast<const SubqueryScan*>(plan)->subplan,
-                estate, relation_oid, providers, visited));
-            break;
-        case T_CustomScan:
-            merge_list(reinterpret_cast<const CustomScan*>(plan)
-                ->custom_plans);
-            break;
-        case T_Append:
-            merge_list(reinterpret_cast<const Append*>(plan)->appendplans);
-            break;
-        case T_MergeAppend:
-            merge_list(reinterpret_cast<const MergeAppend*>(plan)
-                ->mergeplans);
-            break;
-        case T_BitmapAnd:
-            merge_list(reinterpret_cast<const BitmapAnd*>(plan)
-                ->bitmapplans);
-            break;
-        case T_BitmapOr:
-            merge_list(reinterpret_cast<const BitmapOr*>(plan)
-                ->bitmapplans);
-            break;
-        case T_Agg:
-            merge_list(reinterpret_cast<const Agg*>(plan)->chain);
-            break;
-        default:
-            break;
-    }
-
-    const provider_registry::ProviderV2* matched_complete_provider = nullptr;
-    for (std::uint32_t index = 0;
-         index < providers.provider_count; ++index) {
-        const provider_registry::ProviderV2* provider =
-            providers.providers[index];
-        if (provider != nullptr
-            && (provider->provider_flags
-                    & BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION) != 0
-            && reuse::provider_plan_matches(plan, provider)) {
-            if (matched_complete_provider != nullptr
-                && matched_complete_provider->provider_id
-                    != provider->provider_id) {
-                result.provider_ambiguous = true;
-            } else {
-                matched_complete_provider = provider;
-            }
-        }
-    }
-    result.complete_provider = result.complete_provider
-        || (matched_complete_provider != nullptr
-            && result.references_relation);
-    if (matched_complete_provider != nullptr
-        && result.references_relation) {
-        if (result.provider_id != 0
-            && result.provider_id != matched_complete_provider->provider_id) {
-            result.provider_ambiguous = true;
-        } else {
-            result.provider_id = matched_complete_provider->provider_id;
-            result.provider_abi_version =
-                matched_complete_provider->abi_version;
-        }
-    }
-    return result;
+    return planner::exact_dependency_evidence(
+        plan,
+        estate,
+        relation_oid,
+        providers,
+        visited,
+        kMaximumExactPlanWalkNodesV1);
 }
 
 struct ExactDependencyVersionsV1 {
@@ -9715,14 +9563,26 @@ void cache_state_cleanup(void* argument) noexcept {
             palloc0(sizeof(Oid) * static_cast<std::size_t>(descriptor->natts)));
         std::vector<ColumnSchema> schema = build_column_schema(
             descriptor, state.send_functions);
-        state.column_checksum_policy = new PostgreSqlColumnChecksumPolicy();
-        state.column_sink = new storage::StorageColumnStoreBlockSink();
-        state.column_builder = new PostgreSqlStreamingColumnStoreBuilder(
+        state.column_checksum_policy =
+            executor::try_construct_context_owned<
+                PostgreSqlColumnChecksumPolicy>(CurrentMemoryContext);
+        state.column_sink =
+            executor::try_construct_context_owned<
+                storage::StorageColumnStoreBlockSink>(CurrentMemoryContext);
+        if (state.column_checksum_policy == nullptr
+            || state.column_sink == nullptr) {
+            destroy_column_builder(state);
+            return false;
+        }
+        state.column_builder =
+            executor::try_construct_context_owned<
+                PostgreSqlStreamingColumnStoreBuilder>(
+            CurrentMemoryContext,
             current_column_store_identity(),
             schema,
             *state.column_checksum_policy,
             *state.column_sink);
-        return true;
+        return state.column_builder != nullptr;
     } catch (...) {
         destroy_column_builder(state);
         return false;
@@ -10006,7 +9866,12 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
             pfree(store);
             return reject(CompleteResultLoadFailureV1::Validation);
         }
-        view = new ColumnStoreView(std::move(*validated));
+        view = executor::try_construct_context_owned<ColumnStoreView>(
+            CurrentMemoryContext, std::move(*validated));
+        if (view == nullptr) {
+            pfree(store);
+            return reject(CompleteResultLoadFailureV1::Validation);
+        }
     } catch (...) {
         pfree(store);
         return reject(CompleteResultLoadFailureV1::Validation);
@@ -10014,7 +9879,7 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
     if (view->column_count()
             != static_cast<std::size_t>(expected_descriptor->natts)
         || view->row_count() != pin.row_count) {
-        delete view;
+        executor::destroy_context_owned(view);
         pfree(store);
         return reject(CompleteResultLoadFailureV1::DescriptorMismatch);
     }
@@ -10090,7 +9955,7 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
             MemoryContextDelete(row_context);
             pfree(values);
             pfree(nulls);
-            delete view;
+            executor::destroy_context_owned(view);
             pfree(store);
             tuplestore_end(result);
             PG_RE_THROW();
@@ -10102,7 +9967,7 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
     MemoryContextDelete(row_context);
     pfree(values);
     pfree(nulls);
-    delete view;
+    executor::destroy_context_owned(view);
     pfree(store);
     if (!valid) {
         tuplestore_end(result);
@@ -12481,12 +12346,9 @@ void destroy_coverage_stored_recipe(
 }
 
 void destroy_coverage_builder(ReusableCoverageState& state) noexcept {
-    delete state.column_builder;
-    state.column_builder = nullptr;
-    delete state.column_sink;
-    state.column_sink = nullptr;
-    delete state.column_checksum_policy;
-    state.column_checksum_policy = nullptr;
+    executor::destroy_context_owned(state.column_builder);
+    executor::destroy_context_owned(state.column_sink);
+    executor::destroy_context_owned(state.column_checksum_policy);
     if (state.send_functions != nullptr) {
         pfree(state.send_functions);
         state.send_functions = nullptr;
@@ -13438,14 +13300,26 @@ void coverage_state_cleanup(void* opaque) noexcept {
             sizeof(Oid) * state.stored_column_count));
         std::vector<ColumnSchema> schema = build_column_schema(
             state.stored_descriptor, state.send_functions);
-        state.column_checksum_policy = new PostgreSqlColumnChecksumPolicy();
-        state.column_sink = new storage::StorageColumnStoreBlockSink();
-        state.column_builder = new PostgreSqlStreamingColumnStoreBuilder(
+        state.column_checksum_policy =
+            executor::try_construct_context_owned<
+                PostgreSqlColumnChecksumPolicy>(CurrentMemoryContext);
+        state.column_sink =
+            executor::try_construct_context_owned<
+                storage::StorageColumnStoreBlockSink>(CurrentMemoryContext);
+        if (state.column_checksum_policy == nullptr
+            || state.column_sink == nullptr) {
+            destroy_coverage_builder(state);
+            return false;
+        }
+        state.column_builder =
+            executor::try_construct_context_owned<
+                PostgreSqlStreamingColumnStoreBuilder>(
+            CurrentMemoryContext,
             current_column_store_identity(),
             schema,
             *state.column_checksum_policy,
             *state.column_sink);
-        return true;
+        return state.column_builder != nullptr;
     } catch (...) {
         destroy_coverage_builder(state);
         return false;
@@ -18496,6 +18370,45 @@ void enable_main_tree_coverage_fail_open(PlannedStmt& statement) noexcept {
     }
 }
 
+/**
+ * Finalize all cache-owned plan metadata after the current outer provider has
+ * completed its post-setrefs mutations.
+ *
+ * Repeating this operation is intentional: when cache is the inner planner
+ * hook it first sees the post-setrefs tree before an outer provider mutates
+ * it, and the provider bridge then authoritatively replaces those provisional
+ * recipes.  Every refresh forces exact nodes to bypass before rebuilding.
+ */
+void finalize_cache_planned_statement(
+        PlannedStmt& statement,
+        MemoryContext planner_context) {
+    if (mark_subplan_coverage_permanent_fail_open(statement)) {
+        enable_main_tree_coverage_fail_open(statement);
+    }
+    if (refresh_finalized_exact_provider_recipes(
+            statement, planner_context)
+        && merge_finalized_exact_dependencies(statement)) {
+        verify_exact_cache_plan_fail_open(statement);
+    }
+}
+
+/** V2 planner-bridge endpoint invoked only after provider Plan mutation. */
+void observe_finalized_planned_statement(
+        PlannedStmt* statement) noexcept {
+    if (statement == nullptr) {
+        return;
+    }
+    finalize_cache_planned_statement(*statement, CurrentMemoryContext);
+    if (g_planner_frame != nullptr) {
+        /*
+         * Cache is the outer hook in this load order.  The bridge refresh is
+         * authoritative; do not immediately rebuild the same recipes again
+         * after the provider returns.
+         */
+        g_planner_frame->bridge_finalized_statement = statement;
+    }
+}
+
 /** Reentrant planner wrapper that owns canonical bytes for upper-path hooks. */
 PlannedStmt* cache_planner(
         Query* query, const char* query_string,
@@ -18589,15 +18502,9 @@ PlannedStmt* cache_planner(
                 query, query_string, cursor_options, bound_parameters)
             : standard_planner(
                 query, query_string, cursor_options, bound_parameters);
-        if (result != nullptr) {
-            if (mark_subplan_coverage_permanent_fail_open(*result)) {
-                enable_main_tree_coverage_fail_open(*result);
-            }
-            if (refresh_finalized_exact_provider_recipes(
-                    *result, planner_context)
-                && merge_finalized_exact_dependencies(*result)) {
-                verify_exact_cache_plan_fail_open(*result);
-            }
+        if (result != nullptr
+            && frame.bridge_finalized_statement != result) {
+            finalize_cache_planned_statement(*result, planner_context);
         }
         g_planner_frame = frame.previous;
     }
@@ -19968,14 +19875,12 @@ struct EntrySnapshot {
     }
     const bool storage_attached = storage::storage_ready()
         || storage::attach_storage();
-    void* workspace_memory = palloc_extended(
-        sizeof(ExactRegistrySweepWorkspaceV1),
-        MCXT_ALLOC_NO_OOM);
-    if (workspace_memory == nullptr) {
+    auto* workspace =
+        executor::try_construct_context_owned<
+            ExactRegistrySweepWorkspaceV1>(CurrentMemoryContext);
+    if (workspace == nullptr) {
         return 0;
     }
-    auto* workspace = ::new (workspace_memory)
-        ExactRegistrySweepWorkspaceV1{};
     LWLockAcquire(g_registry_lock, LW_SHARED);
     for (std::size_t index = 0; index < kRegistryCapacity; ++index) {
         const CacheEntry& entry = g_shared->entries[index];
@@ -20072,8 +19977,7 @@ struct EntrySnapshot {
     for (std::size_t index = 0; index < manifest_count; ++index) {
         static_cast<void>(storage::retire_manifest(manifests[index]));
     }
-    workspace->~ExactRegistrySweepWorkspaceV1();
-    pfree(workspace_memory);
+    executor::destroy_context_owned(workspace);
     return swept;
 }
 
@@ -22253,11 +22157,11 @@ extern "C" {
 
 void _PG_init() {
     using namespace bioseq::cache::pg;
-    register_cache_gucs();
     if (!provider_registry::preflight_provider_registry_v2()) {
         ereport(ERROR,
             (errmsg("bioseq_cache provider rendezvous is owned by another library")));
     }
+    register_cache_gucs();
     if (!maintenance::register_reusable_janitor_callback_v1(
             cache_registry_janitor_sweep_v1)) {
         ereport(ERROR,
@@ -22267,6 +22171,8 @@ void _PG_init() {
         observe_provider_relation_write);
     provider_registry::install_planner_bridge_observer_v2(
         observe_provider_rel_paths);
+    provider_registry::install_finalized_plan_bridge_observer_v2(
+        observe_finalized_planned_statement);
     if (process_shared_preload_libraries_in_progress) {
         g_preload_requested = true;
         if (!maintenance::register_static_janitor_worker()) {

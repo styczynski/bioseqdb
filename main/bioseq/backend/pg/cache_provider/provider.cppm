@@ -146,7 +146,8 @@ inline bool g_directory_published = false;
             == bioseq::cache::kProviderAbiVersion
         && api->planner_bridge->postgres_major
             == kPostgresMajorVersion
-        && api->planner_bridge->after_provider_rel_paths != nullptr;
+        && api->planner_bridge->after_provider_rel_paths != nullptr
+        && api->planner_bridge->after_planned_statement != nullptr;
 }
 
 [[nodiscard]] bool registration_valid(
@@ -321,6 +322,21 @@ export bool bioseq_cache_provider_is_bound() noexcept {
         && detail::g_registered
         && detail::g_bound_api != nullptr
         && detail::g_bound_api_cookie != 0;
+}
+
+/**
+ * Notify the cache only after Bioseq's outer planner hook has completed every
+ * post-setrefs mutation of the main Plan tree and PlannedStmt::subplans.
+ */
+export void bioseq_cache_provider_after_planned_statement(
+        PlannedStmt* statement) noexcept {
+    const BioseqCacheApiV2* const api = detail::g_bound_api;
+    if (statement == nullptr || !detail::g_registered
+        || !detail::cache_api_valid(api)
+        || api->instance_cookie != detail::g_bound_api_cookie) {
+        return;
+    }
+    api->planner_bridge->after_planned_statement(statement);
 }
 
 } // namespace bioseq::pg::cache_provider

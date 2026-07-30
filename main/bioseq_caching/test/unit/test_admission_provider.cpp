@@ -131,6 +131,15 @@ BioseqCacheStatusV2 late_fetch(
     return BIOSEQ_CACHE_STATUS_OK;
 }
 
+void after_provider_rel_paths(
+    ::PlannerInfo*,
+    ::RelOptInfo*,
+    unsigned int,
+    ::RangeTblEntry*,
+    const BioseqCacheProviderV2*) {}
+
+void after_planned_statement(::PlannedStmt*) {}
+
 BioseqCacheColumnSchemaV2 column(
     std::uint32_t attno,
     std::uint64_t semantic_id = 7) {
@@ -555,6 +564,39 @@ TEST_CASE("provider registration enforces callbacks implied by flags") {
     provider.struct_size = sizeof(BioseqCacheProviderV2);
     provider.abi_version = kProviderAbiVersion + 1;
     REQUIRE_FALSE(provider_registration_valid(&provider, 18));
+}
+
+TEST_CASE("planner bridge preserves its prefix and finalized Plan tail") {
+    BioseqCachePlannerBridgeV2 bridge{
+        .struct_size = static_cast<std::uint32_t>(
+            offsetof(
+                BioseqCachePlannerBridgeV2,
+                after_planned_statement)),
+        .abi_version = kProviderAbiVersion,
+        .postgres_major = 18,
+        .after_provider_rel_paths = after_provider_rel_paths,
+        .after_planned_statement = after_planned_statement,
+    };
+    REQUIRE(provider_abi_field_present(
+        &bridge,
+        offsetof(
+            BioseqCachePlannerBridgeV2,
+            after_provider_rel_paths),
+        bridge.after_provider_rel_paths));
+    REQUIRE_FALSE(provider_abi_field_present(
+        &bridge,
+        offsetof(
+            BioseqCachePlannerBridgeV2,
+            after_planned_statement),
+        bridge.after_planned_statement));
+
+    bridge.struct_size = sizeof(BioseqCachePlannerBridgeV2);
+    REQUIRE(provider_abi_field_present(
+        &bridge,
+        offsetof(
+            BioseqCachePlannerBridgeV2,
+            after_planned_statement),
+        bridge.after_planned_statement));
 }
 
 TEST_CASE("canonical keys, identities, dependencies, and settings are exact") {

@@ -238,6 +238,43 @@ struct sql_error_fields {
     std::terminate();
 }
 
+/**
+ * Emit a PostgreSQL ERROR only after callers have released every C++ owner.
+ *
+ * Keeping ereport inside this protected PostgreSQL module prevents importers
+ * from expanding PostgreSQL compiler-builtin macros after importing another
+ * PostgreSQL-backed module.
+ */
+[[noreturn]] inline void emit_postgres_error_after_cleanup(
+        int sqlstate,
+        const char* message) noexcept {
+    ereport(
+        ERROR,
+        (errcode(sqlstate),
+         errmsg_internal(
+             "%s",
+             message == nullptr
+                 ? "PostgreSQL error without a message"
+                 : message)));
+    pg_unreachable();
+}
+
+/**
+ * Re-raise preserved PostgreSQL ErrorData after caller-owned cleanup.
+ *
+ * PostgreSQL retains the original SQLSTATE, including cancellation and
+ * shutdown classes. A missing payload is itself an internal boundary error.
+ */
+[[noreturn]] inline void rethrow_postgres_error_after_cleanup(
+        ErrorData* error) noexcept {
+    if (error != nullptr) {
+        ReThrowError(error);
+    }
+    emit_postgres_error_after_cleanup(
+        ERRCODE_INTERNAL_ERROR,
+        "bioseq could not preserve PostgreSQL error data");
+}
+
 }  // namespace bioseq::pg_utils
 
 namespace bioseq::pg_utils {

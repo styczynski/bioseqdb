@@ -23,6 +23,7 @@ struct Expr;
 struct List;
 struct Path;
 struct Plan;
+struct PlannedStmt;
 struct PlannerInfo;
 struct Query;
 struct RangeTblEntry;
@@ -282,6 +283,14 @@ struct BioseqCachePlannerBridgeV2 {
         unsigned int rti,
         RangeTblEntry* rte,
         const BioseqCacheProviderV2* provider);
+    /**
+     * Rebuild cache-owned exact recipes after the provider's outer planner
+     * hook has completed every post-setrefs Plan mutation.
+     *
+     * The callback is idempotent for one PlannedStmt and never initializes
+     * executor state or a retained child Plan.
+     */
+    void (*after_planned_statement)(PlannedStmt* statement);
 };
 
 struct BioseqCacheProviderRegistrationV2 {
@@ -641,7 +650,9 @@ static_assert(offsetof(BioseqCachePlannerBridgeV2, abi_version) == 4);
 static_assert(offsetof(BioseqCachePlannerBridgeV2, postgres_major) == 8);
 static_assert(
     offsetof(BioseqCachePlannerBridgeV2, after_provider_rel_paths) == 16);
-static_assert(sizeof(BioseqCachePlannerBridgeV2) == 24);
+static_assert(
+    offsetof(BioseqCachePlannerBridgeV2, after_planned_statement) == 24);
+static_assert(sizeof(BioseqCachePlannerBridgeV2) == 32);
 static_assert(alignof(BioseqCachePlannerBridgeV2) == 8);
 
 static_assert(std::is_standard_layout_v<

@@ -102,9 +102,19 @@ TEST_CASE("BioseqScan exact provider produces and hits in same and reuse modes",
         const auto cold = data.exec(small_query, 5min);
         const auto after_cold =
             bioseq::cache_test::read_cache_stats(admin);
+        const auto child_executions_after_cold =
+            bioseq::cache_test::integer(
+                admin,
+                "SELECT exact_child_executions "
+                "FROM bioseq_cache_test.runtime_counters()");
         const auto warm = data.exec(small_query, 5min);
         const auto after_warm =
             bioseq::cache_test::read_cache_stats(admin);
+        const auto child_executions_after_warm =
+            bioseq::cache_test::integer(
+                admin,
+                "SELECT exact_child_executions "
+                "FROM bioseq_cache_test.runtime_counters()");
         CHECK(bioseq::postgres_test::exact_row_hash(cold)
               == oracle_digest);
         CHECK(bioseq::postgres_test::exact_row_hash(warm)
@@ -114,6 +124,9 @@ TEST_CASE("BioseqScan exact provider produces and hits in same and reuse modes",
         CHECK((after_warm - after_cold).completed_hits == 1);
         CHECK((after_warm - after_cold).reuse_hits == 0);
         CHECK((after_warm - after_cold).fallbacks == 0);
+        CHECK(child_executions_after_cold == 1);
+        CHECK(child_executions_after_warm
+              == child_executions_after_cold);
         bioseq::postgres_test::record_migration_probe(
             "combined.bioseq_provider.cold_identity");
         bioseq::postgres_test::record_migration_probe(
@@ -138,7 +151,7 @@ TEST_CASE("performance GUCs preserve Bioseq exact-cache identity",
         "performance GUCs preserve Bioseq exact-cache identity"};
     bioseq::postgres_test::postgres_fixture fixture{
         bioseq::cache_test::cluster_options(
-            true, bioseq::cache_test::preload_order::cache_then_bioseq)};
+            true, bioseq::cache_test::preload_order::bioseq_then_cache)};
     auto& admin = fixture.admin();
     auto data = fixture.connect(30s);
     create_small_fixture(admin);

@@ -3,18 +3,72 @@ option(BIOSEQ_CACHE_BUILD_TESTS
 option(BIOSEQ_CACHE_TESTING
   "Build the noninstalled bioseq_cache test-support DSO" OFF)
 
+function(_bioseq_cache_verify_sql_row_profile_guard)
+  set(_rows_source "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows.cppm")
+  file(READ "${_rows_source}" _rows_text)
+  string(FIND "${_rows_text}"
+    "#if defined(BIOSEQ_CACHE_TESTING)" _guard_begin)
+  string(FIND "${_rows_text}"
+    "#endif  // defined(BIOSEQ_CACHE_TESTING)" _guard_end)
+  if(_guard_begin LESS 0 OR _guard_end LESS 0
+      OR _guard_end LESS_EQUAL _guard_begin)
+    message(FATAL_ERROR
+      "bioseq_cache SQL row profile contract requires one ordered "
+      "BIOSEQ_CACHE_TESTING guard")
+  endif()
+  foreach(_row IN ITEMS
+      storage_tier_stats_row
+      entry_state_row
+      runtime_counters_row
+      transition_state_row
+      planner_reference_counts_row
+      provider_callback_stats_row
+      plan_build_stats_row
+      injected_coverage_row
+      coverage_bucket_state_row)
+    string(FIND "${_rows_text}" "struct ${_row} final" _row_begin)
+    string(FIND "${_rows_text}"
+      "static_assert(std::is_aggregate_v<${_row}>);" _row_contract)
+    if(_row_begin LESS _guard_begin OR _row_begin GREATER _guard_end
+        OR _row_contract LESS _guard_begin
+        OR _row_contract GREATER _guard_end)
+      message(FATAL_ERROR
+        "bioseq_cache SQL row profile contract exposes test-only ${_row} "
+        "outside BIOSEQ_CACHE_TESTING")
+    endif()
+  endforeach()
+  foreach(_row IN ITEMS stats_row cache_entry_row)
+    string(FIND "${_rows_text}" "struct ${_row} final" _row_begin)
+    string(FIND "${_rows_text}"
+      "static_assert(std::is_aggregate_v<${_row}>);" _row_contract)
+    if(_row_begin LESS 0 OR _row_contract LESS 0
+        OR _row_begin GREATER_EQUAL _guard_begin
+        OR _row_contract GREATER_EQUAL _guard_begin)
+      message(FATAL_ERROR
+        "bioseq_cache SQL row profile contract hides production ${_row}")
+    endif()
+  endforeach()
+endfunction()
+
+_bioseq_cache_verify_sql_row_profile_guard()
+
 add_subdirectory(core)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/BioseqSqlCodegen.cmake")
 
 set(BIOSEQ_CACHE_PRODUCTION_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/pg/provider_registry.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/registry.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/reusable_adapter.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/shared_registry.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/dependency_runtime.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/object_dependency_hooks.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/executor/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/executor/lifecycle.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/planner/index.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/planner/exact.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/reusable_adapter.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/index.cppm"

@@ -17,7 +17,7 @@ module;
 export module bioseq.cache.pg.sql:test_controls;
 
 import bioseq.cache.pg;
-import bioseq.cache.pg.provider_registry;
+import bioseq.cache.pg.provider;
 import bioseq.cache.pg.sql.rows;
 import bioseq.cache.pg.storage;
 import bioseq.cache.pg.test_provider;
