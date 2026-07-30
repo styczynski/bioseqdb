@@ -138,6 +138,8 @@ TEST_CASE("disabled and same modes preserve exact rows and counters",
           >= invalidated_before.invalidations);
     bioseq::postgres_test::record_migration_probe(
         "regress.cache_dml_transactions.committed_write_invalidates");
+    bioseq::postgres_test::record_migration_probe(
+        "python.runner.kind_routing");
 }
 
 TEST_CASE("exact cache handles parameters, nulls, duplicates, and empty sets",

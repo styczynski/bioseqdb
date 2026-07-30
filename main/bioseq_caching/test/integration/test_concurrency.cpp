@@ -261,4 +261,8 @@ TEST_CASE("cancelled waiter drains without disturbing its producer",
         "isolation.cache_waiter_cancel.producer_completes");
     bioseq::postgres_test::record_migration_probe(
         "isolation.cache_waiter_cancel.references_drained");
+    bioseq::postgres_test::record_migration_probe(
+        "python.runner.failure_propagation");
+    bioseq::postgres_test::record_migration_probe(
+        "python.benchmark.waiter_cancel");
 }

@@ -42,6 +42,23 @@ target_link_libraries(bioseq_cache_integration_tests
     bioseq_cache_test_context
     Catch2::Catch2)
 
+set(_bioseq_cache_legacy_inventory
+  "${CMAKE_CURRENT_LIST_DIR}/../legacy_asset_inventory.txt")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${_bioseq_cache_legacy_inventory}")
+add_test(
+  NAME bioseq_cache_legacy_inventory_tracking
+  COMMAND bioseq_cache_legacy_inventory_tracking
+    --legacy-root "${CMAKE_CURRENT_LIST_DIR}/../.."
+    --legacy-inventory "${_bioseq_cache_legacy_inventory}"
+    --phase current
+    --inventory-only)
+set_tests_properties(
+  bioseq_cache_legacy_inventory_tracking
+  PROPERTIES
+    LABELS "cache;unit;migration;inventory"
+    TIMEOUT 30)
+
 if(TARGET postgresql_bioseq_cache_test_support)
   add_dependencies(
     bioseq_cache_integration_tests
@@ -72,6 +89,10 @@ if(TARGET postgresql_bioseq_cache_test_support)
         "$<TARGET_GENEX_EVAL:postgresql_bioseq_cache_test_support,$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_DSO>>"
       --migration-ledger
         "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
+      --migration-harness
+        "cache-integration"
+      --migration-report-role
+        "cache-integration"
       --report
         "${CMAKE_BINARY_DIR}/reports/bioseq-cache-integration.json"
       --case-timeout-seconds

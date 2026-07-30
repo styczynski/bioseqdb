@@ -159,6 +159,8 @@ TEST_CASE("file tier replays and janitor reclamation is coherent",
         std::chrono::steady_clock::now() + 10s, 20ms));
     bioseq::postgres_test::record_migration_probe(
         "tap.011.ttl.expired_entry_swept");
+    bioseq::postgres_test::record_migration_probe(
+        "python.benchmark.ttl_cleanup");
 }
 
 TEST_CASE("restart removes boot-scoped entries and partial files",
@@ -237,6 +239,8 @@ TEST_CASE("restart removes boot-scoped entries and partial files",
     CHECK(fresh_stats.completed_hits == 0);
     bioseq::postgres_test::record_migration_probe(
         "tap.003.restart.first_query_is_fresh_miss");
+    bioseq::postgres_test::record_migration_probe(
+        "python.runner.cluster_lifecycle");
 }
 
 TEST_CASE("unclean postmaster death performs crash recovery",

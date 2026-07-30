@@ -2548,6 +2548,7 @@ int run(int argc, char** argv, scenario required_scenario) noexcept {
         execute_benchmark(options, *report);
         require_migration_contract_unchanged(*report);
         write_report(options.report, *report);
+        require_migration_contract_unchanged(*report);
         return 0;
     } catch (const std::exception& error) {
         write_failure_report(

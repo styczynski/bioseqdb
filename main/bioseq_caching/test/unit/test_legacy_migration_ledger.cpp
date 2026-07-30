@@ -3,8 +3,10 @@
 
 #include "legacy_migration_ledger.hpp"
 
+#include <array>
 #include <filesystem>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -16,9 +18,13 @@ namespace {
     std::string_view stable_id,
     std::string_view catch_case,
     std::string_view status,
-    std::string_view legacy_path = "DOC0395 section") {
+    std::string_view legacy_path = "DOC0395 section",
+    std::string_view evidence_harness = "cache-integration",
+    std::string_view evidence_role = "cache-integration") {
     return std::string(legacy_path)
         + "\tassertion\t" + std::string(stable_id)
+        + "\t" + std::string(evidence_harness)
+        + "\t" + std::string(evidence_role)
         + "\tregress\treplacement scenario and rationale"
           "\texpected result\tstate invariant\t"
         + std::string(catch_case)
@@ -31,6 +37,24 @@ namespace {
         std::string(bioseq::cache_test::migration::ledger_header)
         + "\n" + body};
     return bioseq::cache_test::migration::parse_ledger(input);
+}
+
+[[nodiscard]] std::filesystem::path source_root() {
+    const std::filesystem::path source =
+        std::filesystem::absolute(std::filesystem::path{__FILE__});
+    if (!std::filesystem::is_regular_file(source)) {
+        throw std::runtime_error(
+            "migration-ledger unit test cannot locate its source file");
+    }
+    return source.parent_path();
+}
+
+[[nodiscard]] std::filesystem::path present_asset() {
+    return std::filesystem::path{__FILE__}.filename();
+}
+
+[[nodiscard]] std::filesystem::path module_root() {
+    return source_root().parent_path().parent_path();
 }
 
 }  // namespace
@@ -65,6 +89,33 @@ TEST_CASE("migration ledger rejects duplicate stable ids",
         ContainsSubstring("duplicates stable_id 'duplicate.id'"));
 }
 
+TEST_CASE("migration ledger requires an explicit supported evidence harness",
+          "[cache][unit][migration-ledger]") {
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        parse(row(
+            "invalid.owner", "some case", "mapped",
+            "DOC0395 section", "cache-other")),
+        ContainsSubstring("invalid evidence_harness 'cache-other'"));
+}
+
+TEST_CASE("migration ledger requires a compatible explicit evidence role",
+          "[cache][unit][migration-ledger]") {
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        parse(row(
+            "invalid.role", "some case", "mapped",
+            "DOC0395 section", "cache-integration",
+            "cache-bioseq-support-integration")),
+        ContainsSubstring("incompatible evidence_harness"));
+    CHECK_THROWS_WITH(
+        parse(row(
+            "unknown.role", "some case", "mapped",
+            "DOC0395 section", "cache-integration",
+            "cache-other")),
+        ContainsSubstring("invalid evidence_role 'cache-other'"));
+}
+
 TEST_CASE("global migration validation rejects unknown Catch mappings",
           "[cache][unit][migration-ledger]") {
     const auto ledger =
@@ -89,67 +140,301 @@ TEST_CASE("mapped migration rejects deletion already started",
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(
         bioseq::cache_test::migration::validate_global_ledger(
-            not_ready, cases, std::filesystem::path{}),
+            not_ready, cases, std::filesystem::current_path(),
+            std::vector<std::filesystem::path>{"test/tap/deleted.pl"}),
         ContainsSubstring(
-            "every row must be passing or retired_with_proof"));
+            "deletion started during migration tracking"));
 }
 
-TEST_CASE("final migration without supplied assets supports validation",
+TEST_CASE("per-harness validation ignores cross-harness missing evidence but rejects in-scope missing evidence",
           "[cache][unit][migration-ledger]") {
-    const std::unordered_set<std::string> cases{
-        "passing case", "replacement case"};
-    const auto ready = parse(
+    using namespace bioseq::cache_test::migration;
+    const auto ledger = parse(
         row(
-            "passing.id", "passing case", "passing",
-            "test/tap/deleted.pl")
+            "integration.id", "integration case", "passing",
+            "DOC0395 section", "cache-integration")
         + row(
-            "retired.id", "replacement case",
-            "retired_with_proof"));
-    const auto validation =
-        bioseq::cache_test::migration::validate_global_ledger(
-            ready, cases, std::filesystem::path{});
-    CHECK(validation.legacy_deletion_started);
-    CHECK(validation.deletion_ready);
-    CHECK(validation.mapped_rows == 0);
-    CHECK(validation.passing_rows == 1);
-    CHECK(validation.retired_with_proof_rows == 1);
-}
+            "benchmark.id", "benchmark case", "passing",
+            "DOC0395 section", "cache-bench", "cache-bench"));
+    const std::array integration_evidence{
+        probe_observation{
+            .owner = evidence_harness::cache_integration,
+            .role = evidence_role::cache_integration,
+            .stable_id = "integration.id",
+            .test_case = "integration case",
+            .section = "section",
+            .passed = true}};
+    CHECK_NOTHROW(validate_harness_evidence(
+        ledger, evidence_harness::cache_integration,
+        integration_evidence));
 
-TEST_CASE("deletion-ready migration rejects a supplied legacy asset",
-          "[cache][unit][migration-ledger]") {
-    const auto ready =
-        parse(row("passing.id", "passing case", "passing"));
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(
-        bioseq::cache_test::migration::validate_global_ledger(
-            ready,
-            std::unordered_set<std::string>{"passing case"},
-            std::filesystem::current_path(),
-            std::vector<std::filesystem::path>{"."}),
+        validate_harness_evidence(
+            ledger, evidence_harness::cache_bench, {}),
         ContainsSubstring(
-            "every supplied legacy asset must be absent"));
+            "benchmark.id owned by cache-bench: expected 1, observed 0"));
+    CHECK_THROWS_WITH(
+        validate_combined_evidence(ledger, integration_evidence),
+        ContainsSubstring(
+            "benchmark.id owned by cache-bench: expected 1, observed 0"));
 }
 
-TEST_CASE("deletion-ready migration accepts an absent legacy asset list",
+TEST_CASE("per-report validation ignores sibling roles but rejects in-role missing evidence",
           "[cache][unit][migration-ledger]") {
-    const auto ready =
-        parse(row("passing.id", "passing case", "passing"));
-    const std::filesystem::path legacy_root =
-        std::filesystem::current_path();
-    const std::vector<std::filesystem::path> absent_assets{
-        "__bioseq_cache_deleted_regression_assets__",
-        "__bioseq_cache_deleted_tap_assets__"};
-    for (const auto& asset : absent_assets) {
-        REQUIRE_FALSE(std::filesystem::exists(legacy_root / asset));
-    }
-    const auto validation =
-        bioseq::cache_test::migration::validate_global_ledger(
-            ready,
-            std::unordered_set<std::string>{"passing case"},
-            legacy_root,
-            absent_assets);
+    using namespace bioseq::cache_test::migration;
+    const auto ledger = parse(
+        row(
+            "support.id", "support case", "passing",
+            "DOC0395 section", "cache-bioseq-integration",
+            "cache-bioseq-support-integration")
+        + row(
+            "production.id", "production case", "passing",
+            "DOC0395 section", "cache-bioseq-integration",
+            "cache-bioseq-production-integration"));
+    const std::array support_evidence{
+        probe_observation{
+            .owner = evidence_harness::cache_bioseq_integration,
+            .role =
+                evidence_role::cache_bioseq_support_integration,
+            .stable_id = "support.id",
+            .test_case = "support case",
+            .section = "section",
+            .passed = true}};
+    CHECK_NOTHROW(validate_report_evidence(
+        ledger, evidence_harness::cache_bioseq_integration,
+        evidence_role::cache_bioseq_support_integration,
+        support_evidence));
+
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        validate_report_evidence(
+            ledger, evidence_harness::cache_bioseq_integration,
+            evidence_role::cache_bioseq_production_integration, {}),
+        ContainsSubstring(
+            "production.id owned by cache-bioseq-integration"));
+    CHECK_THROWS_WITH(
+        validate_harness_evidence(
+            ledger, evidence_harness::cache_bioseq_integration,
+            support_evidence),
+        ContainsSubstring(
+            "production.id owned by cache-bioseq-integration"));
+}
+
+TEST_CASE("proof-ready migration requires complete evidence while exact legacy assets remain present",
+          "[cache][unit][migration-ledger]") {
+    using namespace bioseq::cache_test::migration;
+    const auto ledger = parse(
+        row("passing.id", "passing case", "passing")
+        + row(
+            "second.id", "replacement case", "passing"));
+    const std::unordered_set<std::string> cases{
+        "passing case", "replacement case"};
+    const std::array evidence{
+        probe_observation{
+            .owner = evidence_harness::cache_integration,
+            .role = evidence_role::cache_integration,
+            .stable_id = "passing.id",
+            .test_case = "passing case",
+            .section = "section",
+            .passed = true},
+        probe_observation{
+            .owner = evidence_harness::cache_integration,
+            .role = evidence_role::cache_integration,
+            .stable_id = "second.id",
+            .test_case = "replacement case",
+            .section = "section",
+            .passed = true}};
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        validate_global_ledger(
+            ledger, cases, source_root(), {present_asset()}, {},
+            retirement_phase::proof_ready),
+        ContainsSubstring(
+            "passing.id owned by cache-integration: expected 1, observed 0"));
+
+    const auto validation = validate_global_ledger(
+        ledger, cases, source_root(), {present_asset()}, evidence,
+        retirement_phase::proof_ready);
     CHECK(validation.deletion_ready);
+    CHECK(validation.proof_ready);
+    CHECK_FALSE(validation.retirement_complete);
+    CHECK_FALSE(validation.legacy_deletion_started);
+    CHECK(validation.passing_rows == 2);
+    CHECK(validation.retired_with_proof_rows == 0);
+}
+
+TEST_CASE("retired migration requires complete evidence and every exact legacy asset absent",
+          "[cache][unit][migration-ledger]") {
+    using namespace bioseq::cache_test::migration;
+    const auto ledger =
+        parse(row(
+            "passing.id", "passing case", "retired_with_proof"));
+    const std::filesystem::path absent{
+        "__bioseq_cache_retired_asset__"};
+    REQUIRE_FALSE(std::filesystem::exists(source_root() / absent));
+    const std::array evidence{
+        probe_observation{
+            .owner = evidence_harness::cache_integration,
+            .role = evidence_role::cache_integration,
+            .stable_id = "passing.id",
+            .test_case = "passing case",
+            .section = "section",
+            .passed = true}};
+    const auto validation = validate_global_ledger(
+        ledger, std::unordered_set<std::string>{"passing case"},
+        source_root(), {absent}, evidence, retirement_phase::retired);
+    CHECK(validation.deletion_ready);
+    CHECK(validation.proof_ready);
+    CHECK(validation.retirement_complete);
     CHECK(validation.legacy_deletion_started);
-    CHECK(validation.mapped_rows == 0);
-    CHECK(validation.passing_rows == 1);
+}
+
+TEST_CASE("migration retirement rejects a partial exact-inventory deletion",
+          "[cache][unit][migration-ledger]") {
+    using namespace bioseq::cache_test::migration;
+    const auto ledger =
+        parse(row("passing.id", "passing case", "passing"));
+    const std::filesystem::path absent{
+        "__bioseq_cache_partially_deleted_asset__"};
+    REQUIRE_FALSE(std::filesystem::exists(source_root() / absent));
+    const std::array evidence{
+        probe_observation{
+            .owner = evidence_harness::cache_integration,
+            .role = evidence_role::cache_integration,
+            .stable_id = "passing.id",
+            .test_case = "passing case",
+            .section = "section",
+            .passed = true}};
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        validate_global_ledger(
+            ledger, std::unordered_set<std::string>{"passing case"},
+            source_root(), {present_asset(), absent}, evidence,
+            retirement_phase::proof_ready),
+        ContainsSubstring("legacy asset inventory is partially deleted"));
+    CHECK_THROWS_WITH(
+        validate_global_ledger(
+            ledger, std::unordered_set<std::string>{"passing case"},
+            source_root(), {present_asset(), absent}, evidence,
+            retirement_phase::retired),
+        ContainsSubstring("legacy asset inventory is partially deleted"));
+}
+
+TEST_CASE("proof and retired phases reject mixed ledger lifecycle states",
+          "[cache][unit][migration-ledger]") {
+    using namespace bioseq::cache_test::migration;
+    const auto ledger = parse(
+        row("passing.id", "passing case", "passing")
+        + row(
+            "retired.id", "retired case",
+            "retired_with_proof"));
+    const std::array evidence{
+        probe_observation{
+            .owner = evidence_harness::cache_integration,
+            .role = evidence_role::cache_integration,
+            .stable_id = "passing.id",
+            .test_case = "passing case",
+            .section = "section",
+            .passed = true},
+        probe_observation{
+            .owner = evidence_harness::cache_integration,
+            .role = evidence_role::cache_integration,
+            .stable_id = "retired.id",
+            .test_case = "retired case",
+            .section = "section",
+            .passed = true}};
+    const std::unordered_set<std::string> cases{
+        "passing case", "retired case"};
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        validate_global_ledger(
+            ledger, cases, source_root(), {present_asset()}, evidence,
+            retirement_phase::proof_ready),
+        ContainsSubstring(
+            "proof-ready phase requires every migration-ledger row"));
+    CHECK_THROWS_WITH(
+        validate_global_ledger(
+            ledger, cases, source_root(),
+            {std::filesystem::path{
+                "__bioseq_cache_absent_mixed_asset__"}},
+            evidence, retirement_phase::retired),
+        ContainsSubstring(
+            "retired phase requires every migration-ledger row"));
+}
+
+TEST_CASE("exact legacy inventory rejects wrong cardinality and path substitution",
+          "[cache][unit][migration-ledger]") {
+    using namespace bioseq::cache_test::migration;
+    const auto untracked = parse(
+        row("passing.id", "passing case", "passing"));
+    const std::unordered_set<std::string> cases{"passing case"};
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        validate_global_ledger(
+            untracked, cases, source_root(),
+            std::vector<std::filesystem::path>(84, present_asset()),
+            {}, retirement_phase::tracking, 85),
+        ContainsSubstring("84 entries; expected 85"));
+    CHECK_THROWS_WITH(
+        validate_global_ledger(
+            untracked, cases, source_root(),
+            std::vector<std::filesystem::path>(86, present_asset()),
+            {}, retirement_phase::tracking, 85),
+        ContainsSubstring("86 entries; expected 85"));
+
+    const auto tracked = parse(row(
+        "tracked.id", "passing case", "mapped",
+        "test/unit/test_legacy_migration_ledger.cpp"));
+    CHECK_THROWS_WITH(
+        validate_global_ledger(
+            tracked, cases, module_root(),
+            {"test/unit/test_dependency_directory.cpp"}),
+        ContainsSubstring(
+            "legacy asset inventory omits ledger path "
+            "test/unit/test_legacy_migration_ledger.cpp"));
+}
+
+TEST_CASE("combined migration evidence rejects substituted Catch provenance",
+          "[cache][unit][migration-ledger]") {
+    using namespace bioseq::cache_test::migration;
+    const auto ledger =
+        parse(row("passing.id", "passing case", "passing"));
+    const std::array substituted{
+        probe_observation{
+            .owner = evidence_harness::cache_integration,
+            .role = evidence_role::cache_integration,
+            .stable_id = "passing.id",
+            .test_case = "different case",
+            .section = "section",
+            .passed = true}};
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        validate_combined_evidence(ledger, substituted),
+        ContainsSubstring(
+            "combined migration evidence provenance mismatch"));
+}
+
+TEST_CASE("migration contract document loaders parse retained bytes",
+          "[cache][unit][migration-ledger]") {
+    using namespace bioseq::cache_test::migration;
+    const std::string ledger_document =
+        std::string(ledger_header) + "\n"
+        + row("retained.id", "retained case", "mapped");
+    const ledger retained =
+        load_ledger_document(ledger_document);
+    REQUIRE(retained.rows.size() == 1);
+    CHECK(retained.rows.front().stable_id == "retained.id");
+
+    const auto catch_cases =
+        load_catch_case_manifest_document(
+            "retained case\nsecond case\n");
+    const std::unordered_set<std::string> expected_cases{
+        "retained case", "second case"};
+    CHECK(catch_cases == expected_cases);
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        load_catch_case_manifest_document(
+            "retained case\nretained case\n"),
+        ContainsSubstring("duplicates test case 'retained case'"));
 }

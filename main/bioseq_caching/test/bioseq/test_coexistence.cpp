@@ -106,6 +106,8 @@ TEST_CASE("Bioseq and cache install and preload independently in either order",
         "control metadata"};
     bioseq::postgres_test::record_migration_probe(
         "combined.coexistence.control_files_have_no_requires");
+    bioseq::postgres_test::record_migration_probe(
+        "python.runner.sanitized_environment");
 }
 
 TEST_CASE("Bioseq-only server does not require the cache DSO",

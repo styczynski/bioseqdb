@@ -561,6 +561,12 @@ struct integration_test_report {
     std::vector<phase_duration_report> phase_durations;
     std::vector<host_qualification_report> host_qualifications;
     std::vector<sql_transcript_entry> sql_transcripts;
+    std::string migration_evidence_harness;
+    std::string migration_report_role;
+    std::string migration_coverage;
+    std::string migration_phase;
+    std::string migration_ledger_sha256;
+    std::string evidence_contract_sha256;
     std::vector<migration_probe_record> migration_probes;
     std::vector<artifact_report> artifacts;
     std::vector<cleanup_observation> cleanup_observations;
@@ -1372,6 +1378,45 @@ export namespace bioseq::postgres_test {
 inline void write_integration_test_report(
     const std::filesystem::path& path,
     const integration_test_report& report) {
+    if (report.schema_version == "bioseq-cache-test-v2") {
+        const auto lower_sha256 =
+            [](std::string_view value) {
+                return value.size() == 64
+                    && std::ranges::all_of(
+                        value, [](char character) {
+                            return (character >= '0'
+                                    && character <= '9')
+                                || (character >= 'a'
+                                    && character <= 'f');
+                        });
+            };
+        const bool owner_role_match =
+            (report.migration_evidence_harness
+                    == "cache-integration"
+             && report.migration_report_role
+                    == "cache-integration")
+            || (report.migration_evidence_harness
+                    == "cache-bioseq-integration"
+                && (report.migration_report_role
+                        == "cache-bioseq-support-integration"
+                    || report.migration_report_role
+                        == "cache-bioseq-production-integration"));
+        const bool valid_phase =
+            report.migration_phase == "mapped"
+            || report.migration_phase == "passing"
+            || report.migration_phase == "retired_with_proof"
+            || report.migration_phase == "mixed";
+        if (!owner_role_match
+            || (report.migration_coverage != "full-role"
+                && report.migration_coverage != "executed-only")
+            || !valid_phase
+            || !lower_sha256(report.migration_ledger_sha256)
+            || !lower_sha256(report.evidence_contract_sha256)) {
+            throw std::runtime_error(
+                "bioseq-cache-test-v2 report has incomplete or "
+                "incompatible migration provenance");
+        }
+    }
     const std::filesystem::path absolute_path =
         std::filesystem::absolute(path);
     std::filesystem::create_directories(absolute_path.parent_path());
@@ -1673,6 +1718,36 @@ inline void write_integration_test_report(
         report_detail::write_transcript(output, entry);
     }
     output.put(']');
+
+    if (report.schema_version == "bioseq-cache-test-v2") {
+        report_detail::comma(output, first);
+        report_detail::key(output, "migration_evidence_harness");
+        report_detail::write_string(
+            output, report.migration_evidence_harness);
+
+        report_detail::comma(output, first);
+        report_detail::key(output, "migration_report_role");
+        report_detail::write_string(
+            output, report.migration_report_role);
+
+        report_detail::comma(output, first);
+        report_detail::key(output, "migration_coverage");
+        report_detail::write_string(output, report.migration_coverage);
+
+        report_detail::comma(output, first);
+        report_detail::key(output, "migration_phase");
+        report_detail::write_string(output, report.migration_phase);
+
+        report_detail::comma(output, first);
+        report_detail::key(output, "migration_ledger_sha256");
+        report_detail::write_string(
+            output, report.migration_ledger_sha256);
+
+        report_detail::comma(output, first);
+        report_detail::key(output, "evidence_contract_sha256");
+        report_detail::write_string(
+            output, report.evidence_contract_sha256);
+    }
 
     report_detail::comma(output, first);
     report_detail::key(output, "migration_probes");

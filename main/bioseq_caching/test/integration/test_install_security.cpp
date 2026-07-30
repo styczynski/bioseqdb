@@ -198,5 +198,7 @@ TEST_CASE("cache install, preload diagnostics, and ACLs are native",
             "tap.001.preload.stored_oid_cannot_bypass_acl");
         bioseq::postgres_test::record_migration_probe(
             "tap.001.preload.denial_documents_two_part_grant");
+        bioseq::postgres_test::record_migration_probe(
+            "python.runner.artifact_validation");
     }
 }

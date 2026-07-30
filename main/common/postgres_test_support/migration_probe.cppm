@@ -40,10 +40,12 @@ struct migration_probe_record {
     std::uint64_t ordinal{};
 };
 
-/// @brief Expected runtime count loaded from one non-retired ledger row.
+/// @brief Expected runtime count and exact Catch provenance for one ledger row.
 struct expected_migration_probe {
     std::string stable_id;
     std::size_t expected_count{1};
+    std::string test_case;
+    std::string section;
 };
 
 /// @brief Invalid/duplicate/missing migration evidence.
@@ -353,6 +355,24 @@ inline void validate_migration_probe_records(
         if (!record.passed) {
             throw migration_probe_error("non-passing migration probe: "
                                         + record.stable_id);
+        }
+        const auto expected_record =
+            std::find_if(
+                expected.begin(), expected.end(),
+                [&record](const expected_migration_probe& item) {
+                    return item.stable_id == record.stable_id;
+                });
+        if (expected_record != expected.end()
+            && !expected_record->test_case.empty()
+            && (record.test_case != expected_record->test_case
+                || record.section != expected_record->section)) {
+            throw migration_probe_error(
+                "migration probe provenance mismatch for "
+                + record.stable_id + ": expected Catch case '"
+                + expected_record->test_case + "', section '"
+                + expected_record->section + "'; observed case '"
+                + record.test_case + "', section '" + record.section
+                + "'");
         }
         ++actual_counts[record.stable_id];
     }

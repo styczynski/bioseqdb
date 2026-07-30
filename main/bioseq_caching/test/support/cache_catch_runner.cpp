@@ -115,7 +115,14 @@ void begin_unattested_artifact_scope(
 
 struct watchdog_launch_configuration {
     std::filesystem::path executable;
+    std::string executable_sha256;
     std::filesystem::path report;
+    std::filesystem::path migration_ledger;
+    std::string migration_evidence_harness;
+    std::string migration_report_role;
+    std::string migration_phase;
+    std::string migration_ledger_sha256;
+    std::string evidence_contract_sha256;
 };
 
 constexpr std::string_view watchdog_armed_magic =
@@ -509,7 +516,19 @@ public:
                             watchdog_launch()->report.string(),
                             evidence.current_case,
                             std::to_string(::getpid()),
-                            std::to_string(timeout.count())},
+                            std::to_string(timeout.count()),
+                            watchdog_launch()->
+                                migration_evidence_harness,
+                            watchdog_launch()->migration_report_role,
+                            watchdog_launch()->migration_phase,
+                            watchdog_launch()->
+                                migration_ledger_sha256,
+                            watchdog_launch()->
+                                evidence_contract_sha256,
+                            watchdog_launch()->
+                                migration_ledger.string(),
+                            watchdog_launch()->
+                                executable_sha256},
                         .output_file =
                             evidence.watchdog_state / "watchdog.log"}));
             await_watchdog_armed(
@@ -736,85 +755,159 @@ void reconcile_migration_probes(
     }
 }
 
-[[nodiscard]] std::vector<bioseq::postgres_test::expected_migration_probe>
-expected_migration_probes(
-    const std::filesystem::path& ledger,
-    const std::vector<bioseq::postgres_test::test_case_report>& cases) {
+struct migration_ledger_snapshot {
+    std::filesystem::path path;
+    bioseq::cache_test::migration::ledger parsed;
+    std::string raw_sha256;
+    std::string evidence_contract_sha256;
+    std::string phase;
+};
+
+[[nodiscard]] migration_ledger_snapshot load_migration_ledger_snapshot(
+    const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error(
+            "cannot read migration ledger: " + path.string());
+    }
+    const std::string raw{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{}};
+    if (input.bad()) {
+        throw std::runtime_error(
+            "failed while reading migration ledger: " + path.string());
+    }
+    auto parsed =
+        bioseq::cache_test::migration::load_ledger_document(raw);
+    const std::string evidence_contract_sha256 =
+        bioseq::postgres_test::sha256(
+            bioseq::cache_test::migration::
+                canonical_evidence_contract_material(parsed)).hex();
+    const std::string phase{
+        bioseq::cache_test::migration::ledger_phase_name(parsed)};
+    return migration_ledger_snapshot{
+        .path = path,
+        .parsed = std::move(parsed),
+        .raw_sha256 = bioseq::postgres_test::sha256(raw).hex(),
+        .evidence_contract_sha256 = evidence_contract_sha256,
+        .phase = phase};
+}
+
+[[nodiscard]] bool migration_ledger_unchanged(
+    const migration_ledger_snapshot& snapshot) noexcept {
+    try {
+        return bioseq::postgres_test::sha256_file(snapshot.path).hex()
+            == snapshot.raw_sha256;
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] bool file_sha256_unchanged(
+    const std::filesystem::path& path,
+    std::string_view expected_sha256) noexcept {
+    try {
+        return bioseq::postgres_test::sha256_file(path).hex()
+            == expected_sha256;
+    } catch (...) {
+        return false;
+    }
+}
+
+[[nodiscard]] bool executable_allows_migration_role(
+    const std::filesystem::path& executable,
+    bioseq::cache_test::migration::evidence_harness owner,
+    bioseq::cache_test::migration::evidence_role role) noexcept {
+    using bioseq::cache_test::migration::evidence_harness;
+    using bioseq::cache_test::migration::evidence_role;
+    const std::string name = executable.filename().string();
+    if (name == "bioseq_cache_integration_tests") {
+        return owner == evidence_harness::cache_integration
+            && role == evidence_role::cache_integration;
+    }
+    if (name
+        == "bioseq_cache_bioseq_support_integration_tests") {
+        return owner == evidence_harness::cache_bioseq_integration
+            && role
+                == evidence_role::cache_bioseq_support_integration;
+    }
+    if (name
+        == "bioseq_cache_bioseq_production_integration_tests") {
+        return owner == evidence_harness::cache_bioseq_integration
+            && role
+                == evidence_role::cache_bioseq_production_integration;
+    }
+    return false;
+}
+
+[[nodiscard]] bool migration_row_was_executed(
+    const bioseq::cache_test::migration::ledger_row& row,
+    const std::vector<
+        bioseq::postgres_test::test_case_report>& cases) {
     std::unordered_set<std::string> executed_cases;
     for (const auto& test_case : cases) {
         if (test_case.section.empty()
-            && (test_case.status == "passed"
-                || test_case.status == "failed")) {
+            && test_case.status != "skipped") {
             executed_cases.insert(test_case.test_case);
         }
     }
+    if (!executed_cases.contains(row.catch2_case)) {
+        return false;
+    }
+    const bool case_has_explicit_sections = std::any_of(
+        cases.begin(), cases.end(),
+        [&row](const auto& test_case) {
+            return test_case.test_case == row.catch2_case
+                && !test_case.section.empty();
+        });
+    if (!case_has_explicit_sections || row.catch2_section.empty()) {
+        return true;
+    }
+    return std::any_of(
+        cases.begin(), cases.end(),
+        [&row](const auto& test_case) {
+            return test_case.test_case == row.catch2_case
+                && test_case.section == row.catch2_section;
+        });
+}
 
-    const bioseq::cache_test::migration::ledger parsed =
-        bioseq::cache_test::migration::load_ledger(ledger);
+[[nodiscard]] std::vector<bioseq::postgres_test::expected_migration_probe>
+expected_migration_probes(
+    const bioseq::cache_test::migration::ledger& ledger,
+    bioseq::cache_test::migration::evidence_harness owner,
+    bioseq::cache_test::migration::evidence_role role,
+    const std::vector<bioseq::postgres_test::test_case_report>& cases,
+    bool executed_only) {
     std::vector<bioseq::postgres_test::expected_migration_probe> expected;
-    for (const auto& row : parsed.rows) {
-        if (row.migration_status
-                == bioseq::cache_test::migration::status::retired_with_proof
-            || !executed_cases.contains(row.catch2_case)) {
-            continue;
-        }
-        const bool case_has_explicit_sections = std::any_of(
-            cases.begin(), cases.end(),
-            [&row](const auto& test_case) {
-                return test_case.test_case == row.catch2_case
-                    && !test_case.section.empty();
-            });
-        const bool ledger_section_executed = std::any_of(
-            cases.begin(), cases.end(),
-            [&row](const auto& test_case) {
-                return test_case.test_case == row.catch2_case
-                    && test_case.section == row.catch2_section;
-            });
-        if (case_has_explicit_sections && !row.catch2_section.empty()
-            && !ledger_section_executed) {
+    for (const auto& row : ledger.rows) {
+        if (!bioseq::cache_test::migration::requires_probe(
+                row, owner, role)
+            || (executed_only
+                && !migration_row_was_executed(row, cases))) {
             continue;
         }
         expected.push_back(
             bioseq::postgres_test::expected_migration_probe{
                 .stable_id = row.stable_id,
                 .expected_count =
-                    bioseq::cache_test::migration::expected_probe_count(row)});
+                    bioseq::cache_test::migration::expected_probe_count(row),
+                .test_case = row.catch2_case,
+                .section = row.catch2_section});
     }
     return expected;
-}
-
-[[nodiscard]] std::vector<
-    bioseq::postgres_test::migration_probe_record>
-functional_migration_probes(
-    const std::vector<
-        bioseq::postgres_test::migration_probe_record>& probes,
-    const std::vector<
-        bioseq::postgres_test::test_case_report>& cases) {
-    std::unordered_set<std::string> functionally_evaluated_cases;
-    for (const auto& test_case : cases) {
-        if (test_case.section.empty()
-            && (test_case.status == "passed"
-                || test_case.status == "failed")) {
-            functionally_evaluated_cases.insert(test_case.test_case);
-        }
-    }
-    std::vector<bioseq::postgres_test::migration_probe_record> selected;
-    selected.reserve(probes.size());
-    std::ranges::copy_if(
-        probes, std::back_inserter(selected),
-        [&functionally_evaluated_cases](const auto& probe) {
-            return functionally_evaluated_cases.contains(
-                probe.test_case);
-        });
-    return selected;
 }
 
 /// @brief Writes the native runner verdict and stable migration probes.
 void write_report(
     const std::filesystem::path& report,
-    std::string_view executable,
+    const std::filesystem::path& executable,
+    std::string_view executable_sha256,
     std::vector<bioseq::postgres_test::report_argument> arguments,
-    const bioseq::cache_test::runner_configuration& configuration) {
+    const bioseq::cache_test::runner_configuration& configuration,
+    bioseq::cache_test::migration::evidence_harness migration_owner,
+    bioseq::cache_test::migration::evidence_role migration_role,
+    std::string_view migration_coverage,
+    const migration_ledger_snapshot& migration_ledger) {
     retain_attested_artifacts(catch_evidence());
     bioseq::postgres_test::cleanup_report cleanup =
         bioseq::postgres_test::aggregate_cleanup_report();
@@ -855,12 +948,9 @@ void write_report(
             "state path was preserved";
     }
     bioseq::postgres_test::integration_test_report native_report{
-        .schema_version = "bioseq-cache-test-v1",
-        .executable = std::string(executable),
-        .build_identity =
-            bioseq::postgres_test::sha256_file(
-                std::filesystem::absolute(
-                    std::filesystem::path(executable))).hex(),
+        .schema_version = "bioseq-cache-test-v2",
+        .executable = executable.string(),
+        .build_identity = std::string(executable_sha256),
         .arguments = std::move(arguments),
         .cluster_configuration = {
             {"ownership",
@@ -877,6 +967,17 @@ void write_report(
             bioseq::postgres_test::host_qualification_reports(),
         .sql_transcripts =
             bioseq::postgres_test::process_sql_transcript_entries(),
+        .migration_evidence_harness = std::string(
+            bioseq::cache_test::migration::harness_name(
+                migration_owner)),
+        .migration_report_role = std::string(
+            bioseq::cache_test::migration::role_name(
+                migration_role)),
+        .migration_coverage = std::string(migration_coverage),
+        .migration_phase = migration_ledger.phase,
+        .migration_ledger_sha256 = migration_ledger.raw_sha256,
+        .evidence_contract_sha256 =
+            migration_ledger.evidence_contract_sha256,
         .migration_probes =
             bioseq::postgres_test::migration_probe_records(),
         .artifacts = catch_evidence().attested_artifacts,
@@ -911,8 +1012,26 @@ void write_report(
                 *configuration.bioseq_dso));
         }
     }
+    if (!migration_ledger_unchanged(migration_ledger)) {
+        throw std::runtime_error(
+            "migration ledger changed before report publication");
+    }
+    if (!file_sha256_unchanged(
+            executable, executable_sha256)) {
+        throw std::runtime_error(
+            "integration executable changed before report publication");
+    }
     bioseq::postgres_test::write_integration_test_report(
         report, native_report);
+    if (!migration_ledger_unchanged(migration_ledger)) {
+        throw std::runtime_error(
+            "migration ledger changed during report publication");
+    }
+    if (!file_sha256_unchanged(
+            executable, executable_sha256)) {
+        throw std::runtime_error(
+            "integration executable changed during report publication");
+    }
 }
 
 [[nodiscard]] std::optional<std::uint64_t> parse_unsigned(
@@ -1543,7 +1662,14 @@ watchdog_cleanup_cluster(
     std::string test_case,
     std::uint64_t parent_pid,
     std::chrono::seconds timeout,
-    const std::filesystem::path& executable) {
+    const std::filesystem::path& executable,
+    std::string migration_evidence_harness,
+    std::string migration_report_role,
+    std::string migration_phase,
+    std::string migration_ledger_sha256,
+    std::string evidence_contract_sha256,
+    const std::filesystem::path& migration_ledger,
+    std::string executable_sha256) {
     const bool parent_was_already_gone =
         ::getppid() != static_cast<pid_t>(parent_pid);
     const auto parent_identity = parent_was_already_gone
@@ -1713,6 +1839,22 @@ watchdog_cleanup_cluster(
     if (!recovered_artifacts) {
         note_recovery_failure("artifacts");
     }
+    try {
+        if (bioseq::postgres_test::sha256_file(
+                migration_ledger).hex()
+            != migration_ledger_sha256) {
+            note_recovery_failure(
+                "migration ledger changed after runner startup");
+        }
+    } catch (...) {
+        note_recovery_failure(
+            "migration ledger cannot be verified at watchdog exit");
+    }
+    if (!file_sha256_unchanged(
+            executable, executable_sha256)) {
+        note_recovery_failure(
+            "integration executable path changed after runner startup");
+    }
 
     std::vector<bioseq::postgres_test::test_case_report> cases =
         recovered_cases.value_or(
@@ -1778,16 +1920,10 @@ watchdog_cleanup_cluster(
         cleanup_observations.push_back(std::move(observation));
     }
 
-    std::string build_identity;
-    try {
-        build_identity =
-            bioseq::postgres_test::sha256_file(executable).hex();
-    } catch (...) {
-    }
     bioseq::postgres_test::integration_test_report emergency{
-        .schema_version = "bioseq-cache-test-v1",
+        .schema_version = "bioseq-cache-test-v2",
         .executable = executable.string(),
-        .build_identity = std::move(build_identity),
+        .build_identity = executable_sha256,
         .cluster_configuration = {
             {"supervision", "out-of-process per-case watchdog"},
             {"termination", "bounded process-tree cleanup"},
@@ -1795,9 +1931,9 @@ watchdog_cleanup_cluster(
              evidence_recovery_detail.empty()
                  ? "all typed snapshots recovered"
                  : "missing or invalid: " + evidence_recovery_detail},
-            {"supervision-state",
+            {"retained-supervision-state",
              cleanup_succeeded
-                 ? "removed after verified cleanup"
+                 ? "none"
                  : state_directory.string()}},
         .cases = std::move(cases),
         .phase_durations =
@@ -1811,6 +1947,15 @@ watchdog_cleanup_cluster(
         .sql_transcripts =
             bioseq::postgres_test::load_supervision_sql_transcript(
                 state_directory),
+        .migration_evidence_harness =
+            migration_evidence_harness,
+        .migration_report_role = migration_report_role,
+        .migration_coverage = "executed-only",
+        .migration_phase = migration_phase,
+        .migration_ledger_sha256 =
+            migration_ledger_sha256,
+        .evidence_contract_sha256 =
+            evidence_contract_sha256,
         .migration_probes = std::move(probes),
         .artifacts =
             recovered_artifacts.value_or(
@@ -1828,6 +1973,17 @@ watchdog_cleanup_cluster(
     try {
         bioseq::postgres_test::write_integration_test_report(
             report_path, emergency);
+        if (bioseq::postgres_test::sha256_file(
+                migration_ledger).hex()
+            != migration_ledger_sha256) {
+            parent_fail_safe.resolve();
+            return 126;
+        }
+        if (!file_sha256_unchanged(
+                executable, executable_sha256)) {
+            parent_fail_safe.resolve();
+            return 126;
+        }
     } catch (...) {
         parent_fail_safe.resolve();
         return 126;
@@ -1844,7 +2000,7 @@ watchdog_cleanup_cluster(
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    if (argc == 7
+    if (argc == 14
         && std::string_view(argv[1])
             == "--bioseq-internal-watchdog") {
         const auto parent_pid = parse_unsigned(argv[5]);
@@ -1864,7 +2020,9 @@ int main(int argc, char* argv[]) {
                 argv[2], argv[3], argv[4], *parent_pid,
                 std::chrono::seconds(
                     static_cast<std::chrono::seconds::rep>(*timeout)),
-                current_executable_path(argv[0]));
+                current_executable_path(argv[0]),
+                argv[7], argv[8], argv[9], argv[10], argv[11],
+                argv[12], argv[13]);
         } catch (...) {
             return 126;
         }
@@ -1885,6 +2043,8 @@ int main(int argc, char* argv[]) {
     std::string bioseq_dso;
     std::string provider_peer_test_dso;
     std::string migration_ledger;
+    std::string migration_harness;
+    std::string migration_report_role;
     std::string report;
     int case_timeout_seconds = 480;
     int large_case_timeout_seconds = 6300;
@@ -1925,6 +2085,12 @@ int main(int argc, char* argv[]) {
                   "optional incompatible provider-peer test DSO")
         | Catch::Clara::Opt(migration_ledger, "PATH")
               ["--migration-ledger"]("legacy migration ledger TSV")
+        | Catch::Clara::Opt(migration_harness, "NAME")
+              ["--migration-harness"](
+                  "migration evidence owner for this executable")
+        | Catch::Clara::Opt(migration_report_role, "NAME")
+              ["--migration-report-role"](
+                  "unique role of this migration evidence report")
         | Catch::Clara::Opt(report, "PATH")
               ["--report"]("native JSON report path")
         | Catch::Clara::Opt(case_timeout_seconds, "SECONDS")
@@ -1957,6 +2123,8 @@ int main(int argc, char* argv[]) {
         || postgres_stage_manifest.empty() || cache_control.empty()
         || cache_install_sql.empty() || cache_dso.empty()
         || migration_ledger.empty()
+        || migration_harness.empty()
+        || migration_report_role.empty()
         || report.empty()
         || case_timeout_seconds <= 0
         || large_case_timeout_seconds <= 0) {
@@ -1982,6 +2150,40 @@ int main(int argc, char* argv[]) {
     if (any_bioseq_only_stage != all_bioseq_only_stage
         || (all_bioseq_only_stage && !all_bioseq)) {
         return 2;
+    }
+
+    std::optional<
+        bioseq::cache_test::migration::evidence_harness>
+        migration_owner;
+    std::optional<
+        bioseq::cache_test::migration::evidence_role>
+        migration_role;
+    std::optional<migration_ledger_snapshot> migration_snapshot;
+    std::filesystem::path executed_executable;
+    std::string executed_executable_sha256;
+    try {
+        executed_executable = current_executable_path(argv[0]);
+        executed_executable_sha256 =
+            bioseq::postgres_test::sha256_file(
+                executed_executable).hex();
+        migration_owner =
+            bioseq::cache_test::migration::parse_evidence_harness(
+                migration_harness);
+        migration_role =
+            bioseq::cache_test::migration::parse_evidence_role(
+                migration_report_role);
+        if (bioseq::cache_test::migration::role_harness(
+                *migration_role)
+                != *migration_owner
+            || !executable_allows_migration_role(
+                executed_executable,
+                *migration_owner, *migration_role)) {
+            return 2;
+        }
+        migration_snapshot =
+            load_migration_ledger_snapshot(migration_ledger);
+    } catch (...) {
+        return 3;
     }
 
     bioseq::cache_test::runner_configuration configuration{
@@ -2017,8 +2219,22 @@ int main(int argc, char* argv[]) {
     }
     bioseq::cache_test::set_runner_configuration(std::move(configuration));
     watchdog_launch() = watchdog_launch_configuration{
-        .executable = current_executable_path(argv[0]),
-        .report = std::filesystem::absolute(report)};
+        .executable = executed_executable,
+        .executable_sha256 = executed_executable_sha256,
+        .report = std::filesystem::absolute(report),
+        .migration_ledger =
+            std::filesystem::absolute(migration_ledger),
+        .migration_evidence_harness = std::string(
+            bioseq::cache_test::migration::harness_name(
+                *migration_owner)),
+        .migration_report_role = std::string(
+            bioseq::cache_test::migration::role_name(
+                *migration_role)),
+        .migration_phase = migration_snapshot->phase,
+        .migration_ledger_sha256 =
+            migration_snapshot->raw_sha256,
+        .evidence_contract_sha256 =
+            migration_snapshot->evidence_contract_sha256};
     bioseq::postgres_test::clear_migration_probes();
     bioseq::postgres_test::clear_process_sql_transcript();
     bioseq::postgres_test::clear_cleanup_observations();
@@ -2041,17 +2257,33 @@ int main(int argc, char* argv[]) {
     bioseq::postgres_test::set_automatic_report_collection_enabled(false);
     bool migration_valid = true;
     std::string migration_validation_message;
+    std::string migration_coverage{"executed-only"};
     try {
-        const auto expected = expected_migration_probes(
-            migration_ledger, catch_evidence().cases);
-        const auto selected_probes = functional_migration_probes(
-            bioseq::postgres_test::migration_probe_records(),
-            catch_evidence().cases);
+        const auto expected_full_role = expected_migration_probes(
+            migration_snapshot->parsed, *migration_owner,
+            *migration_role, catch_evidence().cases, false);
+        const auto expected_executed = expected_migration_probes(
+            migration_snapshot->parsed, *migration_owner,
+            *migration_role, catch_evidence().cases, true);
+        const bool full_role =
+            expected_executed.size() == expected_full_role.size();
+        migration_coverage =
+            full_role ? "full-role" : "executed-only";
+        const auto& expected =
+            full_role ? expected_full_role : expected_executed;
         bioseq::postgres_test::validate_migration_probe_records(
-            selected_probes, expected);
+            bioseq::postgres_test::migration_probe_records(), expected);
+        if (!migration_ledger_unchanged(*migration_snapshot)) {
+            throw std::runtime_error(
+                "migration ledger changed after runner startup");
+        }
         migration_validation_message =
             std::to_string(expected.size())
-            + " selected migration-ledger rows validated";
+            + " migration-ledger rows owned by report role "
+            + std::string(
+                bioseq::cache_test::migration::role_name(
+                    *migration_role))
+            + " validated with " + migration_coverage + " coverage";
     } catch (const std::exception& error) {
         migration_valid = false;
         migration_validation_message = error.what();
@@ -2073,8 +2305,11 @@ int main(int argc, char* argv[]) {
         && !catch_evidence().watchdog_retention_recording_failed;
     try {
         write_report(
-            report, argv[0], std::move(arguments),
-            bioseq::cache_test::configuration());
+            report, executed_executable,
+            executed_executable_sha256, std::move(arguments),
+            bioseq::cache_test::configuration(), *migration_owner,
+            *migration_role, migration_coverage,
+            *migration_snapshot);
     } catch (...) {
         return catch_result == 0 ? 3 : catch_result;
     }

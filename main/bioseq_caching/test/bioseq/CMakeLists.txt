@@ -126,6 +126,10 @@ add_test(
       "$<TARGET_FILE:bioseq_cache_provider_peer_test>"
     --migration-ledger
       "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
+    --migration-harness
+      "cache-bioseq-integration"
+    --migration-report-role
+      "cache-bioseq-support-integration"
     --report
       "${CMAKE_BINARY_DIR}/reports/bioseq-cache-bioseq-support-integration.json"
     --case-timeout-seconds
@@ -159,6 +163,10 @@ add_test(
       "$<TARGET_GENEX_EVAL:postgresql_bioseq,$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_DSO>>"
     --migration-ledger
       "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
+    --migration-harness
+      "cache-bioseq-integration"
+    --migration-report-role
+      "cache-bioseq-production-integration"
     --report
       "${CMAKE_BINARY_DIR}/reports/bioseq-cache-bioseq-production-integration.json"
     --case-timeout-seconds
@@ -171,26 +179,14 @@ set_tests_properties(
   RESOURCE_LOCK "bioseq_private_postgres"
   TIMEOUT "${_bioseq_cache_bioseq_production_suite_timeout_seconds}")
 
-include(
-  "${CMAKE_CURRENT_LIST_DIR}/../support/LegacyMigrationContract.cmake")
-bioseq_cache_add_legacy_migration_contract(
-  LEDGER
-    "${CMAKE_CURRENT_LIST_DIR}/../legacy_migration_ledger.tsv"
-  LEGACY_ROOT
-    "${CMAKE_CURRENT_LIST_DIR}/../.."
-  TARGETS
-    bioseq_cache_unit_tests
-    bioseq_cache_integration_tests
-    bioseq_cache_bioseq_support_integration_tests
-    bioseq_cache_bioseq_production_integration_tests
-  LEGACY_ASSETS
-    bench/run_private_cluster_bench.py
-    bench/sql_cases.json
-    bench/test_run_private_cluster_bench.py
-    sql/bioseq_cache_extension.sql.in
-    sql/bioseq_cache_objects.sql.in
-    sql/bioseq_cache_test_objects.sql.in
-    test/run_private_provider_tests.py
-    test/regress
-    test/isolation
-    test/tap)
+if(NOT TARGET bioseq_cache_legacy_migration_contract)
+  message(FATAL_ERROR
+    "combined cache/Bioseq tests require the cache-owned legacy "
+    "migration contract target")
+endif()
+add_dependencies(
+  bioseq_cache_bioseq_support_integration_tests
+  bioseq_cache_legacy_migration_contract)
+add_dependencies(
+  bioseq_cache_bioseq_production_integration_tests
+  bioseq_cache_legacy_migration_contract)
