@@ -60,7 +60,7 @@ ORDER BY row_id;
 
 -- Force source B to be independently produced instead of consuming A.  The
 -- completed A generation remains in the same reusable coverage directory.
-SELECT bioseq_cache_test.provider_set_mapping_fault('provider_error');
+SELECT bioseq_cache_test.provider_set_mapping_fault('provider_status_error');
 SELECT row_id
 FROM cache_provider_older_rows
 WHERE nullable_value >= 5

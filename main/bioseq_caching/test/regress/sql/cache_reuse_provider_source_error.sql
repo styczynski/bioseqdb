@@ -67,14 +67,14 @@ WHERE row_id <= 70
 ORDER BY row_id;
 
 -- Produce B and C independently so the later consumer sees three sources.
-SELECT bioseq_cache_test.provider_set_mapping_fault('provider_error');
+SELECT bioseq_cache_test.provider_set_mapping_fault('provider_status_error');
 SELECT row_id
 FROM cache_provider_source_error_rows
 WHERE nullable_value BETWEEN 71 AND 90
 ORDER BY row_id;
 SELECT bioseq_cache_test.provider_set_mapping_fault('none');
 
-SELECT bioseq_cache_test.provider_set_mapping_fault('provider_error');
+SELECT bioseq_cache_test.provider_set_mapping_fault('provider_status_error');
 SELECT row_id
 FROM cache_provider_source_error_rows
 WHERE nullable_value >= 91
@@ -85,10 +85,11 @@ SELECT bioseq_cache_test.provider_reset();
 SELECT bioseq_cache.reset_stats();
 DISCARD PLANS;
 
--- A performs no late fetch.  The one-shot ERROR therefore rejects middle B;
--- C must still late-fetch successfully and the residual must replace only B.
+-- A performs no late fetch.  The one-shot status error therefore rejects
+-- middle B; C must still late-fetch successfully and the residual must replace
+-- only B.  The first staged B value is intentionally discarded.
 SELECT bioseq_cache_test.provider_set_mapping_fault(
-    'late_fetch_error_once');
+    'late_fetch_partial_status_error_once');
 SELECT pg_temp.cache_provider_source_error_bag()::text AS ids
 \gset reused_
 SELECT bioseq_cache_test.provider_set_mapping_fault('none');
@@ -135,7 +136,7 @@ WITH observed AS (
        OR extract_occurrence <> 20
        OR late_fetch_batch <> 2
        OR late_fetch_references <> 30
-       OR late_fetch_values <> 10
+       OR late_fetch_values <> 11
        OR late_fetch_errors <> 1
        OR executor_rows <> 20
        OR gated_expensive_rows <> 20

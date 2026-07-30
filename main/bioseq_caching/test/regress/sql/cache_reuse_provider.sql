@@ -727,7 +727,7 @@ DECLARE
         'unknown_persisted_map_version',
         'decorated_boundary_schema_mismatch',
         'decorated_lineage_schema_mismatch',
-        'provider_error'
+        'provider_status_error'
     ];
 BEGIN
     FOREACH fault IN ARRAY faults LOOP
