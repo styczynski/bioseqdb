@@ -20,7 +20,6 @@ export module bioseq.codegen.sql.renderer:fmgr;
 
 import bioseq.codegen.sql.collector;
 import bioseq.codegen.sql.graph;
-import bioseq.codegen.sql:model;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::sql {
@@ -1939,7 +1938,8 @@ render_support_vector_registry_modules(
 [[nodiscard]] inline std::vector<rendered_fmgr_entrypoint_module>
 render_fmgr_entrypoint_modules(
         const sql_graph& graph,
-        const std::vector<configured_fmgr_owner>& configured_owners) {
+        const std::vector<
+            std::pair<std::string, std::string>>& configured_owners) {
     using symbol_group = std::map<
         std::string,
         std::vector<const normalized_entity*>,
@@ -1953,13 +1953,14 @@ render_fmgr_entrypoint_modules(
     std::map<std::string, std::string, std::less<>>
         configured_owner_by_module;
     std::set<std::string, std::less<>> configured_owner_keys;
-    for (const configured_fmgr_owner& owner : configured_owners) {
+    for (const auto& [owner_key, source_module] :
+         configured_owners) {
         if (!configured_owner_by_module.emplace(
-                owner.source_module, owner.owner_key).second
-            || !configured_owner_keys.emplace(owner.owner_key).second) {
+                source_module, owner_key).second
+            || !configured_owner_keys.emplace(owner_key).second) {
             throw std::runtime_error(
                 "configured fmgr owner mapping is not one-to-one for '"
-                + owner.owner_key + "'");
+                + owner_key + "'");
         }
     }
     for (const normalized_entity& entity : graph.entities) {
@@ -2055,12 +2056,13 @@ render_fmgr_entrypoint_modules(
             fmgr_detail::render_vector_aggregate_registry(graph)) {
         result.push_back(std::move(*registry));
     }
-    for (const configured_fmgr_owner& owner : configured_owners) {
-        if (!by_owner.contains(owner.owner_key)) {
+    for (const auto& [owner_key, source_module] :
+         configured_owners) {
+        if (!by_owner.contains(owner_key)) {
             throw std::runtime_error(
-                "configured fmgr owner '" + owner.owner_key
+                "configured fmgr owner '" + owner_key
                 + "' has no generated routine in module '"
-                + owner.source_module + "'");
+                + source_module + "'");
         }
     }
     return result;

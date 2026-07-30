@@ -166,7 +166,7 @@ parse_fmgr_entrypoint_output(std::string_view value) {
     };
 }
 
-[[nodiscard]] inline configured_fmgr_owner
+[[nodiscard]] inline std::pair<std::string, std::string>
 parse_fmgr_owner(std::string_view value) {
     const configured_entity_handle_output parsed =
         parse_entity_handle_output(value);
@@ -187,10 +187,7 @@ parse_fmgr_owner(std::string_view value) {
             "--fmgr-owner-module has invalid C++ module name '"
             + source_module + "'");
     }
-    return {
-        .owner_key = parsed.owner_key,
-        .source_module = source_module,
-    };
+    return {parsed.owner_key, source_module};
 }
 
 [[nodiscard]] inline std::filesystem::path

@@ -2245,6 +2245,22 @@ inline void run_fmgr_renderer_contract_tests() {
             && module.source_module == "bioseq.fixture"
             && module.content_sha256.size() == 64,
         "configure-stable owner identity");
+    const std::vector<rendered_fmgr_entrypoint_module>
+        configured_owner_modules =
+            render_fmgr_entrypoint_modules(
+                graph,
+                {{"fixture_override", "bioseq.fixture"}});
+    require(
+        configured_owner_modules.size() == 1
+            && configured_owner_modules.front().owner_key
+                == "fixture_override"
+            && configured_owner_modules.front().source_module
+                == "bioseq.fixture"
+            && configured_owner_modules.front().module_name
+                == "bioseq.sql.generated.production."
+                   "fixture_override.entrypoints",
+        "explicit fmgr ownership remains independent of the SQL "
+        "command model partition");
     require(module.wrappers.size() == 3, "three physical wrappers");
     require(
         module.content.contains("PG_FUNCTION_INFO_V1(mmsearch)")

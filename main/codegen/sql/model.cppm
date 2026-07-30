@@ -6,6 +6,7 @@ module;
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 export module bioseq.codegen.sql:model;
@@ -118,11 +119,6 @@ struct configured_fmgr_entrypoint_output {
     std::filesystem::path path;
 };
 
-struct configured_fmgr_owner {
-    std::string owner_key;
-    std::string source_module;
-};
-
 struct command_line {
     command_action action{command_action::generate};
     authority_mode mode{authority_mode::legacy_baseline};
@@ -163,7 +159,7 @@ struct command_line {
     std::vector<configured_row_codec_output> row_codec_outputs;
     std::vector<configured_fmgr_entrypoint_output>
         fmgr_entrypoint_outputs;
-    std::vector<configured_fmgr_owner> fmgr_owners;
+    std::vector<std::pair<std::string, std::string>> fmgr_owners;
     std::string prepare_authority;
     std::string compiler_profile;
     std::string clang_sha256;
