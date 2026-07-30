@@ -235,6 +235,26 @@ transition_state() {
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
     .parallel = bioseq::sql::parallel_safety::restricted,
+    .null_input = bioseq::sql::null_input_policy::strict,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::all,
+    .from = bioseq::sql::public_role,
+})]]
+[[nodiscard]] inline
+bioseq::pg_utils::returns_table<
+    sql_rows::relation_transition_state_row>
+relation_transition_state(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::pg::regclass,
+        })]]
+        std::uint32_t relation_oid) {
+    return test_sql_backend::relation_transition_state(relation_oid);
+}
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
+    .parallel = bioseq::sql::parallel_safety::restricted,
     .null_input = bioseq::sql::null_input_policy::called,
 })]]
 [[bioseq_sql::revoke({

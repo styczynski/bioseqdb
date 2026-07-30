@@ -14,6 +14,10 @@ add_executable(bioseq_cache_integration_tests
   test_types.cpp
   test_transactions.cpp
   test_concurrency.cpp
+  test_isolation_failures.cpp
+  test_isolation_waiters.cpp
+  test_isolation_visibility.cpp
+  test_isolation_provider_validity.cpp
   test_backend_recovery.cpp
   test_cross_database.cpp
   test_owner_liveness.cpp

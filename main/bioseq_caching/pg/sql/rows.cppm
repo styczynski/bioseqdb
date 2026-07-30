@@ -136,6 +136,12 @@ struct transition_state_row final {
     std::int64_t global_completion;
 };
 
+/** One relation's precise commit-transition state exposed by test support. */
+struct relation_transition_state_row final {
+    std::int64_t relation_transitions;
+    std::int64_t relation_epoch;
+};
+
 /** Planner-held reusable references exposed only by test support. */
 struct planner_reference_counts_row final {
     std::int64_t reader_pins;
@@ -214,6 +220,7 @@ static_assert(std::is_aggregate_v<storage_tier_stats_row>);
 static_assert(std::is_aggregate_v<entry_state_row>);
 static_assert(std::is_aggregate_v<runtime_counters_row>);
 static_assert(std::is_aggregate_v<transition_state_row>);
+static_assert(std::is_aggregate_v<relation_transition_state_row>);
 static_assert(std::is_aggregate_v<planner_reference_counts_row>);
 static_assert(std::is_aggregate_v<provider_callback_stats_row>);
 static_assert(std::is_aggregate_v<plan_build_stats_row>);
