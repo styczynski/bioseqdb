@@ -260,9 +260,9 @@ TEST_CASE("integration JSON preserves a failing fractional CPU capacity",
 
     std::ifstream input(path);
     REQUIRE(input);
-    const std::string json(
+    const std::string json{
         std::istreambuf_iterator<char>(input),
-        std::istreambuf_iterator<char>());
+        std::istreambuf_iterator<char>()};
     constexpr std::string_view marker{
         "\"effective_cpu_cores\":"};
     const std::size_t marker_position = json.find(marker);
