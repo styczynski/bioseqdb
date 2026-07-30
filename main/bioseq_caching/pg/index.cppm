@@ -73,6 +73,7 @@ entry_states();
 [[nodiscard]]
 bioseq::pg_utils::returns_table<sql_rows::runtime_counters_row>
 runtime_counters();
+[[nodiscard]] bool cache_infrastructure_ready();
 [[nodiscard]]
 bioseq::pg_utils::returns_table<sql_rows::transition_state_row>
 transition_state();

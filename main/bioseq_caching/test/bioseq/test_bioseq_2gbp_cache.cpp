@@ -125,6 +125,74 @@ void configure_canonical_cpu_path(
     return false;
 }
 
+[[nodiscard]] bool wait_for_production_cache_readiness(
+    bioseq::libpq::connection& admin,
+    std::chrono::steady_clock::time_point deadline) {
+    constexpr std::string_view query{
+        "SELECT 1::bigint AS cache_bootstrap_ready"};
+    return bioseq::postgres_test::wait_until(
+        [&admin, deadline, query] {
+            bioseq::postgres_test::scoped_guc cache_mode{
+                admin,
+                "bioseq.query_cache_optimisation_mode",
+                "same",
+                30s};
+            bioseq::cache_test::exec(
+                admin,
+                "SELECT bioseq_cache.invalidate_all(); "
+                "SELECT bioseq_cache.reset_stats()",
+                30s);
+            const auto before =
+                bioseq::cache_test::read_cache_stats(admin);
+            const auto cold = admin.exec(query, 30s);
+            const auto after_cold =
+                bioseq::cache_test::read_cache_stats(admin);
+            const auto warm = admin.exec(query, 30s);
+            const auto after_warm =
+                bioseq::cache_test::read_cache_stats(admin);
+            const auto cold_delta = after_cold - before;
+            const auto warm_delta = after_warm - after_cold;
+            const bool ready =
+                cold.rows() == 1
+                && cold.columns() == 1
+                && !cold.is_null(0, 0)
+                && cold.value(0, 0) == "1"
+                && bioseq::postgres_test::exact_row_hash(warm)
+                    == bioseq::postgres_test::exact_row_hash(cold)
+                && cold_delta.produced == 1
+                && cold_delta.completed_hits == 0
+                && cold_delta.fallbacks == 0
+                && warm_delta.produced == 0
+                && warm_delta.completed_hits == 1
+                && warm_delta.fallbacks == 0;
+            bioseq::cache_test::exec(
+                admin,
+                "SELECT bioseq_cache.invalidate_all(); "
+                "SELECT bioseq_cache.reset_stats()",
+                30s);
+            if (!ready
+                || std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            const bool drained =
+                bioseq::postgres_test::wait_until(
+                    [&admin] {
+                        return bioseq::cache_test::integer(
+                            admin,
+                            "SELECT count(*) "
+                            "FROM bioseq_cache.entries()")
+                            == 0;
+                    },
+                    deadline, 50ms);
+            bioseq::cache_test::exec(
+                admin,
+                "SELECT bioseq_cache.reset_stats()",
+                30s);
+            return drained;
+        },
+        deadline, 50ms);
+}
+
 }  // namespace
 
 TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly",
@@ -133,7 +201,10 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
         "exactly 2 Gbp combined Bioseq input produces once and replays exactly"};
     const auto test_started = std::chrono::steady_clock::now();
     auto options = bioseq::cache_test::cluster_options(
-        true, bioseq::cache_test::preload_order::cache_then_bioseq);
+        true, bioseq::cache_test::preload_order::cache_then_bioseq, {},
+        false,
+        bioseq::cache_test::bootstrap_readiness::caller_managed);
+    REQUIRE_FALSE(options.post_extension_readiness.has_value());
     options.pre_initdb =
         [](const bioseq::postgres_test::pre_initdb_context& context) {
             bioseq::postgres_test::scoped_report_phase phase{
@@ -179,6 +250,9 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
         "SELECT to_regnamespace('bioseq_cache_test') IS NULL"));
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.production_profile");
+
+    REQUIRE(wait_for_production_cache_readiness(
+        admin, std::chrono::steady_clock::now() + 90s));
 
     configure_canonical_cpu_path(admin);
     configure_canonical_cpu_path(data);

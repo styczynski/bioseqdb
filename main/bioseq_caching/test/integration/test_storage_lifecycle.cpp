@@ -202,6 +202,11 @@ TEST_CASE("restart removes boot-scoped entries and partial files",
     fixture.cluster().restart();
     fixture.reconnect_admin();
     auto& restarted = fixture.admin();
+    CHECK(bioseq::cache_test::boolean(
+        restarted,
+        "SELECT (bioseq_cache_test.bootstrap_status()->>"
+        "'storage_attached')::boolean "
+        "AND bioseq_cache_test.cache_infrastructure_ready()"));
     CHECK(bioseq::cache_test::integer(
               restarted,
               "SELECT count(*) FROM bioseq_cache.entries()")
@@ -254,6 +259,11 @@ TEST_CASE("unclean postmaster death performs crash recovery",
     fixture.cluster().start();
     fixture.reconnect_admin();
     auto& recovered = fixture.admin();
+    CHECK(bioseq::cache_test::boolean(
+        recovered,
+        "SELECT (bioseq_cache_test.bootstrap_status()->>"
+        "'storage_attached')::boolean "
+        "AND bioseq_cache_test.cache_infrastructure_ready()"));
     CHECK(bioseq::cache_test::integer(
               recovered,
               "SELECT count(*) FROM cache_crash_recovery_rows")

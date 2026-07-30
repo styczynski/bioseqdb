@@ -69,6 +69,19 @@ bootstrap_attach_twice() {
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
+    .parallel = bioseq::sql::parallel_safety::restricted,
+    .null_input = bioseq::sql::null_input_policy::called,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::all,
+    .from = bioseq::sql::public_role,
+})]]
+[[nodiscard]] inline bool cache_infrastructure_ready() {
+    return test_sql_backend::cache_infrastructure_ready();
+}
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
     .null_input = bioseq::sql::null_input_policy::strict,
 })]]
 [[bioseq_sql::revoke({

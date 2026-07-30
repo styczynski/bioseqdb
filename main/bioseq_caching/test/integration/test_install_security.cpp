@@ -5,6 +5,7 @@
 #include <chrono>
 #include <string>
 #include <string_view>
+#include <utility>
 
 import bioseq.cache.test_context;
 import bioseq.test.postgres;
@@ -17,9 +18,11 @@ TEST_CASE("cache install, preload diagnostics, and ACLs are native",
         "cache install, preload diagnostics, and ACLs are native"};
 
     SECTION("cache-required modes reject a non-preloaded postmaster") {
+        auto options = bioseq::cache_test::cluster_options(
+            false, bioseq::cache_test::preload_order::none);
+        CHECK_FALSE(options.post_extension_readiness.has_value());
         bioseq::postgres_test::postgres_fixture fixture{
-            bioseq::cache_test::cluster_options(
-                false, bioseq::cache_test::preload_order::none)};
+            std::move(options)};
         auto& connection = fixture.admin();
 
         struct non_preloaded_mode {
@@ -71,12 +74,55 @@ TEST_CASE("cache install, preload diagnostics, and ACLs are native",
     }
 
     SECTION("preload, catalog identity, and diagnostics ACLs") {
+        auto options = bioseq::cache_test::cluster_options(
+            false, bioseq::cache_test::preload_order::cache_only,
+            {{"bioseq.query_cache_optimisation_mode", "same"}});
+        REQUIRE(options.post_extension_readiness.has_value());
+        CHECK(options.post_extension_readiness->sql.find(
+                  "bootstrap_attach_twice")
+              != std::string::npos);
+        CHECK(options.post_extension_readiness->sql.find(
+                  "bootstrap_status")
+              != std::string::npos);
+        CHECK(options.post_extension_readiness->sql.find(
+                  "cache_infrastructure_ready")
+              != std::string::npos);
+        options.post_extension_readiness->sql =
+            "WITH first_poll AS MATERIALIZED ("
+            "SELECT current_setting("
+            "'bioseq_test.readiness_probe_seen', true) "
+            "IS NOT DISTINCT FROM 'on' AS seen), "
+            "mark_poll AS MATERIALIZED ("
+            "SELECT set_config("
+            "'bioseq_test.readiness_probe_seen', 'on', false) "
+            "FROM first_poll WHERE NOT seen) "
+            "SELECT first_poll.seen AND readiness.ready "
+            "FROM first_poll LEFT JOIN mark_poll ON true "
+            "CROSS JOIN LATERAL ("
+            + options.post_extension_readiness->sql
+            + ") AS readiness(ready)";
         bioseq::postgres_test::postgres_fixture fixture{
-            bioseq::cache_test::cluster_options(
-                false, bioseq::cache_test::preload_order::cache_only,
-                {{"bioseq.query_cache_optimisation_mode", "same"}})};
+            std::move(options)};
+        auto& initial_connection = fixture.admin();
+        CHECK(bioseq::cache_test::boolean(
+            initial_connection,
+            "SELECT current_setting("
+            "'bioseq_test.readiness_probe_seen', true) = 'on'"));
+        fixture.reconnect_admin();
         auto& connection = fixture.admin();
+        CHECK(bioseq::cache_test::boolean(
+            connection,
+            "SELECT current_setting("
+            "'bioseq_test.readiness_probe_seen', true) = 'on'"));
 
+        CHECK(bioseq::cache_test::boolean(
+            connection,
+            "SELECT to_regprocedure("
+            "'bioseq_cache_test.cache_infrastructure_ready()') "
+            "IS NOT NULL"));
+        CHECK(bioseq::cache_test::boolean(
+            connection,
+            "SELECT bioseq_cache_test.cache_infrastructure_ready()"));
         CHECK(bioseq::cache_test::scalar(
                   connection,
                   "SHOW bioseq.query_cache_optimisation_mode")

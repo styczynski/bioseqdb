@@ -21223,6 +21223,24 @@ inline void copy_injected_bytes_typed(
 
 namespace bioseq::cache::pg::test_sql_backend {
 
+/** Prove planner infrastructure health without prepared-xact policy gates. */
+[[nodiscard]] bool cache_infrastructure_ready() {
+    require_cache_test_superuser_typed();
+    const bool header_ready =
+        guc::preload_requested()
+        && g_shared != nullptr
+        && g_shared->magic == kSharedMagic
+        && g_shared->shared_abi_version == kSharedAbiVersion
+        && pg_atomic_read_u32(&g_shared->ready) != 0
+        && pg_atomic_read_u32(&g_shared->bootstrap_failure) == 0;
+    return header_ready
+        && shared_registry::shared_registry_bootstrap_state()
+            == BootstrapState::Ready
+        && bind_shared_reusable_registry()
+        && storage::runtime_snapshot().correctness_readiness
+            >= CacheCorrectnessReadiness::ReusableCoverageReady;
+}
+
 /** Select one exact-plan verifier fault. */
 void set_exact_plan_fault(const std::string& name) {
     require_cache_test_superuser_typed();

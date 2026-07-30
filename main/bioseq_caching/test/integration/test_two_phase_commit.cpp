@@ -125,6 +125,11 @@ TEST_CASE("prepared transitions reconstruct across postmaster restart",
     fixture.cluster().restart();
     fixture.reconnect_admin();
     auto& recovered = fixture.admin();
+    CHECK(bioseq::cache_test::boolean(
+        recovered,
+        "SELECT (bioseq_cache_test.bootstrap_status()->>"
+        "'storage_attached')::boolean "
+        "AND bioseq_cache_test.cache_infrastructure_ready()"));
     CHECK(bioseq::cache_test::integer(
               recovered,
               "SELECT count(*) FROM cache_prepared_restart_rows")
@@ -155,6 +160,11 @@ TEST_CASE("prepared transitions reconstruct across postmaster restart",
     fixture.cluster().restart();
     fixture.reconnect_admin();
     auto& rollback_recovered = fixture.admin();
+    CHECK(bioseq::cache_test::boolean(
+        rollback_recovered,
+        "SELECT (bioseq_cache_test.bootstrap_status()->>"
+        "'storage_attached')::boolean "
+        "AND bioseq_cache_test.cache_infrastructure_ready()"));
     bioseq::cache_test::exec(
         rollback_recovered,
         "ROLLBACK PREPARED 'cache_restart_rollback'");

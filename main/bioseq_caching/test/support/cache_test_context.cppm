@@ -50,6 +50,12 @@ enum class preload_order {
     bioseq_then_cache,
 };
 
+/// @brief Chooses whether the fixture or the case owns lazy cache bootstrap.
+enum class bootstrap_readiness {
+    fixture_managed,
+    caller_managed,
+};
+
 /// @brief Public cache diagnostics sampled without affecting a data session.
 struct cache_stats {
     std::int64_t produced{};
@@ -68,6 +74,32 @@ struct cache_stats {
 }  // namespace bioseq::cache_test
 
 namespace bioseq::cache_test::detail {
+
+inline constexpr std::string_view kCacheBootstrapReadinessSql{
+    "WITH a AS MATERIALIZED ("
+    "SELECT bioseq_cache_test.bootstrap_attach_twice() AS a), "
+    "q AS MATERIALIZED ("
+    "SELECT a.a, bioseq_cache_test.bootstrap_status() AS s FROM a) "
+    "SELECT (a->>'first_attached')::boolean "
+    "AND (a->>'second_attached')::boolean "
+    "AND (a->>'same_area')::boolean "
+    "AND (a->>'same_root')::boolean "
+    "AND (a->>'mapping_pinned')::boolean "
+    "AND (s->>'state')::integer = 2 "
+    "AND (s->>'failure')::integer = 0 "
+    "AND (s->>'boot_nonce')::bigint <> 0 "
+    "AND (s->>'initialization_attempts')::bigint > 0 "
+    "AND (s->>'live_unpublished_areas')::integer = 0 "
+    "AND NOT (s->>'cleanup_handle_published')::boolean "
+    "AND (s->>'ready_handle_published')::boolean "
+    "AND (s->>'root_published')::boolean "
+    "AND (s->>'storage_attached')::boolean "
+    "AND (s->>'mapping_pinned')::boolean "
+    "AND (s->>'storage_metadata_in_dsa')::boolean "
+    "AND (s->>'reusable_wait_cvs_in_dsa')::boolean "
+    "AND (s->>'reusable_wait_cv_count')::integer > 0 "
+    "AND bioseq_cache_test.cache_infrastructure_ready() "
+    "FROM q"};
 
 /// @brief Returns the process-owned command-line configuration.
 [[nodiscard]] inline runner_configuration& configuration_storage() {
@@ -225,7 +257,9 @@ canonical_cache_stage_artifact_paths(
     bool include_bioseq,
     preload_order order = preload_order::cache_only,
     std::vector<std::pair<std::string, std::string>> startup_gucs = {},
-    bool create_bioseq_first = false) {
+    bool create_bioseq_first = false,
+    bootstrap_readiness readiness =
+        bootstrap_readiness::fixture_managed) {
     const runner_configuration& value = configuration();
     const postgres_test::extension_artifact cache_artifact{
         .name = "bioseq_cache",
@@ -275,6 +309,18 @@ canonical_cache_stage_artifact_paths(
         break;
     }
 
+    std::optional<postgres_test::post_extension_readiness_probe>
+        post_extension_readiness;
+    if (order != preload_order::none
+        && readiness == bootstrap_readiness::fixture_managed) {
+        post_extension_readiness =
+            postgres_test::post_extension_readiness_probe{
+                .sql = std::string{
+                    detail::kCacheBootstrapReadinessSql},
+                .deadline = 90s,
+                .poll_interval = 20ms};
+    }
+
     return postgres_test::cluster_options{
         .postgres_bin_dir = value.postgres_bin_dir,
         .preinstalled_stage_root = value.postgres_stage_root,
@@ -285,6 +331,8 @@ canonical_cache_stage_artifact_paths(
         .startup_gucs = std::move(startup_gucs),
         .process_environment = {},
         .pre_initdb = {},
+        .post_extension_readiness =
+            std::move(post_extension_readiness),
         .startup_timeout = 60s,
         .stop_timeout = 30s};
 }

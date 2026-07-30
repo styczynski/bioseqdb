@@ -18,7 +18,12 @@ namespace {
 [[nodiscard]] bioseq::postgres_test::cluster_options
 bootstrap_options(std::optional<std::string> fault = std::nullopt) {
   auto options = bioseq::cache_test::cluster_options(
-      false, bioseq::cache_test::preload_order::cache_only);
+      false, bioseq::cache_test::preload_order::cache_only, {}, false,
+      bioseq::cache_test::bootstrap_readiness::caller_managed);
+  if (options.post_extension_readiness.has_value()) {
+    throw std::logic_error(
+        "bootstrap recovery must own lazy initialization");
+  }
   if (fault.has_value()) {
     options.process_environment.emplace_back(
         "BIOSEQ_CACHE_TEST_BOOTSTRAP_FAULT", std::move(*fault));
@@ -157,6 +162,8 @@ TEST_CASE("bootstrap attachment takeover and corruption fail open coherently",
     bool owner_token_visible{};
     bool cleanup_visible{};
     bool takeover_valid{};
+    bool disabled_writer_committed{};
+    bool disabled_writer_preserved_owner{};
     std::vector<bioseq::postgres_test::session_task> tasks;
     tasks.push_back(bioseq::postgres_test::session_task{
         .name = "bootstrap-paused-initializer",
@@ -166,7 +173,9 @@ TEST_CASE("bootstrap attachment takeover and corruption fail open coherently",
     tasks.push_back(bioseq::postgres_test::session_task{
         .name = "bootstrap-takeover-controller",
         .body = [&dead_token, &new_token, &cleanup_handle, &owner_token_visible,
-                 &cleanup_visible, &takeover_valid](
+                 &cleanup_visible, &takeover_valid,
+                 &disabled_writer_committed,
+                 &disabled_writer_preserved_owner](
                     bioseq::postgres_test::session_context &session) {
           owner_token_visible = wait_for_status(
               session,
@@ -196,6 +205,33 @@ TEST_CASE("bootstrap attachment takeover and corruption fail open coherently",
                        "(s->>'initializer_nonce') || '|' || "
                        "(s->>'initializer_started_at') || '|' || "
                        "(s->>'initializer_claim') FROM q");
+          static_cast<void>(session.exec(
+              "SET bioseq.query_cache_optimisation_mode = 'disabled'; "
+              "CREATE TABLE bootstrap_pre_ready_writer_rows("
+              "id integer PRIMARY KEY, value text); "
+              "INSERT INTO bootstrap_pre_ready_writer_rows VALUES "
+              "(10, 'ten'), (20, 'twenty'), (30, 'thirty')"));
+          disabled_writer_committed = true;
+          const std::string token_after_write = session_scalar(
+              session, "WITH q AS ("
+                       "SELECT bioseq_cache_test.bootstrap_status() AS s) "
+                       "SELECT (s->>'initializer_proc') || '|' || "
+                       "(s->>'initializer_pid') || '|' || "
+                       "(s->>'initializer_nonce') || '|' || "
+                       "(s->>'initializer_started_at') || '|' || "
+                       "(s->>'initializer_claim') FROM q");
+          disabled_writer_preserved_owner =
+              token_after_write == dead_token
+              && session_boolean(
+                  session,
+                  status_sql(
+                      "(s->>'state')::integer = 1 "
+                      "AND (s->>'pause_reached')::boolean "
+                      "AND "
+                      "(s->>'initialization_attempts')::bigint = 1 "
+                      "AND NOT "
+                      "(s->>'ready_handle_published')::boolean "
+                      "AND NOT (s->>'root_published')::boolean"));
           const std::string initializer_pid =
               session_scalar(session, "SELECT ("
                                       "bioseq_cache_test.bootstrap_status()->>"
@@ -281,15 +317,23 @@ TEST_CASE("bootstrap attachment takeover and corruption fail open coherently",
     CHECK(owner_token_visible);
     CHECK(cleanup_visible);
     CHECK(takeover_valid);
+    CHECK(disabled_writer_committed);
+    CHECK(disabled_writer_preserved_owner);
     CHECK_FALSE(dead_token.empty());
     CHECK_FALSE(new_token.empty());
     CHECK(new_token != dead_token);
 
     auto &connection = fixture.admin();
-    create_source_table(connection, "bootstrap_takeover_rows");
     bioseq::cache_test::exec(connection, "SELECT bioseq_cache.reset_stats()");
-    CHECK(source_result(connection, "bootstrap_takeover_rows") == "3|60");
-    CHECK(source_result(connection, "bootstrap_takeover_rows") == "3|60");
+    CHECK(bioseq::cache_test::boolean(
+        connection,
+        "SELECT bioseq_cache_test.cache_infrastructure_ready()"));
+    CHECK(source_result(
+              connection, "bootstrap_pre_ready_writer_rows")
+          == "3|60");
+    CHECK(source_result(
+              connection, "bootstrap_pre_ready_writer_rows")
+          == "3|60");
     const auto stats = bioseq::cache_test::read_cache_stats(connection);
     CHECK(stats.produced == 1);
     CHECK(stats.completed_hits == 1);
