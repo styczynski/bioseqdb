@@ -653,7 +653,7 @@ private:
             }
             std::ranges::sort(
                 descendants,
-                [&](const std::filesystem::path& lhs,
+                [&staged_root](const std::filesystem::path& lhs,
                     const std::filesystem::path& rhs) {
                     return lhs.lexically_relative(staged_root)
                                .generic_string()
@@ -1560,7 +1560,7 @@ TEST_CASE("preinstalled stage rejects runtime closure divergence",
           "[runtime-closure]") {
     temporary_preinstalled_stage_tree tree;
     const std::array artifacts{tree.normal_artifact()};
-    const auto attest = [&]() {
+    const auto attest = [&tree, &artifacts]() {
         return attest_preinstalled_extension_stage(
             tree.stage_root(), tree.manifest(), tree.bin_directory(),
             tree.runtime_library_directory(), artifacts, {});
@@ -1889,6 +1889,45 @@ TEST_CASE("live-resource publication and removal remain retryable",
         tree.state_directory()));
 }
 
+TEST_CASE(
+    "stopped cluster publication retries after durable replacement failure",
+    "[postgres-test-support][unit][supervision][journal][stopped][retry]") {
+    temporary_resource_journal_tree tree;
+    configure_supervision_state(tree.state_directory());
+    const supervised_cluster_record starting{
+        .root = tree.owned_root(),
+        .data_directory = tree.data_directory(),
+        .discover_postmaster_pid = true,
+        .postmaster_executable = "/contract/postgres"};
+    register_supervised_cluster(starting);
+
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::write);
+    CHECK_THROWS(register_supervised_cluster(
+        supervised_cluster_record{
+            .root = tree.owned_root(),
+            .data_directory = tree.data_directory(),
+            .postmaster_executable = "/contract/postgres"}));
+    CHECK_FALSE(load_supervision_registries(
+        tree.state_directory()));
+
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::none);
+    REQUIRE_NOTHROW(register_supervised_cluster(
+        supervised_cluster_record{
+            .root = tree.owned_root(),
+            .data_directory = tree.data_directory(),
+            .postmaster_executable = "/contract/postgres"}));
+    const auto stopped = load_supervision_registries(
+        tree.state_directory());
+    REQUIRE(stopped.has_value());
+    REQUIRE(stopped->clusters.size() == 1);
+    CHECK_FALSE(stopped->clusters.front().discover_postmaster_pid);
+    CHECK(stopped->clusters.front().postmaster_pid == 0);
+    CHECK(stopped->clusters.front().postmaster_start_token.empty());
+    CHECK(stopped->clusters.front().postmaster_process_group == 0);
+}
+
 TEST_CASE("live-resource registry publication failures stay dirty",
           "[postgres-test-support][unit][supervision][journal][fault]") {
     const auto exercise =
@@ -2085,6 +2124,8 @@ TEST_CASE("retained launch broker pins a foreground postmaster process group",
     REQUIRE(::getsid(static_cast<pid_t>(identity->pid))
             == broker_session);
     REQUIRE_FALSE(broker.leader_exited_unreaped());
+    REQUIRE_FALSE(
+        broker.reap_after_verified_target_termination(0ms));
 
     const auto wait_for_stopped = [&identity](bool expected) {
         const auto finish =
@@ -2109,7 +2150,28 @@ TEST_CASE("retained launch broker pins a foreground postmaster process group",
         std::this_thread::sleep_for(5ms);
     }
     REQUIRE_FALSE(supervised_process_matches(*identity));
-    REQUIRE(broker.reap_after_verified_target_termination(2s));
+    const auto broker_finish =
+        std::chrono::steady_clock::now() + 2s;
+    while (!broker.leader_exited_unreaped()
+           && std::chrono::steady_clock::now() < broker_finish) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(broker.leader_exited_unreaped());
+    REQUIRE_FALSE(supervised_process_group_absent(
+        identity->process_group));
+
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::write);
+    REQUIRE_FALSE(
+        broker.reap_after_verified_target_termination(2s));
+    REQUIRE(broker.pid() == -1);
+    REQUIRE(broker.process_group() == -1);
+    CHECK_FALSE(load_supervision_registries(
+        tree.state_directory()));
+
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::none);
+    REQUIRE(broker.reap_after_verified_target_termination(0ms));
 
     const auto group_finish =
         std::chrono::steady_clock::now() + 2s;
@@ -2120,6 +2182,57 @@ TEST_CASE("retained launch broker pins a foreground postmaster process group",
     }
     CHECK(supervised_process_group_absent(
         identity->process_group));
+    CHECK(supervision_registries_empty(
+        tree.state_directory()));
+}
+
+TEST_CASE("retained broker owns startup failure before any postmaster pidfile",
+          "[postgres-test-support][unit][process][supervision][startup]") {
+    temporary_resource_journal_tree tree;
+    configure_supervision_state(tree.state_directory());
+    const std::filesystem::path executable =
+        std::filesystem::canonical(
+            std::filesystem::path{
+                BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH});
+    const std::filesystem::path canonical_data =
+        std::filesystem::canonical(tree.data_directory());
+    spawned_process broker = spawned_process::spawn(process_options{
+        .executable = executable,
+        .arguments = {"--hold", "-D", canonical_data.string()},
+        .output_file =
+            tree.state_directory() / "pre-pidfile-postmaster.log",
+        .supervise = true,
+        .supervision_data_directory = canonical_data});
+
+    REQUIRE_FALSE(std::filesystem::exists(
+        canonical_data / "postmaster.pid"));
+    CHECK_FALSE(capture_supervised_postmaster_identity(
+        executable, canonical_data, 50ms, 5ms));
+    REQUIRE(broker.pid() > 1);
+    REQUIRE(broker.process_group() == broker.pid());
+    REQUIRE_FALSE(broker.leader_exited_unreaped());
+    REQUIRE_FALSE(
+        broker.reap_after_verified_target_termination(0ms));
+
+    REQUIRE(broker.signal_owned_group_while_unreaped(SIGKILL));
+    const auto exit_finish =
+        std::chrono::steady_clock::now() + 2s;
+    while (!broker.leader_exited_unreaped()
+           && std::chrono::steady_clock::now() < exit_finish) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(broker.leader_exited_unreaped());
+    const std::int64_t owned_group = broker.process_group();
+    REQUIRE_FALSE(supervised_process_group_absent(
+        owned_group));
+    REQUIRE(broker.reap_after_verified_target_termination(2s));
+    const auto group_finish =
+        std::chrono::steady_clock::now() + 2s;
+    while (!supervised_process_group_absent(owned_group)
+           && std::chrono::steady_clock::now() < group_finish) {
+        std::this_thread::sleep_for(5ms);
+    }
+    CHECK(supervised_process_group_absent(owned_group));
     CHECK(supervision_registries_empty(
         tree.state_directory()));
 }
@@ -2409,9 +2522,62 @@ TEST_CASE("postgres test support enforces migration probe identity and counts",
     const std::array expected{
         expected_migration_probe{
             .stable_id = "support.probe.contract",
-            .expected_count = 1}};
+            .expected_count = 1,
+            .test_case = "probe contract",
+            .section = "single"}};
     REQUIRE_NOTHROW(validate_migration_probes(expected));
+    const std::array substituted_provenance{
+        expected_migration_probe{
+            .stable_id = "support.probe.contract",
+            .expected_count = 1,
+            .test_case = "probe contract",
+            .section = "different section"}};
+    REQUIRE_THROWS_AS(
+        validate_migration_probes(substituted_provenance),
+        migration_probe_error);
     clear_migration_probes();
+}
+
+TEST_CASE("cache integration v2 reports require and serialize migration provenance",
+          "[postgres-test-support][unit][report]") {
+    temporary_resource_journal_tree tree;
+    const std::filesystem::path path =
+        tree.owned_root() / "cache-integration-v2.json";
+    integration_test_report report{
+        .schema_version = "bioseq-cache-test-v2",
+        .executable = "/build/bioseq_cache_integration_tests",
+        .build_identity = std::string(64, 'a'),
+        .migration_evidence_harness = "cache-integration",
+        .migration_report_role = "cache-integration",
+        .migration_coverage = "full-role",
+        .migration_phase = "passing",
+        .migration_ledger_sha256 = std::string(64, 'b'),
+        .evidence_contract_sha256 = std::string(64, 'c'),
+        .cleanup = cleanup_report{
+            .succeeded = true,
+            .detail = "contract cleanup"}};
+    REQUIRE_NOTHROW(write_integration_test_report(path, report));
+
+    std::ifstream input(path, std::ios::binary);
+    REQUIRE(input);
+    const std::string document{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{}};
+    CHECK(document.find(
+              R"("migration_evidence_harness":"cache-integration")")
+          != std::string::npos);
+    CHECK(document.find(
+              R"("migration_report_role":"cache-integration")")
+          != std::string::npos);
+    CHECK(document.find(R"("migration_coverage":"full-role")")
+          != std::string::npos);
+    CHECK(document.find(R"("migration_phase":"passing")")
+          != std::string::npos);
+
+    report.migration_report_role = "cache-bench";
+    REQUIRE_THROWS_AS(
+        write_integration_test_report(path, report),
+        std::runtime_error);
 }
 
 TEST_CASE("canonical row hash distinguishes NULL from empty text",
