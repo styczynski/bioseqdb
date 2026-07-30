@@ -234,6 +234,15 @@ public:
         }
     }
 
+    /// @brief Stops sampling and preserves its terminal report for cleanup.
+    [[nodiscard]] resource_sampling_report finish_resource_sampling() {
+        if (!resource_sampler_) {
+            throw fixture_error(
+                "automatic fixture resource sampling is unavailable");
+        }
+        return resource_sampler_->finish();
+    }
+
 private:
     void cleanup_and_record() noexcept {
         if (cleanup_recorded_) {

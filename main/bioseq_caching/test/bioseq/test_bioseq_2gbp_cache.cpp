@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -9,6 +11,7 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 import bioseq.cache.test_context;
 import bioseq.test.postgres;
@@ -33,6 +36,9 @@ constexpr std::uint64_t minimum_data_space =
 constexpr std::uint64_t io_probe_bytes = gibibyte;
 constexpr double minimum_io_mib_per_second = 150.0;
 constexpr std::int64_t coordinate_tolerance = 50'000;
+constexpr std::array<std::string_view, 8> required_resource_phases{
+    "cluster-started", "generation", "index", "oracle",
+    "cold", "warm", "explain", "column-cache"};
 
 constexpr std::string_view alignment_query{
     "SELECT id, "
@@ -90,6 +96,45 @@ constexpr std::string_view alignment_query{
         }
     }
     return true;
+}
+
+void collect_plan_nodes_with_property(
+    const bioseq::postgres_test::json_value& value,
+    std::string_view property,
+    std::string_view expected,
+    std::vector<const bioseq::postgres_test::json_value*>& matches) {
+    if (const auto* object = value.as_object()) {
+        const auto* candidate = value.find(property);
+        if (candidate != nullptr
+            && candidate->as_string() != nullptr
+            && *candidate->as_string() == expected) {
+            matches.push_back(&value);
+        }
+        for (const auto& [name, child] : *object) {
+            static_cast<void>(name);
+            collect_plan_nodes_with_property(
+                child, property, expected, matches);
+        }
+        return;
+    }
+    if (const auto* array = value.as_array()) {
+        for (const auto& child : *array) {
+            collect_plan_nodes_with_property(
+                child, property, expected, matches);
+        }
+    }
+}
+
+[[nodiscard]] std::vector<
+    const bioseq::postgres_test::json_value*>
+find_plan_nodes_with_property(
+    const bioseq::postgres_test::json_value& value,
+    std::string_view property,
+    std::string_view expected) {
+    std::vector<const bioseq::postgres_test::json_value*> matches;
+    collect_plan_nodes_with_property(
+        value, property, expected, matches);
+    return matches;
 }
 
 void configure_canonical_cpu_path(
@@ -319,8 +364,6 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     }
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.exact_fixture_created");
-    bioseq::postgres_test::record_migration_probe(
-        "combined.bioseq_2gbp.persisted_index_active");
 
     bioseq::cache_test::exec(
         admin,
@@ -498,9 +541,32 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     CHECK(bioseq::postgres_test::explain_property_number(
               children->as_array()->front(), "Actual Loops")
           == 0.0);
+    const auto bioseq_nodes = find_plan_nodes_with_property(
+        *children, "Custom Plan Provider", "BioseqScan");
+    REQUIRE(bioseq_nodes.size() == 1);
+    REQUIRE(bioseq::postgres_test::explain_property_string(
+                *bioseq_nodes.front(), "Node Type")
+            == "Custom Scan");
+    REQUIRE(bioseq::postgres_test::explain_property_number(
+                *bioseq_nodes.front(), "Actual Loops")
+            == 0.0);
+    const auto persisted_index =
+        bioseq::postgres_test::explain_property_string(
+            *bioseq_nodes.front(),
+            "Bioseq Fetched From Sequence Index");
+    REQUIRE(persisted_index.has_value());
+    REQUIRE(persisted_index->contains("index presence: 100%"));
+    REQUIRE(bioseq_nodes.front()->find("Bioseq Recomputed") == nullptr);
+    REQUIRE(find_plan_nodes_with_property(
+                *children, "Node Type", "Seq Scan")
+                .empty());
     const auto after_explain =
         bioseq::cache_test::read_cache_stats(admin);
     CHECK((after_explain - after_warm).completed_hits == 1);
+    bioseq::postgres_test::record_migration_probe(
+        "combined.bioseq_2gbp.persisted_index_active");
+    bioseq::postgres_test::record_migration_probe(
+        "python.benchmark.provider_placeholder_removed");
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.explain_hit");
     bioseq::postgres_test::record_migration_probe(
@@ -530,9 +596,46 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
               "WHERE state = 'BUILDING'")
           == 0);
     CHECK_FALSE(has_partial_file(fixture.cluster().data_directory()));
+    const auto sampling = fixture.finish_resource_sampling();
+    const auto repeated_sampling = fixture.finish_resource_sampling();
+    REQUIRE(repeated_sampling.rss_samples == sampling.rss_samples);
+    REQUIRE(
+        repeated_sampling.owned_root_samples
+        == sampling.owned_root_samples);
+    REQUIRE(
+        repeated_sampling.peak_postmaster_process_tree_rss_bytes
+        == sampling.peak_postmaster_process_tree_rss_bytes);
+    REQUIRE(
+        repeated_sampling.peak_owned_root_bytes
+        == sampling.peak_owned_root_bytes);
+    REQUIRE(
+        repeated_sampling.rss_sampling_failures
+        == sampling.rss_sampling_failures);
+    REQUIRE(
+        repeated_sampling.owned_root_sampling_failures
+        == sampling.owned_root_sampling_failures);
+    REQUIRE(
+        repeated_sampling.phase_boundaries.size()
+        == sampling.phase_boundaries.size());
+    REQUIRE(sampling.rss_samples >= 2);
+    REQUIRE(sampling.owned_root_samples >= 2);
+    REQUIRE(sampling.peak_postmaster_process_tree_rss_bytes > 0);
+    REQUIRE(sampling.peak_owned_root_bytes > 0);
+    REQUIRE(sampling.rss_sampling_failures == 0);
+    REQUIRE(sampling.owned_root_sampling_failures == 0);
+    for (const std::string_view phase : required_resource_phases) {
+        const auto boundary = std::ranges::find_if(
+            sampling.phase_boundaries,
+            [phase](const bioseq::postgres_test::
+                        resource_phase_boundary& candidate) {
+                return candidate.phase == phase;
+            });
+        REQUIRE(boundary != sampling.phase_boundaries.end());
+        REQUIRE(
+            boundary->postmaster_process_tree_rss_bytes.has_value());
+        REQUIRE(boundary->owned_root_bytes.has_value());
+    }
     CHECK(std::chrono::steady_clock::now() - test_started < 105min);
-    bioseq::postgres_test::record_migration_probe(
-        "python.benchmark.resource_sampling");
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.cleanup_invariants");
 }
