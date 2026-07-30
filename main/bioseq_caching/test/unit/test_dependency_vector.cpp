@@ -108,7 +108,7 @@ static_assert(std::is_trivially_copyable_v<DependencyVectorHeaderV1>);
 static_assert(std::is_standard_layout_v<DependencyVectorHeaderV1>);
 
 TEST_CASE("dependency vector envelope validates canonical pointer-free bytes",
-          "[cache][dependency-vector][wire]") {
+          "[cache][unit][dependency-vector][wire]") {
   const std::vector entries{entry(11), entry(12), entry(13)};
   std::vector<std::byte> bytes(dependency_vector_envelope_bytes(entries.size()));
   std::fill(bytes.begin(), bytes.end(), std::byte{0xa5});
@@ -134,7 +134,7 @@ TEST_CASE("dependency vector envelope validates canonical pointer-free bytes",
 }
 
 TEST_CASE("dependency vector envelope detects shape checksum and semantics",
-          "[cache][dependency-vector][validation]") {
+          "[cache][unit][dependency-vector][validation]") {
   SECTION("payload corruption") {
     const std::vector entries{entry(11), entry(12)};
     std::vector<std::byte> bytes(
@@ -204,7 +204,7 @@ TEST_CASE("dependency vector envelope detects shape checksum and semantics",
 }
 
 TEST_CASE("dependency vector cap is exact and never truncates",
-          "[cache][dependency-vector][cap]") {
+          "[cache][unit][dependency-vector][cap]") {
   std::vector<DependencyVectorEntryV1> maximum;
   maximum.reserve(kMaxDependenciesPerGeneration);
   for (std::uint32_t index = 0;
@@ -228,7 +228,7 @@ TEST_CASE("dependency vector cap is exact and never truncates",
 }
 
 TEST_CASE("dependency fingerprint material includes the versioned guard",
-          "[cache][dependency-vector][fingerprint]") {
+          "[cache][unit][dependency-vector][fingerprint]") {
   const std::array entries{entry(11), entry(12)};
   std::vector<std::byte> envelope(
       dependency_vector_envelope_bytes(entries.size()));
@@ -283,7 +283,7 @@ TEST_CASE("dependency fingerprint material includes the versioned guard",
 }
 
 TEST_CASE("reserved database guards have kind-derived completion semantics",
-          "[cache][dependency-vector][guard]") {
+          "[cache][unit][dependency-vector][guard]") {
   const DependencyVectorEntryV1 write = database_write_guard();
   const DependencyVectorEntryV1 definition = database_definition_guard();
   CHECK(database_write_guard_entry_valid_v1(write));
@@ -297,7 +297,7 @@ TEST_CASE("reserved database guards have kind-derived completion semantics",
 }
 
 TEST_CASE("snapshot binding and continuing completion are independent",
-          "[cache][dependency-vector][snapshot-binding]") {
+          "[cache][unit][dependency-vector][snapshot-binding]") {
   constexpr std::uint64_t old_producer_completion = 41;
   constexpr std::uint64_t fresh_binding = 52;
 

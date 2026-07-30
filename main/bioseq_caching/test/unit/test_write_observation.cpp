@@ -14,7 +14,7 @@ using bioseq::cache::WriteSubtransactionResultV1;
 using Ledger = TransactionWriteLedgerV1<std::uint64_t, 4, 3>;
 
 TEST_CASE("write observations merge released savepoints and deduplicate keys",
-          "[cache][write-observation]") {
+          "[cache][unit][write-observation]") {
   Ledger ledger;
   REQUIRE(ledger.observe(1, 10) == WriteObservationResultV1::Recorded);
   REQUIRE(ledger.observe(2, 20) == WriteObservationResultV1::Recorded);
@@ -33,7 +33,7 @@ TEST_CASE("write observations merge released savepoints and deduplicate keys",
 }
 
 TEST_CASE("write observations discard rolled-back savepoint keys",
-          "[cache][write-observation]") {
+          "[cache][unit][write-observation]") {
   Ledger ledger;
   REQUIRE(ledger.observe(1, 10) == WriteObservationResultV1::Recorded);
   REQUIRE(ledger.observe(2, 20) == WriteObservationResultV1::Recorded);
@@ -48,7 +48,7 @@ TEST_CASE("write observations discard rolled-back savepoint keys",
 }
 
 TEST_CASE("coarse fallback remains sticky after savepoint rollback",
-          "[cache][write-observation]") {
+          "[cache][unit][write-observation]") {
   Ledger ledger;
   ledger.observe_coarse(2);
   REQUIRE(ledger.finish_subtransaction(2, 1, false) ==
@@ -63,7 +63,7 @@ TEST_CASE("coarse fallback remains sticky after savepoint rollback",
 }
 
 TEST_CASE("bounded key and frame pressure fail closed to coarse mode",
-          "[cache][write-observation]") {
+          "[cache][unit][write-observation]") {
   Ledger key_pressure;
   REQUIRE(key_pressure.observe(1, 1) == WriteObservationResultV1::Recorded);
   REQUIRE(key_pressure.observe(1, 2) == WriteObservationResultV1::Recorded);
@@ -89,7 +89,7 @@ TEST_CASE("bounded key and frame pressure fail closed to coarse mode",
 }
 
 TEST_CASE("top-level cleanup removes every transaction observation",
-          "[cache][write-observation]") {
+          "[cache][unit][write-observation]") {
   Ledger ledger;
   REQUIRE(ledger.observe(1, 10) == WriteObservationResultV1::Recorded);
   ledger.observe_coarse(1);

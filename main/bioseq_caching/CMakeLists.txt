@@ -4,7 +4,7 @@ option(BIOSEQ_CACHE_TESTING
   "Build the noninstalled bioseq_cache test-support DSO" OFF)
 
 function(_bioseq_cache_verify_sql_row_profile_guard)
-  set(_rows_source "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows.cppm")
+  set(_rows_source "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows/index.cppm")
   file(READ "${_rows_source}" _rows_text)
   string(FIND "${_rows_text}"
     "#if defined(BIOSEQ_CACHE_TESTING)" _guard_begin)
@@ -64,7 +64,7 @@ set(BIOSEQ_CACHE_PRODUCTION_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/pg/dependency_runtime.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/object_dependency_hooks.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/guc.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/executor/context.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/executor/context/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/executor/lifecycle.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/executor/exact_scan.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/executor/index.cppm"
@@ -74,7 +74,7 @@ set(BIOSEQ_CACHE_PRODUCTION_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/diagnostics.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/admin.cppm")
@@ -95,7 +95,7 @@ bioseq_register_sql_owner(
   EXTENSION bioseq_cache
   OWNER_KEY cache_sql_rows
   MODULE bioseq.cache.pg.sql.rows
-  SOURCES pg/sql/rows.cppm
+  SOURCES pg/sql/rows/index.cppm
   PROFILES production test_support
   AUTHORITIES SUPPORT)
 bioseq_register_sql_owner(

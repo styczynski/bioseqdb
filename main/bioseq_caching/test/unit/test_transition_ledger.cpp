@@ -543,7 +543,7 @@ void require_finish_contract_order(
 }
 
 TEST_CASE("transition ledger computes bounded pointer-free layouts",
-          "[cache][transition-ledger][layout]") {
+          "[cache][unit][transition-ledger][layout]") {
   const auto request = transition_ledger_preload_request(
       TransitionLedgerConfigV1{
           .owner_capacity = 64,
@@ -570,7 +570,7 @@ TEST_CASE("transition ledger computes bounded pointer-free layouts",
 }
 
 TEST_CASE("commit drains exact transitions and owner references once",
-          "[cache][transition-ledger][commit][replay]") {
+          "[cache][unit][transition-ledger][commit][replay]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto first = fixture.callbacks_state.add_dependency(101, 5);
@@ -645,7 +645,7 @@ TEST_CASE("commit drains exact transitions and owner references once",
 }
 
 TEST_CASE("abort conservatively publishes epochs and wakes waiters",
-          "[cache][transition-ledger][abort]") {
+          "[cache][unit][transition-ledger][abort]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto precise = fixture.callbacks_state.add_dependency(101, 2);
@@ -668,7 +668,7 @@ TEST_CASE("abort conservatively publishes epochs and wakes waiters",
 }
 
 TEST_CASE("two owners on one dependency drain two to one to zero",
-          "[cache][transition-ledger][concurrency][writers]") {
+          "[cache][unit][transition-ledger][concurrency][writers]") {
   LedgerFixture fixture(2, 4, 8);
   const auto emergency_zero =
       fixture.callbacks_state.add_dependency(900, 7);
@@ -711,7 +711,7 @@ TEST_CASE("two owners on one dependency drain two to one to zero",
 }
 
 TEST_CASE("every no-mutation begin failure rolls back its durable prefix",
-          "[cache][transition-ledger][sequence][rollback]") {
+          "[cache][unit][transition-ledger][sequence][rollback]") {
   for (std::uint32_t failure_index = 0; failure_index < 3; ++failure_index) {
     LedgerFixture fixture;
     const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
@@ -756,7 +756,7 @@ TEST_CASE("every no-mutation begin failure rolls back its durable prefix",
 }
 
 TEST_CASE("post-apply begin diagnostics also drain every prefix member",
-          "[cache][transition-ledger][sequence][rollback]") {
+          "[cache][unit][transition-ledger][sequence][rollback]") {
   for (std::uint32_t failure_index = 0; failure_index < 3; ++failure_index) {
     LedgerFixture fixture;
     const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
@@ -783,7 +783,7 @@ TEST_CASE("post-apply begin diagnostics also drain every prefix member",
 }
 
 TEST_CASE("finish diagnostics cannot strand transitions or stop the drain",
-          "[cache][transition-ledger][sequence][finish]") {
+          "[cache][unit][transition-ledger][sequence][finish]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   std::array<TransitionDependencyReferenceV1, 3> precise{
@@ -821,7 +821,7 @@ TEST_CASE("finish diagnostics cannot strand transitions or stop the drain",
 }
 
 TEST_CASE("an unapplied finish remains exactly repairable without replaying peers",
-          "[cache][transition-ledger][repair][replay]") {
+          "[cache][unit][transition-ledger][repair][replay]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   std::array<TransitionDependencyReferenceV1, 3> precise{
@@ -865,7 +865,7 @@ TEST_CASE("an unapplied finish remains exactly repairable without replaying peer
 }
 
 TEST_CASE("full owner identity and dependency generation reject ABA replay",
-          "[cache][transition-ledger][aba]") {
+          "[cache][unit][transition-ledger][aba]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto precise = fixture.callbacks_state.add_dependency(101, 2, 11);
@@ -907,7 +907,7 @@ TEST_CASE("full owner identity and dependency generation reject ABA replay",
 }
 
 TEST_CASE("shared claim source is monotonic and refuses wrap",
-          "[cache][transition-ledger][sequence][wrap][aba]") {
+          "[cache][unit][transition-ledger][sequence][wrap][aba]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto first = fixture.claim_owner(0, emergency);
@@ -936,7 +936,7 @@ TEST_CASE("shared claim source is monotonic and refuses wrap",
 }
 
 TEST_CASE("savepoint rebuild releases rolled back refs and preserves survivors",
-          "[cache][transition-ledger][savepoint][rebuild]") {
+          "[cache][unit][transition-ledger][savepoint][rebuild]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto first = fixture.callbacks_state.add_dependency(101, 5);
@@ -972,7 +972,7 @@ TEST_CASE("savepoint rebuild releases rolled back refs and preserves survivors",
 }
 
 TEST_CASE("the first precise reference can claim and transition the owner slot",
-          "[cache][transition-ledger][precise-owner]") {
+          "[cache][unit][transition-ledger][precise-owner]") {
   LedgerFixture fixture(1, 2, 8);
   const auto first = fixture.callbacks_state.add_dependency(101, 5);
   const auto second = fixture.callbacks_state.add_dependency(102, 2);
@@ -999,7 +999,7 @@ TEST_CASE("the first precise reference can claim and transition the owner slot",
 }
 
 TEST_CASE("the initial precise reference counts against owner capacity",
-          "[cache][transition-ledger][precise-owner][capacity]") {
+          "[cache][unit][transition-ledger][precise-owner][capacity]") {
   LedgerFixture fixture(1, 2, 8);
   const auto first = fixture.callbacks_state.add_dependency(101, 5);
   const auto second = fixture.callbacks_state.add_dependency(102, 2);
@@ -1020,7 +1020,7 @@ TEST_CASE("the initial precise reference counts against owner capacity",
 }
 
 TEST_CASE("savepoint rebuild preserves the initial precise reference",
-          "[cache][transition-ledger][precise-owner][savepoint]") {
+          "[cache][unit][transition-ledger][precise-owner][savepoint]") {
   LedgerFixture fixture(1, 3, 8);
   const auto first = fixture.callbacks_state.add_dependency(101, 5);
   const auto second = fixture.callbacks_state.add_dependency(102, 2);
@@ -1052,7 +1052,7 @@ TEST_CASE("savepoint rebuild preserves the initial precise reference",
 }
 
 TEST_CASE("invalid rebuild and record input make coarse sticky",
-          "[cache][transition-ledger][savepoint][coarse]") {
+          "[cache][unit][transition-ledger][savepoint][coarse]") {
   SECTION("invalid emergency") {
     LedgerFixture fixture;
     auto invalid = fixture.callbacks_state.add_dependency(900, 7);
@@ -1101,7 +1101,7 @@ TEST_CASE("invalid rebuild and record input make coarse sticky",
 }
 
 TEST_CASE("duplicate exact refs never double count transitions",
-          "[cache][transition-ledger][duplicate][coarse]") {
+          "[cache][unit][transition-ledger][duplicate][coarse]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto precise = fixture.callbacks_state.add_dependency(101, 2);
@@ -1128,7 +1128,7 @@ TEST_CASE("duplicate exact refs never double count transitions",
 }
 
 TEST_CASE("precise capacity pressure switches atomically to emergency coarse",
-          "[cache][transition-ledger][capacity][coarse]") {
+          "[cache][unit][transition-ledger][capacity][coarse]") {
   LedgerFixture fixture(1, 2, 8);
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto first = fixture.callbacks_state.add_dependency(101, 1);
@@ -1159,7 +1159,7 @@ TEST_CASE("precise capacity pressure switches atomically to emergency coarse",
 }
 
 TEST_CASE("the 257th unique precise key forces emergency coarse",
-          "[cache][transition-ledger][capacity][boundary]") {
+          "[cache][unit][transition-ledger][capacity][boundary]") {
   LedgerFixture fixture(1, 256, 16);
   const auto emergency = fixture.callbacks_state.add_dependency(900, 15);
   std::array<TransitionDependencyReferenceV1, 257> precise{};
@@ -1190,7 +1190,7 @@ TEST_CASE("the 257th unique precise key forces emergency coarse",
 }
 
 TEST_CASE("partition lock failure mutates nothing and retries coarse",
-          "[cache][transition-ledger][locks][coarse]") {
+          "[cache][unit][transition-ledger][locks][coarse]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto precise = fixture.callbacks_state.add_dependency(101, 2);
@@ -1212,7 +1212,7 @@ TEST_CASE("partition lock failure mutates nothing and retries coarse",
 }
 
 TEST_CASE("exact abort cancels a transitioning begin without guessing",
-          "[cache][transition-ledger][locks][interleave]") {
+          "[cache][unit][transition-ledger][locks][interleave]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto precise = fixture.callbacks_state.add_dependency(101, 2);
@@ -1237,7 +1237,7 @@ TEST_CASE("exact abort cancels a transitioning begin without guessing",
 }
 
 TEST_CASE("transitioning finish drains only the published prefix",
-          "[cache][transition-ledger][transitioning][prefix]") {
+          "[cache][unit][transition-ledger][transitioning][prefix]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto first = fixture.callbacks_state.add_dependency(101, 5);
@@ -1279,7 +1279,7 @@ TEST_CASE("transitioning finish drains only the published prefix",
 }
 
 TEST_CASE("dead collecting repair rechecks the token and releases references",
-          "[cache][transition-ledger][liveness][repair]") {
+          "[cache][unit][transition-ledger][liveness][repair]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto precise = fixture.callbacks_state.add_dependency(101, 2);
@@ -1308,7 +1308,7 @@ TEST_CASE("dead collecting repair rechecks the token and releases references",
 }
 
 TEST_CASE("liveness ABA recheck never clears a replacement owner",
-          "[cache][transition-ledger][liveness][aba]") {
+          "[cache][unit][transition-ledger][liveness][aba]") {
   LedgerFixture fixture;
   const auto old_emergency =
       fixture.callbacks_state.add_dependency(900, 7);
@@ -1341,7 +1341,7 @@ TEST_CASE("liveness ABA recheck never clears a replacement owner",
 }
 
 TEST_CASE("dead transitioning owner fails closed without a guessed decrement",
-          "[cache][transition-ledger][liveness][transitioning]") {
+          "[cache][unit][transition-ledger][liveness][transitioning]") {
   LedgerFixture fixture;
   const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
   const auto precise = fixture.callbacks_state.add_dependency(101, 2);
@@ -1371,7 +1371,7 @@ TEST_CASE("dead transitioning owner fails closed without a guessed decrement",
 }
 
 TEST_CASE("dead active or repairing owner fails bootstrap without guessing",
-          "[cache][transition-ledger][crash][repair]") {
+          "[cache][unit][transition-ledger][crash][repair]") {
   SECTION("active owner") {
     LedgerFixture fixture;
     const auto emergency = fixture.callbacks_state.add_dependency(900, 7);
@@ -1421,7 +1421,7 @@ TEST_CASE("dead active or repairing owner fails bootstrap without guessing",
 }
 
 TEST_CASE("diagnostics are deterministic bounded and redact no pointers",
-          "[cache][transition-ledger][diagnostics]") {
+          "[cache][unit][transition-ledger][diagnostics]") {
   LedgerFixture fixture;
   const auto emergency_two =
       fixture.callbacks_state.add_dependency(902, 2);

@@ -9,7 +9,8 @@ import bioseq.cache.core;
 
 using namespace bioseq::cache;
 
-TEST_CASE("cache diagnostic text follows producer and monitor policy") {
+TEST_CASE("cache diagnostic text follows producer and monitor policy",
+          "[cache][unit][coverage-readiness]") {
     REQUIRE(
         cache_diagnostic_disclosure(true, false, false)
         == CacheDiagnosticDisclosure::FullText);
@@ -24,7 +25,8 @@ TEST_CASE("cache diagnostic text follows producer and monitor policy") {
         == CacheDiagnosticDisclosure::SummaryOnly);
 }
 
-TEST_CASE("SQL boolean helpers implement WHERE and IS NOT TRUE") {
+TEST_CASE("SQL boolean helpers implement WHERE and IS NOT TRUE",
+          "[cache][unit][coverage-readiness]") {
     REQUIRE_FALSE(passes_where(SqlBool::FalseValue));
     REQUIRE(passes_where(SqlBool::TrueValue));
     REQUIRE_FALSE(passes_where(SqlBool::Unknown));
@@ -34,7 +36,8 @@ TEST_CASE("SQL boolean helpers implement WHERE and IS NOT TRUE") {
     REQUIRE(is_not_true(SqlBool::Unknown) == SqlBool::TrueValue);
 }
 
-TEST_CASE("coverage branches are disjoint, bag preserving, and NULL correct") {
+TEST_CASE("coverage branches are disjoint, bag preserving, and NULL correct",
+          "[cache][unit][coverage-readiness]") {
     const std::vector<CoverageRow> rows{
         {.occurrence = 1,
          .visible_value = 7,
@@ -69,7 +72,8 @@ TEST_CASE("coverage branches are disjoint, bag preserving, and NULL correct") {
         == std::vector<std::uint64_t>{1, 2, 3});
 }
 
-TEST_CASE("an invalid earlier source cannot exclude a later valid source") {
+TEST_CASE("an invalid earlier source cannot exclude a later valid source",
+          "[cache][unit][coverage-readiness]") {
     const std::vector<CoverageRow> rows{
         {.occurrence = 41,
          .requested_predicate = SqlBool::TrueValue,
@@ -86,7 +90,8 @@ TEST_CASE("an invalid earlier source cannot exclude a later valid source") {
     REQUIRE(assignment.residual() == std::vector<std::uint64_t>{42});
 }
 
-TEST_CASE("source density ordering is exact at uint64 boundaries") {
+TEST_CASE("source density ordering is exact at uint64 boundaries",
+          "[cache][unit][coverage-readiness]") {
     constexpr auto maximum = (std::numeric_limits<std::uint64_t>::max)();
     REQUIRE(fraction_less_exact(1, 3, 2, 5));
     REQUIRE_FALSE(fraction_less_exact(2, 5, 1, 3));
@@ -120,7 +125,8 @@ TEST_CASE("source density ordering is exact at uint64 boundaries") {
     REQUIRE(coverage_source_precedes(complete, later));
 }
 
-TEST_CASE("readiness gates exact and reusable entries independently") {
+TEST_CASE("readiness gates exact and reusable entries independently",
+          "[cache][unit][coverage-readiness]") {
     REQUIRE_FALSE(readiness_allows(
         CacheCorrectnessReadiness::PassthroughOnly,
         CacheEntryKind::ExactFinalResult,
@@ -171,7 +177,8 @@ TEST_CASE("readiness gates exact and reusable entries independently") {
         false));
 }
 
-TEST_CASE("every readiness, kind, observability, and class flag is crossed") {
+TEST_CASE("every readiness, kind, observability, and class flag is crossed",
+          "[cache][unit][coverage-readiness]") {
     const std::array readiness_values{
         CacheCorrectnessReadiness::PassthroughOnly,
         CacheCorrectnessReadiness::RelationFreeOnly,

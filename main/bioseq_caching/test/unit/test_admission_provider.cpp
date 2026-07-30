@@ -175,7 +175,8 @@ BioseqCacheColumnMapEntryV2 map_entry(
 
 } // namespace
 
-TEST_CASE("shared admission never exceeds the live 25-percent ceiling") {
+TEST_CASE("shared admission never exceeds the live 25-percent ceiling",
+          "[cache][unit][admission-provider]") {
     TestCounter counter{};
     TestBudget budget{.allocatable = 1'000, .total = 2'000};
     BasicCacheAdmission admission(counter, budget);
@@ -208,7 +209,8 @@ TEST_CASE("shared admission never exceeds the live 25-percent ceiling") {
     REQUIRE(admission.reserved_bytes() == 0);
 }
 
-TEST_CASE("fixed and variable DSA accounting share one exact ceiling") {
+TEST_CASE("fixed and variable DSA accounting share one exact ceiling",
+          "[cache][unit][admission-provider]") {
     REQUIRE(conservative_dsa_reservation_bytes(1).value() == 8'192);
     REQUIRE(conservative_dsa_reservation_bytes(4'096).value() == 8'192);
     REQUIRE(conservative_dsa_reservation_bytes(4'097).value() == 12'288);
@@ -251,7 +253,8 @@ TEST_CASE("fixed and variable DSA accounting share one exact ceiling") {
     REQUIRE(admission.reserved_bytes() == 16'384);
 }
 
-TEST_CASE("admission reports pressure, overflow, and file floors") {
+TEST_CASE("admission reports pressure, overflow, and file floors",
+          "[cache][unit][admission-provider]") {
     TestCounter counter{};
     TestBudget budget{.allocatable = 100, .total = 0, .pressure = true};
     BasicCacheAdmission admission(counter, budget);
@@ -286,7 +289,8 @@ TEST_CASE("admission reports pressure, overflow, and file floors") {
         0, 21ULL << 30, capacity, 100ULL << 30, 0));
 }
 
-TEST_CASE("provider schema maps require exact SQL and semantic meaning") {
+TEST_CASE("provider schema maps require exact SQL and semantic meaning",
+          "[cache][unit][admission-provider]") {
     const std::array consumer_columns{column(1)};
     const std::array source_columns{column(1)};
     const std::array<std::uint32_t, 1> consumer_required{1};
@@ -338,7 +342,8 @@ TEST_CASE("provider schema maps require exact SQL and semantic meaning") {
         == SourceMapError::CapabilityMissing);
 }
 
-TEST_CASE("provider schemas reject zero, duplicate, and out-of-range attnos") {
+TEST_CASE("provider schemas reject zero, duplicate, and out-of-range attnos",
+          "[cache][unit][admission-provider]") {
     auto valid = column(1);
     ProviderSchemaView schema{.columns = &valid, .column_count = 1};
     REQUIRE(validate_provider_schema(schema).has_value());
@@ -388,7 +393,8 @@ TEST_CASE("provider schemas reject zero, duplicate, and out-of-range attnos") {
         == SourceMapError::InvalidAttno);
 }
 
-TEST_CASE("repeated source attributes are legal only for identical meaning") {
+TEST_CASE("repeated source attributes are legal only for identical meaning",
+          "[cache][unit][admission-provider]") {
     const std::array consumer_columns{column(1), column(2)};
     const std::array source_columns{column(1)};
     const std::array<std::uint32_t, 2> required{1, 2};
@@ -420,7 +426,8 @@ TEST_CASE("repeated source attributes are legal only for identical meaning") {
         == SourceMapError::SemanticIdMismatch);
 }
 
-TEST_CASE("source-map shape and meaning failures are exhaustive") {
+TEST_CASE("source-map shape and meaning failures are exhaustive",
+          "[cache][unit][admission-provider]") {
     const std::array consumer_columns{column(1, 7), column(2, 8)};
     const std::array source_columns{column(1, 7), column(2, 8)};
     const std::array<std::uint32_t, 2> required{1, 2};
@@ -528,7 +535,8 @@ TEST_CASE("source-map shape and meaning failures are exhaustive") {
     }
 }
 
-TEST_CASE("provider registration enforces callbacks implied by flags") {
+TEST_CASE("provider registration enforces callbacks implied by flags",
+          "[cache][unit][admission-provider]") {
     BioseqCacheProviderV2 provider{
         .struct_size = sizeof(BioseqCacheProviderV2),
         .abi_version = kProviderAbiVersion,
@@ -582,7 +590,8 @@ TEST_CASE("provider registration enforces callbacks implied by flags") {
     REQUIRE_FALSE(provider_registration_valid(&provider, 18));
 }
 
-TEST_CASE("planner bridge preserves its prefix and finalized Plan tail") {
+TEST_CASE("planner bridge preserves its prefix and finalized Plan tail",
+          "[cache][unit][admission-provider]") {
     BioseqCachePlannerBridgeV2 bridge{
         .struct_size = static_cast<std::uint32_t>(
             offsetof(
@@ -615,7 +624,8 @@ TEST_CASE("planner bridge preserves its prefix and finalized Plan tail") {
         bridge.after_planned_statement));
 }
 
-TEST_CASE("canonical keys, identities, dependencies, and settings are exact") {
+TEST_CASE("canonical keys, identities, dependencies, and settings are exact",
+          "[cache][unit][admission-provider]") {
     CanonicalCacheKey first{.bytes = {std::byte{1}, std::byte{2}}};
     CanonicalCacheKey same = first;
     CanonicalCacheKey collision = first;
@@ -723,7 +733,8 @@ TEST_CASE("canonical keys, identities, dependencies, and settings are exact") {
         required_settings, invalid_duplicate));
 }
 
-TEST_CASE("provider digest framing and runtime recipe checks are unambiguous") {
+TEST_CASE("provider digest framing and runtime recipe checks are unambiguous",
+          "[cache][unit][admission-provider]") {
     const std::array payload_a{std::byte{2}, std::byte{3}};
     const std::array payload_b{std::byte{3}};
     std::vector<std::byte> framed_a;

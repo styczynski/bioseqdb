@@ -355,7 +355,8 @@ void require_map_entry(
 }  // namespace
 
 TEST_CASE(
-    "separate translation units agree on the complete V2 provider ABI") {
+    "separate translation units agree on the complete V2 provider ABI",
+    "[cache][unit][provider-api-abi]") {
     g_observations = {};
     bioseq_cache_test_reset_fake_provider_v2();
 

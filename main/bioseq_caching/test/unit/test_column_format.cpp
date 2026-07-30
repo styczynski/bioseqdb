@@ -330,7 +330,8 @@ struct MetadataHeavyPhysicalSink {
 
 } // namespace
 
-TEST_CASE("streaming output is byte-identical across mixed multi-groups") {
+TEST_CASE("streaming output is byte-identical across mixed multi-groups",
+          "[cache][unit][column-format]") {
     auto schema = mixed_schema();
     constexpr RowGroupLimits limits{.rows = 2, .value_bytes = 1'024};
     TestChecksums checksums;
@@ -380,7 +381,8 @@ TEST_CASE("streaming output is byte-identical across mixed multi-groups") {
     actual->mark_published();
 }
 
-TEST_CASE("streaming preserves empty, aligned fixed, and flat-varlena wire bytes") {
+TEST_CASE("streaming preserves empty, aligned fixed, and flat-varlena wire bytes",
+          "[cache][unit][column-format]") {
     TestChecksums checksums;
     auto mixed = mixed_schema();
     ColumnStoreBuilder empty_retained(kIdentity, mixed);
@@ -464,7 +466,8 @@ TEST_CASE("streaming preserves empty, aligned fixed, and flat-varlena wire bytes
     actual->mark_published();
 }
 
-TEST_CASE("streaming row-value boundaries and hard caps fail before retention") {
+TEST_CASE("streaming row-value boundaries and hard caps fail before retention",
+          "[cache][unit][column-format]") {
     TestChecksums checksums;
     const std::array<ColumnSchema, 1> schema{{
         {
@@ -544,7 +547,8 @@ TEST_CASE("streaming row-value boundaries and hard caps fail before retention") 
         .error() == FormatError::TooManyRowGroups);
 }
 
-TEST_CASE("streaming row-group metadata is capped and cleaned exactly once") {
+TEST_CASE("streaming row-group metadata is capped and cleaned exactly once",
+          "[cache][unit][column-format]") {
     TestChecksums checksums;
     const std::array<ColumnSchema, 0> schema{};
     const std::array<EncodedColumnValue, 0> row{};
@@ -572,7 +576,8 @@ TEST_CASE("streaming row-group metadata is capped and cleaned exactly once") {
     REQUIRE(sink.discarded == sink.stored);
 }
 
-TEST_CASE("streaming sink failures discard every temporary token once") {
+TEST_CASE("streaming sink failures discard every temporary token once",
+          "[cache][unit][column-format]") {
     TestChecksums checksums;
     const std::array<ColumnSchema, 0> schema{};
     const std::array<EncodedColumnValue, 0> row{};
@@ -627,7 +632,8 @@ TEST_CASE("streaming sink failures discard every temporary token once") {
     REQUIRE(abandoned.every_stored_block_discarded_once());
 }
 
-TEST_CASE("coalescing sink publishes physical bytes in logical v1 order") {
+TEST_CASE("coalescing sink publishes physical bytes in logical v1 order",
+          "[cache][unit][column-format]") {
     auto schema = mixed_schema();
     constexpr RowGroupLimits limits{.rows = 2, .value_bytes = 1'024};
     TestChecksums checksums;
@@ -666,7 +672,8 @@ TEST_CASE("coalescing sink publishes physical bytes in logical v1 order") {
         physical.blocks.size(), 0));
 }
 
-TEST_CASE("coalescing sink cleans group, prefix, and suffix flush failures") {
+TEST_CASE("coalescing sink cleans group, prefix, and suffix flush failures",
+          "[cache][unit][column-format]") {
     const std::array<std::byte, 4> full{
         std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
     const std::array<std::byte, 1> one{std::byte{5}};
@@ -715,7 +722,8 @@ TEST_CASE("coalescing sink cleans group, prefix, and suffix flush failures") {
     }
 }
 
-TEST_CASE("coalescing sink rejects physical manifest overflow fail-open") {
+TEST_CASE("coalescing sink rejects physical manifest overflow fail-open",
+          "[cache][unit][column-format]") {
     const std::array<std::byte, 1> one{std::byte{1}};
     CapturingPhysicalSink physical;
     {
@@ -752,7 +760,8 @@ TEST_CASE("coalescing sink rejects physical manifest overflow fail-open") {
         == FormatError::MetadataLimitExceeded);
 }
 
-TEST_CASE("validity bitmaps are canonical at byte boundaries") {
+TEST_CASE("validity bitmaps are canonical at byte boundaries",
+          "[cache][unit][column-format]") {
     const std::array<bool, 10> valid{
         true, false, true, true, false, false, true, false, true, false};
     const auto encoded = encode_validity(valid);
@@ -769,7 +778,8 @@ TEST_CASE("validity bitmaps are canonical at byte boundaries") {
     REQUIRE_FALSE(decode_validity(encoded, 17).has_value());
 }
 
-TEST_CASE("validity bitmap boundary sweep round trips packed booleans") {
+TEST_CASE("validity bitmap boundary sweep round trips packed booleans",
+          "[cache][unit][column-format]") {
     for (const std::size_t size : {
              std::size_t{0},
              std::size_t{1},
@@ -794,7 +804,8 @@ TEST_CASE("validity bitmap boundary sweep round trips packed booleans") {
     }
 }
 
-TEST_CASE("column store round trips null, boolean, fixed, and binary values") {
+TEST_CASE("column store round trips null, boolean, fixed, and binary values",
+          "[cache][unit][column-format]") {
     auto schema = mixed_schema();
     ColumnStoreBuilder builder(kIdentity, schema, {.rows = 2, .value_bytes = 1'024});
     append_mixed_rows(builder);
@@ -835,7 +846,8 @@ TEST_CASE("column store round trips null, boolean, fixed, and binary values") {
     REQUIRE_FALSE(view->value(0, 3).has_value());
 }
 
-TEST_CASE("prevalidated column chunks preserve row-group order and nulls") {
+TEST_CASE("prevalidated column chunks preserve row-group order and nulls",
+          "[cache][unit][column-format]") {
     auto schema = mixed_schema();
     ColumnStoreBuilder builder(
         kIdentity, schema, {.rows = 2, .value_bytes = 1'024});
@@ -886,7 +898,8 @@ TEST_CASE("prevalidated column chunks preserve row-group order and nulls") {
     REQUIRE_FALSE(view->column_chunks(3).has_value());
 }
 
-TEST_CASE("binary-send encoding accepts PostgreSQL pass-by-value types") {
+TEST_CASE("binary-send encoding accepts PostgreSQL pass-by-value types",
+          "[cache][unit][column-format]") {
     const std::array<ColumnSchema, 1> schema{{
         {
             .name = "binary_int4",
@@ -917,7 +930,8 @@ TEST_CASE("binary-send encoding accepts PostgreSQL pass-by-value types") {
     REQUIRE(view->value(0, 0)->bytes[3] == std::byte{42});
 }
 
-TEST_CASE("schema digest commits names and complete SQL type metadata") {
+TEST_CASE("schema digest commits names and complete SQL type metadata",
+          "[cache][unit][column-format]") {
     TestChecksums checksums;
     auto base = mixed_schema();
     const auto original = schema_digest(base, checksums);
@@ -940,7 +954,8 @@ TEST_CASE("schema digest commits names and complete SQL type metadata") {
     REQUIRE(schema_digest(changed, checksums).value() != *original);
 }
 
-TEST_CASE("row-group row target splits at minus, at, and plus one") {
+TEST_CASE("row-group row target splits at minus, at, and plus one",
+          "[cache][unit][column-format]") {
     TestChecksums checksums;
     const std::array<ColumnSchema, 0> schema{};
     const std::array<EncodedColumnValue, 0> values{};
@@ -964,7 +979,8 @@ TEST_CASE("row-group row target splits at minus, at, and plus one") {
     REQUIRE(group_count_for(5) == 2);
 }
 
-TEST_CASE("fixed by-reference storage honors its declared alignment") {
+TEST_CASE("fixed by-reference storage honors its declared alignment",
+          "[cache][unit][column-format]") {
     const std::array<ColumnSchema, 1> schema{{
         {
             .name = "fixed_ref",
@@ -1015,7 +1031,8 @@ TEST_CASE("fixed by-reference storage honors its declared alignment") {
     REQUIRE(view->value(1, 0)->bytes[0] == std::byte{4});
 }
 
-TEST_CASE("opposite-endian metadata is rejected before allocation") {
+TEST_CASE("opposite-endian metadata is rejected before allocation",
+          "[cache][unit][column-format]") {
     auto schema = mixed_schema();
     ColumnStoreBuilder builder(kIdentity, schema);
     append_mixed_rows(builder);
@@ -1029,7 +1046,8 @@ TEST_CASE("opposite-endian metadata is rejected before allocation") {
         == FormatError::EndianMismatch);
 }
 
-TEST_CASE("empty and zero-column result shapes remain first-class") {
+TEST_CASE("empty and zero-column result shapes remain first-class",
+          "[cache][unit][column-format]") {
     TestChecksums checksums;
     auto schema = mixed_schema();
     ColumnStoreBuilder empty(kIdentity, schema);
@@ -1058,7 +1076,8 @@ TEST_CASE("empty and zero-column result shapes remain first-class") {
     REQUIRE(zero_view->row_group_count() == 2);
 }
 
-TEST_CASE("builder rejects schema, arity, NULL, width, and boolean violations") {
+TEST_CASE("builder rejects schema, arity, NULL, width, and boolean violations",
+          "[cache][unit][column-format]") {
     TestChecksums checksums;
     auto schema = mixed_schema();
     ColumnStoreBuilder builder(kIdentity, schema);
@@ -1119,7 +1138,8 @@ TEST_CASE("builder rejects schema, arity, NULL, width, and boolean violations") 
         == FormatError::InvalidSchema);
 }
 
-TEST_CASE("every stored byte is covered by validation or a checksum") {
+TEST_CASE("every stored byte is covered by validation or a checksum",
+          "[cache][unit][column-format]") {
     auto schema = mixed_schema();
     ColumnStoreBuilder builder(kIdentity, schema, {.rows = 2, .value_bytes = 1'024});
     append_mixed_rows(builder);
@@ -1136,7 +1156,8 @@ TEST_CASE("every stored byte is covered by validation or a checksum") {
     }
 }
 
-TEST_CASE("all truncation points, identities, and unavailable checksums fail closed") {
+TEST_CASE("all truncation points, identities, and unavailable checksums fail closed",
+          "[cache][unit][column-format]") {
     auto schema = mixed_schema();
     ColumnStoreBuilder builder(kIdentity, schema, {.rows = 2, .value_bytes = 1'024});
     append_mixed_rows(builder);
@@ -1177,7 +1198,8 @@ TEST_CASE("all truncation points, identities, and unavailable checksums fail clo
         == FormatError::ChecksumUnavailable);
 }
 
-TEST_CASE("dictionary and block-reference policies fail safely") {
+TEST_CASE("dictionary and block-reference policies fail safely",
+          "[cache][unit][column-format]") {
     REQUIRE(dictionary_is_beneficial(100, 30, 20));
     REQUIRE_FALSE(dictionary_is_beneficial(50, 30, 20));
     REQUIRE_FALSE(dictionary_is_beneficial(

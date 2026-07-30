@@ -498,7 +498,8 @@ struct SampledOwnerLiveness {
 
 } // namespace
 
-TEST_CASE("reusable registry sizes exactly and coalesces only full keys") {
+TEST_CASE("reusable registry sizes exactly and coalesces only full keys",
+          "[cache][unit][reusable-registry]") {
   REQUIRE(ReusableRegistryConfigV1{}.max_generations == 1'024);
   RegistryFixture fixture{8};
   REQUIRE(fixture.request_.membership_lock_count == 1);
@@ -546,7 +547,8 @@ TEST_CASE("reusable registry sizes exactly and coalesces only full keys") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("terminal publication snapshots every active waiter owner") {
+TEST_CASE("terminal publication snapshots every active waiter owner",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{4, 16U << 10, 1};
   auto producer_claim = claim_exact(
       fixture, exact_key(222), digest(222), "waiter-transfer", 1);
@@ -592,7 +594,8 @@ TEST_CASE("terminal publication snapshots every active waiter owner") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("unified registry separates exact and coverage digest collisions") {
+TEST_CASE("unified registry separates exact and coverage digest collisions",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{8};
   const CacheDigest256 forced_collision = digest(201);
   const auto exact_namespace = exact_key(22);
@@ -680,7 +683,8 @@ TEST_CASE("unified registry separates exact and coverage digest collisions") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("exact-only retirement unlinks and reclaims without coverage locks") {
+TEST_CASE("exact-only retirement unlinks and reclaims without coverage locks",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{1, 4U << 10, 1};
   const auto key = exact_key(23);
   auto claimed = claim_exact(fixture, key, digest(202), "exact-generation", 1);
@@ -735,7 +739,8 @@ TEST_CASE("exact-only retirement unlinks and reclaims without coverage locks") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("exact claims keep dependency versions distinct") {
+TEST_CASE("exact claims keep dependency versions distinct",
+          "[cache][unit][reusable-registry]") {
   SECTION("in-flight work also binds the snapshot completion handshake") {
     RegistryFixture fixture{4, 16U << 10, 1};
     const auto key = exact_key(224);
@@ -820,7 +825,8 @@ TEST_CASE("exact claims keep dependency versions distinct") {
   }
 }
 
-TEST_CASE("reserved guard kind follows generation observability") {
+TEST_CASE("reserved guard kind follows generation observability",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{4, 16U << 10, 1};
   const TestDependencyEnvelope dependencies = dependency_envelope();
   ReusableClaimRequestV1 precise_request{
@@ -880,7 +886,8 @@ TEST_CASE("reserved guard kind follows generation observability") {
           ReusableRegistryErrorV1::InvalidArgument);
 }
 
-TEST_CASE("dependency release retries an exact applied prefix") {
+TEST_CASE("dependency release retries an exact applied prefix",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{1, 4U << 10, 1};
   const auto key = exact_key(230);
   auto claimed = claim_exact(fixture, key, digest(230), "release-prefix", 1);
@@ -972,7 +979,8 @@ TEST_CASE("dependency release retries an exact applied prefix") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("dependency release finalizes an arbitrary retired-list position") {
+TEST_CASE("dependency release finalizes an arbitrary retired-list position",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{2, 8U << 10, 1};
   auto first_claim = claim_exact(
       fixture, exact_key(231), digest(231), "retired-first", 1);
@@ -1022,7 +1030,8 @@ TEST_CASE("dependency release finalizes an arbitrary retired-list position") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("dependency release rejects a corrupt retained envelope") {
+TEST_CASE("dependency release rejects a corrupt retained envelope",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{1, 4U << 10, 1};
   auto claimed = claim_exact(
       fixture, exact_key(233), digest(233), "corrupt-release-vector", 1);
@@ -1052,7 +1061,8 @@ TEST_CASE("dependency release rejects a corrupt retained envelope") {
           ReusableRegistryErrorV1::CorruptGeneration);
 }
 
-TEST_CASE("dependency release rejects a corrupt conservative guard") {
+TEST_CASE("dependency release rejects a corrupt conservative guard",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{1, 4U << 10, 1};
   auto claimed = claim_exact(
       fixture, exact_key(234), digest(234), "corrupt-release-guard", 1);
@@ -1080,7 +1090,8 @@ TEST_CASE("dependency release rejects a corrupt conservative guard") {
           ReusableRegistryErrorV1::CorruptGeneration);
 }
 
-TEST_CASE("claim kind and kind-specific identity shapes are validated") {
+TEST_CASE("claim kind and kind-specific identity shapes are validated",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{4, 16U << 10, 1};
   const auto key = exact_key(24);
   const TestDependencyEnvelope dependencies = dependency_envelope();
@@ -1141,7 +1152,8 @@ TEST_CASE("claim kind and kind-specific identity shapes are validated") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("coverage lookup proves full domain bytes after digest match") {
+TEST_CASE("coverage lookup proves full domain bytes after digest match",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{8};
   const auto key = coverage_key(23, 70);
   auto left = claim(fixture, key, digest(10), "domain-left", "left-v1", 1);
@@ -1162,7 +1174,8 @@ TEST_CASE("coverage lookup proves full domain bytes after digest match") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("security namespaces own independent bounded 64 member domains") {
+TEST_CASE("security namespaces own independent bounded 64 member domains",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{66, 1U << 20, 1};
   const auto crowded_key = coverage_key(30, 80);
   std::vector<ReusableGenerationReferenceV1> references;
@@ -1214,7 +1227,8 @@ TEST_CASE("security namespaces own independent bounded 64 member domains") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("exact ninth claim retires the least recently used terminal member") {
+TEST_CASE("exact ninth claim retires the least recently used terminal member",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{12, 1U << 20, 1};
   const auto key = exact_key(32);
   const CacheDigest256 shared_digest = digest(220);
@@ -1266,7 +1280,8 @@ TEST_CASE("exact ninth claim retires the least recently used terminal member") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("saturated exact bucket declines when every terminal member is pinned") {
+TEST_CASE("saturated exact bucket declines when every terminal member is pinned",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{10, 1U << 20, 1};
   const auto key = exact_key(33);
   const CacheDigest256 shared_digest = digest(221);
@@ -1306,7 +1321,8 @@ TEST_CASE("saturated exact bucket declines when every terminal member is pinned"
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("saturated admission allocation failure does not retire a victim") {
+TEST_CASE("saturated admission allocation failure does not retire a victim",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{10, 2U << 10, 1};
   const auto key = exact_key(37);
   const CacheDigest256 shared_digest = digest(222);
@@ -1336,7 +1352,8 @@ TEST_CASE("saturated admission allocation failure does not retire a victim") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("coverage sixty fifth claim retires one LRU member from both indexes") {
+TEST_CASE("coverage sixty fifth claim retires one LRU member from both indexes",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{68, 2U << 20, 1};
   const auto key = coverage_key(34, 82);
   constexpr std::string_view domain = "coverage-saturated-domain";
@@ -1402,7 +1419,8 @@ TEST_CASE("coverage sixty fifth claim retires one LRU member from both indexes")
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("independently saturated exact and coverage buckets report both manifests") {
+TEST_CASE("independently saturated exact and coverage buckets report both manifests",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{78, 2U << 20, 1};
   const CacheDigest256 shared_digest = digest(250);
   const auto exact_namespace = exact_key(35);
@@ -1468,7 +1486,8 @@ TEST_CASE("independently saturated exact and coverage buckets report both manife
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("every reusable security field partitions discovery") {
+TEST_CASE("every reusable security field partitions discovery",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{8, 1U << 20, 1};
   const auto base = coverage_key(33, 81);
   std::array<ReusableCoverageDirectoryKeyV1, 7> keys{};
@@ -1509,7 +1528,8 @@ TEST_CASE("every reusable security field partitions discovery") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("reusable security namespace rejects invalid sentinels") {
+TEST_CASE("reusable security namespace rejects invalid sentinels",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{2};
   const auto valid = coverage_key(34, 82);
   auto require_rejected = [&fixture](ReusableCoverageDirectoryKeyV1 key) {
@@ -1547,7 +1567,8 @@ TEST_CASE("reusable security namespace rejects invalid sentinels") {
           ReusableClaimDispositionV1::ClaimedProducer);
 }
 
-TEST_CASE("two index retirement and reclaim reject stale ABA references") {
+TEST_CASE("two index retirement and reclaim reject stale ABA references",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{1, 4U << 10, 1};
   const auto key = coverage_key(40);
   auto claimed = claim(fixture, key, digest(40), "domain", "generation", 1);
@@ -1596,7 +1617,8 @@ TEST_CASE("two index retirement and reclaim reject stale ABA references") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("reusable reference owners are ABA safe and bounded") {
+TEST_CASE("reusable reference owners are ABA safe and bounded",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{2, 16U << 10, 1};
   const auto key = coverage_key(45);
   auto claimed = claim(fixture, key, digest(45), "domain", "generation", 1);
@@ -1626,7 +1648,8 @@ TEST_CASE("reusable reference owners are ABA safe and bounded") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("janitor owner snapshots are bounded and ABA-token complete") {
+TEST_CASE("janitor owner snapshots are bounded and ABA-token complete",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{5, 64U << 10, 1};
 
   const auto exact_namespace = exact_key(45);
@@ -1775,7 +1798,8 @@ TEST_CASE("janitor owner snapshots are bounded and ABA-token complete") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("janitor reaps exact dead waiter planner and reader owners") {
+TEST_CASE("janitor reaps exact dead waiter planner and reader owners",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{4, 16U << 10, 1};
   const auto key = coverage_key(46);
   auto claimed = claim(fixture, key, digest(46), "domain", "generation", 1);
@@ -1850,7 +1874,8 @@ TEST_CASE("janitor reaps exact dead waiter planner and reader owners") {
   REQUIRE(retirement.retired_invalidated == 1);
 }
 
-TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
+TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{4};
   const auto key = coverage_key(46);
   auto claimed = claim(
@@ -2012,7 +2037,8 @@ TEST_CASE("reusable producer diagnostics are bounded ABA-owned and separate") {
       == ReusableRegistryErrorV1::StaleReference);
 }
 
-TEST_CASE("reusable legacy begin publishes unavailable plan statuses") {
+TEST_CASE("reusable legacy begin publishes unavailable plan statuses",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{2};
   auto claimed = claim(
       fixture, coverage_key(48), digest(71), "legacy-domain",
@@ -2044,7 +2070,8 @@ TEST_CASE("reusable legacy begin publishes unavailable plan statuses") {
       == ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("reusable analyzed diagnostics may refresh a live producer") {
+TEST_CASE("reusable analyzed diagnostics may refresh a live producer",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{2};
   auto claimed = claim(
       fixture, coverage_key(50), digest(74), "analyzed-domain",
@@ -2104,7 +2131,8 @@ TEST_CASE("reusable analyzed diagnostics may refresh a live producer") {
       == ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("reusable SQL and plan captures fail independently") {
+TEST_CASE("reusable SQL and plan captures fail independently",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{4};
   const std::string_view sql = "SELECT payload FROM provider_rows";
   const std::string_view canonical = "{CUSTOMSCAN :provider 7}";
@@ -2173,7 +2201,8 @@ TEST_CASE("reusable SQL and plan captures fail independently") {
       == ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("diagnostic arena accepts each independent boundary exactly") {
+TEST_CASE("diagnostic arena accepts each independent boundary exactly",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{2, 20U << 20, 1};
   auto claimed = claim(fixture, coverage_key(54), digest(91),
                        "boundary-domain", "boundary-generation", 1);
@@ -2268,7 +2297,8 @@ TEST_CASE("diagnostic arena accepts each independent boundary exactly") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("diagnostic replacement and retired reclaim release every range") {
+TEST_CASE("diagnostic replacement and retired reclaim release every range",
+          "[cache][unit][reusable-registry]") {
   constexpr std::uint32_t arena_bytes = 64U << 10;
   RegistryFixture fixture{1, arena_bytes, 1};
   auto claimed = claim(fixture, coverage_key(55), digest(92),
@@ -2340,7 +2370,8 @@ TEST_CASE("diagnostic replacement and retired reclaim release every range") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("diagnostic publication revalidates producer and ABA identity") {
+TEST_CASE("diagnostic publication revalidates producer and ABA identity",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{1, 1U << 20, 1};
   const auto key = coverage_key(56);
   auto claimed = claim(fixture, key, digest(93), "aba-domain",
@@ -2427,7 +2458,8 @@ TEST_CASE("diagnostic publication revalidates producer and ABA identity") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("diagnostic arena OOM leaves prior text and state unchanged") {
+TEST_CASE("diagnostic arena OOM leaves prior text and state unchanged",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{1, 352, 1};
   auto claimed = claim(fixture, coverage_key(57), digest(94), "d", "g", 6);
   REQUIRE(claimed);
@@ -2515,7 +2547,8 @@ TEST_CASE("diagnostic arena OOM leaves prior text and state unchanged") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("deep validation rejects diagnostic arena range corruption") {
+TEST_CASE("deep validation rejects diagnostic arena range corruption",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{1, 4U << 10, 1};
   auto claimed = claim(fixture, coverage_key(59), digest(96),
                        "corruption-domain", "corruption-generation", 8);
@@ -2579,7 +2612,8 @@ TEST_CASE("deep validation rejects diagnostic arena range corruption") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("reusable diagnostics copy bounded redacted generation rows") {
+TEST_CASE("reusable diagnostics copy bounded redacted generation rows",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{8, 32U << 10, 1};
   const auto key = coverage_key(47);
 
@@ -2713,7 +2747,8 @@ TEST_CASE("reusable diagnostics copy bounded redacted generation rows") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("bounded reusable invalidation is collision and ABA safe") {
+TEST_CASE("bounded reusable invalidation is collision and ABA safe",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{8, 32U << 10, 1};
   const auto key = coverage_key(60);
   const auto other_security_key = coverage_key(61);
@@ -2886,7 +2921,8 @@ TEST_CASE("bounded reusable invalidation is collision and ABA safe") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("reusable invalidation observability and coarse scope are explicit") {
+TEST_CASE("reusable invalidation observability and coarse scope are explicit",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{4, 16U << 10, 1};
   const auto key = coverage_key(70, 91, 70);
   const auto other_database_key = coverage_key(70, 91, 71);
@@ -2954,7 +2990,8 @@ TEST_CASE("reusable invalidation observability and coarse scope are explicit") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("janitor fails dead owners and retires expired manifests") {
+TEST_CASE("janitor fails dead owners and retires expired manifests",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{4, 16U << 10, 1};
   const auto key = coverage_key(50);
   auto dead = claim(fixture, key, digest(50), "domain", "dead", 1);
@@ -3027,7 +3064,8 @@ TEST_CASE("janitor fails dead owners and retires expired manifests") {
           ReusableRegistryErrorV1::None);
 }
 
-TEST_CASE("janitor wake references are bounded and deduplicated") {
+TEST_CASE("janitor wake references are bounded and deduplicated",
+          "[cache][unit][reusable-registry]") {
   RegistryFixture fixture{8, 32U << 10, 1};
   const auto key = coverage_key(52);
   std::array<ReusableGenerationReferenceV1, 4> references{};
