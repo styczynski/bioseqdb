@@ -180,6 +180,7 @@ inline void set_runner_configuration(runner_configuration configuration) {
         .preload_libraries = std::move(preload_libraries),
         .startup_gucs = std::move(startup_gucs),
         .process_environment = {},
+        .pre_initdb = {},
         .startup_timeout = 60s,
         .stop_timeout = 30s};
 }

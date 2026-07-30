@@ -1,29 +1,14 @@
-#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <fcntl.h>
-#include <unistd.h>
-
-#if defined(__APPLE__)
-#include <mach/mach.h>
-#include <sys/sysctl.h>
-#endif
-
-#include <algorithm>
-#include <array>
 #include <charconv>
 #include <chrono>
-#include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <utility>
-#include <vector>
 
 import bioseq.cache.test_context;
 import bioseq.test.postgres;
@@ -34,7 +19,6 @@ namespace {
 
 constexpr std::uint64_t reference_bases = 2'000'000'000ULL;
 constexpr std::uint64_t gibibyte = 1024ULL * 1024ULL * 1024ULL;
-constexpr std::uint64_t mebibyte = 1024ULL * 1024ULL;
 constexpr std::uint64_t minimum_total_ram = 16ULL * gibibyte;
 constexpr std::uint64_t minimum_available_ram = 8ULL * gibibyte;
 constexpr std::uint64_t minimum_data_space =
@@ -64,153 +48,6 @@ constexpr std::string_view alignment_query{
     "bioseq.query_end(id), "
     "bioseq.query_len(id), "
     "bioseq.is_reverse(id)"};
-
-struct memory_capacity {
-    std::uint64_t total{};
-    std::uint64_t available{};
-};
-
-struct io_probe_result {
-    double write_mib_per_second{};
-    double read_mib_per_second{};
-};
-
-class probe_file_guard {
-public:
-    explicit probe_file_guard(std::filesystem::path path)
-        : path_(std::move(path)) {}
-    probe_file_guard(const probe_file_guard&) = delete;
-    probe_file_guard& operator=(const probe_file_guard&) = delete;
-    ~probe_file_guard() noexcept {
-        std::error_code error;
-        std::filesystem::remove(path_, error);
-    }
-
-private:
-    std::filesystem::path path_;
-};
-
-[[nodiscard]] std::uint64_t checked_product(long lhs, long rhs) {
-    if (lhs <= 0 || rhs <= 0) {
-        return 0;
-    }
-    const auto left = static_cast<std::uint64_t>(lhs);
-    const auto right = static_cast<std::uint64_t>(rhs);
-    if (left > std::numeric_limits<std::uint64_t>::max() / right) {
-        throw std::overflow_error("physical memory size overflow");
-    }
-    return left * right;
-}
-
-[[nodiscard]] memory_capacity host_memory_capacity() {
-#if defined(__APPLE__)
-    std::uint64_t total{};
-    std::size_t total_size = sizeof(total);
-    if (::sysctlbyname("hw.memsize", &total, &total_size, nullptr, 0) != 0) {
-        throw std::runtime_error("cannot read hw.memsize");
-    }
-    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-    vm_statistics64_data_t statistics{};
-    if (::host_statistics64(
-            mach_host_self(), HOST_VM_INFO64,
-            reinterpret_cast<host_info64_t>(&statistics), &count)
-        != KERN_SUCCESS) {
-        throw std::runtime_error("cannot read host VM statistics");
-    }
-    vm_size_t page_size{};
-    if (::host_page_size(mach_host_self(), &page_size) != KERN_SUCCESS) {
-        throw std::runtime_error("cannot read host page size");
-    }
-    const std::uint64_t available_pages =
-        static_cast<std::uint64_t>(statistics.free_count)
-        + static_cast<std::uint64_t>(statistics.inactive_count);
-    return memory_capacity{
-        .total = total,
-        .available = available_pages
-            * static_cast<std::uint64_t>(page_size)};
-#else
-    return memory_capacity{
-        .total = checked_product(
-            ::sysconf(_SC_PHYS_PAGES), ::sysconf(_SC_PAGESIZE)),
-        .available = checked_product(
-            ::sysconf(_SC_AVPHYS_PAGES), ::sysconf(_SC_PAGESIZE))};
-#endif
-}
-
-void write_all(int descriptor, const std::byte* data, std::size_t size) {
-    std::size_t offset = 0;
-    while (offset < size) {
-        const ssize_t written =
-            ::write(descriptor, data + offset, size - offset);
-        if (written <= 0) {
-            throw std::runtime_error("sequential I/O probe write failed");
-        }
-        offset += static_cast<std::size_t>(written);
-    }
-}
-
-void read_all(int descriptor, std::byte* data, std::size_t size) {
-    std::size_t offset = 0;
-    while (offset < size) {
-        const ssize_t received =
-            ::read(descriptor, data + offset, size - offset);
-        if (received <= 0) {
-            throw std::runtime_error("sequential I/O probe read failed");
-        }
-        offset += static_cast<std::size_t>(received);
-    }
-}
-
-[[nodiscard]] io_probe_result qualify_data_filesystem(
-    const std::filesystem::path& directory) {
-    const std::filesystem::path probe_path =
-        directory / ".bioseq-cache-2gbp-io-probe";
-    probe_file_guard cleanup{probe_path};
-    const int descriptor = ::open(
-        probe_path.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
-    if (descriptor < 0) {
-        throw std::runtime_error("cannot create 2 Gbp I/O probe file");
-    }
-    try {
-        std::vector<std::byte> block(
-            8ULL * mebibyte, std::byte{0xa5});
-        const std::size_t iterations =
-            static_cast<std::size_t>(io_probe_bytes / block.size());
-        const auto write_started = std::chrono::steady_clock::now();
-        for (std::size_t index = 0; index < iterations; ++index) {
-            write_all(descriptor, block.data(), block.size());
-        }
-        if (::fsync(descriptor) != 0) {
-            throw std::runtime_error("cannot fsync 2 Gbp I/O probe");
-        }
-        const auto write_finished = std::chrono::steady_clock::now();
-        if (::lseek(descriptor, 0, SEEK_SET) < 0) {
-            throw std::runtime_error("cannot rewind 2 Gbp I/O probe");
-        }
-        const auto read_started = std::chrono::steady_clock::now();
-        for (std::size_t index = 0; index < iterations; ++index) {
-            read_all(descriptor, block.data(), block.size());
-        }
-        const auto read_finished = std::chrono::steady_clock::now();
-        static_cast<void>(::close(descriptor));
-        const double write_seconds =
-            std::chrono::duration<double>(
-                write_finished - write_started).count();
-        const double read_seconds =
-            std::chrono::duration<double>(
-                read_finished - read_started).count();
-        return io_probe_result{
-            .write_mib_per_second =
-                static_cast<double>(io_probe_bytes / mebibyte)
-                / write_seconds,
-            .read_mib_per_second =
-                static_cast<double>(io_probe_bytes / mebibyte)
-                / read_seconds};
-    } catch (...) {
-        static_cast<void>(::close(descriptor));
-        throw;
-    }
-}
 
 [[nodiscard]] std::int64_t parse_i64(std::string_view text) {
     std::int64_t value{};
@@ -267,51 +104,68 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
     bioseq::postgres_test::migration_probe_scope probes{
         "exactly 2 Gbp Bioseq result produces once and replays exactly"};
     const auto test_started = std::chrono::steady_clock::now();
-    bioseq::postgres_test::postgres_fixture fixture{
-        bioseq::cache_test::cluster_options(
-            true, bioseq::cache_test::preload_order::cache_then_bioseq)};
+    auto options = bioseq::cache_test::cluster_options(
+        true, bioseq::cache_test::preload_order::cache_then_bioseq);
+    options.pre_initdb =
+        [](const bioseq::postgres_test::pre_initdb_context& context) {
+            bioseq::postgres_test::scoped_report_phase phase{
+                "host-qualification"};
+            static_cast<void>(
+                bioseq::postgres_test::qualify_host_before_initdb(
+                    context.data_directory,
+                    bioseq::postgres_test::
+                        host_qualification_requirements{
+                            .test_case =
+                                bioseq::postgres_test::
+                                    current_report_case_context()
+                                        .test_case,
+                            .minimum_total_ram_bytes =
+                                minimum_total_ram,
+                            .minimum_available_ram_bytes =
+                                minimum_available_ram,
+                            .minimum_data_available_bytes =
+                                minimum_data_space,
+                            .minimum_logical_cores = 8,
+                            .io_probe_bytes = io_probe_bytes,
+                            .minimum_io_mib_per_second =
+                                minimum_io_mib_per_second}));
+            phase.complete();
+        };
+    bioseq::postgres_test::postgres_fixture fixture{std::move(options)};
     auto& admin = fixture.admin();
     auto data = fixture.connect(30s);
 
-    const memory_capacity memory = host_memory_capacity();
-    const std::filesystem::space_info data_space =
-        std::filesystem::space(fixture.cluster().data_directory());
-    const unsigned int logical_cores = std::thread::hardware_concurrency();
-    INFO("total RAM bytes: " << memory.total);
-    INFO("available RAM bytes: " << memory.available);
-    INFO("PGDATA available bytes: " << data_space.available);
-    INFO("logical cores: " << logical_cores);
-    REQUIRE(memory.total >= minimum_total_ram);
-    REQUIRE(memory.available >= minimum_available_ram);
-    REQUIRE(data_space.available >= minimum_data_space);
-    REQUIRE(logical_cores >= 8);
-    const io_probe_result io =
-        qualify_data_filesystem(fixture.cluster().data_directory());
-    INFO("sequential write MiB/s: " << io.write_mib_per_second);
-    INFO("sequential read MiB/s: " << io.read_mib_per_second);
-    REQUIRE(io.write_mib_per_second >= minimum_io_mib_per_second);
-    REQUIRE(io.read_mib_per_second >= minimum_io_mib_per_second);
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.host_qualified");
 
     configure_canonical_cpu_path(admin);
     configure_canonical_cpu_path(data);
-    bioseq::cache_test::exec(
-        admin,
-        "SET bioseq.update_index_on_insert = off; "
-        "SELECT bioseq.create_query_target_sample_table("
-        "'cache_bioseq_2gbp', 1, 5000000, 100000.0, 2000000000, "
-        "0.001, 0.0005, 0.0005, 1.0, 1.0, 0.5, 3219876)",
-        20min);
-    bioseq::cache_test::exec(
-        admin,
-        "SELECT bioseq.update_index("
-        "'cache_bioseq_2gbp'::regclass, "
-        "'minimizers_per_fragment'); "
-        "SELECT bioseq.set_active_read_index("
-        "'cache_bioseq_2gbp'::regclass, "
-        "'minimizers_per_fragment')",
-        20min);
+    {
+        bioseq::postgres_test::scoped_report_phase phase{"generation"};
+        bioseq::cache_test::exec(
+            admin,
+            "SET bioseq.update_index_on_insert = off; "
+            "SELECT bioseq.create_query_target_sample_table("
+            "'cache_bioseq_2gbp', 1, 5000000, 100000.0, 2000000000, "
+            "0.001, 0.0005, 0.0005, 1.0, 1.0, 0.5, 3219876)",
+            20min);
+        phase.complete();
+        fixture.observe_resource_phase("generation");
+    }
+    {
+        bioseq::postgres_test::scoped_report_phase phase{"index"};
+        bioseq::cache_test::exec(
+            admin,
+            "SELECT bioseq.update_index("
+            "'cache_bioseq_2gbp'::regclass, "
+            "'minimizers_per_fragment'); "
+            "SELECT bioseq.set_active_read_index("
+            "'cache_bioseq_2gbp'::regclass, "
+            "'minimizers_per_fragment')",
+            20min);
+        phase.complete();
+        fixture.observe_resource_phase("index");
+    }
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.exact_fixture_created");
     bioseq::postgres_test::record_migration_probe(
@@ -323,8 +177,14 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
     bioseq::cache_test::exec(
         data,
         "SET bioseq.query_cache_optimisation_mode = 'disabled'");
-    const bioseq::libpq::result oracle =
-        data.exec(alignment_query, 20min);
+    const bioseq::libpq::result oracle = [&] {
+        bioseq::postgres_test::scoped_report_phase phase{"oracle"};
+        bioseq::libpq::result result =
+            data.exec(alignment_query, 20min);
+        phase.complete();
+        fixture.observe_resource_phase("oracle");
+        return result;
+    }();
     REQUIRE(oracle.rows() > 0);
     const auto oracle_digest =
         bioseq::postgres_test::exact_row_hash(oracle);
@@ -340,8 +200,14 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
         "SET bioseq.query_cache_optimisation_mode = 'same'");
     const auto before_cold =
         bioseq::cache_test::read_cache_stats(admin);
-    const bioseq::libpq::result cold =
-        data.exec(alignment_query, 20min);
+    const bioseq::libpq::result cold = [&] {
+        bioseq::postgres_test::scoped_report_phase phase{"cold"};
+        bioseq::libpq::result result =
+            data.exec(alignment_query, 20min);
+        phase.complete();
+        fixture.observe_resource_phase("cold");
+        return result;
+    }();
     const auto after_cold =
         bioseq::cache_test::read_cache_stats(admin);
     REQUIRE(cold.rows() > 0);
@@ -420,8 +286,14 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.query_bounds_and_strand");
 
-    const bioseq::libpq::result warm =
-        data.exec(alignment_query, 5min);
+    const bioseq::libpq::result warm = [&] {
+        bioseq::postgres_test::scoped_report_phase phase{"warm"};
+        bioseq::libpq::result result =
+            data.exec(alignment_query, 5min);
+        phase.complete();
+        fixture.observe_resource_phase("warm");
+        return result;
+    }();
     const auto after_warm =
         bioseq::cache_test::read_cache_stats(admin);
     CHECK(bioseq::postgres_test::exact_row_hash(warm) == oracle_digest);
@@ -446,8 +318,14 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.complete_entry");
 
-    const auto explain = bioseq::postgres_test::run_explain(
-        data, alignment_query, true, 5min);
+    const auto explain = [&] {
+        bioseq::postgres_test::scoped_report_phase phase{"explain"};
+        auto result = bioseq::postgres_test::run_explain(
+            data, alignment_query, true, 5min);
+        phase.complete();
+        fixture.observe_resource_phase("explain");
+        return result;
+    }();
     const auto cache_nodes =
         explain.find_plan_nodes("Custom Plan Provider", "BioseqCacheScan");
     REQUIRE(cache_nodes.size() == 1);
@@ -472,8 +350,13 @@ TEST_CASE("exactly 2 Gbp Bioseq result produces once and replays exactly",
 
     bioseq::cache_test::exec(
         data, "SET bioseq.enable_column_cache = off");
-    const auto column_cache_off =
-        data.exec(alignment_query, 5min);
+    const auto column_cache_off = [&] {
+        bioseq::postgres_test::scoped_report_phase phase{"column-cache"};
+        auto result = data.exec(alignment_query, 5min);
+        phase.complete();
+        fixture.observe_resource_phase("column-cache");
+        return result;
+    }();
     const auto after_column_cache_off =
         bioseq::cache_test::read_cache_stats(admin);
     CHECK(bioseq::postgres_test::exact_row_hash(column_cache_off)

@@ -30,6 +30,8 @@ extern char** environ;
 
 export module bioseq.test.postgres:process;
 
+import :supervision;
+
 export namespace bioseq::postgres_test {
 
 /// @brief Failure raised by a lifecycle subprocess.
@@ -50,6 +52,7 @@ struct process_options {
     std::vector<std::string> arguments;
     std::vector<std::pair<std::string, std::string>> environment;
     std::optional<std::filesystem::path> output_file;
+    bool supervise{};
 };
 
 /// @brief Decoded child exit status.
@@ -222,7 +225,12 @@ public:
                                 + options.executable.string() + ": "
                                 + std::strerror(status));
         }
-        return spawned_process(child, std::move(output), remove_log);
+        if (options.supervise) {
+            register_supervised_process(
+                static_cast<std::uint64_t>(child));
+        }
+        return spawned_process(
+            child, std::move(output), remove_log, options.supervise);
     }
 
     spawned_process(const spawned_process&) = delete;
@@ -232,6 +240,7 @@ public:
         : pid_(std::exchange(other.pid_, -1)),
           output_file_(std::move(other.output_file_)),
           remove_output_(std::exchange(other.remove_output_, false)),
+          supervised_(std::exchange(other.supervised_, false)),
           exit_(std::move(other.exit_)) {}
 
     spawned_process& operator=(spawned_process&& other) noexcept {
@@ -241,6 +250,7 @@ public:
             pid_ = std::exchange(other.pid_, -1);
             output_file_ = std::move(other.output_file_);
             remove_output_ = std::exchange(other.remove_output_, false);
+            supervised_ = std::exchange(other.supervised_, false);
             exit_ = std::move(other.exit_);
         }
         return *this;
@@ -292,11 +302,13 @@ public:
                 return std::nullopt;
             }
             if (errno == ECHILD) {
+                release_supervision();
                 pid_ = -1;
             }
             return std::nullopt;
         }
         exit_ = decode_status(status);
+        release_supervision();
         pid_ = -1;
         return exit_;
     }
@@ -326,12 +338,14 @@ public:
             const pid_t waited = ::waitpid(pid_, &status, 0);
             if (waited == pid_) {
                 exit_ = decode_status(status);
+                release_supervision();
                 pid_ = -1;
                 return;
             }
             if (waited < 0 && errno == EINTR) {
                 continue;
             }
+            release_supervision();
             pid_ = -1;
             return;
         }
@@ -358,10 +372,24 @@ public:
     }
 
 private:
-    spawned_process(pid_t pid, std::filesystem::path output, bool remove_output)
+    spawned_process(
+        pid_t pid,
+        std::filesystem::path output,
+        bool remove_output,
+        bool supervised)
         : pid_(pid),
           output_file_(std::move(output)),
-          remove_output_(remove_output) {}
+          remove_output_(remove_output),
+          supervised_(supervised) {}
+
+    void release_supervision() noexcept {
+        if (!supervised_ || pid_ <= 1) {
+            return;
+        }
+        unregister_supervised_process(
+            static_cast<std::uint64_t>(pid_));
+        supervised_ = false;
+    }
 
     /// @brief Creates and closes a unique private capture file.
     [[nodiscard]] static std::filesystem::path make_temporary_log() {
@@ -403,6 +431,7 @@ private:
     pid_t pid_{-1};
     std::filesystem::path output_file_;
     bool remove_output_{};
+    bool supervised_{};
     std::optional<process_exit> exit_;
 };
 

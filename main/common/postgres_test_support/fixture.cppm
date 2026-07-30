@@ -27,6 +27,7 @@ export module bioseq.test.postgres:fixture;
 import bioseq.libpq.client;
 import :cluster;
 import :report;
+import :resource_sampler;
 
 export namespace bioseq::postgres_test {
 
@@ -147,6 +148,13 @@ public:
         try {
             cluster_.initialize();
             cluster_.start();
+            if (automatic_report_collection_enabled()) {
+                resource_sampler_.emplace(
+                    cluster_.root_directory(),
+                    cluster_.data_directory());
+                resource_sampler_->observe_phase_boundary(
+                    "cluster-started");
+            }
             admin_.emplace(cluster_.connect(std::chrono::seconds(10)));
             attach_process_sql_transcript(*admin_, "admin");
             if (install_extensions) {
@@ -211,6 +219,13 @@ public:
         extensions_installed_ = true;
     }
 
+    /// @brief Forces an exact resource sample at a workload phase boundary.
+    void observe_resource_phase(std::string_view phase) noexcept {
+        if (resource_sampler_) {
+            resource_sampler_->observe_phase_boundary(phase);
+        }
+    }
+
 private:
     void cleanup_and_record() noexcept {
         if (cleanup_recorded_) {
@@ -225,9 +240,13 @@ private:
             }
             const std::filesystem::path root =
                 cluster_.root_directory();
-            const resource_report resources =
+            resource_report resources =
                 capture_resource_report(
                     std::span<const std::filesystem::path>(&root, 1));
+            if (resource_sampler_) {
+                resources.postgres = resource_sampler_->finish();
+                resource_sampler_.reset();
+            }
             const cluster_cleanup_result& cleanup = cluster_.cleanup();
             record_cleanup_observation(
                 root, cleanup.succeeded, cleanup.detail, resources);
@@ -255,6 +274,7 @@ private:
     std::vector<std::string> extension_names_;
     private_cluster cluster_;
     std::optional<bioseq::libpq::connection> admin_;
+    std::optional<resource_sampler> resource_sampler_;
     bool extensions_installed_{};
     bool cleanup_recorded_{};
 };

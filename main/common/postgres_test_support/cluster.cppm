@@ -14,6 +14,7 @@ module;
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <span>
@@ -31,8 +32,17 @@ import bioseq.libpq.client;
 import :artifact;
 import :process;
 import :report;
+import :supervision;
 
 export namespace bioseq::postgres_test {
+
+/// @brief Exact marker-owned paths available immediately before initdb.
+struct pre_initdb_context {
+    const std::filesystem::path& root_directory;
+    const std::filesystem::path& data_directory;
+    const std::filesystem::path& socket_directory;
+    const std::filesystem::path& log_directory;
+};
 
 /// @brief Complete source-neutral configuration for one private PostgreSQL node.
 struct cluster_options {
@@ -41,6 +51,7 @@ struct cluster_options {
     std::vector<std::string> preload_libraries;
     std::vector<std::pair<std::string, std::string>> startup_gucs;
     std::vector<std::pair<std::string, std::string>> process_environment;
+    std::function<void(const pre_initdb_context&)> pre_initdb;
     std::chrono::seconds startup_timeout{60};
     std::chrono::seconds stop_timeout{30};
 };
@@ -217,7 +228,11 @@ public:
           data_directory_(root_ / "data"),
           socket_directory_(root_ / "socket"),
           log_directory_(root_ / "log"),
-          port_(cluster_detail::available_port()) {}
+          port_(cluster_detail::available_port()) {
+        register_supervised_cluster(supervised_cluster_record{
+            .root = root_,
+            .data_directory = data_directory_});
+    }
 
     ~private_cluster() noexcept {
         static_cast<void>(cleanup());
@@ -233,11 +248,19 @@ public:
                 "initialize cannot reuse a cleaned private cluster");
         }
         require_state(cluster_state::constructed, "initialize");
+        std::filesystem::create_directories(data_directory_);
         std::filesystem::create_directories(socket_directory_);
         std::filesystem::create_directories(log_directory_);
         stage_ = stage_extension_artifacts(root_ / "stage", options_.extensions);
         if (automatic_report_collection_enabled()) {
             record_artifact_stage(*stage_);
+        }
+        if (options_.pre_initdb) {
+            options_.pre_initdb(pre_initdb_context{
+                .root_directory = root_,
+                .data_directory = data_directory_,
+                .socket_directory = socket_directory_,
+                .log_directory = log_directory_});
         }
         const auto init_exit = run_program(
             "initdb",
@@ -271,6 +294,10 @@ public:
         cleanup_error_.clear();
         state_ = cluster_state::running;
         try {
+            register_supervised_cluster(supervised_cluster_record{
+                .root = root_,
+                .data_directory = data_directory_,
+                .discover_postmaster_pid = true});
             const auto exit = run_program(
                 "pg_ctl",
                 {"--pgdata", data_directory_.string(),
@@ -285,6 +312,11 @@ public:
                                     + read_file(log_directory_
                                                 / "pg_ctl_start.log"));
             }
+            register_supervised_cluster(supervised_cluster_record{
+                .root = root_,
+                .data_directory = data_directory_,
+                .postmaster_pid = static_cast<std::uint64_t>(
+                    read_postmaster_pid())});
         } catch (...) {
             stop();
             throw;
@@ -318,6 +350,9 @@ public:
             throw process_error("postmaster did not exit after SIGKILL");
         }
         state_ = cluster_state::stopped;
+        register_supervised_cluster(supervised_cluster_record{
+            .root = root_,
+            .data_directory = data_directory_});
     }
 
     /// @brief Stops the owned postmaster; never throws from cleanup paths.
@@ -367,6 +402,9 @@ public:
              && cluster_detail::process_absent(postmaster_pid))
             || (postmaster_pid <= 1 && pg_ctl_stopped)) {
             state_ = cluster_state::stopped;
+            register_supervised_cluster(supervised_cluster_record{
+                .root = root_,
+                .data_directory = data_directory_});
         } else {
             cleanup_error_ +=
                 (cleanup_error_.empty() ? "" : "; ")
@@ -378,6 +416,9 @@ public:
         if (postmaster_pid > 1
             && cluster_detail::process_absent(postmaster_pid)) {
             state_ = cluster_state::stopped;
+            register_supervised_cluster(supervised_cluster_record{
+                .root = root_,
+                .data_directory = data_directory_});
         }
         set_cleanup_error_noexcept(
             "private cluster stop failed while recording diagnostics");
@@ -511,7 +552,8 @@ private:
             .executable = program(name),
             .arguments = std::move(arguments),
             .environment = options_.process_environment,
-            .output_file = output});
+            .output_file = output,
+            .supervise = true});
         return child.wait_for(deadline);
     }
 
@@ -661,6 +703,9 @@ private:
             }
             std::error_code error;
             std::filesystem::remove_all(root_, error);
+            if (!error) {
+                unregister_supervised_cluster(root_);
+            }
             if (error && cleanup_error_.empty()) {
                 cleanup_error_ = "failed removing private root: "
                     + error.message();

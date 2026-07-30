@@ -6,14 +6,22 @@
 
 #include "legacy_migration_ledger.hpp"
 
+#include <signal.h>
+#include <unistd.h>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #include <algorithm>
+#include <cerrno>
+#include <charconv>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <mutex>
+#include <fstream>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -35,12 +43,69 @@ struct catch_report_evidence {
     std::vector<std::size_t> section_failure_offsets;
     std::string failure_message;
     std::chrono::steady_clock::time_point case_started{};
-    std::optional<std::jthread> watchdog;
+    std::optional<bioseq::postgres_test::spawned_process> watchdog;
+    std::filesystem::path watchdog_state;
 };
 
 [[nodiscard]] catch_report_evidence& catch_evidence() {
     static catch_report_evidence evidence;
     return evidence;
+}
+
+struct watchdog_launch_configuration {
+    std::filesystem::path executable;
+    std::filesystem::path report;
+};
+
+[[nodiscard]] std::optional<watchdog_launch_configuration>&
+watchdog_launch() {
+    static std::optional<watchdog_launch_configuration> configuration;
+    return configuration;
+}
+
+[[nodiscard]] std::filesystem::path make_watchdog_state() {
+    std::string pattern =
+        (std::filesystem::temp_directory_path()
+         / "bioseq-watchdog-XXXXXX").string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+    char* created = ::mkdtemp(writable.data());
+    if (created == nullptr) {
+        throw std::runtime_error(
+            "cannot create external-watchdog state directory");
+    }
+    return std::filesystem::path(created);
+}
+
+[[nodiscard]] std::filesystem::path current_executable_path(
+    [[maybe_unused]] std::string_view argv_zero) {
+#if defined(__linux__)
+    return std::filesystem::canonical("/proc/self/exe");
+#elif defined(__APPLE__)
+    std::uint32_t size{};
+    static_cast<void>(::_NSGetExecutablePath(nullptr, &size));
+    std::vector<char> path(size);
+    if (size == 0
+        || ::_NSGetExecutablePath(path.data(), &size) != 0) {
+        throw std::runtime_error(
+            "cannot identify native test executable");
+    }
+    return std::filesystem::canonical(path.data());
+#else
+    return std::filesystem::canonical(
+        std::filesystem::absolute(argv_zero));
+#endif
+}
+
+void stop_watchdog(catch_report_evidence& evidence) noexcept {
+    evidence.watchdog.reset();
+    bioseq::postgres_test::disable_supervision_state();
+    if (!evidence.watchdog_state.empty()) {
+        static_cast<void>(
+            bioseq::postgres_test::remove_supervision_state(
+                evidence.watchdog_state));
+        evidence.watchdog_state.clear();
+    }
 }
 
 [[nodiscard]] std::string active_section(
@@ -88,6 +153,7 @@ public:
     using Catch::EventListenerBase::EventListenerBase;
 
     void testRunStarting(const Catch::TestRunInfo&) override {
+        stop_watchdog(catch_evidence());
         catch_evidence() = {};
         bioseq::postgres_test::clear_report_case_context();
         bioseq::postgres_test::clear_migration_probe_context();
@@ -103,17 +169,35 @@ public:
         evidence.case_started = std::chrono::steady_clock::now();
         const std::chrono::seconds timeout =
             bioseq::cache_test::configuration().case_timeout;
-        evidence.watchdog.emplace(
-            [timeout](std::stop_token stop_token) {
-                std::mutex mutex;
-                std::condition_variable_any wake;
-                std::unique_lock lock(mutex);
-                static_cast<void>(wake.wait_for(
-                    lock, stop_token, timeout, [] { return false; }));
-                if (!stop_token.stop_requested()) {
-                    std::_Exit(124);
-                }
-            });
+        if (!watchdog_launch()) {
+            throw std::runtime_error(
+                "external watchdog launch configuration is missing");
+        }
+        evidence.watchdog_state = make_watchdog_state();
+        try {
+            bioseq::postgres_test::configure_supervision_state(
+                evidence.watchdog_state);
+            bioseq::postgres_test::
+                initialize_supervision_report_journals();
+            bioseq::postgres_test::
+                initialize_supervision_resource_journal();
+            evidence.watchdog.emplace(
+                bioseq::postgres_test::spawned_process::spawn(
+                    bioseq::postgres_test::process_options{
+                        .executable = watchdog_launch()->executable,
+                        .arguments = {
+                            "--bioseq-internal-watchdog",
+                            evidence.watchdog_state.string(),
+                            watchdog_launch()->report.string(),
+                            evidence.current_case,
+                            std::to_string(::getpid()),
+                            std::to_string(timeout.count())},
+                        .output_file =
+                            evidence.watchdog_state / "watchdog.log"}));
+        } catch (...) {
+            stop_watchdog(evidence);
+            throw;
+        }
         bioseq::postgres_test::set_report_case_context(
             {.test_case = evidence.current_case});
         bioseq::postgres_test::update_migration_probe_case_section(
@@ -194,7 +278,7 @@ public:
     void testCaseEnded(
         const Catch::TestCaseStats& test_stats) override {
         auto& evidence = catch_evidence();
-        evidence.watchdog.reset();
+        stop_watchdog(evidence);
         std::string outcome =
             test_case_status(test_stats.totals, test_stats.aborting);
         if (bioseq::postgres_test::infrastructure_inconclusive_for_case(
@@ -227,7 +311,7 @@ public:
     }
 
     void testRunEnded(const Catch::TestRunStats&) override {
-        catch_evidence().watchdog.reset();
+        stop_watchdog(catch_evidence());
     }
 };
 
@@ -394,9 +478,373 @@ void write_report(
         report, native_report);
 }
 
+[[nodiscard]] std::optional<std::uint64_t> parse_unsigned(
+    std::string_view text) {
+    std::uint64_t value{};
+    const auto [end, error] = std::from_chars(
+        text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] bool process_absent(std::uint64_t pid) noexcept {
+    if (pid <= 1) {
+        return true;
+    }
+    if (::kill(static_cast<pid_t>(pid), 0) == 0) {
+        return false;
+    }
+    return errno == ESRCH;
+}
+
+[[nodiscard]] bool marker_owned_cluster(
+    const bioseq::postgres_test::supervised_cluster_record& cluster) {
+    if (cluster.root.empty()
+        || !cluster.root.filename().string().starts_with(
+            "bioseq-pg-test-")
+        || !std::filesystem::is_regular_file(
+            cluster.root / ".bioseq-private-cluster")) {
+        return false;
+    }
+    if (std::filesystem::canonical(cluster.root.parent_path())
+        != std::filesystem::canonical(
+            std::filesystem::temp_directory_path())) {
+        return false;
+    }
+    return cluster.data_directory.lexically_normal()
+        == (cluster.root / "data").lexically_normal();
+}
+
+[[nodiscard]] bioseq::postgres_test::cleanup_observation
+watchdog_cleanup_cluster(
+    const bioseq::postgres_test::supervised_cluster_record& cluster,
+    std::uint64_t ordinal) noexcept {
+    bioseq::postgres_test::cleanup_observation observation{
+        .ordinal = ordinal,
+        .root = cluster.root};
+    try {
+        if (!marker_owned_cluster(cluster)) {
+            observation.detail =
+                "watchdog refused an unproven private-cluster root";
+            return observation;
+        }
+        bioseq::postgres_test::supervised_cluster_record active = cluster;
+        if (active.discover_postmaster_pid
+            && active.postmaster_pid <= 1) {
+            std::ifstream pid_input(
+                active.data_directory / "postmaster.pid");
+            std::uint64_t pid_from_data{};
+            pid_input >> pid_from_data;
+            if (pid_input && pid_from_data > 1) {
+                active.postmaster_pid = pid_from_data;
+            }
+        }
+        if (active.postmaster_pid == 1) {
+            active.postmaster_pid = 0;
+        }
+        std::vector<std::uint64_t> process_tree;
+        if (active.postmaster_pid > 1
+            && !process_absent(active.postmaster_pid)) {
+            if (auto sampled =
+                    bioseq::postgres_test::
+                        sample_postmaster_process_tree_pids(
+                            active.postmaster_pid)) {
+                process_tree = std::move(*sampled);
+            } else {
+                process_tree.push_back(active.postmaster_pid);
+            }
+            const pid_t native_pid =
+                static_cast<pid_t>(active.postmaster_pid);
+            const pid_t group = ::getpgid(native_pid);
+            if (group > 1 && group != ::getpgrp()) {
+                static_cast<void>(::kill(-group, SIGTERM));
+            }
+            static_cast<void>(::kill(native_pid, SIGTERM));
+            const auto graceful_deadline =
+                std::chrono::steady_clock::now()
+                + std::chrono::seconds(5);
+            while (std::chrono::steady_clock::now() < graceful_deadline
+                   && !process_absent(active.postmaster_pid)) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(20));
+            }
+            if (!process_absent(active.postmaster_pid)) {
+                for (auto iterator = process_tree.rbegin();
+                     iterator != process_tree.rend(); ++iterator) {
+                    if (*iterator > 1) {
+                        static_cast<void>(::kill(
+                            static_cast<pid_t>(*iterator), SIGKILL));
+                    }
+                }
+                if (group > 1 && group != ::getpgrp()) {
+                    static_cast<void>(::kill(-group, SIGKILL));
+                }
+                const auto force_deadline =
+                    std::chrono::steady_clock::now()
+                    + std::chrono::seconds(2);
+                while (std::chrono::steady_clock::now() < force_deadline
+                       && !process_absent(active.postmaster_pid)) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(20));
+                }
+            }
+        }
+        if (active.postmaster_pid > 1
+            && !process_absent(active.postmaster_pid)) {
+            observation.detail =
+                "watchdog could not stop the registered postmaster";
+            return observation;
+        }
+        std::error_code error;
+        std::filesystem::remove_all(cluster.root, error);
+        if (error) {
+            observation.detail =
+                "watchdog could not remove private root: "
+                + error.message();
+            return observation;
+        }
+        observation.succeeded = true;
+        observation.detail =
+            "external watchdog stopped the process tree and removed "
+            "the marker-owned root";
+    } catch (const std::exception& error) {
+        observation.detail = error.what();
+    } catch (...) {
+        observation.detail =
+            "unknown external-watchdog cleanup failure";
+    }
+    return observation;
+}
+
+[[nodiscard]] bool watchdog_cleanup_process(
+    std::uint64_t process_pid) noexcept {
+    if (process_absent(process_pid)) {
+        return true;
+    }
+    const pid_t native_pid = static_cast<pid_t>(process_pid);
+    const pid_t group = ::getpgid(native_pid);
+    if (group > 1 && group != ::getpgrp()) {
+        static_cast<void>(::kill(-group, SIGTERM));
+    }
+    static_cast<void>(::kill(native_pid, SIGTERM));
+    const auto graceful_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < graceful_deadline
+           && !process_absent(process_pid)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (process_absent(process_pid)) {
+        return true;
+    }
+    if (group > 1 && group != ::getpgrp()) {
+        static_cast<void>(::kill(-group, SIGKILL));
+    }
+    static_cast<void>(::kill(native_pid, SIGKILL));
+    const auto force_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < force_deadline
+           && !process_absent(process_pid)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return process_absent(process_pid);
+}
+
+[[nodiscard]] int run_internal_watchdog(
+    const std::filesystem::path& state_directory,
+    const std::filesystem::path& report_path,
+    std::string test_case,
+    std::uint64_t parent_pid,
+    std::chrono::seconds timeout,
+    const std::filesystem::path& executable) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    bool parent_disappeared = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (process_absent(parent_pid)
+            || ::getppid() != static_cast<pid_t>(parent_pid)) {
+            parent_disappeared = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (!parent_disappeared
+        && ::kill(static_cast<pid_t>(parent_pid), SIGSTOP) != 0) {
+        if (errno == ESRCH) {
+            parent_disappeared = true;
+        } else {
+            return 125;
+        }
+    }
+
+    const auto clusters =
+        bioseq::postgres_test::load_supervised_clusters(state_directory);
+    bioseq::postgres_test::resource_report resources;
+    resources.postgres =
+        bioseq::postgres_test::load_supervision_resource_report(
+            state_directory);
+    for (const auto& cluster : clusters) {
+        std::uint64_t postmaster_pid = cluster.postmaster_pid;
+        if (cluster.discover_postmaster_pid && postmaster_pid <= 1) {
+            std::ifstream input(
+                cluster.data_directory / "postmaster.pid");
+            input >> postmaster_pid;
+        }
+        if (postmaster_pid > 1) {
+            if (const auto rss =
+                    bioseq::postgres_test::
+                        sample_postmaster_process_tree_rss(
+                            postmaster_pid)) {
+                ++resources.postgres.rss_samples;
+                resources.postgres
+                    .peak_postmaster_process_tree_rss_bytes =
+                    std::max(
+                        resources.postgres
+                            .peak_postmaster_process_tree_rss_bytes,
+                        *rss);
+            } else {
+                ++resources.postgres.rss_sampling_failures;
+            }
+        }
+        if (const auto root_bytes =
+                bioseq::postgres_test::sample_owned_root_bytes(
+                    cluster.root)) {
+            ++resources.postgres.owned_root_samples;
+            resources.postgres.peak_owned_root_bytes =
+                std::max(
+                    resources.postgres.peak_owned_root_bytes,
+                    *root_bytes);
+        } else {
+            ++resources.postgres.owned_root_sampling_failures;
+        }
+    }
+    resources.postgres.phase_boundaries.push_back(
+        bioseq::postgres_test::resource_phase_boundary{
+            .ordinal =
+                resources.postgres.phase_boundaries.size(),
+            .phase = parent_disappeared
+                ? "runner-terminated" : "watchdog-timeout",
+            .elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started),
+            .postmaster_process_tree_rss_bytes =
+                resources.postgres
+                        .peak_postmaster_process_tree_rss_bytes == 0
+                ? std::optional<std::uint64_t>{}
+                : std::optional<std::uint64_t>{
+                    resources.postgres
+                        .peak_postmaster_process_tree_rss_bytes},
+            .owned_root_bytes =
+                resources.postgres.peak_owned_root_bytes == 0
+                ? std::optional<std::uint64_t>{}
+                : std::optional<std::uint64_t>{
+                    resources.postgres.peak_owned_root_bytes}});
+    resources.peak_rss_bytes =
+        resources.postgres.peak_postmaster_process_tree_rss_bytes;
+    resources.observed_temp_bytes =
+        resources.postgres.peak_owned_root_bytes;
+
+    const auto processes =
+        bioseq::postgres_test::load_supervised_processes(state_directory);
+    bool lifecycle_cleanup_succeeded = true;
+    for (const std::uint64_t process_pid : processes) {
+        lifecycle_cleanup_succeeded =
+            watchdog_cleanup_process(process_pid)
+            && lifecycle_cleanup_succeeded;
+    }
+
+    std::vector<bioseq::postgres_test::cleanup_observation>
+        cleanup_observations;
+    cleanup_observations.reserve(clusters.size());
+    bool cleanup_succeeded = lifecycle_cleanup_succeeded;
+    for (std::size_t index = 0; index < clusters.size(); ++index) {
+        auto observation = watchdog_cleanup_cluster(
+            clusters[index], index);
+        observation.test_case = test_case;
+        if (index == 0) {
+            observation.resources = resources;
+        }
+        cleanup_succeeded =
+            cleanup_succeeded && observation.succeeded;
+        cleanup_observations.push_back(std::move(observation));
+    }
+
+    std::string build_identity;
+    try {
+        build_identity =
+            bioseq::postgres_test::sha256_file(executable).hex();
+    } catch (...) {
+    }
+    bioseq::postgres_test::integration_test_report emergency{
+        .schema_version = "bioseq-cache-test-v1",
+        .executable = executable.string(),
+        .build_identity = std::move(build_identity),
+        .cluster_configuration = {
+            {"supervision", "out-of-process per-case watchdog"},
+            {"termination", "bounded process-tree cleanup"}},
+        .cases = {
+            bioseq::postgres_test::test_case_report{
+                .test_case = std::move(test_case),
+                .status = "infrastructure-inconclusive",
+                .message = parent_disappeared
+                    ? "external watchdog observed an unexpected runner "
+                      "termination"
+                    : "external watchdog exceeded the per-case timeout of "
+                        + std::to_string(timeout.count()) + " seconds",
+                .duration =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started)}},
+        .sql_transcripts =
+            bioseq::postgres_test::load_supervision_sql_transcript(
+                state_directory),
+        .cleanup_observations = std::move(cleanup_observations),
+        .resources = std::move(resources),
+        .cleanup = bioseq::postgres_test::cleanup_report{
+            .succeeded = cleanup_succeeded,
+            .detail = cleanup_succeeded
+                ? (clusters.empty()
+                    ? "watchdog observed no registered private clusters"
+                    : "watchdog cleaned every registered private cluster")
+                : "watchdog cleanup was incomplete"}};
+    try {
+        bioseq::postgres_test::write_integration_test_report(
+            report_path, emergency);
+    } catch (...) {
+        static_cast<void>(
+            ::kill(static_cast<pid_t>(parent_pid), SIGKILL));
+        return 126;
+    }
+    static_cast<void>(
+        bioseq::postgres_test::remove_supervision_state(state_directory));
+    if (!parent_disappeared) {
+        static_cast<void>(
+            ::kill(static_cast<pid_t>(parent_pid), SIGKILL));
+    }
+    return 124;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
+    if (argc == 7
+        && std::string_view(argv[1])
+            == "--bioseq-internal-watchdog") {
+        const auto parent_pid = parse_unsigned(argv[5]);
+        const auto timeout = parse_unsigned(argv[6]);
+        if (!parent_pid || *parent_pid <= 1 || !timeout
+            || *timeout == 0
+            || *timeout
+                > static_cast<std::uint64_t>(
+                    std::chrono::seconds::max().count())) {
+            return 2;
+        }
+        return run_internal_watchdog(
+            argv[2], argv[3], argv[4], *parent_pid,
+            std::chrono::seconds(
+                static_cast<std::chrono::seconds::rep>(*timeout)),
+            current_executable_path(argv[0]));
+    }
     Catch::Session session;
 
     std::string postgres_bin_dir;
@@ -486,6 +934,9 @@ int main(int argc, char* argv[]) {
             provider_peer_test_dso;
     }
     bioseq::cache_test::set_runner_configuration(std::move(configuration));
+    watchdog_launch() = watchdog_launch_configuration{
+        .executable = current_executable_path(argv[0]),
+        .report = std::filesystem::absolute(report)};
     bioseq::postgres_test::clear_migration_probes();
     bioseq::postgres_test::clear_process_sql_transcript();
     bioseq::postgres_test::clear_cleanup_observations();

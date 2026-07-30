@@ -38,8 +38,11 @@ target_sources(bioseq_postgres_test_support
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/row_hash.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/supervision.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/process.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/artifact.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/resource_sampler.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/qualification.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/cluster.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/fixture.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/explain.cppm"

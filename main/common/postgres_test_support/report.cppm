@@ -4,6 +4,7 @@ module;
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,9 @@ export module bioseq.test.postgres:report;
 import bioseq.libpq.client;
 import :artifact;
 import :migration_probe;
+import :qualification;
+import :resource_sampler;
+import :supervision;
 
 export namespace bioseq::postgres_test {
 
@@ -75,6 +79,37 @@ struct context_state {
 [[nodiscard]] inline std::atomic_bool& automatic_collection() {
     static std::atomic_bool enabled{false};
     return enabled;
+}
+
+inline void append_crash_transcript(
+    const sql_transcript_entry& entry) noexcept {
+    try {
+        const auto directory = supervision_state_directory();
+        if (!directory) {
+            return;
+        }
+        std::ofstream output(
+            *directory / "sql-transcript.tsv", std::ios::app);
+        if (!output) {
+            return;
+        }
+        output << entry.ordinal << '\t'
+               << supervision_hex_encode(entry.session) << '\t'
+               << supervision_hex_encode(entry.test_case) << '\t'
+               << supervision_hex_encode(entry.section) << '\t'
+               << supervision_hex_encode(entry.sql) << '\t'
+               << (entry.status == sql_transcript_status::succeeded
+                       ? "passed" : "failed")
+               << '\t' << supervision_hex_encode(entry.sqlstate)
+               << '\t' << supervision_hex_encode(entry.message)
+               << '\t' << supervision_hex_encode(entry.command_tag)
+               << '\t' << entry.row_count
+               << '\t' << entry.column_count
+               << '\t' << entry.duration.count()
+               << '\t' << (entry.rows_truncated ? 1 : 0) << '\n';
+        output.flush();
+    } catch (...) {
+    }
 }
 
 }  // namespace bioseq::postgres_test::report_state_detail
@@ -192,6 +227,7 @@ public:
     void append(sql_transcript_entry entry) {
         std::scoped_lock lock(mutex_);
         entry.ordinal = next_ordinal_++;
+        report_state_detail::append_crash_transcript(entry);
         entries_.push_back(std::move(entry));
     }
 
@@ -336,6 +372,104 @@ process_sql_transcript_entries() {
     return process_sql_transcript().entries();
 }
 
+/// @brief Truncates crash-resilient transcript evidence for one case.
+inline void initialize_supervision_report_journals() noexcept {
+    try {
+        const auto directory = supervision_state_directory();
+        if (!directory) {
+            return;
+        }
+        std::ofstream output(
+            *directory / "sql-transcript.tsv", std::ios::trunc);
+        output.close();
+    } catch (...) {
+    }
+}
+
+/// @brief Loads all complete transcript journal rows after a runner crash.
+[[nodiscard]] inline std::vector<sql_transcript_entry>
+load_supervision_sql_transcript(
+    const std::filesystem::path& directory) {
+    std::ifstream input(directory / "sql-transcript.tsv");
+    std::vector<sql_transcript_entry> entries;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::vector<std::string_view> fields;
+        std::size_t begin = 0;
+        while (begin <= line.size()) {
+            const std::size_t end = line.find('\t', begin);
+            fields.push_back(
+                std::string_view(line).substr(
+                    begin,
+                    end == std::string::npos
+                        ? std::string::npos : end - begin));
+            if (end == std::string::npos) {
+                break;
+            }
+            begin = end + 1U;
+        }
+        if (fields.size() != 13U) {
+            continue;
+        }
+        const auto parse_u64 =
+            [](std::string_view text) -> std::optional<std::uint64_t> {
+                std::uint64_t value{};
+                const auto [end, error] = std::from_chars(
+                    text.data(), text.data() + text.size(), value);
+                if (error != std::errc{}
+                    || end != text.data() + text.size()) {
+                    return std::nullopt;
+                }
+                return value;
+            };
+        const auto parse_i64 =
+            [](std::string_view text) -> std::optional<std::int64_t> {
+                std::int64_t value{};
+                const auto [end, error] = std::from_chars(
+                    text.data(), text.data() + text.size(), value);
+                if (error != std::errc{}
+                    || end != text.data() + text.size()) {
+                    return std::nullopt;
+                }
+                return value;
+            };
+        const auto ordinal = parse_u64(fields[0]);
+        const auto session = supervision_hex_decode(fields[1]);
+        const auto test_case = supervision_hex_decode(fields[2]);
+        const auto section = supervision_hex_decode(fields[3]);
+        const auto sql = supervision_hex_decode(fields[4]);
+        const auto sqlstate = supervision_hex_decode(fields[6]);
+        const auto message = supervision_hex_decode(fields[7]);
+        const auto command_tag = supervision_hex_decode(fields[8]);
+        const auto row_count = parse_i64(fields[9]);
+        const auto column_count = parse_i64(fields[10]);
+        const auto duration = parse_i64(fields[11]);
+        if (!ordinal || !session || !test_case || !section || !sql
+            || !sqlstate || !message || !command_tag || !row_count
+            || !column_count || !duration
+            || (fields[5] != "passed" && fields[5] != "failed")) {
+            continue;
+        }
+        entries.push_back(sql_transcript_entry{
+            .ordinal = *ordinal,
+            .session = std::move(*session),
+            .test_case = std::move(*test_case),
+            .section = std::move(*section),
+            .sql = std::move(*sql),
+            .status = fields[5] == "passed"
+                ? sql_transcript_status::succeeded
+                : sql_transcript_status::failed,
+            .sqlstate = std::move(*sqlstate),
+            .message = std::move(*message),
+            .command_tag = std::move(*command_tag),
+            .row_count = *row_count,
+            .column_count = *column_count,
+            .rows_truncated = fields[12] == "1",
+            .duration = std::chrono::milliseconds(*duration)});
+    }
+    return entries;
+}
+
 /// @brief One command-line argument after runner-owned sensitivity classification.
 struct report_argument {
     std::string name;
@@ -349,6 +483,16 @@ struct test_case_report {
     std::string section;
     std::string status;
     std::string message;
+    std::chrono::milliseconds duration{};
+};
+
+/// @brief Timed acceptance phase associated with the active Catch context.
+struct phase_duration_report {
+    std::uint64_t ordinal{};
+    std::string test_case;
+    std::string section;
+    std::string phase;
+    std::string status;
     std::chrono::milliseconds duration{};
 };
 
@@ -371,6 +515,7 @@ struct artifact_report {
 struct resource_report {
     std::uint64_t peak_rss_bytes{};
     std::uint64_t observed_temp_bytes{};
+    resource_sampling_report postgres;
 };
 
 /// @brief No-throw teardown verdict supplied after cluster cleanup.
@@ -398,6 +543,8 @@ struct integration_test_report {
     std::vector<report_argument> arguments;
     std::vector<std::pair<std::string, std::string>> cluster_configuration;
     std::vector<test_case_report> cases;
+    std::vector<phase_duration_report> phase_durations;
+    std::vector<host_qualification_report> host_qualifications;
     std::vector<sql_transcript_entry> sql_transcripts;
     std::vector<migration_probe_record> migration_probes;
     std::vector<artifact_report> artifacts;
@@ -483,6 +630,12 @@ struct artifact_state {
     std::vector<artifact_report> reports;
 };
 
+struct phase_state {
+    std::mutex mutex;
+    std::vector<phase_duration_report> reports;
+    std::uint64_t next_ordinal{};
+};
+
 [[nodiscard]] inline cleanup_state& process_cleanup() {
     static cleanup_state state;
     return state;
@@ -493,9 +646,82 @@ struct artifact_state {
     return state;
 }
 
+[[nodiscard]] inline phase_state& process_phases() {
+    static phase_state state;
+    return state;
+}
+
 }  // namespace bioseq::postgres_test::report_state_detail
 
 export namespace bioseq::postgres_test {
+
+/// @brief Records one completed or interrupted timed phase.
+inline void record_phase_duration(
+    std::string_view phase,
+    std::chrono::milliseconds duration,
+    bool completed,
+    report_case_context context = current_report_case_context()) noexcept {
+    try {
+        auto& state = report_state_detail::process_phases();
+        std::scoped_lock lock(state.mutex);
+        state.reports.push_back(phase_duration_report{
+            .ordinal = state.next_ordinal++,
+            .test_case = std::move(context.test_case),
+            .section = std::move(context.section),
+            .phase = std::string(phase),
+            .status = completed ? "completed" : "interrupted",
+            .duration = duration});
+    } catch (...) {
+    }
+}
+
+/// @brief Clears phase timing evidence before a native Catch session.
+inline void clear_phase_duration_reports() noexcept {
+    try {
+        auto& state = report_state_detail::process_phases();
+        std::scoped_lock lock(state.mutex);
+        state.reports.clear();
+        state.next_ordinal = 0;
+    } catch (...) {
+    }
+}
+
+/// @brief Returns phase timings in observation order.
+[[nodiscard]] inline std::vector<phase_duration_report>
+phase_duration_reports() {
+    auto& state = report_state_detail::process_phases();
+    std::scoped_lock lock(state.mutex);
+    return state.reports;
+}
+
+/// @brief RAII phase timer that records interruption during unwinding.
+class scoped_report_phase {
+public:
+    explicit scoped_report_phase(std::string phase)
+        : phase_(std::move(phase)),
+          context_(current_report_case_context()),
+          started_(std::chrono::steady_clock::now()) {}
+
+    scoped_report_phase(const scoped_report_phase&) = delete;
+    scoped_report_phase& operator=(const scoped_report_phase&) = delete;
+
+    ~scoped_report_phase() noexcept {
+        record_phase_duration(
+            phase_,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started_),
+            completed_,
+            std::move(context_));
+    }
+
+    void complete() noexcept { completed_ = true; }
+
+private:
+    std::string phase_;
+    report_case_context context_;
+    std::chrono::steady_clock::time_point started_;
+    bool completed_{};
+};
 
 /// @brief Records exact source/staged artifact evidence for one fixture.
 inline void record_artifact_stage(
@@ -624,6 +850,32 @@ cleanup_observations() {
             std::max(
                 aggregate.observed_temp_bytes,
                 observation.resources.observed_temp_bytes);
+        aggregate.postgres.peak_postmaster_process_tree_rss_bytes =
+            std::max(
+                aggregate.postgres
+                    .peak_postmaster_process_tree_rss_bytes,
+                observation.resources.postgres
+                    .peak_postmaster_process_tree_rss_bytes);
+        aggregate.postgres.peak_owned_root_bytes =
+            std::max(
+                aggregate.postgres.peak_owned_root_bytes,
+                observation.resources.postgres.peak_owned_root_bytes);
+        aggregate.postgres.rss_samples +=
+            observation.resources.postgres.rss_samples;
+        aggregate.postgres.owned_root_samples +=
+            observation.resources.postgres.owned_root_samples;
+        aggregate.postgres.rss_sampling_failures +=
+            observation.resources.postgres.rss_sampling_failures;
+        aggregate.postgres.owned_root_sampling_failures +=
+            observation.resources.postgres.owned_root_sampling_failures;
+        auto boundaries =
+            observation.resources.postgres.phase_boundaries;
+        for (resource_phase_boundary& boundary : boundaries) {
+            boundary.ordinal =
+                aggregate.postgres.phase_boundaries.size();
+            aggregate.postgres.phase_boundaries.push_back(
+                std::move(boundary));
+        }
     }
     return aggregate;
 }
@@ -725,6 +977,63 @@ inline void write_transcript(
     output.put('}');
 }
 
+inline void write_resource_sampling(
+    std::ostream& output,
+    const resource_sampling_report& report) {
+    output.put('{');
+    key(output, "peak_postmaster_process_tree_rss_bytes");
+    output << report.peak_postmaster_process_tree_rss_bytes;
+    output.put(',');
+    key(output, "peak_owned_root_bytes");
+    output << report.peak_owned_root_bytes;
+    output.put(',');
+    key(output, "rss_samples");
+    output << report.rss_samples;
+    output.put(',');
+    key(output, "owned_root_samples");
+    output << report.owned_root_samples;
+    output.put(',');
+    key(output, "rss_sampling_failures");
+    output << report.rss_sampling_failures;
+    output.put(',');
+    key(output, "owned_root_sampling_failures");
+    output << report.owned_root_sampling_failures;
+    output.put(',');
+    key(output, "phase_boundaries");
+    output.put('[');
+    bool first = true;
+    for (const resource_phase_boundary& boundary :
+         report.phase_boundaries) {
+        comma(output, first);
+        output.put('{');
+        key(output, "ordinal");
+        output << boundary.ordinal;
+        output.put(',');
+        key(output, "phase");
+        write_string(output, boundary.phase);
+        output.put(',');
+        key(output, "elapsed_ms");
+        output << boundary.elapsed.count();
+        output.put(',');
+        key(output, "postmaster_process_tree_rss_bytes");
+        if (boundary.postmaster_process_tree_rss_bytes) {
+            output << *boundary.postmaster_process_tree_rss_bytes;
+        } else {
+            output << "null";
+        }
+        output.put(',');
+        key(output, "owned_root_bytes");
+        if (boundary.owned_root_bytes) {
+            output << *boundary.owned_root_bytes;
+        } else {
+            output << "null";
+        }
+        output.put('}');
+    }
+    output.put(']');
+    output.put('}');
+}
+
 }  // namespace bioseq::postgres_test::report_detail
 
 export namespace bioseq::postgres_test {
@@ -808,6 +1117,151 @@ inline void write_integration_test_report(
         output.put(',');
         report_detail::key(output, "duration_ms");
         output << test_case.duration.count();
+        output.put('}');
+    }
+    output.put(']');
+
+    report_detail::comma(output, first);
+    report_detail::key(output, "phase_durations");
+    output.put('[');
+    bool first_phase = true;
+    for (const phase_duration_report& phase : report.phase_durations) {
+        report_detail::comma(output, first_phase);
+        output.put('{');
+        report_detail::key(output, "ordinal");
+        output << phase.ordinal;
+        output.put(',');
+        report_detail::key(output, "test_case");
+        report_detail::write_string(output, phase.test_case);
+        output.put(',');
+        report_detail::key(output, "section");
+        report_detail::write_string(output, phase.section);
+        output.put(',');
+        report_detail::key(output, "phase");
+        report_detail::write_string(output, phase.phase);
+        output.put(',');
+        report_detail::key(output, "status");
+        report_detail::write_string(output, phase.status);
+        output.put(',');
+        report_detail::key(output, "duration_ms");
+        output << phase.duration.count();
+        output.put('}');
+    }
+    output.put(']');
+
+    report_detail::comma(output, first);
+    report_detail::key(output, "host_qualifications");
+    output.put('[');
+    bool first_qualification = true;
+    for (const host_qualification_report& qualification :
+         report.host_qualifications) {
+        report_detail::comma(output, first_qualification);
+        output.put('{');
+        report_detail::key(output, "ordinal");
+        output << qualification.ordinal;
+        output.put(',');
+        report_detail::key(output, "test_case");
+        report_detail::write_string(output, qualification.test_case);
+        output.put(',');
+        report_detail::key(output, "status");
+        report_detail::write_string(
+            output,
+            qualification.status == host_qualification_status::passed
+                ? "passed" : "infrastructure-inconclusive");
+        output.put(',');
+        report_detail::key(output, "detail");
+        report_detail::write_string(output, qualification.detail);
+        output.put(',');
+        report_detail::key(output, "total_ram_bytes");
+        output << qualification.total_ram_bytes;
+        output.put(',');
+        report_detail::key(output, "available_ram_bytes");
+        output << qualification.available_ram_bytes;
+        output.put(',');
+        report_detail::key(output, "logical_cores");
+        output << qualification.logical_cores;
+        output.put(',');
+        report_detail::key(output, "required_total_ram_bytes");
+        output << qualification.required_total_ram_bytes;
+        output.put(',');
+        report_detail::key(output, "required_available_ram_bytes");
+        output << qualification.required_available_ram_bytes;
+        output.put(',');
+        report_detail::key(output, "required_logical_cores");
+        output << qualification.required_logical_cores;
+        output.put(',');
+        report_detail::key(output, "required_io_mib_per_second");
+        output << qualification.required_io_mib_per_second;
+        output.put(',');
+        report_detail::key(output, "duration_ms");
+        output << qualification.duration.count();
+        output.put(',');
+        report_detail::key(output, "filesystems");
+        output.put('[');
+        bool first_filesystem = true;
+        for (const filesystem_qualification_report& filesystem :
+             qualification.filesystems) {
+            report_detail::comma(output, first_filesystem);
+            output.put('{');
+            report_detail::key(output, "role");
+            report_detail::write_string(output, filesystem.role);
+            output.put(',');
+            report_detail::key(output, "path");
+            report_detail::write_string(
+                output, filesystem.path.string());
+            output.put(',');
+            report_detail::key(output, "capacity_bytes");
+            output << filesystem.capacity_bytes;
+            output.put(',');
+            report_detail::key(output, "available_bytes");
+            output << filesystem.available_bytes;
+            output.put(',');
+            report_detail::key(output, "required_available_bytes");
+            output << filesystem.required_available_bytes;
+            output.put(',');
+            report_detail::key(output, "device_id");
+            output << filesystem.device_id;
+            output.put(',');
+            report_detail::key(output, "distinct_from_data");
+            output << (filesystem.distinct_from_data ? "true" : "false");
+            output.put(',');
+            report_detail::key(output, "passed");
+            output << (filesystem.passed ? "true" : "false");
+            output.put('}');
+        }
+        output.put(']');
+        output.put(',');
+        report_detail::key(output, "io");
+        output.put('{');
+        report_detail::key(output, "path");
+        report_detail::write_string(output, qualification.io.path.string());
+        output.put(',');
+        report_detail::key(output, "bytes");
+        output << qualification.io.bytes;
+        output.put(',');
+        report_detail::key(output, "write_duration_ms");
+        output << qualification.io.write_duration.count();
+        output.put(',');
+        report_detail::key(output, "read_duration_ms");
+        output << qualification.io.read_duration.count();
+        output.put(',');
+        report_detail::key(output, "write_mib_per_second");
+        output << qualification.io.write_mib_per_second;
+        output.put(',');
+        report_detail::key(output, "read_mib_per_second");
+        output << qualification.io.read_mib_per_second;
+        output.put(',');
+        report_detail::key(output, "cache_eviction_method");
+        report_detail::write_string(
+            output, qualification.io.cache_eviction_method);
+        output.put(',');
+        report_detail::key(output, "cache_eviction_succeeded");
+        output << (qualification.io.cache_eviction_succeeded
+                       ? "true" : "false");
+        output.put(',');
+        report_detail::key(output, "passed");
+        output << (qualification.io.passed ? "true" : "false");
+        output.put('}');
         output.put('}');
     }
     output.put(']');
@@ -914,6 +1368,10 @@ inline void write_integration_test_report(
         output.put(',');
         report_detail::key(output, "observed_temp_bytes");
         output << observation.resources.observed_temp_bytes;
+        output.put(',');
+        report_detail::key(output, "postgres");
+        report_detail::write_resource_sampling(
+            output, observation.resources.postgres);
         output.put('}');
     }
     output.put(']');
@@ -922,7 +1380,10 @@ inline void write_integration_test_report(
     report_detail::key(output, "resources");
     output << "{\"peak_rss_bytes\":" << report.resources.peak_rss_bytes
            << ",\"observed_temp_bytes\":"
-           << report.resources.observed_temp_bytes << '}';
+           << report.resources.observed_temp_bytes << ",\"postgres\":";
+    report_detail::write_resource_sampling(
+        output, report.resources.postgres);
+    output.put('}');
     report_detail::comma(output, first);
     report_detail::key(output, "cleanup");
     output.put('{');
