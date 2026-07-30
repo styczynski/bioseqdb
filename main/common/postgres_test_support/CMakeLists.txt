@@ -69,6 +69,15 @@ add_dependencies(
 
 if(BUILD_TESTING)
   find_package(Catch2 3 REQUIRED)
+  add_executable(bioseq_postgres_test_process_contract_child
+    "${CMAKE_CURRENT_LIST_DIR}/process_contract_child.cpp")
+  set_target_properties(
+    bioseq_postgres_test_process_contract_child
+    PROPERTIES
+      CXX_STANDARD 26
+      CXX_STANDARD_REQUIRED ON
+      CXX_EXTENSIONS ON
+      INTERPROCEDURAL_OPTIMIZATION FALSE)
   add_executable(bioseq_postgres_test_support_contract_tests
     "${CMAKE_CURRENT_LIST_DIR}/contract_tests.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/qualification_contract_tests.cpp")
@@ -82,6 +91,13 @@ if(BUILD_TESTING)
     PRIVATE
       bioseq_postgres_test_support
       Catch2::Catch2WithMain)
+  target_compile_definitions(
+    bioseq_postgres_test_support_contract_tests
+    PRIVATE
+      "BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH=\"$<TARGET_FILE:bioseq_postgres_test_process_contract_child>\"")
+  add_dependencies(
+    bioseq_postgres_test_support_contract_tests
+    bioseq_postgres_test_process_contract_child)
   add_test(
     NAME bioseq_postgres_test_support_contract_tests
     COMMAND bioseq_postgres_test_support_contract_tests)

@@ -3,8 +3,10 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -16,6 +18,10 @@
 #include <unistd.h>
 
 import bioseq.test.postgres;
+
+#if !defined(BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH)
+#error "BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH must name the process contract child"
+#endif
 
 using namespace std::chrono_literals;
 using namespace bioseq::postgres_test;
@@ -44,6 +50,37 @@ struct report_state_reset {
         }
         clear_cleanup_observations();
     }
+};
+
+class scoped_environment_override {
+public:
+    scoped_environment_override(const char* name, const char* value)
+        : name_(name) {
+        if (const char* current = std::getenv(name)) {
+            original_ = current;
+        }
+        if (::setenv(name, value, 1) != 0) {
+            throw std::runtime_error(
+                "cannot configure process-environment contract");
+        }
+    }
+
+    scoped_environment_override(const scoped_environment_override&) = delete;
+    scoped_environment_override& operator=(
+        const scoped_environment_override&) = delete;
+
+    ~scoped_environment_override() noexcept {
+        if (original_) {
+            static_cast<void>(
+                ::setenv(name_.c_str(), original_->c_str(), 1));
+        } else {
+            static_cast<void>(::unsetenv(name_.c_str()));
+        }
+    }
+
+private:
+    std::string name_;
+    std::optional<std::string> original_;
 };
 
 class temporary_resource_journal_tree {
@@ -464,6 +501,49 @@ TEST_CASE("unjournaled supervised child spawn fails synchronously",
         tree.state_directory() / "registries.dirty"));
     CHECK_FALSE(load_supervision_registries(
         tree.state_directory()));
+}
+
+TEST_CASE("supervised spawn preserves exact argv zero and PostgreSQL PATH",
+          "[postgres-test-support][unit][process][postgres-binary-identity]") {
+    temporary_resource_journal_tree tree;
+    configure_supervision_state(tree.state_directory());
+
+    const std::filesystem::path executable =
+        std::filesystem::canonical(
+            std::filesystem::path{
+                BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH});
+    const std::filesystem::path preferred_directory =
+        executable.parent_path();
+    const std::filesystem::path poisoned_directory =
+        tree.state_directory() / "host-postgres-bin";
+    REQUIRE(std::filesystem::create_directories(poisoned_directory));
+    const std::filesystem::path output =
+        tree.state_directory() / "process-contract-child.log";
+    const scoped_environment_override host_pg{
+        "PGHOST", "host-postgres.invalid"};
+    const scoped_environment_override host_pgdata{
+        "PGDATA", poisoned_directory.c_str()};
+
+    spawned_process child = spawned_process::spawn(process_options{
+        .executable = executable,
+        .environment = {{"PATH", poisoned_directory.string()}},
+        .preferred_path_directory = preferred_directory,
+        .output_file = output,
+        .supervise = true,
+        .supervision_data_directory = tree.data_directory()});
+    const process_exit exit = child.wait_for(5s);
+    REQUIRE(exit.succeeded());
+
+    const std::string captured = child.captured_output();
+    CHECK(captured.find("argv0=" + executable.string() + "\n")
+          != std::string::npos);
+    CHECK(captured.find(
+              "PATH=" + preferred_directory.string() + ":"
+              + poisoned_directory.string() + "\n")
+          != std::string::npos);
+    CHECK(captured.find("PGHOST=<unset>\n") != std::string::npos);
+    CHECK(captured.find("PGDATA=<unset>\n") != std::string::npos);
+    CHECK(supervision_registries_empty(tree.state_directory()));
 }
 
 TEST_CASE("supervised process identity rejects a changed start token",

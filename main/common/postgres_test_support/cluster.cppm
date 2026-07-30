@@ -1055,6 +1055,7 @@ private:
             .executable = program(name),
             .arguments = std::move(arguments),
             .environment = options_.process_environment,
+            .preferred_path_directory = options_.postgres_bin_dir,
             .output_file = output,
             .supervise = true,
             .supervision_data_directory = data_directory_});

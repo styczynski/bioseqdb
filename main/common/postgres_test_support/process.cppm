@@ -207,6 +207,7 @@ struct process_options {
     std::filesystem::path executable;
     std::vector<std::string> arguments;
     std::vector<std::pair<std::string, std::string>> environment;
+    std::optional<std::filesystem::path> preferred_path_directory;
     std::optional<std::filesystem::path> output_file;
     bool supervise{};
     std::optional<std::filesystem::path> supervision_data_directory;
@@ -226,7 +227,9 @@ struct process_exit {
 /// @brief Produces an allowlisted environment with all ambient PG routing removed.
 [[nodiscard]] inline std::vector<std::pair<std::string, std::string>>
 sanitized_process_environment(
-    std::span<const std::pair<std::string, std::string>> overrides = {}) {
+    std::span<const std::pair<std::string, std::string>> overrides = {},
+    const std::optional<std::filesystem::path>& preferred_path_directory =
+        std::nullopt) {
     const auto allowed_exact = [](std::string_view name) noexcept {
         return name == "PATH" || name == "HOME" || name == "LANG"
             || name == "LANGUAGE" || name == "TZ" || name == "TERM"
@@ -263,6 +266,32 @@ sanitized_process_environment(
             throw process_error("invalid child environment override");
         }
         values.insert_or_assign(name, value);
+    }
+    if (preferred_path_directory) {
+        std::error_code path_error;
+        const std::filesystem::path preferred =
+            std::filesystem::canonical(
+                *preferred_path_directory, path_error);
+        if (path_error
+            || !std::filesystem::is_directory(preferred, path_error)
+            || path_error) {
+            throw process_error(
+                "preferred child PATH directory is unavailable: "
+                + preferred_path_directory->string());
+        }
+        const std::string prefix = preferred.string();
+        if (prefix.empty() || prefix.find('\0') != std::string::npos
+            || prefix.find(':') != std::string::npos) {
+            throw process_error(
+                "preferred child PATH directory is not representable");
+        }
+        auto path = values.find("PATH");
+        if (path == values.end() || path->second.empty()) {
+            values.insert_or_assign("PATH", prefix);
+        } else if (path->second != prefix
+                   && !path->second.starts_with(prefix + ":")) {
+            path->second = prefix + ":" + path->second;
+        }
     }
     std::vector<std::pair<std::string, std::string>> result;
     result.reserve(values.size());
@@ -303,7 +332,7 @@ public:
 
         std::vector<std::string> argument_storage;
         argument_storage.reserve(options.arguments.size() + 1);
-        argument_storage.push_back(options.executable.filename().string());
+        argument_storage.push_back(options.executable.string());
         argument_storage.insert(argument_storage.end(),
                                 options.arguments.begin(),
                                 options.arguments.end());
@@ -315,7 +344,8 @@ public:
         arguments.push_back(nullptr);
 
         const auto environment_pairs =
-            sanitized_process_environment(options.environment);
+            sanitized_process_environment(
+                options.environment, options.preferred_path_directory);
         std::vector<std::string> environment_storage;
         environment_storage.reserve(environment_pairs.size());
         for (const auto& [name, value] : environment_pairs) {
