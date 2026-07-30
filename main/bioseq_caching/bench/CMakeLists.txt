@@ -66,9 +66,9 @@ add_test(
   NAME bioseq_cache_benchmark_report_contract_tests
   COMMAND bioseq_cache_benchmark_report_contract_tests)
 
-# The MCP reads this generated target-property inventory and passes the exact
-# build-tree artifacts to native private-cluster executables. Forward slashes
-# keep the JSON portable across CMake hosts.
+# The MCP reads this generated path inventory and passes the exact source- and
+# build-tree inputs to native private-cluster executables. Forward slashes keep
+# the JSON portable across CMake hosts.
 set(_bioseq_cache_test_control "")
 set(_bioseq_cache_test_install_sql "")
 set(_bioseq_cache_test_dso "")
@@ -84,6 +84,7 @@ endif()
 set(_bioseq_control "")
 set(_bioseq_install_sql "")
 set(_bioseq_dso "")
+set(_bioseq_cache_provider_peer_test_dso "")
 if(BIOSEQ_BUILD_CORE)
   # postgresql_bioseq is declared after bioseq_caching at the top level. These
   # generator expressions resolve after the complete target graph exists.
@@ -93,6 +94,10 @@ if(BIOSEQ_BUILD_CORE)
     "$<SHELL_PATH:$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_INSTALL_SQL>>")
   set(_bioseq_dso
     "$<SHELL_PATH:$<TARGET_GENEX_EVAL:postgresql_bioseq,$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_DSO>>>")
+  if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
+    set(_bioseq_cache_provider_peer_test_dso
+      "$<SHELL_PATH:$<TARGET_FILE:bioseq_cache_provider_peer_test>>")
+  endif()
 endif()
 
 set(_bioseq_cache_native_artifacts
@@ -106,7 +111,9 @@ set(_bioseq_cache_native_artifacts
   \"cache_test_dso\": \"${_bioseq_cache_test_dso}\",
   \"bioseq_control\": \"${_bioseq_control}\",
   \"bioseq_install_sql\": \"${_bioseq_install_sql}\",
-  \"bioseq_dso\": \"${_bioseq_dso}\"
+  \"bioseq_dso\": \"${_bioseq_dso}\",
+  \"provider_peer_test_dso\": \"${_bioseq_cache_provider_peer_test_dso}\",
+  \"migration_ledger\": \"$<SHELL_PATH:${CMAKE_CURRENT_LIST_DIR}/../test/legacy_migration_ledger.tsv>\"
 }
 ")
 file(GENERATE

@@ -1191,6 +1191,7 @@ MODES: Dict[str, ModeDefinition] = {
                 "--cache-control", "{cache_test_control}",
                 "--cache-install-sql", "{cache_test_install_sql}",
                 "--cache-dso", "{cache_test_dso}",
+                "--migration-ledger", "{migration_ledger}",
                 "--report", "{report}",
                 "--case-timeout-seconds", "480",
                 "--reporter", "console::out=-::colour-mode=ansi",
@@ -1251,8 +1252,11 @@ MODES: Dict[str, ModeDefinition] = {
                 "--bioseq-control", "{bioseq_control}",
                 "--bioseq-install-sql", "{bioseq_install_sql}",
                 "--bioseq-dso", "{bioseq_dso}",
+                "--provider-peer-test-dso", "{provider_peer_test_dso}",
+                "--migration-ledger", "{migration_ledger}",
                 "--report", "{report}",
-                "--case-timeout-seconds", "6300",
+                "--case-timeout-seconds", "480",
+                "--large-case-timeout-seconds", "6300",
                 "--reporter", "console::out=-::colour-mode=ansi",
             ],
         ],
@@ -2008,11 +2012,13 @@ _CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
     "bioseq_control",
     "bioseq_install_sql",
     "bioseq_dso",
+    "provider_peer_test_dso",
+    "migration_ledger",
 })
 
 
 def _cache_native_artifacts(active_bin_dir: Path) -> dict[str, str]:
-    """Load CMake-generated extension paths for native cache runners."""
+    """Load CMake-generated input paths for native cache runners."""
     manifest = active_bin_dir / "cache_native_artifacts.json"
     try:
         payload = json.loads(manifest.read_text(encoding="utf-8"))

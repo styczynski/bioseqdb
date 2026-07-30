@@ -360,6 +360,12 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("BIOSEQ_EXTENSION_CONTROL_FILE", cmake)
         self.assertIn("BIOSEQ_EXTENSION_INSTALL_SQL", cmake)
         self.assertIn("BIOSEQ_EXTENSION_DSO", cmake)
+        for key in server._CACHE_NATIVE_ARTIFACT_KEYS:
+            with self.subTest(native_artifact_key=key):
+                self.assertIn(f'\\"{key}\\"', cmake)
+        self.assertIn(
+            "$<TARGET_FILE:bioseq_cache_provider_peer_test>", cmake)
+        self.assertIn("../test/legacy_migration_ledger.tsv", cmake)
         self.assertIn("Threads::Threads", cmake)
         self.assertIn(
             "bioseq_cache_benchmark_report_contract_tests", cmake)
@@ -447,7 +453,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             "cache-bioseq-integration": (
                 "bioseq_cache_bioseq_integration_tests",
                 120.0,
-                "6300",
+                "480",
                 None,
             ),
             "cache-bioseq-bench": (
@@ -486,6 +492,97 @@ class CacheModeRoutingTest(unittest.TestCase):
                     self.assertIn("--bioseq-control", command)
                     self.assertIn("--bioseq-install-sql", command)
                     self.assertIn("--bioseq-dso", command)
+
+    def test_cache_integration_resolves_exact_cmake_parity_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            binary_dir = Path(tmp)
+            manifest = {
+                key: str(binary_dir / key)
+                for key in server._CACHE_NATIVE_ARTIFACT_KEYS
+            }
+            manifest["provider_peer_test_dso"] = ""
+            for key, value in manifest.items():
+                if not value:
+                    continue
+                path = Path(value)
+                if key == "postgres_bin_dir":
+                    path.mkdir()
+                else:
+                    path.touch()
+            (binary_dir / "cache_native_artifacts.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            report = binary_dir / "reports" / "report_0.json"
+
+            resolved = server._run_command_argv(
+                "cache-integration",
+                binary_dir,
+                server.MODES["cache-integration"].commands[0],
+                report_path=report,
+            )
+
+        self.assertEqual(
+            resolved,
+            [
+                str(binary_dir / "bioseq_cache_integration_tests"),
+                "--postgres-bin-dir", manifest["postgres_bin_dir"],
+                "--cache-control", manifest["cache_test_control"],
+                "--cache-install-sql", manifest["cache_test_install_sql"],
+                "--cache-dso", manifest["cache_test_dso"],
+                "--migration-ledger", manifest["migration_ledger"],
+                "--report", str(report),
+                "--case-timeout-seconds", "480",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+        )
+
+    def test_combined_integration_resolves_exact_cmake_parity_argv(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            binary_dir = Path(tmp)
+            manifest = {
+                key: str(binary_dir / key)
+                for key in server._CACHE_NATIVE_ARTIFACT_KEYS
+            }
+            for key, value in manifest.items():
+                path = Path(value)
+                if key == "postgres_bin_dir":
+                    path.mkdir()
+                else:
+                    path.touch()
+            (binary_dir / "cache_native_artifacts.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            report = binary_dir / "reports" / "report_0.json"
+
+            resolved = server._run_command_argv(
+                "cache-bioseq-integration",
+                binary_dir,
+                server.MODES["cache-bioseq-integration"].commands[0],
+                report_path=report,
+            )
+
+        self.assertEqual(
+            resolved,
+            [
+                str(
+                    binary_dir
+                    / "bioseq_cache_bioseq_integration_tests"
+                ),
+                "--postgres-bin-dir", manifest["postgres_bin_dir"],
+                "--cache-control", manifest["cache_test_control"],
+                "--cache-install-sql", manifest["cache_test_install_sql"],
+                "--cache-dso", manifest["cache_test_dso"],
+                "--bioseq-control", manifest["bioseq_control"],
+                "--bioseq-install-sql", manifest["bioseq_install_sql"],
+                "--bioseq-dso", manifest["bioseq_dso"],
+                "--provider-peer-test-dso",
+                manifest["provider_peer_test_dso"],
+                "--migration-ledger", manifest["migration_ledger"],
+                "--report", str(report),
+                "--case-timeout-seconds", "480",
+                "--large-case-timeout-seconds", "6300",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+        )
 
     def test_cache_modes_contain_no_script_runner_invocations(self) -> None:
         forbidden = (".py", ".pl", ".pm", "python", "perl")
