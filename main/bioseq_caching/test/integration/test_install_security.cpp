@@ -133,6 +133,7 @@ TEST_CASE("cache install, preload diagnostics, and ACLs are native",
 
         bool denied = false;
         std::string denial;
+        std::string denial_hint;
         try {
             static_cast<void>(connection.exec(
                 "SET ROLE cache_monitor_execute_only; "
@@ -140,11 +141,12 @@ TEST_CASE("cache install, preload diagnostics, and ACLs are native",
         } catch (const bioseq::libpq::query_error& error) {
             denied = true;
             denial = error.what();
+            denial_hint = error.hint();
         }
         CHECK(denied);
         CHECK(denial.find("permission denied to inspect bioseq_cache")
               != std::string::npos);
-        CHECK(denial.find("USAGE") != std::string::npos);
+        CHECK(denial_hint.find("USAGE") != std::string::npos);
         bioseq::cache_test::exec(connection, "RESET ROLE");
         bioseq::postgres_test::record_migration_probe(
             "tap.001.preload.stored_oid_cannot_bypass_acl");
