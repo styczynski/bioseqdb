@@ -44,6 +44,9 @@ inline constexpr bioseq::sql::schema_entity bioseq_cache_test{};
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::jsonb,
+})]]
 [[nodiscard]] inline bioseq::pg_utils::sql_jsonb bootstrap_status() {
     return storage::bootstrap_test_api::bootstrap_status();
 }
@@ -55,6 +58,9 @@ inline constexpr bioseq::sql::schema_entity bioseq_cache_test{};
 [[bioseq_sql::revoke({
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::jsonb,
 })]]
 [[nodiscard]] inline bioseq::pg_utils::sql_jsonb
 bootstrap_attach_twice() {
@@ -744,6 +750,9 @@ inline void provider_reset() {
 [[bioseq_sql::revoke({
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::jsonb,
 })]]
 [[nodiscard]] inline bioseq::pg_utils::sql_jsonb provider_stats() {
     return test_provider::provider_stats();
