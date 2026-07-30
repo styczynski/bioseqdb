@@ -915,7 +915,7 @@ class ModeDefinition:
     commands: List[List[str]]
     """Extra documentation"""
     docs: str
-    """This applies only to benchmarks. Defines subdirectory within REPORTING_DIR where benchmark report is saved"""
+    """Optional subdirectory within REPORTING_DIR for a native run report."""
     reporting_subdir_name: Optional[str] = None
     """This applies only to benchmark. Is this benchmark target?"""
     is_bench_mode: bool = False
@@ -958,8 +958,8 @@ class ModeDefinition:
         return "were" if self.is_verb_plular else "was"
 
     @property
-    def reporting_dir(self) -> str:
-        if not self.is_bench_mode or not self.reporting_subdir_name:
+    def reporting_dir(self) -> Path:
+        if not self.reporting_subdir_name:
             return REPORTING_DIR / "__does_not_exist__"
         return REPORTING_DIR / self.reporting_subdir_name
 
@@ -1169,17 +1169,28 @@ MODES: Dict[str, ModeDefinition] = {
         expected_duration_min=8.0,
         build_only_expected_duration_min=1.0,
         label="bioseq_cache temporary-cluster tests",
-        docs="Run cache regression, isolation and TAP tests in private clusters",
+        docs="Run native cache Catch2 integration tests in a private cluster",
         is_verb_plular=True,
         preset_family="cache",
         binary_subdir="bioseq_caching",
-        targets=["postgresql_bioseq_cache"],
-        commands=[],
-        post_build_targets=(
-            "test_bioseq_cache_regress",
-            "test_bioseq_cache_isolation",
-            "test_bioseq_cache_tap",
-        ),
+        targets=[
+            "postgresql_bioseq_cache",
+            "postgresql_bioseq_cache_test_support",
+            "bioseq_cache_integration_tests",
+        ],
+        commands=[
+            [
+                "bioseq_cache_integration_tests",
+                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--cache-control", "{cache_test_control}",
+                "--cache-install-sql", "{cache_test_install_sql}",
+                "--cache-dso", "{cache_test_dso}",
+                "--report", "{report}",
+                "--case-timeout-seconds", "480",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+        ],
+        reporting_subdir_name="bioseq_cache_integration",
         uses_private_cluster=True,
     ),
     "cache-bench": ModeDefinition(
@@ -1192,8 +1203,19 @@ MODES: Dict[str, ModeDefinition] = {
         preset_family="cache",
         binary_subdir="bioseq_caching",
         targets=["postgresql_bioseq_cache", "bioseq_cache_bench"],
-        commands=[],
-        post_build_targets=("run_bioseq_cache_bench",),
+        commands=[
+            [
+                "bioseq_cache_bench",
+                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--cache-control", "{cache_control}",
+                "--cache-install-sql", "{cache_install_sql}",
+                "--cache-dso", "{cache_dso}",
+                "--scenario", "standalone",
+                "--samples", "7",
+                "--warmup-samples", "1",
+                "--report", "{report}",
+            ],
+        ],
         reporting_subdir_name="bioseq_cache_bench",
         is_bench_mode=True,
         uses_private_cluster=True,
@@ -1207,9 +1229,28 @@ MODES: Dict[str, ModeDefinition] = {
         is_verb_plular=True,
         preset_family="cache-bioseq",
         binary_subdir="bioseq_caching",
-        targets=["postgresql_bioseq_cache", "postgresql_bioseq"],
-        commands=[],
-        post_build_targets=("test_bioseq_cache_bioseq_private",),
+        targets=[
+            "postgresql_bioseq_cache",
+            "postgresql_bioseq_cache_test_support",
+            "postgresql_bioseq",
+            "bioseq_cache_bioseq_integration_tests",
+        ],
+        commands=[
+            [
+                "bioseq_cache_bioseq_integration_tests",
+                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--cache-control", "{cache_test_control}",
+                "--cache-install-sql", "{cache_test_install_sql}",
+                "--cache-dso", "{cache_test_dso}",
+                "--bioseq-control", "{bioseq_control}",
+                "--bioseq-install-sql", "{bioseq_install_sql}",
+                "--bioseq-dso", "{bioseq_dso}",
+                "--report", "{report}",
+                "--case-timeout-seconds", "6300",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+        ],
+        reporting_subdir_name="bioseq_cache_bioseq_integration",
         uses_private_cluster=True,
     ),
     "cache-bioseq-bench": ModeDefinition(
@@ -1221,9 +1262,27 @@ MODES: Dict[str, ModeDefinition] = {
         is_verb_plular=False,
         preset_family="cache-bioseq",
         binary_subdir="bioseq_caching",
-        targets=["postgresql_bioseq_cache", "postgresql_bioseq"],
-        commands=[],
-        post_build_targets=("run_bioseq_cache_bioseq_bench",),
+        targets=[
+            "postgresql_bioseq_cache",
+            "postgresql_bioseq",
+            "bioseq_cache_bioseq_bench",
+        ],
+        commands=[
+            [
+                "bioseq_cache_bioseq_bench",
+                "--postgres-bin-dir", "{postgres_bin_dir}",
+                "--cache-control", "{cache_control}",
+                "--cache-install-sql", "{cache_install_sql}",
+                "--cache-dso", "{cache_dso}",
+                "--bioseq-control", "{bioseq_control}",
+                "--bioseq-install-sql", "{bioseq_install_sql}",
+                "--bioseq-dso", "{bioseq_dso}",
+                "--scenario", "bioseq-2gbp",
+                "--samples", "3",
+                "--warmup-samples", "1",
+                "--report", "{report}",
+            ],
+        ],
         reporting_subdir_name="bioseq_cache_bioseq_bench",
         is_bench_mode=True,
         uses_private_cluster=True,
@@ -1241,7 +1300,8 @@ REMOTE_RUN_BUILD_MODES: tuple[str, ...] = tuple(sorted(
     VALID_MODES - REMOTE_RUN_REJECTED_MODES))
 BENCH_CLI_MODES: tuple[str, ...] = tuple(sorted(
     mode for mode, details in MODES.items()
-    if details.is_bench_mode and details.commands
+    if (details.is_bench_mode and details.commands
+        and not mode.startswith("cache-"))
 ))
 
 
@@ -1284,7 +1344,11 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
         shared_target_names=("bioseq_cache_core",)),
     "bioseq_cache_bench": InspectTargetDefinition(
         mode="cache-bench", artifact_names=("bioseq_cache_bench",),
-        shared_target_names=("bioseq_cache_core",)),
+        shared_target_names=("bioseq_cache_benchmark_support",)),
+    "bioseq_cache_bioseq_bench": InspectTargetDefinition(
+        mode="cache-bioseq-bench",
+        artifact_names=("bioseq_cache_bioseq_bench",),
+        shared_target_names=("bioseq_cache_benchmark_support",)),
 }
 
 
@@ -1880,7 +1944,7 @@ def _postgresql_e2e_restart_shell_command(active_build_dir: Path,
 # --------------------------- build worker ----------------------------------
 
 def _report_index(filename: str) -> int:
-    """Return the ordinal of an exact benchmark report filename.
+    """Return the ordinal of an exact native run-report filename.
 
     The benchmark framework writes ``report_<N>.json``.  Keep accepting the
     older MCP-owned ``report_build_<N>.json`` spelling so an older benchmark
@@ -1908,8 +1972,7 @@ def _report_paths(reporting_dir: Path) -> set[Path]:
 
 
 def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
-    """Return the highest-numbered report file produced after `snapshot_paths`
-    was taken (i.e. one not in the snapshot)."""
+    """Return the highest-numbered mode report created after the snapshot."""
     mode_details = MODES[mode]
     if not mode_details.reporting_dir.exists():
         return None
@@ -1926,6 +1989,61 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
             not p.name.startswith("report_build_"),
         ),
     )
+
+
+_CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
+    "postgres_bin_dir",
+    "cache_control",
+    "cache_install_sql",
+    "cache_dso",
+    "cache_test_control",
+    "cache_test_install_sql",
+    "cache_test_dso",
+    "bioseq_control",
+    "bioseq_install_sql",
+    "bioseq_dso",
+})
+
+
+def _cache_native_artifacts(active_bin_dir: Path) -> dict[str, str]:
+    """Load CMake-generated extension paths for native cache runners."""
+    manifest = active_bin_dir / "cache_native_artifacts.json"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read native cache artifact manifest {manifest}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"native cache artifact manifest is not an object: {manifest}")
+    unknown = set(payload) - _CACHE_NATIVE_ARTIFACT_KEYS
+    missing = _CACHE_NATIVE_ARTIFACT_KEYS - set(payload)
+    if unknown or missing:
+        raise RuntimeError(
+            "native cache artifact manifest keys differ from the MCP "
+            f"contract: missing={sorted(missing)} unknown={sorted(unknown)}")
+    values: dict[str, str] = {}
+    for key, value in payload.items():
+        if not isinstance(value, str):
+            raise RuntimeError(
+                f"native cache artifact {key!r} is not a string")
+        if value and not Path(value).is_absolute():
+            raise RuntimeError(
+                f"native cache artifact {key!r} is not absolute: {value}")
+        values[key] = value
+    return values
+
+
+def _next_report_path(reporting_dir: Path) -> Path:
+    """Reserve the next deterministic report name without creating the file."""
+    reporting_dir.mkdir(parents=True, exist_ok=True)
+    ordinals = [
+        _report_index(path.name)
+        for path in _report_paths(reporting_dir)
+    ]
+    next_ordinal = max(ordinals, default=-1) + 1
+    return reporting_dir / f"report_{next_ordinal}.json"
 
 
 def _sql_guardrail_workflow_manifest(
@@ -3964,11 +4082,58 @@ def _run_sql_guardrail_promotion(
 
 def _run_command_argv(mode: str, active_bin_dir: Path,
                       command: List[str], bench_flags=None,
-                      test_flags=None) -> List[str]:
+                      test_flags=None,
+                      report_path: Path | None = None) -> List[str]:
     """Resolve one configured command and apply its mode-scoped arguments."""
     if not command:
         raise ValueError("configured run command may not be empty")
-    full_command = [str(active_bin_dir / command[0]), *command[1:]]
+    if Path(command[0]).suffix.lower() in {".py", ".pl", ".pm"}:
+        raise ValueError(
+            f"cache/build mode runner must be native: {command[0]}")
+
+    artifact_values: dict[str, str] | None = None
+    resolved_arguments: list[str] = []
+    for argument in command[1:]:
+        if argument == "{report}":
+            if report_path is None:
+                raise ValueError(
+                    f"mode {mode!r} requires a generated report path")
+            resolved_arguments.append(str(report_path))
+            continue
+        if argument.startswith("{") and argument.endswith("}"):
+            key = argument[1:-1]
+            if key not in _CACHE_NATIVE_ARTIFACT_KEYS:
+                raise ValueError(
+                    f"unknown native cache command placeholder: {argument}")
+            if artifact_values is None:
+                artifact_values = _cache_native_artifacts(active_bin_dir)
+            value = artifact_values[key]
+            if not value:
+                raise RuntimeError(
+                    f"native cache artifact {key!r} is unavailable in "
+                    f"the {mode!r} build tree")
+            artifact_path = Path(value)
+            usable = (
+                artifact_path.is_dir()
+                if key == "postgres_bin_dir"
+                else artifact_path.is_file()
+            )
+            if not usable:
+                expected_kind = (
+                    "directory" if key == "postgres_bin_dir"
+                    else "file"
+                )
+                raise RuntimeError(
+                    f"native cache artifact {key!r} is not a usable "
+                    f"{expected_kind}: {artifact_path}")
+            resolved_arguments.append(value)
+            continue
+        resolved_arguments.append(argument)
+
+    full_command = [
+        str(active_bin_dir / command[0]),
+        *resolved_arguments,
+    ]
     if MODES[mode].is_bench_mode and bench_flags:
         full_command += list(bench_flags)
     elif mode == "unit+integration" and test_flags:
@@ -4653,7 +4818,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
             "private-cluster mode reached shared extension install routing")
 
     pre_reports: set[Path] = set()
-    if mode_details.is_bench_mode and mode_details.reporting_dir.exists():
+    if (mode_details.reporting_subdir_name
+            and mode_details.reporting_dir.exists()):
         pre_reports = _report_paths(mode_details.reporting_dir)
 
     try:
@@ -5155,14 +5321,23 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 # MODES.commands store binary BASENAMES; resolve against the
                 # active build's bin dir (DOC0270). Args after the first slot
                 # are passed through verbatim.
+                command_report_path = (
+                    _next_report_path(mode_details.reporting_dir)
+                    if "{report}" in cmd else None
+                )
                 full_cmd = _run_command_argv(
                     mode, active_bin_dir, cmd,
-                    bench_flags=bench_flags, test_flags=test_flags)
+                    bench_flags=bench_flags, test_flags=test_flags,
+                    report_path=command_report_path)
                 rc = _stream_subprocess(
                     full_cmd, log_handle, deadline,
                     cwd=active_build_dir, env=run_env,
                 )
                 if rc != 0:
+                    if (command_report_path is not None
+                            and command_report_path.is_file()):
+                        _update_entry(
+                            mode, report_file=str(command_report_path))
                     # Bench exits non-zero when regression rules are violated
                     # (exit code 2) — we still want to surface the report path,
                     # so this is a "completed with violations" outcome rather
@@ -5173,7 +5348,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
                             "treating as completed-with-violations")
                         break
                     raise RuntimeError(f"run failed with exit code {rc}: {' '.join(cmd)}")
-            report_path = _newest_report(pre_reports, mode) if mode_details.is_bench_mode else None
+            report_path = (
+                _newest_report(pre_reports, mode)
+                if mode_details.reporting_subdir_name else None
+            )
+            if (mode_details.reporting_subdir_name
+                    and report_path is None):
+                raise RuntimeError(
+                    f"{mode} completed without publishing its required "
+                    "native JSON report")
             completed_at = time.time()
             _update_entry(
                 mode,

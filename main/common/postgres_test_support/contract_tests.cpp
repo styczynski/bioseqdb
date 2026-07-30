@@ -4,6 +4,7 @@
 #include <chrono>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 import bioseq.test.postgres;
 
@@ -14,7 +15,20 @@ static_assert(requires(bioseq::libpq::connection& connection) {
     connection.exec(
         "BEGIN", 1s, bioseq::libpq::transaction_policy::allow_open);
     connection.current_transaction_state();
+    connection.exec_single_row_observed("SELECT 1", 1s);
 });
+static_assert(std::is_same_v<
+    decltype(std::declval<bioseq::libpq::connection&>()
+                 .exec_single_row_observed("SELECT 1", 1s)),
+    bioseq::libpq::single_row_observed_result>);
+
+TEST_CASE("libpq first-row observation has explicit empty-result semantics",
+          "[postgres-test-support][unit][libpq][first-row]") {
+    const bioseq::libpq::single_row_observed_result observation;
+    CHECK_FALSE(observation.time_to_first_row.has_value());
+    CHECK(observation.elapsed == 0ns);
+    CHECK(observation.rows.rows() == 0);
+}
 
 TEST_CASE("postgres test support SHA-256 matches the standard vector",
           "[postgres-test-support][unit]") {

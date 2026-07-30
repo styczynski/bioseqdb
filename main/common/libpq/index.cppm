@@ -28,7 +28,8 @@ export module bioseq.libpq.client;
 // Every connection and every command runs through the same nonblocking
 // PQconnectStartParams/PQconnectPoll and PQsendQuery/PQflush/PQconsumeInput/
 // PQgetResult state machine (§13.5): a fixed connection deadline, chunked row
-// retrieval (PQsetChunkedRowsMode), bounded PQcancel + drain on a client
+// retrieval (PQsetChunkedRowsMode) for ordinary calls, an opt-in single-row
+// observer for true first-tuple timing, bounded PQcancel + drain on a client
 // deadline or a caller-imposed result limit, rejection of the COPY sub-protocols
 // no tutorial may enter, and a PQTRANS_IDLE requirement by default. Explicit
 // PostgreSQL isolation fixtures may select allow_open so transactions span
@@ -91,7 +92,7 @@ struct notice {
     std::string message;
 };
 
-/// @brief Caller-imposed retention bounds applied while chunked rows accumulate.
+/// @brief Caller-imposed retention bounds applied while streamed rows accumulate.
 ///
 /// A zero field means "unlimited". The state machine retains rows up to and
 /// including the first element that crosses a bound, then cancels the running
@@ -170,6 +171,18 @@ private:
     [[nodiscard]] const column_meta& at_column(int column) const {
         return columns_[static_cast<std::size_t>(column)];
     }
+};
+
+/// @brief Materialised result plus wire-observed first-row and completion time.
+///
+/// `time_to_first_row` is empty for a successful command or empty tuple result.
+/// Tuple queries use libpq single-row mode, and the timestamp is captured when
+/// the first `PGRES_SINGLE_TUPLE` reaches the client state machine. `elapsed`
+/// covers send, flush, every row, and the terminal result.
+struct single_row_observed_result {
+    result rows;
+    std::optional<std::chrono::nanoseconds> time_to_first_row;
+    std::chrono::nanoseconds elapsed{};
 };
 
 /// @brief Every result set a (possibly multi-statement) phase produced, in order.
@@ -260,6 +273,23 @@ public:
                                       const execution_limits& limits,
                                       transaction_policy policy) {
         return run_statement(sql, deadline, limits, policy);
+    }
+
+    /// @brief Executes one bounded query and observes its first wire-level row.
+    ///
+    /// The returned rows have the same owned representation and transaction
+    /// policy as `exec`; only libpq's retrieval mode changes from 32-row chunks
+    /// to `PQsetSingleRowMode`. Default `exec` behavior remains unchanged.
+    [[nodiscard]] single_row_observed_result exec_single_row_observed(
+        std::string_view sql,
+        std::chrono::milliseconds deadline,
+        execution_limits limits = {},
+        transaction_policy policy =
+            transaction_policy::require_idle) {
+        single_row_observed_result observed;
+        observed.rows = run_statement(
+            sql, deadline, limits, policy, &observed);
+        return observed;
     }
 
     /// @brief Runs a (possibly multi-statement) phase capturing every result set
@@ -642,8 +672,11 @@ private:
     [[nodiscard]] result run_statement(std::string_view sql,
                                        clock::duration budget,
                                        const execution_limits& limits,
-                                       transaction_policy policy) {
-        multi_result outcome = run_statement_multi(sql, budget, limits, policy);
+                                       transaction_policy policy,
+                                       single_row_observed_result*
+                                           observation = nullptr) {
+        multi_result outcome = run_statement_multi(
+            sql, budget, limits, policy, observation);
         if (outcome.error) {
             throw *outcome.error;
         }
@@ -651,8 +684,9 @@ private:
     }
 
     // The single §13.5 send/flush/consume state machine. Sends `sql`, enables
-    // 32-row chunked retrieval, then polls the socket under `budget` while
-    // consuming results — committing chunked rows only on their zero-row
+    // ordinary 32-row chunks or opt-in single-row observation, then polls the
+    // socket under `budget` while consuming results — committing streamed rows
+    // only on their zero-row
     // PGRES_TUPLES_OK terminator, discarding a failed statement's provisional
     // rows, rejecting COPY, bounding accumulation against `limits`, and requiring
     // a PQTRANS_IDLE connection afterward. Every fully completed result set is
@@ -663,17 +697,32 @@ private:
     [[nodiscard]] multi_result run_statement_multi(std::string_view sql,
                                                    clock::duration budget,
                                                    const execution_limits& limits,
-                                                   transaction_policy policy) {
-        const auto deadline = clock::now() + budget;
+                                                   transaction_policy policy,
+                                                   single_row_observed_result*
+                                                       observation = nullptr) {
+        const auto started = clock::now();
+        const auto deadline = started + budget;
+        if (observation != nullptr) {
+            observation->time_to_first_row.reset();
+            observation->elapsed = std::chrono::nanoseconds::zero();
+        }
         const std::string owned(sql);
         if (PQsendQuery(handle_, owned.c_str()) == 0) {
             throw query_error("failed to send command: " + current_error_message(),
                               std::string{});
         }
-        if (PQsetChunkedRowsMode(handle_, 32) == 0) {
+        const int row_mode_enabled =
+            observation != nullptr
+                ? PQsetSingleRowMode(handle_)
+                : PQsetChunkedRowsMode(handle_, 32);
+        if (row_mode_enabled == 0) {
             cancel_bounded(std::chrono::seconds(2));
             drain_results_bounded(std::chrono::seconds(2));
-            throw query_error("failed to enable chunked row retrieval", std::string{});
+            throw query_error(
+                observation != nullptr
+                    ? "failed to enable single-row retrieval"
+                    : "failed to enable chunked row retrieval",
+                std::string{});
         }
         for (;;) {
             const int flushed = PQflush(handle_);
@@ -726,10 +775,24 @@ private:
             }
             const ExecStatusType st = PQresultStatus(res);
             bool capped = false;
-            if (st == PGRES_TUPLES_CHUNK) {
+            if (st == PGRES_SINGLE_TUPLE || st == PGRES_TUPLES_CHUNK) {
+                if (observation != nullptr
+                    && !observation->time_to_first_row
+                    && PQntuples(res) > 0) {
+                    observation->time_to_first_row =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            clock::now() - started);
+                }
                 absorb(provisional, res, /*copy_rows=*/true, limits, total_bytes, limited);
                 have_chunk_columns = true;
             } else if (st == PGRES_TUPLES_OK) {
+                if (observation != nullptr
+                    && !observation->time_to_first_row
+                    && PQntuples(res) > 0) {
+                    observation->time_to_first_row =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            clock::now() - started);
+                }
                 result current;
                 current.status_ = PGRES_TUPLES_OK;
                 if (PQntuples(res) == 0 && have_chunk_columns) {
@@ -787,6 +850,11 @@ private:
                 }
                 cancel_bounded(std::chrono::seconds(2));
                 drain_results_bounded(std::chrono::seconds(2));
+                if (observation != nullptr) {
+                    observation->elapsed =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            clock::now() - started);
+                }
                 return outcome;
             }
         }
@@ -806,6 +874,11 @@ private:
         if (error) {
             outcome.error = query_error(error->primary, error->sqlstate, error->detail,
                                         error->hint, error->severity);
+        }
+        if (observation != nullptr) {
+            observation->elapsed =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    clock::now() - started);
         }
         return outcome;
     }
