@@ -307,18 +307,36 @@ struct FileAdmissionPolicy {
             filesystem_capacity / 10u);
     }
 
-    /** Validate one prospective file reservation with checked arithmetic. */
+    /**
+     * Validate one prospective file reservation against an explicit free
+     * floor.  Callers may lower the floor only for isolated test policy; actual
+     * availability and the ten-percent capacity ceiling always remain active.
+     */
+    [[nodiscard]] static constexpr bool can_reserve_with_free_floor(
+        std::uint64_t reserved_file_bytes,
+        std::uint64_t requested_bytes,
+        std::uint64_t filesystem_capacity,
+        std::uint64_t filesystem_available,
+        std::uint64_t free_floor) noexcept {
+        const auto desired = checked_add(reserved_file_bytes, requested_bytes);
+        return desired.has_value()
+            && *desired <= ceiling_bytes(filesystem_capacity)
+            && filesystem_available >= requested_bytes
+            && filesystem_available - requested_bytes >= free_floor;
+    }
+
+    /** Validate one production file reservation with checked arithmetic. */
     [[nodiscard]] static constexpr bool can_reserve(
         std::uint64_t reserved_file_bytes,
         std::uint64_t requested_bytes,
         std::uint64_t filesystem_capacity,
         std::uint64_t filesystem_available) noexcept {
-        const auto desired = checked_add(reserved_file_bytes, requested_bytes);
-        return desired.has_value()
-            && *desired <= ceiling_bytes(filesystem_capacity)
-            && filesystem_available >= requested_bytes
-            && filesystem_available - requested_bytes
-                >= free_floor_bytes(filesystem_capacity);
+        return can_reserve_with_free_floor(
+            reserved_file_bytes,
+            requested_bytes,
+            filesystem_capacity,
+            filesystem_available,
+            free_floor_bytes(filesystem_capacity));
     }
 };
 

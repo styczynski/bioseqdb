@@ -447,7 +447,13 @@ struct StorageBootstrapAttachTwiceSnapshot {
     std::uint64_t attaches_after = 0;
 };
 
-/** Force later block reservations to bypass DSA in testing builds only. */
+/**
+ * Force later block reservations onto the file tier in testing builds only.
+ *
+ * The override retains actual-space and configured/capacity ceiling checks,
+ * but waives the production free-space floor so file-tier tests do not depend
+ * on unrelated host disk occupancy.
+ */
 [[nodiscard]] bool set_test_force_file_tier(bool enabled) noexcept;
 
 /** Snapshot backing tiers without exposing paths or mutable ledger records. */
@@ -3428,8 +3434,15 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
         : policy_ceiling;
     const std::uint64_t observed = pg_atomic_read_u64(
         &file_reserved_bytes());
-    const std::uint64_t free_floor = FileAdmissionPolicy::free_floor_bytes(
-        filesystem_bytes);
+    /*
+     * The explicit test-only override must exercise the file path even when
+     * unrelated host occupancy has already crossed the production reserve
+     * floor.  A zero floor still leaves the actual available bytes, configured
+     * file ceiling, and ten-percent filesystem-capacity ceiling below intact.
+     */
+    const std::uint64_t free_floor = force_file_tier
+        ? 0
+        : FileAdmissionPolicy::free_floor_bytes(filesystem_bytes);
     const std::uint64_t free_headroom = filesystem_available > free_floor
         ? filesystem_available - free_floor
         : 0;
@@ -3448,11 +3461,14 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
     };
     BasicCacheAdmission file_admission{file_counter, file_budget};
     auto file_permit = file_admission.try_reserve(bytes.size());
-    if (!FileAdmissionPolicy::can_reserve(
+    const bool file_policy_allows_reservation =
+        FileAdmissionPolicy::can_reserve_with_free_floor(
             observed,
             bytes.size(),
             filesystem_bytes,
-            filesystem_available)
+            filesystem_available,
+            free_floor);
+    if (!file_policy_allows_reservation
         || !file_permit.has_value()) {
         clear_unreserved_ledger_slot(ledger_slot, sequence, owner);
         result.error = StorageError::FileTierFull;

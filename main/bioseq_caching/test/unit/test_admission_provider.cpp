@@ -268,6 +268,22 @@ TEST_CASE("admission reports pressure, overflow, and file floors") {
         0, 1ULL << 30, capacity, 25ULL << 30));
     REQUIRE_FALSE(FileAdmissionPolicy::can_reserve(
         0, 6ULL << 30, capacity, 25ULL << 30));
+    /*
+     * Below the production free-space floor, ordinary admission rejects even
+     * a small request although the request fits both actual availability and
+     * the ten-percent capacity ceiling.  Test-only forced-file storage may
+     * waive only that floor; these two limits remain its safety contract.
+     */
+    constexpr std::uint64_t below_floor_available = 15ULL << 30;
+    constexpr std::uint64_t small_request = 1ULL << 20;
+    REQUIRE_FALSE(FileAdmissionPolicy::can_reserve(
+        0, small_request, capacity, below_floor_available));
+    REQUIRE(FileAdmissionPolicy::can_reserve_with_free_floor(
+        0, small_request, capacity, below_floor_available, 0));
+    REQUIRE_FALSE(FileAdmissionPolicy::can_reserve_with_free_floor(
+        0, 16ULL << 30, capacity, below_floor_available, 0));
+    REQUIRE_FALSE(FileAdmissionPolicy::can_reserve_with_free_floor(
+        0, 21ULL << 30, capacity, 100ULL << 30, 0));
 }
 
 TEST_CASE("provider schema maps require exact SQL and semantic meaning") {
