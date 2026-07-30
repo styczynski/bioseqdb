@@ -817,7 +817,9 @@ manifest_statement_binding(
         }
     }
     const std::vector<std::string> retired_c_symbols =
-        safety::doc0388_retired_c_symbols();
+        graph.extension_name == "bioseq"
+        ? safety::doc0388_retired_c_symbols()
+        : std::vector<std::string>{};
     const std::vector<rendered_entity_handle_module>
         entity_handle_modules = render_entity_handle_modules(graph);
     std::size_t entity_handle_count = 0;

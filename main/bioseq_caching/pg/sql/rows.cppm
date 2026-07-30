@@ -89,6 +89,11 @@ struct cache_entry_row final {
     std::optional<bioseq::pg_utils::sql_jsonb> dependencies;
 };
 
+static_assert(std::is_aggregate_v<stats_row>);
+static_assert(std::is_aggregate_v<cache_entry_row>);
+
+#if defined(BIOSEQ_CACHE_TESTING)
+
 /** Storage-ledger counters exposed only by the test-support profile. */
 struct storage_tier_stats_row final {
     bool force_file_tier;
@@ -205,8 +210,6 @@ struct coverage_bucket_state_row final {
     bioseq::pg_utils::sql_int64_array generation_ids;
 };
 
-static_assert(std::is_aggregate_v<stats_row>);
-static_assert(std::is_aggregate_v<cache_entry_row>);
 static_assert(std::is_aggregate_v<storage_tier_stats_row>);
 static_assert(std::is_aggregate_v<entry_state_row>);
 static_assert(std::is_aggregate_v<runtime_counters_row>);
@@ -216,5 +219,7 @@ static_assert(std::is_aggregate_v<provider_callback_stats_row>);
 static_assert(std::is_aggregate_v<plan_build_stats_row>);
 static_assert(std::is_aggregate_v<injected_coverage_row>);
 static_assert(std::is_aggregate_v<coverage_bucket_state_row>);
+
+#endif  // defined(BIOSEQ_CACHE_TESTING)
 
 }  // namespace bioseq::cache::pg::sql_rows

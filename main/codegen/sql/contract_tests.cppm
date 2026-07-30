@@ -229,6 +229,16 @@ cache_probe {
                 render_physical_ledger(sibling_context_graph));
         },
         "cannot publish an empty physical ledger");
+    const std::string sibling_context_manifest =
+        render_graph_manifest(
+            sibling_context_graph, sibling_context_sql, {});
+    require(
+        sibling_context_manifest.contains(
+            "\"retired_c_symbol_count\": 0")
+            && sibling_context_manifest.contains(
+                "\"retired_c_symbols\": []"),
+        "a sibling extension manifest does not inherit the main "
+        "extension's retired fmgr symbol ledger");
     const rendered_sql_artifact derived_column_sql =
         render_sql_graph(derived_column_graph);
     const rendered_sql_artifact relocated_derived_column_sql =
