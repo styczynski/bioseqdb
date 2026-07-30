@@ -635,6 +635,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 
 include(AddPostgreSQLExtension)
+include(BioseqSqlAnnotationModel)
 
 # add_definitions(-DPOSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 
@@ -660,7 +661,7 @@ endif()
 # another ExternalProject.
 include(BioseqCodegen)
 set(_bioseq_codegen_components)
-if(BIOSEQ_BUILD_CORE)
+if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
   list(APPEND _bioseq_codegen_components sql)
 endif()
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
@@ -680,6 +681,7 @@ endif()
 # Include extensions and their shared code
 #add_subdirectory(include)
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
+  bioseq_ensure_sql_annotation_model()
   add_subdirectory(common/cache_provider_api)
   add_subdirectory(common/memory_budget)
   add_subdirectory(common/pg_support)
@@ -727,60 +729,19 @@ if(BIOSEQ_BUILD_PAPERS)
 endif()
 #add_subdirectory(h3_postgis)
 
-# The provider matrix belongs to the combined build tree. Both runners own a
-# private PostgreSQL cluster and consume build-tree DSOs directly; neither
-# target installs into or restarts the shared development server.
+# The combined native Catch2 runner is declared only after both independently
+# installable extension DSOs exist. It owns a private PostgreSQL cluster and
+# stages the exact control, generated SQL, and DSO target artifacts.
 if(BIOSEQ_BUILD_CORE AND BIOSEQ_BUILD_CACHE
    AND BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  find_program(BIOSEQ_PROVIDER_PG_REGRESS pg_regress REQUIRED
-    HINTS "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/regress"
-          "${PostgreSQL_BIN_DIR}")
-  find_program(BIOSEQ_PROVIDER_PG_ISOLATION_REGRESS
-    pg_isolation_regress REQUIRED
-    HINTS "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/isolation"
-          "${PostgreSQL_BIN_DIR}")
-  find_program(BIOSEQ_PROVIDER_PROVE prove REQUIRED)
-  get_target_property(BIOSEQ_TEST_BOOTSTRAP_SQL
-    postgresql_bioseq BIOSEQ_TEST_BOOTSTRAP_SQL)
-  if(NOT BIOSEQ_TEST_BOOTSTRAP_SQL
-     OR BIOSEQ_TEST_BOOTSTRAP_SQL MATCHES "-NOTFOUND$")
+  if(NOT TARGET postgresql_bioseq_cache_test_support
+     OR NOT TARGET postgresql_bioseq)
     message(FATAL_ERROR
-      "Combined cache/Bioseq tests require postgresql_bioseq's "
-      "BIOSEQ_TEST_BOOTSTRAP_SQL target property")
+      "Combined cache/Bioseq tests require both extension artifact targets")
   endif()
-
-  add_custom_target(test_bioseq_cache_bioseq_private
-    COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/run_private_provider_tests.py"
-      --kind bioseq-provider
-      --bindir "${PostgreSQL_BIN_DIR}"
-      --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
-      --bioseq-dso "$<TARGET_FILE:postgresql_bioseq>"
-      --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_caching/bioseq_cache_test_bootstrap.sql"
-      --bioseq-bootstrap "${BIOSEQ_TEST_BOOTSTRAP_SQL}"
-      --pg-regress "${BIOSEQ_PROVIDER_PG_REGRESS}"
-      --pg-isolation-regress "${BIOSEQ_PROVIDER_PG_ISOLATION_REGRESS}"
-      --prove "${BIOSEQ_PROVIDER_PROVE}"
-      --inputdir "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/bioseq"
-      --output-root "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_bioseq"
-    DEPENDS postgresql_bioseq_cache postgresql_bioseq
-    USES_TERMINAL)
-
-  add_custom_target(run_bioseq_cache_bioseq_bench
-    COMMAND "${CMAKE_COMMAND}" -E env
-      "BIOSEQ_CACHE_DSO=$<TARGET_FILE:postgresql_bioseq_cache>"
-      "BIOSEQ_CACHE_LIBDIR=$<TARGET_FILE_DIR:postgresql_bioseq_cache>"
-      "BIOSEQ_DSO=$<TARGET_FILE:postgresql_bioseq>"
-      "BIOSEQ_LIBDIR=$<TARGET_FILE_DIR:postgresql_bioseq>"
-      "BIOSEQ_CACHE_BOOTSTRAP_SQL=${CMAKE_CURRENT_BINARY_DIR}/bioseq_caching/bioseq_cache_test_bootstrap.sql"
-      "BIOSEQ_BOOTSTRAP_SQL=${BIOSEQ_TEST_BOOTSTRAP_SQL}"
-      "BIOSEQ_CACHE_REPORT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/reporting/bioseq_cache_bioseq_bench"
-      "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/bench/run_private_cluster_bench.py"
-      --provider
-    DEPENDS postgresql_bioseq_cache postgresql_bioseq
-    USES_TERMINAL)
+  add_subdirectory(
+    "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/bioseq"
+    "${CMAKE_CURRENT_BINARY_DIR}/bioseq_caching/test/bioseq")
 endif()
 
 # Add target that bundles for pgxn

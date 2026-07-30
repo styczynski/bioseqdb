@@ -1441,26 +1441,6 @@ include(
 include(
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/RuntimeEvidence.cmake")
 
-# One compiler-native BMI of the authored annotation/value model is shared by
-# every Clang-built extension owner. The isolated GCC host generator builds
-# its own BMI from the same authored .cppm files.
-set(BIOSEQ_SQL_ANNOTATION_MODEL_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/entities.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/migration.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/options.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/validation.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/index.cppm")
-add_library(bioseq_sql_annotation_model STATIC)
-target_sources(bioseq_sql_annotation_model
-  PUBLIC FILE_SET CXX_MODULES
-    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../codegen"
-    FILES ${BIOSEQ_SQL_ANNOTATION_MODEL_MODULES})
-set_target_properties(bioseq_sql_annotation_model PROPERTIES
-  CXX_STANDARD 26
-  CXX_STANDARD_REQUIRED ON
-  CXX_EXTENSIONS ON
-  CXX_MODULE_STD ON
-  POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(bioseq_modules_nopg
   PUBLIC bioseq_sql_annotation_model)
 

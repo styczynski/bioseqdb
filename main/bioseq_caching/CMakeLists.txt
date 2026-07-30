@@ -7,37 +7,6 @@ add_subdirectory(core)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/BioseqSqlCodegen.cmake")
 
-# Cache-only builds still require the shared SQL generator. The top-level
-# project already creates it when the Bioseq extension is enabled.
-if(NOT TARGET bioseq_codegen)
-  bioseq_add_codegen(
-    TARGET bioseq_codegen
-    PROJECT_TARGET bioseq_codegen_project
-    BINARY_DIR "${CMAKE_BINARY_DIR}/codegen"
-    COMPONENTS sql)
-endif()
-
-# The cache is configured before main/bioseq, so it owns a small, cache-local
-# BMI provider for the authored SQL annotation model.
-set(BIOSEQ_CACHE_SQL_ANNOTATION_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/entities.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/migration.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/options.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/validation.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/index.cppm")
-add_library(bioseq_cache_sql_annotation_model STATIC)
-target_sources(bioseq_cache_sql_annotation_model
-  PUBLIC FILE_SET CXX_MODULES
-    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../codegen"
-    FILES ${BIOSEQ_CACHE_SQL_ANNOTATION_MODULES})
-set_target_properties(bioseq_cache_sql_annotation_model PROPERTIES
-  CXX_STANDARD 26
-  CXX_STANDARD_REQUIRED ON
-  CXX_EXTENSIONS ON
-  CXX_MODULE_STD ON
-  POSITION_INDEPENDENT_CODE ON
-  INTERPROCEDURAL_OPTIMIZATION FALSE)
-
 set(BIOSEQ_CACHE_PRODUCTION_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/pg/provider_registry.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/shared_registry.cppm"
@@ -46,7 +15,6 @@ set(BIOSEQ_CACHE_PRODUCTION_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/reusable_adapter.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/reusable_planning.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/index.cppm"
@@ -158,7 +126,7 @@ AddCommonTargetX(
     bioseq_cache_provider_api
     bioseq_pg_support
     bioseq_pg_sql_boundary
-    bioseq_cache_sql_annotation_model
+    bioseq_sql_annotation_model
   LINKS PostgreSQL::ServerHeaders bioseq_memory_budget
   GENERATED_INSTALL
     "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_GENERATED_INSTALL}"
@@ -181,12 +149,6 @@ target_compile_options(postgresql_bioseq_cache PRIVATE
 add_dependencies(
   postgresql_bioseq_cache
   "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_TARGET}")
-set_target_properties(postgresql_bioseq_cache PROPERTIES
-  BIOSEQ_EXTENSION_DSO
-    "$<TARGET_FILE:postgresql_bioseq_cache>"
-  BIOSEQ_TEST_BOOTSTRAP_SQL
-    "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_GENERATED_INSTALL}")
-
 if(BIOSEQ_CACHE_TESTING)
   add_library(postgresql_bioseq_cache_test_support MODULE)
   target_sources(postgresql_bioseq_cache_test_support
@@ -203,7 +165,7 @@ if(BIOSEQ_CACHE_TESTING)
     bioseq_cache_provider_api
     bioseq_pg_support
     bioseq_pg_sql_boundary
-    bioseq_cache_sql_annotation_model
+    bioseq_sql_annotation_model
     bioseq_memory_budget)
   if(WIN32)
     target_link_libraries(
@@ -235,8 +197,6 @@ if(BIOSEQ_CACHE_TESTING)
       "$<TARGET_FILE:postgresql_bioseq_cache_test_support>"
     BIOSEQ_EXTENSION_TEST_INSTALL_SQL
       "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_INSTALL}"
-    BIOSEQ_TEST_BOOTSTRAP_SQL
-      "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_INSTALL}"
     BIOSEQ_EXTENSION_INSTALL_SQL
       "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_INSTALL}"
     BIOSEQ_EXTENSION_SQL_MANIFEST
@@ -264,8 +224,5 @@ if(BIOSEQ_CACHE_BUILD_TESTS)
   add_subdirectory(bench)
   if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/test/integration/CMakeLists.txt")
     add_subdirectory(test/integration)
-  endif()
-  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/test/bioseq/CMakeLists.txt")
-    add_subdirectory(test/bioseq)
   endif()
 endif()
