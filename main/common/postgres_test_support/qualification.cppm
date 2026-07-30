@@ -87,6 +87,11 @@ enum class cgroup_controller_version {
     v2,
 };
 
+/// @brief Strictly parses a bounded classic-locale finite real.
+/// @return nullopt for empty, overlong, partial, non-finite, or overflow input.
+[[nodiscard]] std::optional<double>
+parse_finite_real(std::string_view text);
+
 /// @brief Parses a cgroup memory limit; `max` is represented by nullopt.
 [[nodiscard]] std::optional<std::uint64_t>
 parse_cgroup_memory_limit(std::string_view text);
@@ -700,7 +705,8 @@ template <class Integer>
 }
 
 [[nodiscard]] std::optional<double> real(std::string_view text) {
-    if (text.empty()) {
+    constexpr std::size_t max_real_text_size = 128;
+    if (text.empty() || text.size() > max_real_text_size) {
         return std::nullopt;
     }
     double value{};
@@ -747,6 +753,11 @@ template <class Integer>
 }  // namespace bioseq::postgres_test::qualification_snapshot_detail
 
 export namespace bioseq::postgres_test {
+
+[[nodiscard]] std::optional<double>
+parse_finite_real(std::string_view text) {
+    return qualification_snapshot_detail::real(text);
+}
 
 /// @brief Publishes the complete current host-qualification registry.
 [[nodiscard]] inline bool

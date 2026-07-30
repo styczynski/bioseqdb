@@ -1,8 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
-#include <cerrno>
-#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -13,7 +11,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <system_error>
+#include <string_view>
 #include <type_traits>
 
 #include <unistd.h>
@@ -242,6 +240,32 @@ TEST_CASE("Linux memory-node scope is normalized and fail-closed",
         std::invalid_argument);
 }
 
+TEST_CASE("finite real parser is bounded and strict",
+          "[postgres-test-support][unit][qualification][parse]") {
+    const auto fractional = parse_finite_real("7.999999");
+    REQUIRE(fractional.has_value());
+    CHECK(*fractional == 7.999999);
+
+    const auto exponent = parse_finite_real("-1.25e+2");
+    REQUIRE(exponent.has_value());
+    CHECK(*exponent == -125.0);
+
+    const auto maximum =
+        parse_finite_real("1.7976931348623157e+308");
+    REQUIRE(maximum.has_value());
+    CHECK(*maximum == std::numeric_limits<double>::max());
+
+    CHECK_FALSE(parse_finite_real("").has_value());
+    CHECK_FALSE(parse_finite_real(" 7.5").has_value());
+    CHECK_FALSE(parse_finite_real("7.5 ").has_value());
+    CHECK_FALSE(parse_finite_real("7.5tail").has_value());
+    CHECK_FALSE(parse_finite_real("nan").has_value());
+    CHECK_FALSE(parse_finite_real("inf").has_value());
+    CHECK_FALSE(parse_finite_real("1e9999").has_value());
+    CHECK_FALSE(
+        parse_finite_real(std::string(129, '0')).has_value());
+}
+
 TEST_CASE("integration JSON preserves a failing fractional CPU capacity",
           "[postgres-test-support][unit][qualification][report]") {
     qualification_snapshot_tree tree;
@@ -267,16 +291,16 @@ TEST_CASE("integration JSON preserves a failing fractional CPU capacity",
         "\"effective_cpu_cores\":"};
     const std::size_t marker_position = json.find(marker);
     REQUIRE(marker_position != std::string::npos);
-    const char* const begin =
-        json.data() + marker_position + marker.size();
-    double serialized{};
-    const auto [end, error] = std::from_chars(
-        begin, json.data() + json.size(), serialized,
-        std::chars_format::general);
-    REQUIRE(error == std::errc{});
-    REQUIRE(end != begin);
-    CHECK(serialized == 7.999999);
-    CHECK(serialized < 8.0);
+    const std::size_t value_begin =
+        marker_position + marker.size();
+    const std::size_t value_end =
+        json.find_first_of(",}", value_begin);
+    REQUIRE(value_end != std::string::npos);
+    const auto serialized = parse_finite_real(std::string_view{
+        json.data() + value_begin, value_end - value_begin});
+    REQUIRE(serialized.has_value());
+    CHECK(*serialized == 7.999999);
+    CHECK(*serialized < 8.0);
 }
 
 TEST_CASE("qualification watchdog snapshot round-trips complete evidence",
