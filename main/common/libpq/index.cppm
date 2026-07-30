@@ -30,9 +30,31 @@ export module bioseq.libpq.client;
 // PQgetResult state machine (§13.5): a fixed connection deadline, chunked row
 // retrieval (PQsetChunkedRowsMode), bounded PQcancel + drain on a client
 // deadline or a caller-imposed result limit, rejection of the COPY sub-protocols
-// no tutorial may enter, and a PQTRANS_IDLE requirement after every phase. No
-// blocking PQconnectdb/PQexec shortcut exists anywhere in this module.
+// no tutorial may enter, and a PQTRANS_IDLE requirement by default. Explicit
+// PostgreSQL isolation fixtures may select allow_open so transactions span
+// independently bounded commands. No blocking PQconnectdb/PQexec shortcut
+// exists anywhere in this module.
 export namespace bioseq::libpq {
+
+/// @brief Controls whether a command must leave its connection transaction-idle.
+///
+/// Existing website and one-shot test callers use `require_idle`, which retains
+/// the historical fail-safe rollback after an accidental BEGIN. PostgreSQL
+/// isolation fixtures opt into `allow_open` so a transaction can intentionally
+/// span several independently bounded commands.
+enum class transaction_policy : std::uint8_t {
+    require_idle,
+    allow_open,
+};
+
+/// @brief Source-neutral view of libpq's current transaction state.
+enum class transaction_state : std::uint8_t {
+    idle,
+    active,
+    in_transaction,
+    failed_transaction,
+    unknown,
+};
 
 /// @brief A libpq error carrying the failing SQLSTATE and structured diagnostics.
 ///
@@ -168,13 +190,18 @@ struct multi_result {
 ///
 /// Constructed from an explicit Unix-socket conninfo so callers never build the
 /// string outside their owning policy module; connection uses
-/// PQconnectStartParams/PQconnectPoll with a fixed ten-second deadline and then
-/// PQsetnonblocking(1). Notices are captured into an owned buffer the caller
-/// drains after each command.
+/// PQconnectStartParams/PQconnectPoll with either the default ten-second or a
+/// caller-supplied deadline and then PQsetnonblocking(1). Notices are captured
+/// into an owned buffer the caller drains after each command.
 class connection {
 public:
     explicit connection(const std::string& conninfo)
         : handle_(nonblocking_connect(conninfo, std::chrono::seconds(10))) {
+        PQsetNoticeReceiver(handle_, &connection::receive_notice, this);
+    }
+    /// @brief Opens a connection under a caller-supplied positive deadline.
+    connection(const std::string& conninfo, std::chrono::milliseconds deadline)
+        : handle_(nonblocking_connect(conninfo, deadline)) {
         PQsetNoticeReceiver(handle_, &connection::receive_notice, this);
     }
     connection(connection&& other) noexcept
@@ -195,20 +222,44 @@ public:
 
     /// @brief Runs a command with the default ten-second client deadline.
     [[nodiscard]] result exec(std::string_view sql) {
-        return run_statement(sql, std::chrono::seconds(10), execution_limits{});
+        return run_statement(sql, std::chrono::seconds(10), execution_limits{},
+                             transaction_policy::require_idle);
     }
 
     /// @brief Runs a command with an explicit client deadline (e.g. the fence).
     [[nodiscard]] result exec(std::string_view sql,
                               std::chrono::milliseconds deadline) {
-        return run_statement(sql, deadline, execution_limits{});
+        return run_statement(sql, deadline, execution_limits{},
+                             transaction_policy::require_idle);
+    }
+
+    /// @brief Runs a command while applying the selected transaction-idle policy.
+    [[nodiscard]] result exec(std::string_view sql, transaction_policy policy) {
+        return run_statement(sql, std::chrono::seconds(10), execution_limits{},
+                             policy);
+    }
+
+    /// @brief Runs a bounded command that may intentionally leave a transaction open.
+    [[nodiscard]] result exec(std::string_view sql,
+                              std::chrono::milliseconds deadline,
+                              transaction_policy policy) {
+        return run_statement(sql, deadline, execution_limits{}, policy);
     }
 
     /// @brief Runs a command under both a client deadline and retention limits.
     [[nodiscard]] result exec_bounded(std::string_view sql,
                                       std::chrono::milliseconds deadline,
                                       const execution_limits& limits) {
-        return run_statement(sql, deadline, limits);
+        return run_statement(sql, deadline, limits,
+                             transaction_policy::require_idle);
+    }
+
+    /// @brief Runs a retention-bounded command under an explicit transaction policy.
+    [[nodiscard]] result exec_bounded(std::string_view sql,
+                                      std::chrono::milliseconds deadline,
+                                      const execution_limits& limits,
+                                      transaction_policy policy) {
+        return run_statement(sql, deadline, limits, policy);
     }
 
     /// @brief Runs a (possibly multi-statement) phase capturing every result set
@@ -221,7 +272,17 @@ public:
     [[nodiscard]] multi_result exec_bounded_multi(std::string_view sql,
                                                   std::chrono::milliseconds deadline,
                                                   const execution_limits& limits) {
-        return run_statement_multi(sql, deadline, limits);
+        return run_statement_multi(sql, deadline, limits,
+                                   transaction_policy::require_idle);
+    }
+
+    /// @brief Runs a multi-result command under an explicit transaction policy.
+    [[nodiscard]] multi_result exec_bounded_multi(
+        std::string_view sql,
+        std::chrono::milliseconds deadline,
+        const execution_limits& limits,
+        transaction_policy policy) {
+        return run_statement_multi(sql, deadline, limits, policy);
     }
 
     /// @brief Drains and clears notices captured since the last drain.
@@ -263,6 +324,26 @@ public:
         return handle_ != nullptr
             && PQstatus(handle_) == CONNECTION_OK
             && PQtransactionStatus(handle_) == PQTRANS_IDLE;
+    }
+
+    /// @brief Returns the current libpq transaction state without exposing PGconn.
+    [[nodiscard]] transaction_state current_transaction_state() const noexcept {
+        if (handle_ == nullptr || PQstatus(handle_) != CONNECTION_OK) {
+            return transaction_state::unknown;
+        }
+        switch (PQtransactionStatus(handle_)) {
+        case PQTRANS_IDLE:
+            return transaction_state::idle;
+        case PQTRANS_ACTIVE:
+            return transaction_state::active;
+        case PQTRANS_INTRANS:
+            return transaction_state::in_transaction;
+        case PQTRANS_INERROR:
+            return transaction_state::failed_transaction;
+        case PQTRANS_UNKNOWN:
+            return transaction_state::unknown;
+        }
+        return transaction_state::unknown;
     }
 
     [[nodiscard]] std::string server_version() const {
@@ -330,6 +411,9 @@ private:
     // lets the single conninfo string flow through the "dbname" keyword unchanged.
     static PGconn* nonblocking_connect(const std::string& conninfo,
                                        clock::duration budget) {
+        if (budget <= clock::duration::zero()) {
+            throw query_error("connection deadline must be positive", std::string{});
+        }
         const char* keywords[] = {"dbname", nullptr};
         const char* values[] = {conninfo.c_str(), nullptr};
         PGconn* conn = PQconnectStartParams(keywords, values, /*expand_dbname=*/1);
@@ -347,7 +431,7 @@ private:
             const bool want_read = (polling == PGRES_POLLING_READING);
             if (!wait_socket(conn, want_read, deadline)) {
                 PQfinish(conn);
-                throw query_error("connection did not complete within 10s",
+                throw query_error("connection deadline exceeded",
                                   std::string{});
             }
             polling = PQconnectPoll(conn);
@@ -557,8 +641,9 @@ private:
     // exceptions exactly as before.
     [[nodiscard]] result run_statement(std::string_view sql,
                                        clock::duration budget,
-                                       const execution_limits& limits) {
-        multi_result outcome = run_statement_multi(sql, budget, limits);
+                                       const execution_limits& limits,
+                                       transaction_policy policy) {
+        multi_result outcome = run_statement_multi(sql, budget, limits, policy);
         if (outcome.error) {
             throw *outcome.error;
         }
@@ -577,7 +662,8 @@ private:
     // the successful results before it (§10.7). Client-side failures still throw.
     [[nodiscard]] multi_result run_statement_multi(std::string_view sql,
                                                    clock::duration budget,
-                                                   const execution_limits& limits) {
+                                                   const execution_limits& limits,
+                                                   transaction_policy policy) {
         const auto deadline = clock::now() + budget;
         const std::string owned(sql);
         if (PQsendQuery(handle_, owned.c_str()) == 0) {
@@ -705,7 +791,8 @@ private:
             }
         }
 
-        if (PQtransactionStatus(handle_) != PQTRANS_IDLE) {
+        if (policy == transaction_policy::require_idle
+            && PQtransactionStatus(handle_) != PQTRANS_IDLE) {
             rollback_bounded(std::chrono::seconds(2));
             if (!error) {
                 error = captured_error{
