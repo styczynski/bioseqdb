@@ -51,11 +51,8 @@ TEST_CASE("one exact producer serves one registered waiter",
             false, bioseq::cache_test::preload_order::cache_only)};
     auto& admin = fixture.admin();
     create_wait_rows(admin, "cache_same_wait_rows");
-    bioseq::cache_test::exec(
-        admin,
-        "SELECT bioseq_cache_test.arm_pause('after_building_publish'); "
-        "SELECT bioseq_cache_test.arm_pause('after_waiter_registered')");
 
+    std::atomic<bool> pauses_armed{};
     std::atomic<bool> producer_paused{};
     std::string producer_count;
     std::string producer_sum;
@@ -64,8 +61,16 @@ TEST_CASE("one exact producer serves one registered waiter",
     std::vector<bioseq::postgres_test::session_task> tasks;
     tasks.push_back(bioseq::postgres_test::session_task{
         .name = "producer",
-        .body = [&producer_count, &producer_sum](
+        .body = [&pauses_armed, &producer_count, &producer_sum](
                     bioseq::postgres_test::session_context& session) {
+            if (!bioseq::postgres_test::wait_until(
+                    [&pauses_armed]() {
+                        return pauses_armed.load(std::memory_order_acquire);
+                    },
+                    session.deadline(), 5ms)) {
+                throw std::runtime_error(
+                    "controller did not arm producer pauses");
+            }
             static_cast<void>(session.exec(
                 "SET application_name = 'cache_native_producer'; "
                 "SET bioseq.query_cache_optimisation_mode = 'same'"));
@@ -99,8 +104,14 @@ TEST_CASE("one exact producer serves one registered waiter",
         }});
     tasks.push_back(bioseq::postgres_test::session_task{
         .name = "controller",
-        .body = [&producer_paused](
+        .body = [&pauses_armed, &producer_paused](
                     bioseq::postgres_test::session_context& session) {
+            static_cast<void>(session.exec(
+                "SELECT bioseq_cache_test.arm_pause("
+                "'after_building_publish'); "
+                "SELECT bioseq_cache_test.arm_pause("
+                "'after_waiter_registered')"));
+            pauses_armed.store(true, std::memory_order_release);
             static_cast<void>(session.exec(
                 "SELECT bioseq_cache_test.wait_until_paused("
                 "'after_building_publish')"));
@@ -155,18 +166,23 @@ TEST_CASE("cancelled waiter drains without disturbing its producer",
             false, bioseq::cache_test::preload_order::cache_only)};
     auto& admin = fixture.admin();
     create_wait_rows(admin, "cache_cancel_wait_rows");
-    bioseq::cache_test::exec(
-        admin,
-        "SELECT bioseq_cache_test.arm_pause('after_building_publish'); "
-        "SELECT bioseq_cache_test.arm_pause('after_waiter_registered')");
 
+    std::atomic<bool> pauses_armed{};
     std::atomic<bool> producer_paused{};
     std::string producer_sum;
     std::vector<bioseq::postgres_test::session_task> tasks;
     tasks.push_back(bioseq::postgres_test::session_task{
         .name = "producer",
-        .body = [&producer_sum](
+        .body = [&pauses_armed, &producer_sum](
                     bioseq::postgres_test::session_context& session) {
+            if (!bioseq::postgres_test::wait_until(
+                    [&pauses_armed]() {
+                        return pauses_armed.load(std::memory_order_acquire);
+                    },
+                    session.deadline(), 5ms)) {
+                throw std::runtime_error(
+                    "controller did not arm producer pauses");
+            }
             static_cast<void>(session.exec(
                 "SET application_name = 'cache_cancel_producer'; "
                 "SET bioseq.query_cache_optimisation_mode = 'same'"));
@@ -196,8 +212,14 @@ TEST_CASE("cancelled waiter drains without disturbing its producer",
         }});
     tasks.push_back(bioseq::postgres_test::session_task{
         .name = "controller",
-        .body = [&producer_paused](
+        .body = [&pauses_armed, &producer_paused](
                     bioseq::postgres_test::session_context& session) {
+            static_cast<void>(session.exec(
+                "SELECT bioseq_cache_test.arm_pause("
+                "'after_building_publish'); "
+                "SELECT bioseq_cache_test.arm_pause("
+                "'after_waiter_registered')"));
+            pauses_armed.store(true, std::memory_order_release);
             static_cast<void>(session.exec(
                 "SELECT bioseq_cache_test.wait_until_paused("
                 "'after_building_publish')"));

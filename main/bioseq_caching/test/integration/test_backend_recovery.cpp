@@ -28,6 +28,16 @@ namespace {
   return true;
 }
 
+void wait_for_flag(std::atomic<bool> &flag,
+                   bioseq::postgres_test::session_context &session,
+                   std::string_view message) {
+  if (!bioseq::postgres_test::wait_until(
+          [&flag]() { return flag.load(std::memory_order_acquire); },
+          session.deadline(), 5ms)) {
+    throw std::runtime_error(std::string(message));
+  }
+}
+
 [[nodiscard]] std::vector<std::string> ordered_ids(int count) {
   std::vector<std::string> values;
   values.reserve(static_cast<std::size_t>(count));
@@ -166,16 +176,19 @@ TEST_CASE("terminated cache producer wakes its waiter without BUILDING leak",
              "INSERT INTO crash_rows "
              "SELECT i, md5(i::text) "
              "FROM generate_series(1, 100) AS g(i); "
-             "SELECT bioseq_cache.reset_stats(); "
-             "SELECT bioseq_cache_test.arm_pause('after_building_publish')");
+             "SELECT bioseq_cache.reset_stats()");
 
+  std::atomic<bool> pause_armed{};
   std::atomic<bool> producer_paused{};
   std::string waiter_count;
   std::string waiter_sum;
   std::vector<bioseq::postgres_test::session_task> tasks;
   tasks.push_back(bioseq::postgres_test::session_task{
       .name = "backend-crash-producer",
-      .body = [](bioseq::postgres_test::session_context &session) {
+      .body = [&pause_armed](
+                  bioseq::postgres_test::session_context &session) {
+        wait_for_flag(pause_armed, session,
+                      "backend-crash producer pause was not armed");
         static_cast<void>(
             session.exec("SET application_name = 'cache_crash_producer'; "
                          "SET bioseq.query_cache_optimisation_mode = 'same'; "
@@ -206,8 +219,12 @@ TEST_CASE("terminated cache producer wakes its waiter without BUILDING leak",
       }});
   tasks.push_back(bioseq::postgres_test::session_task{
       .name = "backend-crash-controller",
-      .body = [&producer_paused](
+      .body = [&pause_armed, &producer_paused](
                   bioseq::postgres_test::session_context &session) {
+        static_cast<void>(
+            session.exec("SELECT bioseq_cache_test.arm_pause("
+                         "'after_building_publish')"));
+        pause_armed.store(true, std::memory_order_release);
         static_cast<void>(
             session.exec("SELECT bioseq_cache_test.wait_until_paused("
                          "'after_building_publish')"));
@@ -270,9 +287,9 @@ TEST_CASE("file write failure fails open and terminalizes the exact claim",
              "INSERT INTO file_rows "
              "SELECT i, repeat(md5(i::text), 1024) "
              "FROM generate_series(1, 128) AS g(i); "
-             "SELECT bioseq_cache.reset_stats(); "
-             "SELECT bioseq_cache_test.arm_pause('after_building_publish')");
+             "SELECT bioseq_cache.reset_stats()");
 
+  std::atomic<bool> pause_armed{};
   std::atomic<bool> producer_paused{};
   std::vector<std::string> producer_rows;
   std::vector<std::string> waiter_rows;
@@ -283,7 +300,10 @@ TEST_CASE("file write failure fails open and terminalizes the exact claim",
   tasks.push_back(bioseq::postgres_test::session_task{
       .name = "file-failure-producer",
       .body =
-          [&producer_rows](bioseq::postgres_test::session_context &session) {
+          [&pause_armed,
+           &producer_rows](bioseq::postgres_test::session_context &session) {
+            wait_for_flag(pause_armed, session,
+                          "file-failure producer pause was not armed");
             const auto result = session.exec(
                 "SET application_name = 'cache_file_failure_producer'; "
                 "SET bioseq.query_cache_optimisation_mode = 'same'; "
@@ -311,9 +331,13 @@ TEST_CASE("file write failure fails open and terminalizes the exact claim",
       }});
   tasks.push_back(bioseq::postgres_test::session_task{
       .name = "file-failure-controller",
-      .body = [&producer_paused, &failed_key, &failed_generation,
+      .body = [&pause_armed, &producer_paused, &failed_key, &failed_generation,
                &failed_claim_sequence](
                   bioseq::postgres_test::session_context &session) {
+        static_cast<void>(
+            session.exec("SELECT bioseq_cache_test.arm_pause("
+                         "'after_building_publish')"));
+        pause_armed.store(true, std::memory_order_release);
         static_cast<void>(
             session.exec("SELECT bioseq_cache_test.wait_until_paused("
                          "'after_building_publish')"));
@@ -389,10 +413,7 @@ TEST_CASE("waiter entitlement pins TTL-zero storage and drains on every exit",
                                   "SELECT bioseq_cache.reset_stats()");
   const storage_snapshot baseline = read_storage_snapshot(admin);
 
-  bioseq::cache_test::exec(admin, "SELECT bioseq_cache_test.arm_pause("
-                                  "'before_terminal_publish'); "
-                                  "SELECT bioseq_cache_test.arm_pause("
-                                  "'after_waiter_registered')");
+  std::atomic<bool> pauses_armed{};
   std::atomic<bool> producer_at_terminal{};
   std::vector<std::string> cancelled_cycle_producer_rows;
   storage_snapshot entitled{};
@@ -403,8 +424,10 @@ TEST_CASE("waiter entitlement pins TTL-zero storage and drains on every exit",
   std::vector<bioseq::postgres_test::session_task> cancelled_tasks;
   cancelled_tasks.push_back(bioseq::postgres_test::session_task{
       .name = "entitlement-cancel-producer",
-      .body = [&cancelled_cycle_producer_rows](
+      .body = [&pauses_armed, &cancelled_cycle_producer_rows](
                   bioseq::postgres_test::session_context &session) {
+        wait_for_flag(pauses_armed, session,
+                      "cancelled-cycle pauses were not armed");
         const auto result =
             session.exec("SET application_name = 'cache_entitlement_producer'; "
                          "SET bioseq.query_cache_optimisation_mode = 'same'; "
@@ -434,9 +457,16 @@ TEST_CASE("waiter entitlement pins TTL-zero storage and drains on every exit",
       }});
   cancelled_tasks.push_back(bioseq::postgres_test::session_task{
       .name = "entitlement-cancel-controller",
-      .body = [&producer_at_terminal, &baseline, &entitled, &aggressively_swept,
-               &reclaimed, &published_waiter_owned, &terminated_waiter_drained](
+      .body = [&pauses_armed, &producer_at_terminal, &baseline, &entitled,
+               &aggressively_swept, &reclaimed, &published_waiter_owned,
+               &terminated_waiter_drained](
                   bioseq::postgres_test::session_context &session) {
+        static_cast<void>(
+            session.exec("SELECT bioseq_cache_test.arm_pause("
+                         "'before_terminal_publish'); "
+                         "SELECT bioseq_cache_test.arm_pause("
+                         "'after_waiter_registered')"));
+        pauses_armed.store(true, std::memory_order_release);
         static_cast<void>(
             session.exec("SELECT bioseq_cache_test.wait_until_paused("
                          "'before_terminal_publish')"));
@@ -531,11 +561,8 @@ TEST_CASE("waiter entitlement pins TTL-zero storage and drains on every exit",
                    "FROM bioseq_cache_test.entry_states() "
                    "WHERE waiter_count <> 0 OR reader_count <> 0") == 0);
 
-  bioseq::cache_test::exec(admin, "SELECT bioseq_cache.reset_stats(); "
-                                  "SELECT bioseq_cache_test.arm_pause("
-                                  "'before_terminal_publish'); "
-                                  "SELECT bioseq_cache_test.arm_pause("
-                                  "'after_waiter_registered')");
+  bioseq::cache_test::exec(admin, "SELECT bioseq_cache.reset_stats()");
+  std::atomic<bool> success_pauses_armed{};
   std::atomic<bool> success_producer_at_terminal{};
   std::vector<std::string> success_producer_rows;
   std::vector<std::string> success_waiter_rows;
@@ -544,8 +571,10 @@ TEST_CASE("waiter entitlement pins TTL-zero storage and drains on every exit",
   std::vector<bioseq::postgres_test::session_task> success_tasks;
   success_tasks.push_back(bioseq::postgres_test::session_task{
       .name = "entitlement-success-producer",
-      .body = [&success_producer_rows](
+      .body = [&success_pauses_armed, &success_producer_rows](
                   bioseq::postgres_test::session_context &session) {
+        wait_for_flag(success_pauses_armed, session,
+                      "successful-cycle pauses were not armed");
         const auto result =
             session.exec("SET application_name = "
                          "'cache_entitlement_success_producer'; "
@@ -579,9 +608,15 @@ TEST_CASE("waiter entitlement pins TTL-zero storage and drains on every exit",
       }});
   success_tasks.push_back(bioseq::postgres_test::session_task{
       .name = "entitlement-success-controller",
-      .body = [&success_producer_at_terminal, &successful_entitlement_owned,
-               &successful_sweep_preserved](
+      .body = [&success_pauses_armed, &success_producer_at_terminal,
+               &successful_entitlement_owned, &successful_sweep_preserved](
                   bioseq::postgres_test::session_context &session) {
+        static_cast<void>(
+            session.exec("SELECT bioseq_cache_test.arm_pause("
+                         "'before_terminal_publish'); "
+                         "SELECT bioseq_cache_test.arm_pause("
+                         "'after_waiter_registered')"));
+        success_pauses_armed.store(true, std::memory_order_release);
         static_cast<void>(
             session.exec("SELECT bioseq_cache_test.wait_until_paused("
                          "'before_terminal_publish')"));

@@ -104,6 +104,16 @@ cache_files(const bioseq::postgres_test::postgres_fixture &fixture,
   }
 }
 
+void wait_for_flag(std::atomic<bool> &flag,
+                   bioseq::postgres_test::session_context &session,
+                   std::string_view message) {
+  if (!bioseq::postgres_test::wait_until(
+          [&flag]() { return flag.load(std::memory_order_acquire); },
+          session.deadline(), 5ms)) {
+    throw std::runtime_error(std::string(message));
+  }
+}
+
 } // namespace
 
 TEST_CASE("dead producer and reader owners are recovered without stale storage",
@@ -121,14 +131,17 @@ TEST_CASE("dead producer and reader owners are recovered without stale storage",
              "INSERT INTO owner_rows "
              "SELECT i, md5(i::text) "
              "FROM generate_series(1, 64) AS g(i); "
-             "SELECT bioseq_cache_test.set_force_file_tier(true); "
-             "SELECT bioseq_cache_test.arm_pause('after_building_publish')");
+             "SELECT bioseq_cache_test.set_force_file_tier(true)");
 
+  std::atomic<bool> pause_armed{};
   bool live_owner_visible{};
   std::vector<bioseq::postgres_test::session_task> owner_tasks;
   owner_tasks.push_back(bioseq::postgres_test::session_task{
       .name = "owner-liveness-producer",
-      .body = [](bioseq::postgres_test::session_context &session) {
+      .body = [&pause_armed](
+                  bioseq::postgres_test::session_context &session) {
+        wait_for_flag(pause_armed, session,
+                      "owner-liveness producer pause was not armed");
         static_cast<void>(
             session.exec("SET application_name = 'cache_dead_producer'; "
                          "SET bioseq.query_cache_optimisation_mode = 'same'; "
@@ -136,8 +149,12 @@ TEST_CASE("dead producer and reader owners are recovered without stale storage",
       }});
   owner_tasks.push_back(bioseq::postgres_test::session_task{
       .name = "owner-liveness-controller",
-      .body = [&live_owner_visible](
+      .body = [&pause_armed, &live_owner_visible](
                   bioseq::postgres_test::session_context &session) {
+        static_cast<void>(
+            session.exec("SELECT bioseq_cache_test.arm_pause("
+                         "'after_building_publish')"));
+        pause_armed.store(true, std::memory_order_release);
         static_cast<void>(
             session.exec("SELECT bioseq_cache_test.wait_until_paused("
                          "'after_building_publish')"));
@@ -186,14 +203,16 @@ TEST_CASE("dead producer and reader owners are recovered without stale storage",
   const auto old_files = cache_files(fixture, old_boot_nonce, database_oid);
   REQUIRE_FALSE(old_files.empty());
 
-  bioseq::cache_test::exec(
-      admin, "SELECT bioseq_cache_test.arm_pause('after_reader_pinned')");
+  std::atomic<bool> reader_pause_armed{};
   bool reader_ownership_visible{};
   bool reader_sigkilled{};
   std::vector<bioseq::postgres_test::session_task> reader_tasks;
   reader_tasks.push_back(bioseq::postgres_test::session_task{
       .name = "owner-liveness-reader",
-      .body = [](bioseq::postgres_test::session_context &session) {
+      .body = [&reader_pause_armed](
+                  bioseq::postgres_test::session_context &session) {
+        wait_for_flag(reader_pause_armed, session,
+                      "owner-liveness reader pause was not armed");
         static_cast<void>(
             session.exec("SET application_name = 'cache_dead_reader'; "
                          "SET bioseq.query_cache_optimisation_mode = 'same'; "
@@ -201,8 +220,13 @@ TEST_CASE("dead producer and reader owners are recovered without stale storage",
       }});
   reader_tasks.push_back(bioseq::postgres_test::session_task{
       .name = "owner-liveness-killer",
-      .body = [&reader_ownership_visible, &reader_sigkilled](
+      .body = [&reader_pause_armed, &reader_ownership_visible,
+               &reader_sigkilled](
                   bioseq::postgres_test::session_context &session) {
+        static_cast<void>(
+            session.exec("SELECT bioseq_cache_test.arm_pause("
+                         "'after_reader_pinned')"));
+        reader_pause_armed.store(true, std::memory_order_release);
         static_cast<void>(
             session.exec("SELECT bioseq_cache_test.wait_until_paused("
                          "'after_reader_pinned')"));
