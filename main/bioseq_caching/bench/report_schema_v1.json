@@ -191,6 +191,11 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "absolute_path": {
+      "type": "string",
+      "minLength": 2,
+      "pattern": "^/"
+    },
     "counter": {
       "type": "object",
       "additionalProperties": false,
@@ -307,6 +312,9 @@
       "additionalProperties": false,
       "required": [
         "name",
+        "preinstalled_stage_root",
+        "stage_manifest",
+        "stage_manifest_sha256",
         "control_file",
         "install_sql",
         "dso",
@@ -322,6 +330,15 @@
         "name": {
           "type": "string",
           "minLength": 1
+        },
+        "preinstalled_stage_root": {
+          "$ref": "#/$defs/absolute_path"
+        },
+        "stage_manifest": {
+          "$ref": "#/$defs/absolute_path"
+        },
+        "stage_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
         },
         "control_file": {
           "type": "string",
@@ -683,6 +700,9 @@
     ],
     "artifact": [
       "name",
+      "preinstalled_stage_root",
+      "stage_manifest",
+      "stage_manifest_sha256",
       "control_file",
       "install_sql",
       "dso",

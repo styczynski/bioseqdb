@@ -86,6 +86,8 @@ constexpr std::string_view bioseq_query{
 struct benchmark_options {
     scenario selected_scenario{scenario::standalone};
     std::filesystem::path postgres_bin_dir;
+    std::filesystem::path postgres_stage_root;
+    std::filesystem::path postgres_stage_manifest;
     std::filesystem::path cache_control;
     std::filesystem::path cache_install_sql;
     std::filesystem::path cache_dso;
@@ -295,6 +297,8 @@ void finalize_build_identity(benchmark_report& report) {
     for (const postgres_test::artifact_report& artifact : report.artifacts) {
         material.append("|");
         material.append(artifact.name);
+        material.append("|");
+        material.append(artifact.stage_manifest_sha256);
         material.append("|");
         material.append(artifact.control_sha256);
         material.append("|");
@@ -795,6 +799,14 @@ template <class Integer>
             assign_path(options.postgres_bin_dir, argument);
         } else if (argument.starts_with("--postgres-bin-dir=")) {
             options.postgres_bin_dir = argument.substr(19);
+        } else if (argument == "--postgres-stage-root") {
+            assign_path(options.postgres_stage_root, argument);
+        } else if (argument.starts_with("--postgres-stage-root=")) {
+            options.postgres_stage_root = argument.substr(22);
+        } else if (argument == "--postgres-stage-manifest") {
+            assign_path(options.postgres_stage_manifest, argument);
+        } else if (argument.starts_with("--postgres-stage-manifest=")) {
+            options.postgres_stage_manifest = argument.substr(26);
         } else if (argument == "--cache-control") {
             assign_path(options.cache_control, argument);
         } else if (argument.starts_with("--cache-control=")) {
@@ -859,6 +871,9 @@ template <class Integer>
     for (const auto& [path, name] :
          std::vector<std::pair<std::filesystem::path, std::string_view>>{
              {options.postgres_bin_dir, "--postgres-bin-dir"},
+             {options.postgres_stage_root, "--postgres-stage-root"},
+             {options.postgres_stage_manifest,
+              "--postgres-stage-manifest"},
              {options.cache_control, "--cache-control"},
              {options.cache_install_sql, "--cache-install-sql"},
              {options.cache_dso, "--cache-dso"},
@@ -1143,7 +1158,10 @@ extension_artifacts(const benchmark_options& options) {
     }
     return postgres_test::cluster_options{
         .postgres_bin_dir = options.postgres_bin_dir,
+        .preinstalled_stage_root = options.postgres_stage_root,
+        .preinstalled_stage_manifest = options.postgres_stage_manifest,
         .extensions = extension_artifacts(options),
+        .allowed_runtime_dso_overrides = {},
         .preload_libraries = std::move(preloads),
         .startup_gucs = {
             {"max_parallel_workers", "0"},
@@ -1554,6 +1572,15 @@ void write(std::ostream& output, const benchmark_report& report) {
         key(output, "name");
         string(output, artifact.name);
         output.put(',');
+        key(output, "preinstalled_stage_root");
+        string(output, artifact.preinstalled_stage_root.string());
+        output.put(',');
+        key(output, "stage_manifest");
+        string(output, artifact.stage_manifest.string());
+        output.put(',');
+        key(output, "stage_manifest_sha256");
+        string(output, artifact.stage_manifest_sha256);
+        output.put(',');
         key(output, "control_file");
         string(output, artifact.control_file.string());
         output.put(',');
@@ -1684,7 +1711,10 @@ void write(std::ostream& output, const benchmark_report& report) {
 
 }  // namespace json
 
-[[nodiscard]] std::string render_contract_probe(bool passed) {
+[[nodiscard]] std::string render_contract_probe(
+    bool passed, std::filesystem::path preinstalled_stage_root,
+    std::filesystem::path stage_manifest,
+    std::string stage_manifest_sha256) {
     const std::string digest(64, 'a');
     benchmark_report report{
         .status = passed ? "passed" : "failed",
@@ -1699,7 +1729,7 @@ void write(std::ostream& output, const benchmark_report& report) {
                 .compiler_version = "1.0",
                 .cxx_standard = 202302,
                 .build_mode = "ndebug",
-                .identity_sha256 = digest},
+                .identity_sha256 = {}},
         .host_identity =
             host_identity_evidence{
                 .system_name = "contract-system",
@@ -1730,6 +1760,9 @@ void write(std::ostream& output, const benchmark_report& report) {
                 .temp_samples = 3}};
     report.artifacts.push_back(postgres_test::artifact_report{
         .name = "bioseq_cache",
+        .preinstalled_stage_root = std::move(preinstalled_stage_root),
+        .stage_manifest = std::move(stage_manifest),
+        .stage_manifest_sha256 = std::move(stage_manifest_sha256),
         .control_file = "/source/bioseq_cache.control",
         .install_sql = "/source/bioseq_cache--1.0.sql",
         .dso = "/source/bioseq_cache.so",
@@ -1767,6 +1800,7 @@ void write(std::ostream& output, const benchmark_report& report) {
         report.logical_bytes = 2048;
         report.stored_bytes = 1024;
     }
+    finalize_build_identity(report);
     std::ostringstream output;
     json::write(output, report);
     return output.str();
@@ -1834,7 +1868,24 @@ export namespace bioseq::cache_benchmark {
 
 /// @brief Renders deterministic success/failure documents for schema tests.
 [[nodiscard]] std::string render_report_contract_probe(bool passed) {
-    return render_contract_probe(passed);
+    return render_contract_probe(
+        passed, "/stage", "/stage/stage-manifest.json",
+        std::string(64, 'b'));
+}
+
+/// @brief Renders a probe with caller-selected stage provenance.
+///
+/// This overload exists so contract tests can prove that the stage-manifest
+/// digest participates in build identity while host-dependent stage paths do
+/// not.
+[[nodiscard]] std::string
+render_report_contract_probe_with_stage_provenance(
+    bool passed, std::string_view preinstalled_stage_root,
+    std::string_view stage_manifest,
+    std::string_view stage_manifest_sha256) {
+    return render_contract_probe(
+        passed, std::string(preinstalled_stage_root),
+        std::string(stage_manifest), std::string(stage_manifest_sha256));
 }
 
 /// @brief Parse, execute, validate, and report one fixed native benchmark.

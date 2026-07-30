@@ -131,6 +131,18 @@ TEST_CASE(
     const json_value& artifact = artifacts.front();
     CHECK(
         required_string(
+            required_property(artifact, "preinstalled_stage_root"))
+        == "/stage");
+    CHECK(
+        required_string(
+            required_property(artifact, "stage_manifest"))
+        == "/stage/stage-manifest.json");
+    CHECK(
+        required_string(
+            required_property(artifact, "stage_manifest_sha256"))
+        == std::string(64, 'b'));
+    CHECK(
+        required_string(
             required_property(artifact, "staged_control_file"))
         == "/stage/bioseq_cache.control");
     CHECK(
@@ -218,6 +230,50 @@ TEST_CASE(
     CHECK(
         required_integer(required_property(root, "peak_temp_bytes"))
         == 16384);
+}
+
+TEST_CASE(
+    "cache benchmark build identity includes the stage manifest digest "
+    "but excludes host stage paths",
+    "[cache][benchmark][report-contract][build-identity]") {
+    const auto build_identity_sha256 =
+        [](const std::string& document) {
+            const bioseq::postgres_test::explain_document parsed =
+                bioseq::postgres_test::explain_document::parse(document);
+            const json_value& metadata =
+                required_property(parsed.root(), "metadata");
+            const json_value& build_identity =
+                required_property(metadata, "build_identity");
+            return std::string(required_string(required_property(
+                build_identity, "identity_sha256")));
+        };
+
+    const std::string manifest_digest(64, 'b');
+    const std::string original =
+        bioseq::cache_benchmark::
+            render_report_contract_probe_with_stage_provenance(
+                true, "/host-a/stage",
+                "/host-a/metadata/stage-manifest.json",
+                manifest_digest);
+    const std::string relocated =
+        bioseq::cache_benchmark::
+            render_report_contract_probe_with_stage_provenance(
+                true, "/different-host/stage",
+                "/different-host/metadata/stage-manifest.json",
+                manifest_digest);
+    const std::string changed_manifest =
+        bioseq::cache_benchmark::
+            render_report_contract_probe_with_stage_provenance(
+                true, "/host-a/stage",
+                "/host-a/metadata/stage-manifest.json",
+                std::string(64, 'c'));
+
+    CHECK(
+        build_identity_sha256(original)
+        == build_identity_sha256(relocated));
+    CHECK(
+        build_identity_sha256(original)
+        != build_identity_sha256(changed_manifest));
 }
 
 TEST_CASE(
