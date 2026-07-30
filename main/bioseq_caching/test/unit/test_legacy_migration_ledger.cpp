@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -76,7 +77,7 @@ TEST_CASE("global migration validation rejects unknown Catch mappings",
         ContainsSubstring("unknown Catch2 case 'unknown case'"));
 }
 
-TEST_CASE("legacy deletion requires every migration row to be final",
+TEST_CASE("mapped migration rejects deletion already started",
           "[cache][unit][migration-ledger]") {
     const std::unordered_set<std::string> cases{
         "mapped case", "passing case", "replacement case"};
@@ -91,7 +92,12 @@ TEST_CASE("legacy deletion requires every migration row to be final",
             not_ready, cases, std::filesystem::path{}),
         ContainsSubstring(
             "every row must be passing or retired_with_proof"));
+}
 
+TEST_CASE("final migration without supplied assets supports validation",
+          "[cache][unit][migration-ledger]") {
+    const std::unordered_set<std::string> cases{
+        "passing case", "replacement case"};
     const auto ready = parse(
         row(
             "passing.id", "passing case", "passing",
@@ -107,4 +113,43 @@ TEST_CASE("legacy deletion requires every migration row to be final",
     CHECK(validation.mapped_rows == 0);
     CHECK(validation.passing_rows == 1);
     CHECK(validation.retired_with_proof_rows == 1);
+}
+
+TEST_CASE("deletion-ready migration rejects a supplied legacy asset",
+          "[cache][unit][migration-ledger]") {
+    const auto ready =
+        parse(row("passing.id", "passing case", "passing"));
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        bioseq::cache_test::migration::validate_global_ledger(
+            ready,
+            std::unordered_set<std::string>{"passing case"},
+            std::filesystem::current_path(),
+            std::vector<std::filesystem::path>{"."}),
+        ContainsSubstring(
+            "every supplied legacy asset must be absent"));
+}
+
+TEST_CASE("deletion-ready migration accepts an absent legacy asset list",
+          "[cache][unit][migration-ledger]") {
+    const auto ready =
+        parse(row("passing.id", "passing case", "passing"));
+    const std::filesystem::path legacy_root =
+        std::filesystem::current_path();
+    const std::vector<std::filesystem::path> absent_assets{
+        "__bioseq_cache_deleted_regression_assets__",
+        "__bioseq_cache_deleted_tap_assets__"};
+    for (const auto& asset : absent_assets) {
+        REQUIRE_FALSE(std::filesystem::exists(legacy_root / asset));
+    }
+    const auto validation =
+        bioseq::cache_test::migration::validate_global_ledger(
+            ready,
+            std::unordered_set<std::string>{"passing case"},
+            legacy_root,
+            absent_assets);
+    CHECK(validation.deletion_ready);
+    CHECK(validation.legacy_deletion_started);
+    CHECK(validation.mapped_rows == 0);
+    CHECK(validation.passing_rows == 1);
 }

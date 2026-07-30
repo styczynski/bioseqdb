@@ -281,18 +281,28 @@ load_catch_case_manifest(const std::filesystem::path& path) {
             result.legacy_deletion_started = true;
         }
     }
+    result.deletion_ready = result.mapped_rows == 0;
+    std::vector<std::filesystem::path> remaining_legacy_assets;
     for (const auto& asset : legacy_assets) {
-        if (!std::filesystem::exists(legacy_root / asset)) {
+        const std::filesystem::path asset_path = legacy_root / asset;
+        if (!std::filesystem::exists(asset_path)) {
             result.legacy_deletion_started = true;
+        } else if (result.deletion_ready) {
+            remaining_legacy_assets.push_back(asset_path);
         }
     }
-    result.deletion_ready = result.mapped_rows == 0;
     if (result.legacy_deletion_started && !result.deletion_ready) {
         throw std::runtime_error(
             "legacy test asset deletion started while "
             + std::to_string(result.mapped_rows)
             + " migration-ledger rows remain mapped; every row must be "
               "passing or retired_with_proof before deleting legacy assets");
+    }
+    if (!remaining_legacy_assets.empty()) {
+        throw std::runtime_error(
+            "migration ledger is deletion-ready but legacy asset still "
+            "exists: " + remaining_legacy_assets.front().string()
+            + "; every supplied legacy asset must be absent");
     }
     return result;
 }
