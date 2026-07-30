@@ -204,7 +204,9 @@ set_target_properties(postgresql_bioseq_cache PROPERTIES
   POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE
   LIBRARY_OUTPUT_DIRECTORY
-    "${CMAKE_CURRENT_BINARY_DIR}/artifacts/production")
+    "${CMAKE_CURRENT_BINARY_DIR}/artifacts/cache_production/$<CONFIG>"
+  RUNTIME_OUTPUT_DIRECTORY
+    "${CMAKE_CURRENT_BINARY_DIR}/artifacts/cache_production/$<CONFIG>")
 target_compile_options(postgresql_bioseq_cache PRIVATE
   "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>"
   "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
@@ -254,7 +256,9 @@ if(BIOSEQ_CACHE_TESTING)
     PREFIX ""
     OUTPUT_NAME "bioseq_cache"
     LIBRARY_OUTPUT_DIRECTORY
-      "${CMAKE_CURRENT_BINARY_DIR}/artifacts/test_support"
+      "${CMAKE_CURRENT_BINARY_DIR}/artifacts/cache_test_support/$<CONFIG>"
+    RUNTIME_OUTPUT_DIRECTORY
+      "${CMAKE_CURRENT_BINARY_DIR}/artifacts/cache_test_support/$<CONFIG>"
     BIOSEQ_EXTENSION_CONTROL_FILE
       "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
     BIOSEQ_EXTENSION_DSO
