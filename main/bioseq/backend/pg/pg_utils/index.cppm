@@ -20,11 +20,11 @@ module;
 
 #include "common.h"
 
-#include <cstring>
 #include <type_traits>
 
 export module bioseq.pg_utils;
 
+export import bioseq.pg_support;
 export import bioseq.pg_utils.lists;
 export import bioseq.pg_utils.bitmapset;
 export import bioseq.pg_utils.datums;
@@ -101,34 +101,9 @@ export template<typename T>
     return static_cast<T*>(palloc0(element_count * sizeof(T)));
 }
 
-/*
- * MemoryContextScope swaps the current memory context on construction and
- * restores it on destruction. Replaces the manual
- *   MemoryContext old = MemoryContextSwitchTo(target);
- *   ...
- *   MemoryContextSwitchTo(old);
- * pattern with an RAII guard that survives early returns and PG_CATCH.
- *
- * Note: PG memory contexts are not thread-local; this is a save-and-
- * restore guard intended for the calling backend.
- */
-export class MemoryContextScope {
-private:
-    MemoryContext previous_context;
-
-public:
-    explicit MemoryContextScope(MemoryContext target_context)
-        : previous_context(MemoryContextSwitchTo(target_context)) {}
-
-    ~MemoryContextScope() {
-        MemoryContextSwitchTo(previous_context);
-    }
-
-    MemoryContextScope(const MemoryContextScope&) = delete;
-    MemoryContextScope& operator=(const MemoryContextScope&) = delete;
-    MemoryContextScope(MemoryContextScope&&) = delete;
-    MemoryContextScope& operator=(MemoryContextScope&&) = delete;
-};
+/** Preserve Bioseq's historical global name while common owns the guard. */
+export using MemoryContextScope =
+    bioseq::pg_support::MemoryContextScope;
 
 /*
  * safe_relation_open wraps relation_open. It exists so that all callers in
@@ -219,152 +194,10 @@ export inline List* CustomBuildTargetList(List* source_tlist, Index target_var_n
     return rebuilt_tlist;
 }
 
-/*
- * TxnScopedHtab<Entry> wraps a PostgreSQL dynahash table whose lifetime is
- * scoped to TopTransactionContext. On first acquire() the hash table and a
- * backing AllocSetContext are created lazily, and a reset callback is
- * registered so that both the HTAB pointer and the context pointer are
- * nulled out at transaction end. The Entry type must have an Oid-keyed
- * first field (sizeof(Oid) == keysize), matching the convention used by
- * the write-state and read-state caches.
- *
- * Typical usage:
- *
- *   static pg_utils::TxnScopedHtab<MyEntry> my_table{"my txn table"};
- *
- *   MyEntry* entry = my_table.find_or_insert(&oid_key);
- *   MemoryContext ctx = my_table.context();
- *
- * Callers should treat context() as nullable (it is nullable between
- * transactions) and call acquire() if they need it populated.
+/**
+ * Preserve the Oid-first Entry API consumed by Bioseq column state caches.
+ * The implementation and transaction reset callback live in pg_support.
  */
-export template<typename Entry>
-class TxnScopedHtab {
-private:
-    const char* name_;
-    HTAB* table_ = nullptr;
-    MemoryContext context_ = nullptr;
-    MemoryContextCallback reset_callback_{};
-
-    static void cleanup_trampoline(void* argument) {
-        auto* self = static_cast<TxnScopedHtab*>(argument);
-        self->table_ = nullptr;
-        self->context_ = nullptr;
-    }
-
-    void acquire() {
-        if (table_ != nullptr) {
-            return;
-        }
-        /*
-         * Call the internal variant directly to bypass the __builtin_constant_p
-         * static_assert in the AllocSetContextCreate macro -- the caller's
-         * debug_name is a string literal but that literal is forwarded
-         * through a runtime member pointer, which defeats the check.
-         */
-        context_ = AllocSetContextCreateInternal(
-            TopTransactionContext, name_, ALLOCSET_DEFAULT_SIZES);
-
-        HASHCTL hash_info;
-        std::memset(&hash_info, 0, sizeof(hash_info));
-        hash_info.keysize = sizeof(Oid);
-        hash_info.hash = oid_hash;
-        hash_info.entrysize = sizeof(Entry);
-        hash_info.hcxt = context_;
-
-        const uint32 hash_flags = HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT;
-        table_ = hash_create(name_, 64, &hash_info, hash_flags);
-
-        reset_callback_.func = &TxnScopedHtab::cleanup_trampoline;
-        reset_callback_.arg = this;
-        reset_callback_.next = nullptr;
-        MemoryContextRegisterResetCallback(context_, &reset_callback_);
-    }
-
-public:
-    explicit constexpr TxnScopedHtab(const char* debug_name) : name_{debug_name} {}
-
-    /* Returns the owning MemoryContext (valid after acquire or any mutating call). */
-    [[nodiscard]] MemoryContext context() const { return context_; }
-
-    /* Returns the raw HTAB (nullable between transactions). */
-    [[nodiscard]] HTAB* raw() const { return table_; }
-
-    /* True when the table has been lazily created in the current transaction. */
-    [[nodiscard]] bool is_initialised() const { return table_ != nullptr; }
-
-    /* Searches for an existing entry; returns nullptr when absent. */
-    [[nodiscard]] Entry* find(const void* key) {
-        if (table_ == nullptr) {
-            return nullptr;
-        }
-        return static_cast<Entry*>(hash_search(table_, key, HASH_FIND, nullptr));
-    }
-
-    /*
-     * Looks up the entry for the given key, creating the table on first use
-     * and inserting a fresh entry when none exists. When found_existing is
-     * non-null, it is set to indicate whether the entry was pre-existing.
-     */
-    Entry* find_or_insert(const void* key, bool* found_existing = nullptr) {
-        struct FindOrInsertResult {
-            Entry* entry = nullptr;
-            bool found = false;
-        };
-        const FindOrInsertResult result =
-            bioseq::pg_utils::invoke_pg_as_cpp([this, key] {
-            acquire();
-            bool local_found = false;
-            Entry* entry = static_cast<Entry*>(
-                hash_search(table_, key, HASH_ENTER, &local_found));
-            return FindOrInsertResult{
-                .entry = entry,
-                .found = local_found,
-            };
-        });
-        if (found_existing != nullptr) {
-            *found_existing = result.found;
-        }
-        return result.entry;
-    }
-
-    /* Removes an entry if present. No-op if the table is uninitialised. */
-    void remove(const void* key) {
-        if (table_ != nullptr) {
-            hash_search(table_, key, HASH_REMOVE, nullptr);
-        }
-    }
-
-    /* Runs callback(entry) over every live entry in the table. */
-    template<typename Fn>
-    void for_each(Fn&& callback) {
-        if (table_ == nullptr) {
-            return;
-        }
-        HASH_SEQ_STATUS status;
-        hash_seq_init(&status, table_);
-        for (Entry* entry = static_cast<Entry*>(hash_seq_search(&status));
-             entry != nullptr;
-             entry = static_cast<Entry*>(hash_seq_search(&status)))
-        {
-            callback(entry);
-        }
-    }
-
-    /*
-     * Allocates a zero-initialised T inside the table's MemoryContext. Use
-     * this when pushing a per-subtransaction frame onto a stack hanging off
-     * an Entry: the frame must live as long as the map, so it needs to share
-     * the same context. Caller must have already acquired the cache (any
-     * prior find_or_insert call suffices).
-     */
-    template<typename Frame>
-    [[nodiscard]] Frame* alloc_in_context() {
-        return bioseq::pg_utils::invoke_pg_as_cpp([this] {
-            const MemoryContext previous = MemoryContextSwitchTo(context_);
-            Frame* result = make0<Frame>();
-            MemoryContextSwitchTo(previous);
-            return result;
-        });
-    }
-};
+export template <class Entry>
+using TxnScopedHtab =
+    bioseq::pg_support::OidEntryTxnScopedHtab<Entry>;

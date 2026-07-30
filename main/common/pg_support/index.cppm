@@ -20,6 +20,10 @@ export module bioseq.pg_support;
 
 export import :safety_runtime_probe;
 export import :error_boundary;
+export import :lists;
+export import :bitmapset;
+export import :nodes;
+export import :spi;
 
 export namespace bioseq::pg_support {
 
@@ -226,6 +230,148 @@ private:
             HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
 
         callback_.func = &TxnScopedHtab::reset_callback;
+        callback_.arg = this;
+        callback_.next = nullptr;
+        MemoryContextRegisterResetCallback(context_, &callback_);
+    }
+
+    const char* name_ = nullptr;
+    HTAB* table_ = nullptr;
+    MemoryContext context_ = nullptr;
+    MemoryContextCallback callback_{};
+};
+
+/**
+ * Compatibility owner for Bioseq's legacy Oid-first dynahash entries.
+ *
+ * PostgreSQL stores Entry directly, using its first sizeof(Oid) bytes as the
+ * key. This preserves the established Bioseq facade while keeping the actual
+ * transaction/context lifecycle in the common support module.
+ */
+template <class Entry>
+class OidEntryTxnScopedHtab {
+    static_assert(std::is_standard_layout_v<Entry>);
+    static_assert(std::is_trivially_destructible_v<Entry>);
+    static_assert(sizeof(Entry) >= sizeof(Oid));
+
+public:
+    explicit constexpr OidEntryTxnScopedHtab(
+            const char* debug_name) noexcept
+        : name_(debug_name) {}
+
+    OidEntryTxnScopedHtab(const OidEntryTxnScopedHtab&) = delete;
+    OidEntryTxnScopedHtab& operator=(
+        const OidEntryTxnScopedHtab&) = delete;
+    OidEntryTxnScopedHtab(OidEntryTxnScopedHtab&&) = delete;
+    OidEntryTxnScopedHtab& operator=(
+        OidEntryTxnScopedHtab&&) = delete;
+
+    [[nodiscard]] MemoryContext context() const noexcept {
+        return context_;
+    }
+
+    [[nodiscard]] HTAB* raw() const noexcept {
+        return table_;
+    }
+
+    [[nodiscard]] bool is_initialised() const noexcept {
+        return table_ != nullptr;
+    }
+
+    [[nodiscard]] Entry* find(const void* key) {
+        if (table_ == nullptr) {
+            return nullptr;
+        }
+        return static_cast<Entry*>(
+            hash_search(table_, key, HASH_FIND, nullptr));
+    }
+
+    [[nodiscard]] Entry* find_or_insert(
+            const void* key,
+            bool* found_existing = nullptr) {
+        struct result_type {
+            Entry* entry = nullptr;
+            bool found = false;
+        };
+        const result_type result = bioseq::pg_utils::invoke_pg_as_cpp(
+            [this, key] {
+                acquire();
+                bool found = false;
+                Entry* entry = static_cast<Entry*>(
+                    hash_search(table_, key, HASH_ENTER, &found));
+                return result_type{
+                    .entry = entry,
+                    .found = found,
+                };
+            });
+        if (found_existing != nullptr) {
+            *found_existing = result.found;
+        }
+        return result.entry;
+    }
+
+    void remove(const void* key) {
+        if (table_ != nullptr) {
+            static_cast<void>(
+                hash_search(table_, key, HASH_REMOVE, nullptr));
+        }
+    }
+
+    template <class Callback>
+    void for_each(Callback&& callback) {
+        if (table_ == nullptr) {
+            return;
+        }
+        HASH_SEQ_STATUS cursor{};
+        hash_seq_init(&cursor, table_);
+        for (Entry* entry =
+                 static_cast<Entry*>(hash_seq_search(&cursor));
+             entry != nullptr;
+             entry = static_cast<Entry*>(hash_seq_search(&cursor))) {
+            std::forward<Callback>(callback)(entry);
+        }
+    }
+
+    template <class Frame>
+    [[nodiscard]] Frame* alloc_in_context() {
+        static_assert(std::is_trivially_destructible_v<Frame>);
+        return bioseq::pg_utils::invoke_pg_as_cpp([this] {
+            const MemoryContext previous =
+                MemoryContextSwitchTo(context_);
+            Frame* result =
+                static_cast<Frame*>(palloc0(sizeof(Frame)));
+            MemoryContextSwitchTo(previous);
+            return result;
+        });
+    }
+
+private:
+    static void reset_callback(void* argument) noexcept {
+        auto* self =
+            static_cast<OidEntryTxnScopedHtab*>(argument);
+        self->table_ = nullptr;
+        self->context_ = nullptr;
+    }
+
+    void acquire() {
+        if (table_ != nullptr) {
+            return;
+        }
+        context_ = AllocSetContextCreateInternal(
+            TopTransactionContext, name_, ALLOCSET_DEFAULT_SIZES);
+
+        HASHCTL controls{};
+        controls.keysize = sizeof(Oid);
+        controls.hash = oid_hash;
+        controls.entrysize = sizeof(Entry);
+        controls.hcxt = context_;
+        table_ = hash_create(
+            name_,
+            64,
+            &controls,
+            HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
+
+        callback_.func = &OidEntryTxnScopedHtab::reset_callback;
         callback_.arg = this;
         callback_.next = nullptr;
         MemoryContextRegisterResetCallback(context_, &callback_);

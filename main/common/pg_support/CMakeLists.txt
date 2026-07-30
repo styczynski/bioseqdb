@@ -19,7 +19,24 @@ target_sources(bioseq_pg_support
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/safety_runtime_probe.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/error_boundary.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/lists.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/bitmapset.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/nodes.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/spi.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/index.cppm")
+
+if(BUILD_TESTING)
+  add_library(bioseq_pg_support_compile_contracts OBJECT
+    "${CMAKE_CURRENT_LIST_DIR}/contract_tests.cpp")
+  set_target_properties(bioseq_pg_support_compile_contracts PROPERTIES
+    CXX_STANDARD 26
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS ON
+    CXX_MODULE_STD ON
+    INTERPROCEDURAL_OPTIMIZATION FALSE)
+  target_link_libraries(bioseq_pg_support_compile_contracts
+    PRIVATE bioseq_pg_support)
+endif()
 
 # The source-neutral generated-SQL boundary is required by both extension
 # DSOs.  Provision it alongside the PostgreSQL support target so cache-only
