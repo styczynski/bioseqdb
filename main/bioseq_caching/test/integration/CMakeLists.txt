@@ -23,6 +23,7 @@ add_executable(bioseq_cache_integration_tests
   test_owner_liveness.cpp
   test_bootstrap_recovery.cpp
   test_provider.cpp
+  test_provider_migration_gaps.cpp
   test_planner.cpp
   test_legacy_dml_parity.cpp
   test_legacy_security_parity.cpp
