@@ -6181,11 +6181,9 @@ void reusable_registry_janitor_sweep_v1() noexcept {
     executor::destroy_context_owned(workspace);
 }
 
-#if defined(BIOSEQ_CACHE_TESTING)
-
-/** Snapshot test-drain progress only while membership is fully quiesced. */
+/** Snapshot reference ownership only while membership is fully quiesced. */
 [[nodiscard]] ReusableRegistrySnapshotV1
-test_reusable_registry_snapshot_v1() noexcept {
+runtime_reusable_registry_snapshot_v1() noexcept {
     if (!g_reusable_registry || g_reusable_membership_lock == nullptr) {
         return {};
     }
@@ -6194,6 +6192,14 @@ test_reusable_registry_snapshot_v1() noexcept {
         reusable_registry_snapshot(g_reusable_registry);
     LWLockRelease(g_reusable_membership_lock);
     return snapshot;
+}
+
+#if defined(BIOSEQ_CACHE_TESTING)
+
+/** Snapshot test-drain progress through the production reference aggregate. */
+[[nodiscard]] ReusableRegistrySnapshotV1
+test_reusable_registry_snapshot_v1() noexcept {
+    return runtime_reusable_registry_snapshot_v1();
 }
 
 [[nodiscard]] bool same_test_drain_progress_v1(
@@ -10586,6 +10592,42 @@ void cache_explain_custom_scan(
     ExplainPropertyText("Cache Entry Kind", "ExactFinalResult", explain_state);
     const storage::StorageRuntimeSnapshot storage_snapshot =
         storage::runtime_snapshot();
+    const ReusableRegistrySnapshotV1 reference_snapshot =
+        runtime_reusable_registry_snapshot_v1();
+    char* pending_hot_diagnostic =
+        storage_snapshot.pending_hot_bytes_valid
+        ? psprintf(
+            "%llu",
+            static_cast<unsigned long long>(
+                storage_snapshot.pending_hot_bytes))
+        : pstrdup("unavailable");
+    char* pending_file_diagnostic =
+        storage_snapshot.pending_file_bytes_valid
+        ? psprintf(
+            "%llu",
+            static_cast<unsigned long long>(
+                storage_snapshot.pending_file_bytes))
+        : pstrdup("unavailable");
+    const bool reference_snapshot_valid =
+        reference_snapshot.boot_nonce != 0;
+    char* registry_waiter_diagnostic = reference_snapshot_valid
+        ? psprintf(
+            "%llu",
+            static_cast<unsigned long long>(
+                reference_snapshot.waiter_references))
+        : pstrdup("unavailable");
+    char* registry_reader_diagnostic = reference_snapshot_valid
+        ? psprintf(
+            "%llu",
+            static_cast<unsigned long long>(
+                reference_snapshot.reader_pins))
+        : pstrdup("unavailable");
+    char* planner_pin_diagnostic = reference_snapshot_valid
+        ? psprintf(
+            "%llu",
+            static_cast<unsigned long long>(
+                reference_snapshot.planner_pins))
+        : pstrdup("unavailable");
     ExplainPropertyText(
         "Cache Readiness",
         readiness_name(storage_snapshot.correctness_readiness),
@@ -10604,6 +10646,24 @@ void cache_explain_custom_scan(
             storage_snapshot.waiter_reference_count));
     ExplainPropertyText("Cache Storage", storage_diagnostic, explain_state);
     pfree(storage_diagnostic);
+    char* ownership_diagnostic = psprintf(
+        "readers=%llu; pending_hot=%s; pending_file=%s; "
+        "registry_waiters=%s; registry_readers=%s; planner_pins=%s",
+        static_cast<unsigned long long>(
+            storage_snapshot.reader_reference_count),
+        pending_hot_diagnostic,
+        pending_file_diagnostic,
+        registry_waiter_diagnostic,
+        registry_reader_diagnostic,
+        planner_pin_diagnostic);
+    ExplainPropertyText(
+        "Cache Storage Ownership", ownership_diagnostic, explain_state);
+    pfree(ownership_diagnostic);
+    pfree(pending_hot_diagnostic);
+    pfree(pending_file_diagnostic);
+    pfree(registry_waiter_diagnostic);
+    pfree(registry_reader_diagnostic);
+    pfree(planner_pin_diagnostic);
     ExplainPropertyText(
         "Cache Janitor",
         worker_lifecycle_name(storage_snapshot.worker_lifecycle),

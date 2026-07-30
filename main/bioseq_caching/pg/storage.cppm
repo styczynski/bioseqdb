@@ -351,8 +351,11 @@ struct StorageRuntimeSnapshot {
     std::uint64_t reserved_hot_bytes = 0;
     std::uint64_t fixed_hot_bytes = 0;
     std::uint64_t pending_hot_bytes = 0;
+    bool pending_hot_bytes_valid = false;
     std::uint64_t live_hot_bytes = 0;
     std::uint64_t reserved_file_bytes = 0;
+    std::uint64_t pending_file_bytes = 0;
+    bool pending_file_bytes_valid = false;
     std::uint64_t dsa_stored_bytes = 0;
     std::uint64_t file_stored_bytes = 0;
     std::uint64_t row_group_count = 0;
@@ -4206,9 +4209,10 @@ StorageRuntimeSnapshot runtime_snapshot() noexcept {
     const auto registry = shared_registry::shared_registry_diagnostics();
     snapshot.bootstrap_state = registry.state;
     snapshot.bootstrap_ready = registry.state == BootstrapState::Ready;
-    if (g_shared == nullptr) {
+    if (g_shared == nullptr || !g_accounting || g_storage_lock == nullptr) {
         return snapshot;
     }
+    snapshot.pending_file_bytes_valid = true;
     snapshot.worker_lifecycle = static_cast<WorkerLifecycle>(
         pg_atomic_read_u32(&g_shared->worker_lifecycle));
     snapshot.correctness_readiness = static_cast<CacheCorrectnessReadiness>(
@@ -4225,10 +4229,13 @@ StorageRuntimeSnapshot runtime_snapshot() noexcept {
         : pg_atomic_read_u64(&g_registry_root->hot_live_bytes);
     const auto fixed_and_live = checked_add(
         snapshot.fixed_hot_bytes, snapshot.live_hot_bytes);
-    snapshot.pending_hot_bytes = fixed_and_live.has_value() &&
-            snapshot.reserved_hot_bytes >= *fixed_and_live
-        ? snapshot.reserved_hot_bytes - *fixed_and_live
-        : 0;
+    snapshot.pending_hot_bytes_valid =
+        fixed_and_live.has_value()
+        && snapshot.reserved_hot_bytes >= *fixed_and_live;
+    if (snapshot.pending_hot_bytes_valid) {
+        snapshot.pending_hot_bytes =
+            snapshot.reserved_hot_bytes - *fixed_and_live;
+    }
     snapshot.reserved_file_bytes = pg_atomic_read_u64(
         g_accounting.reserved_file_bytes);
     snapshot.hot_ceiling_bytes = g_shared->hot_ceiling_bytes;
@@ -4250,6 +4257,17 @@ StorageRuntimeSnapshot runtime_snapshot() noexcept {
         if (!entry.reservation_accounted ||
             entry.state == BlockLedgerState::Empty) {
             continue;
+        }
+        if (entry.state == BlockLedgerState::Reserved
+            && entry.reservation_tier == BlockBackingTierV1::File
+            && snapshot.pending_file_bytes_valid) {
+            const auto next_pending_file = checked_add(
+                snapshot.pending_file_bytes, entry.reserved_bytes);
+            if (next_pending_file.has_value()) {
+                snapshot.pending_file_bytes = *next_pending_file;
+            } else {
+                snapshot.pending_file_bytes_valid = false;
+            }
         }
         if (entry.reservation_tier == BlockBackingTierV1::Dsa) {
             snapshot.dsa_stored_bytes += entry.payload_bytes;
@@ -4524,9 +4542,11 @@ StorageTierTestSnapshot test_storage_tier_snapshot() noexcept {
     snapshot.fixed_hot_bytes = runtime.fixed_hot_bytes;
     snapshot.live_hot_bytes = runtime.live_hot_bytes;
     snapshot.pending_hot_bytes = runtime.pending_hot_bytes;
-    snapshot.coherent = snapshot.coherent &&
-        runtime.reserved_hot_bytes >= runtime.fixed_hot_bytes &&
-        dynamic_hot_reservations <= runtime.reserved_hot_bytes;
+    snapshot.coherent = snapshot.coherent
+        && runtime.pending_hot_bytes_valid
+        && runtime.pending_file_bytes_valid
+        && runtime.reserved_hot_bytes >= runtime.fixed_hot_bytes
+        && dynamic_hot_reservations <= runtime.reserved_hot_bytes;
     return snapshot;
 }
 

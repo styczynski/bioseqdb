@@ -75,6 +75,33 @@ constexpr std::string_view alignment_query{
     return lhs >= rhs ? lhs - rhs : rhs - lhs;
 }
 
+/// @brief Reads one required unsigned metric from Cache Storage diagnostics.
+[[nodiscard]] std::uint64_t diagnostic_metric(
+    std::string_view diagnostic, std::string_view label) {
+    const std::size_t label_offset = diagnostic.find(label);
+    if (label_offset == std::string_view::npos) {
+        throw std::runtime_error(
+            "Cache Storage diagnostic is missing "
+            + std::string(label));
+    }
+    const std::size_t begin = label_offset + label.size();
+    std::size_t end = begin;
+    while (end < diagnostic.size()
+           && diagnostic[end] >= '0' && diagnostic[end] <= '9') {
+        ++end;
+    }
+    std::uint64_t value{};
+    const auto [parsed_end, error] = std::from_chars(
+        diagnostic.data() + begin, diagnostic.data() + end, value);
+    if (error != std::errc{}
+        || parsed_end != diagnostic.data() + end || begin == end) {
+        throw std::runtime_error(
+            "Cache Storage diagnostic has invalid "
+            + std::string(label));
+    }
+    return value;
+}
+
 /// @brief Compares ordered libpq text-row streams byte for byte.
 [[nodiscard]] bool byte_identical(const bioseq::libpq::result& lhs,
                                   const bioseq::libpq::result& rhs) {
@@ -152,20 +179,20 @@ void configure_canonical_cpu_path(
         "SET bioseq.read_sequence_index = on");
 }
 
-[[nodiscard]] bool has_partial_file(
+/// @brief Detects cache staging files and propagates every filesystem error.
+///
+/// Production cache writers use the `.partial` suffix for both block files and
+/// manifest staging files.  The throwing filesystem overloads are intentional:
+/// an unreadable or disappearing subtree cannot be accepted as proof that no
+/// temporary cache artifact remains.
+[[nodiscard]] bool has_cache_temporary_file(
     const std::filesystem::path& root) {
-    std::error_code error;
-    for (std::filesystem::recursive_directory_iterator iterator{
-             root, std::filesystem::directory_options::skip_permission_denied,
-             error},
-         end;
-         !error && iterator != end;
-         iterator.increment(error)) {
-        if (iterator->is_regular_file(error)
-            && iterator->path().extension() == ".partial") {
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::recursive_directory_iterator{root}) {
+        static_cast<void>(entry.symlink_status());
+        if (entry.path().extension() == ".partial") {
             return true;
         }
-        error.clear();
     }
     return false;
 }
@@ -371,7 +398,7 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     bioseq::cache_test::exec(
         data,
         "SET bioseq.query_cache_optimisation_mode = 'disabled'");
-    const bioseq::libpq::result oracle = [&] {
+    const bioseq::libpq::result oracle = [&data, &fixture] {
         bioseq::postgres_test::scoped_report_phase phase{"oracle"};
         bioseq::libpq::result result =
             data.exec(alignment_query, 20min);
@@ -394,7 +421,7 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
         "SET bioseq.query_cache_optimisation_mode = 'same'");
     const auto before_cold =
         bioseq::cache_test::read_cache_stats(admin);
-    const bioseq::libpq::result cold = [&] {
+    const bioseq::libpq::result cold = [&data, &fixture] {
         bioseq::postgres_test::scoped_report_phase phase{"cold"};
         bioseq::libpq::result result =
             data.exec(alignment_query, 20min);
@@ -485,7 +512,7 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.query_bounds_and_strand");
 
-    const bioseq::libpq::result warm = [&] {
+    const bioseq::libpq::result warm = [&data, &fixture] {
         bioseq::postgres_test::scoped_report_phase phase{"warm"};
         bioseq::libpq::result result =
             data.exec(alignment_query, 5min);
@@ -519,7 +546,7 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.complete_entry");
 
-    const auto explain = [&] {
+    const auto explain = [&data, &fixture] {
         bioseq::postgres_test::scoped_report_phase phase{"explain"};
         auto result = bioseq::postgres_test::run_explain(
             data, alignment_query, true, 5min);
@@ -574,7 +601,7 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
 
     bioseq::cache_test::exec(
         data, "SET bioseq.enable_column_cache = off");
-    const auto column_cache_off = [&] {
+    const auto column_cache_off = [&data, &fixture] {
         bioseq::postgres_test::scoped_report_phase phase{"column-cache"};
         auto result = data.exec(alignment_query, 5min);
         phase.complete();
@@ -590,12 +617,48 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.column_cache_off_hit");
 
+    const auto terminal_explain = bioseq::postgres_test::run_explain(
+        data, alignment_query, false, 5min);
+    const auto terminal_cache_nodes =
+        terminal_explain.find_plan_nodes(
+            "Custom Plan Provider", "BioseqCacheScan");
+    REQUIRE(terminal_cache_nodes.size() == 1);
     CHECK(bioseq::cache_test::integer(
               admin,
               "SELECT count(*) FROM bioseq_cache.entries() "
               "WHERE state = 'BUILDING'")
           == 0);
-    CHECK_FALSE(has_partial_file(fixture.cluster().data_directory()));
+    CHECK(bioseq::cache_test::integer(
+              admin,
+              "SELECT coalesce(sum(waiters), 0) "
+              "FROM bioseq_cache.entries()")
+          == 0);
+    CHECK(bioseq::cache_test::integer(
+              admin,
+              "SELECT coalesce(sum(readers), 0) "
+              "FROM bioseq_cache.entries()")
+          == 0);
+    const auto storage_diagnostic =
+        bioseq::postgres_test::explain_property_string(
+            *terminal_cache_nodes.front(), "Cache Storage");
+    REQUIRE(storage_diagnostic.has_value());
+    CHECK(diagnostic_metric(*storage_diagnostic, "waiters=") == 0);
+    const auto ownership_diagnostic =
+        bioseq::postgres_test::explain_property_string(
+            *terminal_cache_nodes.front(), "Cache Storage Ownership");
+    REQUIRE(ownership_diagnostic.has_value());
+    CHECK(diagnostic_metric(*ownership_diagnostic, "readers=") == 0);
+    CHECK(diagnostic_metric(*ownership_diagnostic, "pending_hot=") == 0);
+    CHECK(diagnostic_metric(*ownership_diagnostic, "pending_file=") == 0);
+    CHECK(diagnostic_metric(
+              *ownership_diagnostic, "registry_waiters=")
+          == 0);
+    CHECK(diagnostic_metric(
+              *ownership_diagnostic, "registry_readers=")
+          == 0);
+    CHECK(diagnostic_metric(*ownership_diagnostic, "planner_pins=") == 0);
+    CHECK_FALSE(has_cache_temporary_file(
+        fixture.cluster().data_directory()));
     const auto sampling = fixture.finish_resource_sampling();
     const auto repeated_sampling = fixture.finish_resource_sampling();
     REQUIRE(repeated_sampling.rss_samples == sampling.rss_samples);

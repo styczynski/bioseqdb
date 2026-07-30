@@ -93,6 +93,12 @@ struct storage_snapshot {
   std::int64_t file_bytes{};
   std::int64_t manifests{};
   std::int64_t waiters{};
+  std::int64_t readers{};
+  std::int64_t pending_hot_bytes{};
+  std::int64_t pending_file_bytes{};
+  std::int64_t registry_waiters{};
+  std::int64_t registry_readers{};
+  std::int64_t planner_pins{};
 
   friend bool operator==(const storage_snapshot &,
                          const storage_snapshot &) = default;
@@ -122,6 +128,55 @@ struct storage_snapshot {
   return value;
 }
 
+[[nodiscard]] bool consume_literal(std::string_view &input,
+                                   std::string_view literal) {
+  if (!input.starts_with(literal)) {
+    return false;
+  }
+  input.remove_prefix(literal.size());
+  return true;
+}
+
+[[nodiscard]] bool consume_unsigned(std::string_view &input) {
+  std::size_t size = 0;
+  while (size < input.size() && input[size] >= '0' && input[size] <= '9') {
+    ++size;
+  }
+  if (size == 0) {
+    return false;
+  }
+  input.remove_prefix(size);
+  return true;
+}
+
+/// Preserve the established Cache Storage value consumed by legacy reports.
+[[nodiscard]] bool legacy_storage_diagnostic_shape(
+    std::string_view diagnostic) {
+  if (!consume_literal(diagnostic, "ready") &&
+      !consume_literal(diagnostic, "unavailable")) {
+    return false;
+  }
+  if (!consume_literal(diagnostic, "; backend=")) {
+    return false;
+  }
+  if (!consume_literal(diagnostic, "attached") &&
+      !consume_literal(diagnostic, "not-attached")) {
+    return false;
+  }
+  return consume_literal(diagnostic, "; hot=") &&
+         consume_unsigned(diagnostic) &&
+         consume_literal(diagnostic, "/") &&
+         consume_unsigned(diagnostic) &&
+         consume_literal(diagnostic, "; file=") &&
+         consume_unsigned(diagnostic) &&
+         consume_literal(diagnostic, "/") &&
+         consume_unsigned(diagnostic) &&
+         consume_literal(diagnostic, "; manifests=") &&
+         consume_unsigned(diagnostic) &&
+         consume_literal(diagnostic, "; waiters=") &&
+         consume_unsigned(diagnostic) && diagnostic.empty();
+}
+
 template <typename Session>
 [[nodiscard]] storage_snapshot read_storage_snapshot(Session &session) {
   const auto explain =
@@ -129,28 +184,65 @@ template <typename Session>
                    "EXPLAIN (COSTS OFF) "
                    "SELECT id FROM entitlement_rows "
                    "WHERE id <= 100 ORDER BY id");
-  std::string diagnostic;
+  std::string storage_diagnostic;
+  std::string ownership_diagnostic;
   for (int row = 0; row < explain.rows(); ++row) {
     if (explain.is_null(row, 0)) {
       continue;
     }
     const std::string_view line = explain.value(row, 0);
-    constexpr std::string_view prefix{"Cache Storage: "};
-    const std::size_t offset = line.find(prefix);
-    if (offset != std::string_view::npos) {
-      diagnostic = std::string(line.substr(offset + prefix.size()));
-      break;
+    constexpr std::string_view storage_prefix{"Cache Storage: "};
+    constexpr std::string_view ownership_prefix{
+        "Cache Storage Ownership: "};
+    const std::size_t storage_offset = line.find(storage_prefix);
+    const std::size_t ownership_offset = line.find(ownership_prefix);
+    if (storage_offset != std::string_view::npos) {
+      storage_diagnostic =
+          std::string(line.substr(storage_offset + storage_prefix.size()));
+    }
+    if (ownership_offset != std::string_view::npos) {
+      ownership_diagnostic = std::string(
+          line.substr(ownership_offset + ownership_prefix.size()));
     }
   }
-  if (diagnostic.empty()) {
+  if (storage_diagnostic.empty() || ownership_diagnostic.empty()) {
     throw std::runtime_error(
-        "EXPLAIN did not expose Cache Storage diagnostics");
+        "EXPLAIN did not expose complete Cache Storage diagnostics");
   }
-  return storage_snapshot{.hot_bytes = diagnostic_metric(diagnostic, "hot="),
-                          .file_bytes = diagnostic_metric(diagnostic, "file="),
+  if (!legacy_storage_diagnostic_shape(storage_diagnostic)) {
+    throw std::runtime_error(
+        "Cache Storage compatibility value changed shape");
+  }
+  return storage_snapshot{.hot_bytes =
+                              diagnostic_metric(storage_diagnostic, "hot="),
+                          .file_bytes =
+                              diagnostic_metric(storage_diagnostic, "file="),
                           .manifests =
-                              diagnostic_metric(diagnostic, "manifests="),
-                          .waiters = diagnostic_metric(diagnostic, "waiters=")};
+                              diagnostic_metric(
+                                  storage_diagnostic, "manifests="),
+                          .waiters =
+                              diagnostic_metric(
+                                  storage_diagnostic, "waiters="),
+                          .readers =
+                              diagnostic_metric(
+                                  ownership_diagnostic, "readers="),
+                          .pending_hot_bytes =
+                              diagnostic_metric(
+                                  ownership_diagnostic, "pending_hot="),
+                          .pending_file_bytes =
+                              diagnostic_metric(
+                                  ownership_diagnostic, "pending_file="),
+                          .registry_waiters =
+                              diagnostic_metric(
+                                  ownership_diagnostic,
+                                  "registry_waiters="),
+                          .registry_readers =
+                              diagnostic_metric(
+                                  ownership_diagnostic,
+                                  "registry_readers="),
+                          .planner_pins =
+                              diagnostic_metric(
+                                  ownership_diagnostic, "planner_pins=")};
 }
 
 [[nodiscard]] bool snapshot_reclaimed(bioseq::libpq::connection &connection,

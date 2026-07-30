@@ -288,7 +288,7 @@ TEST_CASE("provider PostgreSQL errors and interrupts preserve SQL semantics",
         bioseq::postgres_test::exact_row_hash(oracle);
 
     const auto require_propagated =
-        [&](std::string_view fault,
+        [&connection, &oracle_digest](std::string_view fault,
             std::string_view expected_sqlstate,
             std::string_view stable_probe) {
             prime_mapping_source(connection);
