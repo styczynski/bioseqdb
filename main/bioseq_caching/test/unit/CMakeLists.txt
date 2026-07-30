@@ -1,9 +1,11 @@
 find_package(Catch2 3 REQUIRED)
 
 add_executable(bioseq_cache_unit_tests
+  fake_provider_v2.cpp
   test_checked_state_ttl.cpp
   test_coverage_readiness.cpp
   test_admission_provider.cpp
+  test_provider_api_abi.cpp
   test_column_format.cpp
   test_reusable_planning.cpp
   test_reusable_registry.cpp

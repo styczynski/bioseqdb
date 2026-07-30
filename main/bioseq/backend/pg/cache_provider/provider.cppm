@@ -28,6 +28,7 @@ inline constexpr std::uint32_t kPostgresMajorVersion =
 inline void** g_directory_slot = nullptr;
 inline void** g_cache_api_slot = nullptr;
 inline const BioseqCacheApiV2* g_preflight_cache_api = nullptr;
+inline bool g_preflight_cache_api_compatible = true;
 inline const BioseqCacheApiV2* g_bound_api = nullptr;
 inline std::uint64_t g_bound_api_cookie = 0;
 inline BioseqCacheProviderRegistrationV2 g_registration{
@@ -254,16 +255,19 @@ export void bioseq_cache_provider_preflight() {
     }
     const auto* const cache_api =
         static_cast<const BioseqCacheApiV2*>(*api_slot);
-    if (cache_api != nullptr && !detail::cache_api_valid(cache_api)) {
-        ereport(ERROR,
-            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("Bioseq cache API rendezvous is incompatible"),
+    const bool cache_api_compatible =
+        cache_api == nullptr || detail::cache_api_valid(cache_api);
+    if (!cache_api_compatible) {
+        ereport(WARNING,
+            (errmsg("Bioseq ignored an incompatible cache API rendezvous"),
              errdetail("Rendezvous name: %s",
                 bioseq::cache::kCacheApiRendezvousName)));
     }
     detail::g_directory_slot = directory_slot;
     detail::g_cache_api_slot = api_slot;
     detail::g_preflight_cache_api = cache_api;
+    detail::g_preflight_cache_api_compatible =
+        cache_api_compatible;
     if (detail::g_directory.instance_cookie == 0) {
         const auto address = static_cast<std::uint64_t>(
             reinterpret_cast<std::uintptr_t>(&detail::g_directory));
@@ -295,6 +299,15 @@ export void bioseq_cache_provider_publish_directory() {
     const auto* api =
         static_cast<const BioseqCacheApiV2*>(
             *detail::g_cache_api_slot);
+    if (api == detail::g_preflight_cache_api
+        && !detail::g_preflight_cache_api_compatible) {
+        /*
+         * Preflight already warned about this optional peer.  Do not
+         * dereference it again and, critically, do not request a provider
+         * registration token from an incompatible cache DSO.
+         */
+        return;
+    }
     if (!detail::cache_api_valid(api)) {
         ereport(WARNING,
             (errmsg("Bioseq cache provider ignored an incompatible cache API"),
