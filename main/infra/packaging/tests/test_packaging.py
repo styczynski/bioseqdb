@@ -6,8 +6,10 @@ import gzip
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import stat
+import subprocess
 import tarfile
 import tempfile
 from types import SimpleNamespace
@@ -532,6 +534,108 @@ class FormatPlanTests(unittest.TestCase):
                         frozenset({model.ContainerCapability.SYS_NICE}),
                     )
 
+    def test_pacman_sandbox_adjustment_accepts_repeated_options_sections(self) -> None:
+        def sandbox_prelude(script: str) -> str:
+            start = script.index("pacman_conf=/etc/pacman.conf")
+            end = script.index("pacman -Syu", start)
+            body = script[start:end].replace(
+                "pacman_conf=/etc/pacman.conf",
+                'pacman_conf="${PACMAN_CONF_FIXTURE}"',
+                1,
+            )
+            return (
+                "set -Eeuo pipefail\n"
+                "configure_fixture() {\n"
+                f"{body}\n"
+                "}\n"
+                "configure_fixture\n"
+            )
+
+        smoke_script = (
+            PACKAGING_ROOT / "scripts" / "smoke_installed_package.sh"
+        ).read_text(encoding="utf-8")
+        scripts = {
+            "build": pacman.PACMAN_BUILD_SCRIPT,
+            "repository": pacman_repository.PACMAN_REPOSITORY_SCRIPT,
+            "smoke": smoke_script,
+        }
+        valid_fixtures = {
+            "single": "[options]\nArchitecture = auto\n[core]\nInclude = mirrorlist\n",
+            "repeated": (
+                "[options]\nArchitecture = auto\n"
+                "[core]\nInclude = mirrorlist\n"
+                "[options]\nNoExtract = usr/share/doc/*\n"
+            ),
+            "existing_first": (
+                "[options]\nDisableSandbox\nArchitecture = auto\n"
+                "[core]\nInclude = mirrorlist\n"
+            ),
+            "existing_second": (
+                "[options]\nArchitecture = auto\n"
+                "[core]\nInclude = mirrorlist\n"
+                "[options]\nDisableSandbox\nNoExtract = usr/share/doc/*\n"
+            ),
+        }
+        invalid_fixtures = {
+            "missing_options": "Architecture = auto\n[core]\nInclude = mirrorlist\n",
+            "duplicate_same_section": (
+                "[options]\nDisableSandbox\nDisableSandbox\nArchitecture = auto\n"
+            ),
+            "duplicate_across_sections": (
+                "[options]\nDisableSandbox\n[core]\nInclude = mirrorlist\n"
+                "[options]\nDisableSandbox\n"
+            ),
+            "outside_options": "DisableSandbox\n[options]\nArchitecture = auto\n",
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for script_name, script in scripts.items():
+                prelude = sandbox_prelude(script)
+                for name, contents in valid_fixtures.items():
+                    pacman_conf = root / f"pacman-{script_name}-{name}.conf"
+                    pacman_conf.write_text(contents, encoding="utf-8")
+                    environment = dict(os.environ)
+                    environment["PACMAN_CONF_FIXTURE"] = str(pacman_conf)
+                    environment["BIOSEQ_BUILD_DEPENDENCIES"] = "cmake"
+                    with self.subTest(script=script_name, fixture=name):
+                        for _ in range(2):
+                            subprocess.run(
+                                ["bash", "-c", prelude],
+                                check=True,
+                                env=environment,
+                                capture_output=True,
+                                text=True,
+                            )
+                        lines = pacman_conf.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                        self.assertEqual(lines.count("[options]"), contents.count("[options]"))
+                        self.assertEqual(lines.count("DisableSandbox"), 1)
+                        sandbox_index = lines.index("DisableSandbox")
+                        prior_headers = [
+                            line
+                            for line in lines[:sandbox_index]
+                            if line.startswith("[") and line.endswith("]")
+                        ]
+                        self.assertTrue(prior_headers)
+                        self.assertEqual(prior_headers[-1], "[options]")
+
+                for name, contents in invalid_fixtures.items():
+                    pacman_conf = root / f"pacman-{script_name}-{name}.conf"
+                    pacman_conf.write_text(contents, encoding="utf-8")
+                    environment = dict(os.environ)
+                    environment["PACMAN_CONF_FIXTURE"] = str(pacman_conf)
+                    environment["BIOSEQ_BUILD_DEPENDENCIES"] = "cmake"
+                    with self.subTest(script=script_name, invalid_fixture=name):
+                        result = subprocess.run(
+                            ["bash", "-c", prelude],
+                            check=False,
+                            env=environment,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(result.returncode, 64)
+
 
 class TemplateRendererTests(unittest.TestCase):
     def test_renderer_is_strict_public_only_and_deterministic(self) -> None:
@@ -738,6 +842,48 @@ class PublishingContractTests(unittest.TestCase):
 
 
 class RepositoryContractTests(unittest.TestCase):
+    def test_pacman_alias_materialization_is_readable_atomic_and_clean(self) -> None:
+        script = pacman_repository.PACMAN_REPOSITORY_SCRIPT
+        function_start = script.index("materialize_alias() {")
+        function_end = script.index('\ndatabase="${BIOSEQ_REPOSITORY_NAME}', function_start)
+        function = script[function_start:function_end]
+        harness = "\n".join(
+            (
+                "set -Eeuo pipefail",
+                function,
+                'materialize_alias "$1" "$2"',
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            canonical = root / "repository.db.tar.gz"
+            alias = root / "repository.db"
+            canonical.write_bytes(b"repository-metadata")
+
+            subprocess.run(
+                ["bash", "-c", harness, "pacman-alias-test", canonical, alias],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(alias.read_bytes(), canonical.read_bytes())
+            self.assertEqual(stat.S_IMODE(alias.stat().st_mode), 0o644)
+            self.assertTrue(alias.is_file())
+            self.assertFalse(alias.is_symlink())
+            self.assertEqual(list(root.glob("repository.db.tmp.*")), [])
+
+            alias.unlink()
+            alias.mkdir()
+            failed = subprocess.run(
+                ["bash", "-c", harness, "pacman-alias-test", canonical, alias],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(list(root.glob("repository.db.tmp.*")), [])
+
     def test_rpm_repository_plan_is_pinned_secret_scoped_and_exact(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -983,6 +1129,7 @@ test-only-private-key-material
                 self.assertEqual(str(plan.mounts[0].target), "/repo")
                 self.assertIn("repo-add --sign --verify", plan.argv[-1])
                 self.assertIn("materialize_alias", plan.argv[-1])
+                self.assertIn('chmod 0644 "${temporary_alias}"', plan.argv[-1])
                 self.assertEqual(
                     set(plan.environment_names),
                     {
@@ -1028,6 +1175,12 @@ test-only-private-key-material
                 )
                 self.assertEqual(len(runner.calls), 1)
                 self.assertIn("GPG_PRIVATE_KEY", runner.calls[0][1])
+                for path in (
+                    result.package_path,
+                    *result.signature_paths,
+                    *result.metadata_paths,
+                ):
+                    self.assertEqual(path.stat().st_mode & 0o444, 0o444)
 
                 retained_environment: dict[str, str] | None = None
                 with pacman_repository.repository_environment(
