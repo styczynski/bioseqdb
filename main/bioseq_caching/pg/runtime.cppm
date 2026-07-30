@@ -570,6 +570,7 @@ using DirtyObservationLedgerV1 = TransactionWriteLedgerV1<
     kMaximumRelationDependencies,
     kMaximumDirtySubtransactionFramesV1>;
 inline DirtyObservationLedgerV1 g_dirty_observations{};
+inline bool g_write_invalidation_deferred_to_emergency = false;
 inline bool g_database_transition_published = false;
 inline bool g_coarse_transition_published = false;
 inline TransactionId g_database_transition_xid = InvalidTransactionId;
@@ -615,6 +616,24 @@ void bind_reusable_registry_for_write_invalidation() noexcept {
     if (!guc::preload_requested() || g_shared == nullptr
         || pg_atomic_read_u32(&g_shared->ready) == 0
         || pg_atomic_read_u32(&g_shared->bootstrap_failure) != 0) {
+        return;
+    }
+    /*
+     * A disabled writer must invalidate an existing reusable registry, but it
+     * must not become or wait for the lazy initializer.  Before READY there is
+     * no published reusable generation; the preallocated emergency write
+     * dependency remains the conservative transition authority.
+     */
+    const BootstrapState bootstrap_state =
+        shared_registry::shared_registry_bootstrap_state();
+    if (bootstrap_state != BootstrapState::Ready) {
+        if (bootstrap_state == BootstrapState::Uninitialized
+            || bootstrap_state == BootstrapState::Initializing) {
+            g_write_invalidation_deferred_to_emergency = true;
+            dependency_runtime::force_emergency_fallback();
+        } else if (bootstrap_state == BootstrapState::Failed) {
+            mark_shared_cache_failed();
+        }
         return;
     }
     if (!bind_shared_reusable_registry()) {
@@ -1058,6 +1077,7 @@ void observe_provider_rel_paths(
 /** Drop all backend-local transaction frames without retaining stale pointers. */
 void clear_dirty_frames() noexcept {
     g_dirty_observations.reset();
+    g_write_invalidation_deferred_to_emergency = false;
 }
 
 /** Remove one subtransaction frame and optionally merge it into its parent. */
@@ -3475,6 +3495,9 @@ void invalidate_dirty_reusable_generations() noexcept {
          * from XACT_EVENT_COMMIT.
          */
         if (guc::preload_requested() && g_shared != nullptr
+            && !g_write_invalidation_deferred_to_emergency
+            && shared_registry::shared_registry_bootstrap_state()
+                == BootstrapState::Ready
             && transaction_is_dirty()) {
             mark_shared_cache_failed();
         }

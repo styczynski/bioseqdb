@@ -125,9 +125,10 @@ TEST_CASE("bootstrap attachment takeover and corruption fail open coherently",
 
   {
     bioseq::postgres_test::postgres_fixture fixture{bootstrap_options()};
-    auto &connection = fixture.admin();
-    REQUIRE(wait_for_status(connection, "(s->>'state')::integer = 2",
+    auto &admin = fixture.admin();
+    REQUIRE(wait_for_status(admin, "(s->>'state')::integer = 2",
                             std::chrono::steady_clock::now() + 10s));
+    auto connection = fixture.connect();
     CHECK(bioseq::cache_test::boolean(connection, attach_twice_sql()));
     CHECK(bioseq::cache_test::boolean(
         connection, "WITH a AS MATERIALIZED ("
@@ -364,7 +365,7 @@ TEST_CASE("bootstrap attachment takeover and corruption fail open coherently",
         std::string_view{"boot_nonce"}}) {
     INFO("published bootstrap corruption field " << field);
     bioseq::postgres_test::postgres_fixture fixture{bootstrap_options()};
-    auto &connection = fixture.admin();
+    auto connection = fixture.connect();
     REQUIRE(wait_for_status(connection, "(s->>'state')::integer = 2",
                             std::chrono::steady_clock::now() + 10s));
     CHECK(bioseq::cache_test::boolean(
