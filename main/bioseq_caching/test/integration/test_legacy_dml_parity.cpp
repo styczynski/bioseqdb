@@ -81,9 +81,11 @@ TEST_CASE("COPY, SPI, and dependency limits preserve exact generations",
                     END;
                 END
                 $$;
-                SELECT bioseq_cache.invalidate_all();
-                SELECT bioseq_cache.reset_stats();
             )SQL");
+        bioseq::cache_test::exec(
+            connection,
+            "SELECT bioseq_cache.invalidate_all(); "
+            "SELECT bioseq_cache.reset_stats()");
         constexpr std::string_view caught_spi_query{
             "SELECT id, payload FROM cache_caught_spi ORDER BY id"};
         const auto spi_cold = connection.exec(caught_spi_query);
