@@ -1,11 +1,10 @@
 /*-------------------------------------------------------------------------
  *
- * PostgreSQL-memory-context ownership for cache executor objects.
+ * PostgreSQL lifecycle-hook ownership for bioseq_cache.
  *
- * Cache scan state is allocated by PostgreSQL without running C++
- * constructors. These helpers construct nontrivial leaf objects in the
- * owning query context without raw new/delete and release them explicitly
- * from the registered context cleanup callback.
+ * The runtime supplies cache callbacks; this module owns hook chaining and
+ * the saved predecessor pointers. Keeping those pointers here makes hook
+ * lifetime independent from planner and scan implementation details.
  *
  *-------------------------------------------------------------------------
  */
@@ -13,55 +12,108 @@ module;
 
 extern "C" {
 #include "postgres.h"
-#include "utils/memutils.h"
-#include "utils/palloc.h"
-}
 
-#include <memory>
-#include <type_traits>
-#include <utility>
+#include "executor/executor.h"
+#include "miscadmin.h"
+#include "optimizer/planner.h"
+#include "storage/ipc.h"
+#include "storage/shmem.h"
+#include "tcop/utility.h"
+}
 
 export module bioseq.cache.pg.executor:lifecycle;
 
-export namespace bioseq::cache::pg::executor {
+namespace bioseq::cache::pg::executor::lifecycle::detail {
 
-/** Construct one object in a selected PG context without raising on OOM. */
-template<class Value, class... Arguments>
-[[nodiscard]] Value* try_construct_context_owned(
-        MemoryContext context,
-        Arguments&&... arguments) noexcept {
-    static_assert(std::is_nothrow_destructible_v<Value>);
-    if (context == nullptr) {
-        return nullptr;
-    }
-    void* const storage = MemoryContextAllocAligned(
-        context,
-        sizeof(Value),
-        alignof(Value),
-        MCXT_ALLOC_NO_OOM);
-    if (storage == nullptr) {
-        return nullptr;
-    }
-    try {
-        return std::construct_at(
-            static_cast<Value*>(storage),
-            std::forward<Arguments>(arguments)...);
-    } catch (...) {
-        pfree(storage);
-        return nullptr;
-    }
-}
+shmem_request_hook_type g_previous_shmem_request = nullptr;
+shmem_startup_hook_type g_previous_shmem_startup = nullptr;
+planner_hook_type g_previous_planner = nullptr;
+create_upper_paths_hook_type g_previous_create_upper_paths = nullptr;
+ExecutorStart_hook_type g_previous_executor_start = nullptr;
+ExecutorFinish_hook_type g_previous_executor_finish = nullptr;
+ExecutorEnd_hook_type g_previous_executor_end = nullptr;
+ProcessUtility_hook_type g_previous_process_utility = nullptr;
+bool g_backend_hooks_installed = false;
+bool g_shared_memory_hooks_installed = false;
 
-/** Destroy and release one context-owned object, clearing its observer. */
-template<class Value>
-void destroy_context_owned(Value*& value) noexcept {
-    static_assert(std::is_nothrow_destructible_v<Value>);
-    if (value == nullptr) {
+} // namespace bioseq::cache::pg::executor::lifecycle::detail
+
+export namespace bioseq::cache::pg::executor::lifecycle {
+
+struct BackendHookCallbacksV1 {
+    planner_hook_type planner = nullptr;
+    create_upper_paths_hook_type create_upper_paths = nullptr;
+    ExecutorStart_hook_type executor_start = nullptr;
+    ExecutorFinish_hook_type executor_finish = nullptr;
+    ExecutorEnd_hook_type executor_end = nullptr;
+    ProcessUtility_hook_type process_utility = nullptr;
+};
+
+/** Install the permanently chained planner, executor, and utility hooks. */
+void install_backend_hooks(const BackendHookCallbacksV1& callbacks) noexcept {
+    if (detail::g_backend_hooks_installed) {
         return;
     }
-    std::destroy_at(value);
-    pfree(value);
-    value = nullptr;
+    detail::g_previous_planner = planner_hook;
+    planner_hook = callbacks.planner;
+    detail::g_previous_create_upper_paths = create_upper_paths_hook;
+    create_upper_paths_hook = callbacks.create_upper_paths;
+    detail::g_previous_executor_start = ExecutorStart_hook;
+    ExecutorStart_hook = callbacks.executor_start;
+    detail::g_previous_executor_finish = ExecutorFinish_hook;
+    ExecutorFinish_hook = callbacks.executor_finish;
+    detail::g_previous_executor_end = ExecutorEnd_hook;
+    ExecutorEnd_hook = callbacks.executor_end;
+    detail::g_previous_process_utility = ProcessUtility_hook;
+    ProcessUtility_hook = callbacks.process_utility;
+    detail::g_backend_hooks_installed = true;
 }
 
-} // namespace bioseq::cache::pg::executor
+/** Install the shared-memory hooks during shared-preload processing. */
+void install_shared_memory_hooks(
+        shmem_request_hook_type request,
+        shmem_startup_hook_type startup) noexcept {
+    if (detail::g_shared_memory_hooks_installed) {
+        return;
+    }
+    detail::g_previous_shmem_request = shmem_request_hook;
+    shmem_request_hook = request;
+    detail::g_previous_shmem_startup = shmem_startup_hook;
+    shmem_startup_hook = startup;
+    detail::g_shared_memory_hooks_installed = true;
+}
+
+[[nodiscard]] shmem_request_hook_type previous_shmem_request() noexcept {
+    return detail::g_previous_shmem_request;
+}
+
+[[nodiscard]] shmem_startup_hook_type previous_shmem_startup() noexcept {
+    return detail::g_previous_shmem_startup;
+}
+
+[[nodiscard]] planner_hook_type previous_planner() noexcept {
+    return detail::g_previous_planner;
+}
+
+[[nodiscard]] create_upper_paths_hook_type
+previous_create_upper_paths() noexcept {
+    return detail::g_previous_create_upper_paths;
+}
+
+[[nodiscard]] ExecutorStart_hook_type previous_executor_start() noexcept {
+    return detail::g_previous_executor_start;
+}
+
+[[nodiscard]] ExecutorFinish_hook_type previous_executor_finish() noexcept {
+    return detail::g_previous_executor_finish;
+}
+
+[[nodiscard]] ExecutorEnd_hook_type previous_executor_end() noexcept {
+    return detail::g_previous_executor_end;
+}
+
+[[nodiscard]] ProcessUtility_hook_type previous_process_utility() noexcept {
+    return detail::g_previous_process_utility;
+}
+
+} // namespace bioseq::cache::pg::executor::lifecycle
