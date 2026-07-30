@@ -1,21 +1,35 @@
 module;
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <ostream>
-#include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <sys/types.h>
+#include <sys/utsname.h>
+#include <unistd.h>
+
+#if defined(__APPLE__)
+#include <libproc.h>
+#include <mach-o/dyld.h>
+#include <sys/proc_info.h>
+#endif
 
 export module bioseq.cache.benchmark;
 
@@ -38,6 +52,8 @@ using namespace std::chrono_literals;
 constexpr std::uint64_t reference_bases = 2'000'000'000ULL;
 constexpr std::uint64_t standalone_fixture_rows = 20'000ULL;
 constexpr std::string_view report_schema{"bioseq-cache-benchmark-v1"};
+constexpr std::chrono::milliseconds rss_sample_interval{50};
+constexpr std::chrono::milliseconds temp_sample_interval{1000};
 constexpr std::string_view standalone_query{
     "SELECT id, group_id, optional_value, payload "
     "FROM cache_benchmark_rows "
@@ -105,21 +121,53 @@ struct fixture_evidence {
     std::string query;
 };
 
+struct build_identity_evidence {
+    std::filesystem::path executable_path;
+    std::string executable_sha256;
+    std::string compiler;
+    std::string compiler_version;
+    std::uint64_t cxx_standard{};
+    std::string build_mode;
+    std::string identity_sha256;
+};
+
+struct host_identity_evidence {
+    std::string system_name;
+    std::string node_name;
+    std::string release;
+    std::string version;
+    std::string machine;
+    std::uint32_t logical_cpu_count{};
+    std::uint64_t page_size_bytes{};
+};
+
+struct benchmark_resource_report {
+    std::uint64_t peak_postgres_rss_bytes{};
+    std::uint64_t peak_temp_bytes{};
+    std::uint64_t rss_samples{};
+    std::uint64_t temp_samples{};
+    std::uint64_t rss_sampling_failures{};
+    std::uint64_t temp_sampling_failures{};
+};
+
 struct benchmark_report {
     std::string status{"passed"};
     std::string error;
     scenario selected_scenario{scenario::standalone};
     std::string executable;
+    build_identity_evidence build_identity;
+    host_identity_evidence host_identity;
     std::string postgres_server_version;
     std::uint32_t configured_samples{};
     std::uint32_t configured_warmup_samples{};
     fixture_evidence fixture;
     std::string correctness_digest;
+    std::optional<benchmark_sample> cold_producer;
     std::vector<benchmark_sample> samples;
     cache_counters counter_deltas;
     std::uint64_t logical_bytes{};
     std::uint64_t stored_bytes{};
-    postgres_test::resource_report resources;
+    benchmark_resource_report resources;
     std::vector<postgres_test::artifact_report> artifacts;
 };
 
@@ -127,6 +175,543 @@ struct measured_result {
     libpq::result rows;
     std::uint64_t wall_time_ns{};
     std::uint64_t time_to_first_row_ns{};
+};
+
+[[nodiscard]] std::filesystem::path current_executable_path(
+    std::string_view argument_zero) {
+    std::filesystem::path executable;
+#if defined(__linux__)
+    std::error_code link_error;
+    executable =
+        std::filesystem::read_symlink("/proc/self/exe", link_error);
+    if (link_error) {
+        executable.clear();
+    }
+#elif defined(__APPLE__)
+    std::uint32_t capacity = 1024;
+    std::vector<char> buffer(capacity);
+    if (::_NSGetExecutablePath(buffer.data(), &capacity) != 0) {
+        buffer.resize(capacity);
+        if (::_NSGetExecutablePath(buffer.data(), &capacity) != 0) {
+            buffer.clear();
+        }
+    }
+    if (!buffer.empty()) {
+        executable = buffer.data();
+    }
+#endif
+    if (executable.empty()) {
+        if (argument_zero.empty()) {
+            throw std::runtime_error(
+                "cannot identify the benchmark executable");
+        }
+        executable = std::filesystem::absolute(argument_zero);
+    }
+    std::error_code canonical_error;
+    const std::filesystem::path canonical =
+        std::filesystem::weakly_canonical(executable, canonical_error);
+    return canonical_error ? std::filesystem::absolute(executable)
+                           : canonical;
+}
+
+[[nodiscard]] std::string compiler_name() {
+#if defined(__clang__)
+    return "clang";
+#elif defined(__GNUC__)
+    return "gcc";
+#else
+    return "unknown";
+#endif
+}
+
+[[nodiscard]] std::string compiler_version() {
+#if defined(__clang__)
+    return __clang_version__;
+#elif defined(__GNUC__)
+    return __VERSION__;
+#else
+    return "unknown";
+#endif
+}
+
+[[nodiscard]] std::string build_mode() {
+#if defined(NDEBUG)
+    return "ndebug";
+#else
+    return "assertions-enabled";
+#endif
+}
+
+[[nodiscard]] build_identity_evidence build_identity(
+    std::string_view argument_zero) {
+    const std::filesystem::path executable =
+        current_executable_path(argument_zero);
+    return build_identity_evidence{
+        .executable_path = executable,
+        .executable_sha256 =
+            postgres_test::sha256_file(executable).hex(),
+        .compiler = compiler_name(),
+        .compiler_version = compiler_version(),
+        .cxx_standard = static_cast<std::uint64_t>(__cplusplus),
+        .build_mode = build_mode()};
+}
+
+[[nodiscard]] host_identity_evidence host_identity() {
+    utsname information{};
+    if (::uname(&information) != 0) {
+        throw std::runtime_error(
+            "uname failed while capturing benchmark host identity");
+    }
+    const long page_size = ::sysconf(_SC_PAGESIZE);
+    return host_identity_evidence{
+        .system_name = information.sysname,
+        .node_name = information.nodename,
+        .release = information.release,
+        .version = information.version,
+        .machine = information.machine,
+        .logical_cpu_count = std::thread::hardware_concurrency(),
+        .page_size_bytes =
+            page_size > 0 ? static_cast<std::uint64_t>(page_size) : 0};
+}
+
+void finalize_build_identity(benchmark_report& report) {
+    std::string material = report.build_identity.executable_sha256;
+    material.append("|");
+    material.append(report.build_identity.compiler);
+    material.append("|");
+    material.append(report.build_identity.compiler_version);
+    material.append("|");
+    material.append(std::to_string(report.build_identity.cxx_standard));
+    material.append("|");
+    material.append(report.build_identity.build_mode);
+    for (const postgres_test::artifact_report& artifact : report.artifacts) {
+        material.append("|");
+        material.append(artifact.name);
+        material.append("|");
+        material.append(artifact.control_sha256);
+        material.append("|");
+        material.append(artifact.install_sql_sha256);
+        material.append("|");
+        material.append(artifact.dso_sha256);
+        material.append("|");
+        material.append(artifact.staged_control_sha256);
+    }
+    report.build_identity.identity_sha256 =
+        postgres_test::sha256(material).hex();
+}
+
+namespace resource_detail {
+
+struct process_entry {
+    std::uint64_t pid{};
+    std::uint64_t parent_pid{};
+    std::uint64_t rss_bytes{};
+};
+
+struct process_snapshot_result {
+    std::vector<process_entry> processes;
+    bool complete{};
+};
+
+#if defined(__linux__)
+
+[[nodiscard]] std::optional<process_entry> linux_process_entry(
+    const std::filesystem::path& stat_path, std::uint64_t pid,
+    std::uint64_t page_size) {
+    std::ifstream input(stat_path);
+    std::string line;
+    if (!input || !std::getline(input, line)) {
+        return std::nullopt;
+    }
+    const std::size_t command_end = line.rfind(')');
+    if (command_end == std::string::npos
+        || command_end + 2 >= line.size()) {
+        return std::nullopt;
+    }
+    std::istringstream fields(line.substr(command_end + 2));
+    char state{};
+    std::uint64_t parent_pid{};
+    fields >> state >> parent_pid;
+    std::int64_t ignored{};
+    for (int field = 5; field <= 23 && fields; ++field) {
+        fields >> ignored;
+    }
+    std::int64_t rss_pages{};
+    fields >> rss_pages;
+    if (!fields || rss_pages < 0) {
+        return std::nullopt;
+    }
+    const std::uint64_t pages =
+        static_cast<std::uint64_t>(rss_pages);
+    if (page_size != 0
+        && pages > std::numeric_limits<std::uint64_t>::max() / page_size) {
+        return std::nullopt;
+    }
+    return process_entry{
+        .pid = pid,
+        .parent_pid = parent_pid,
+        .rss_bytes = pages * page_size};
+}
+
+[[nodiscard]] process_snapshot_result process_snapshot(
+    std::uint64_t postmaster_pid) {
+    const long native_page_size = ::sysconf(_SC_PAGESIZE);
+    if (native_page_size <= 0) {
+        return process_snapshot_result{};
+    }
+    const std::uint64_t page_size =
+        static_cast<std::uint64_t>(native_page_size);
+    std::vector<process_entry> processes;
+    std::vector<std::uint64_t> pending{postmaster_pid};
+    std::unordered_set<std::uint64_t> observed{postmaster_pid};
+    bool complete = true;
+    while (!pending.empty()) {
+        const std::uint64_t pid = pending.back();
+        pending.pop_back();
+        const std::filesystem::path process_root =
+            std::filesystem::path("/proc") / std::to_string(pid);
+        if (std::optional<process_entry> process =
+                linux_process_entry(
+                    process_root / "stat", pid, page_size)) {
+            processes.push_back(*process);
+        } else {
+            complete = false;
+        }
+        std::ifstream children(
+            process_root / "task" / std::to_string(pid) / "children");
+        if (!children) {
+            complete = false;
+            continue;
+        }
+        std::uint64_t child{};
+        while (children >> child) {
+            if (child > 1 && observed.insert(child).second) {
+                pending.push_back(child);
+            }
+        }
+        if (!children.eof()) {
+            complete = false;
+        }
+    }
+    return process_snapshot_result{
+        .processes = std::move(processes),
+        .complete = complete};
+}
+
+#elif defined(__APPLE__)
+
+[[nodiscard]] process_snapshot_result process_snapshot(
+    std::uint64_t postmaster_pid) {
+    const int process_capacity = ::proc_listallpids(nullptr, 0);
+    if (process_capacity <= 0) {
+        return process_snapshot_result{};
+    }
+    std::vector<pid_t> child_buffer(
+        static_cast<std::size_t>(process_capacity) + 32U);
+    std::vector<process_entry> processes;
+    std::vector<std::uint64_t> pending{postmaster_pid};
+    std::unordered_set<std::uint64_t> observed{postmaster_pid};
+    bool complete = true;
+    while (!pending.empty()) {
+        const std::uint64_t unsigned_pid = pending.back();
+        pending.pop_back();
+        const pid_t pid = static_cast<pid_t>(unsigned_pid);
+        proc_bsdinfo basic{};
+        proc_taskinfo task{};
+        if (::proc_pidinfo(
+                pid, PROC_PIDTBSDINFO, 0, &basic, sizeof(basic))
+                != static_cast<int>(sizeof(basic))
+            || ::proc_pidinfo(
+                   pid, PROC_PIDTASKINFO, 0, &task, sizeof(task))
+                != static_cast<int>(sizeof(task))) {
+            complete = false;
+            continue;
+        }
+        processes.push_back(process_entry{
+            .pid = unsigned_pid,
+            .parent_pid =
+                static_cast<std::uint64_t>(basic.pbi_ppid),
+            .rss_bytes =
+                static_cast<std::uint64_t>(task.pti_resident_size)});
+        const int child_count = ::proc_listchildpids(
+            pid, child_buffer.data(),
+            static_cast<int>(child_buffer.size() * sizeof(pid_t)));
+        if (child_count < 0
+            || static_cast<std::size_t>(child_count)
+                > child_buffer.size()) {
+            complete = false;
+            continue;
+        }
+        for (int index = 0;
+             index < child_count
+             && static_cast<std::size_t>(index) < child_buffer.size();
+             ++index) {
+            const pid_t child = child_buffer[
+                static_cast<std::size_t>(index)];
+            if (child > 1
+                && observed.insert(
+                       static_cast<std::uint64_t>(child)).second) {
+                pending.push_back(
+                    static_cast<std::uint64_t>(child));
+            }
+        }
+    }
+    return process_snapshot_result{
+        .processes = std::move(processes),
+        .complete = complete};
+}
+
+#else
+
+[[nodiscard]] process_snapshot_result process_snapshot(
+    std::uint64_t) {
+    return process_snapshot_result{};
+}
+
+#endif
+
+[[nodiscard]] std::optional<std::uint64_t>
+postgres_cluster_rss_bytes(std::uint64_t postmaster_pid) {
+    process_snapshot_result snapshot =
+        process_snapshot(postmaster_pid);
+    if (!snapshot.complete) {
+        return std::nullopt;
+    }
+    const std::vector<process_entry>& processes = snapshot.processes;
+    const bool root_present = std::any_of(
+        processes.begin(), processes.end(),
+        [postmaster_pid](const process_entry& process) {
+            return process.pid == postmaster_pid;
+        });
+    if (!root_present) {
+        return std::nullopt;
+    }
+    std::unordered_set<std::uint64_t> descendants{postmaster_pid};
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const process_entry& process : processes) {
+            if (!descendants.contains(process.pid)
+                && descendants.contains(process.parent_pid)) {
+                descendants.insert(process.pid);
+                changed = true;
+            }
+        }
+    }
+    std::uint64_t aggregate{};
+    for (const process_entry& process : processes) {
+        if (!descendants.contains(process.pid)) {
+            continue;
+        }
+        if (process.rss_bytes
+            > std::numeric_limits<std::uint64_t>::max() - aggregate) {
+            return std::nullopt;
+        }
+        aggregate += process.rss_bytes;
+    }
+    return aggregate;
+}
+
+[[nodiscard]] std::uint64_t read_postmaster_pid(
+    const std::filesystem::path& data_directory) {
+    std::ifstream input(data_directory / "postmaster.pid");
+    std::uint64_t pid{};
+    input >> pid;
+    if (!input || pid <= 1) {
+        throw std::runtime_error(
+            "cannot identify the private PostgreSQL postmaster");
+    }
+    return pid;
+}
+
+[[nodiscard]] std::optional<std::uint64_t> strict_tree_bytes(
+    const std::filesystem::path& root) {
+    std::error_code error;
+    if (!std::filesystem::exists(root, error) || error) {
+        return std::nullopt;
+    }
+    std::filesystem::recursive_directory_iterator iterator(
+        root, std::filesystem::directory_options::none, error);
+    if (error) {
+        return std::nullopt;
+    }
+    const std::filesystem::recursive_directory_iterator end;
+    std::uint64_t total{};
+    while (iterator != end) {
+        const bool regular = iterator->is_regular_file(error);
+        if (error) {
+            return std::nullopt;
+        }
+        if (regular) {
+            const std::uintmax_t bytes = iterator->file_size(error);
+            if (error
+                || bytes
+                    > std::numeric_limits<std::uint64_t>::max() - total) {
+                return std::nullopt;
+            }
+            total += static_cast<std::uint64_t>(bytes);
+        }
+        iterator.increment(error);
+        if (error) {
+            return std::nullopt;
+        }
+    }
+    return total;
+}
+
+void update_peak(
+    std::atomic<std::uint64_t>& peak, std::uint64_t value) noexcept {
+    std::uint64_t current = peak.load(std::memory_order_relaxed);
+    while (current < value
+           && !peak.compare_exchange_weak(
+               current, value, std::memory_order_relaxed)) {
+    }
+}
+
+}  // namespace resource_detail
+
+class benchmark_resource_tracker {
+public:
+    benchmark_resource_tracker(
+        std::filesystem::path cluster_root,
+        const std::filesystem::path& data_directory,
+        benchmark_resource_report& destination)
+        : cluster_root_(std::move(cluster_root)),
+          postmaster_pid_(
+              resource_detail::read_postmaster_pid(data_directory)),
+          destination_(&destination) {
+        sample_rss_once();
+        sample_temp_once();
+        rss_thread_ = std::jthread(
+            [this](std::stop_token stop_token) noexcept {
+                while (!stop_token.stop_requested()) {
+                    std::this_thread::sleep_for(rss_sample_interval);
+                    if (!stop_token.stop_requested()) {
+                        sample_rss_once();
+                    }
+                }
+            });
+        temp_thread_ = std::jthread(
+            [this](std::stop_token stop_token) noexcept {
+                while (!stop_token.stop_requested()) {
+                    std::this_thread::sleep_for(temp_sample_interval);
+                    if (!stop_token.stop_requested()) {
+                        sample_temp_once();
+                    }
+                }
+            });
+    }
+
+    benchmark_resource_tracker(const benchmark_resource_tracker&) = delete;
+    benchmark_resource_tracker& operator=(
+        const benchmark_resource_tracker&) = delete;
+
+    ~benchmark_resource_tracker() noexcept {
+        if (!finished_) {
+            try {
+                static_cast<void>(finish());
+            } catch (...) {
+                // A failing benchmark retains partial resource evidence;
+                // the original workload error remains authoritative.
+            }
+        }
+    }
+
+    void observe_phase_boundary() noexcept {
+        sample_rss_once();
+        sample_temp_once();
+    }
+
+    [[nodiscard]] benchmark_resource_report finish() {
+        rss_thread_.request_stop();
+        temp_thread_.request_stop();
+        if (rss_thread_.joinable()) {
+            rss_thread_.join();
+        }
+        if (temp_thread_.joinable()) {
+            temp_thread_.join();
+        }
+        sample_rss_once();
+        sample_temp_once();
+        const benchmark_resource_report report{
+            .peak_postgres_rss_bytes =
+                peak_postgres_rss_bytes_.load(std::memory_order_relaxed),
+            .peak_temp_bytes =
+                peak_temp_bytes_.load(std::memory_order_relaxed),
+            .rss_samples =
+                rss_samples_.load(std::memory_order_relaxed),
+            .temp_samples =
+                temp_samples_.load(std::memory_order_relaxed),
+            .rss_sampling_failures =
+                rss_sampling_failures_.load(std::memory_order_relaxed),
+            .temp_sampling_failures =
+                temp_sampling_failures_.load(std::memory_order_relaxed)};
+        *destination_ = report;
+        finished_ = true;
+        if (report.rss_samples < 2
+            || report.peak_postgres_rss_bytes == 0
+            || report.rss_sampling_failures > report.rss_samples) {
+            throw std::runtime_error(
+                "PostgreSQL cluster-process RSS sampling was incomplete");
+        }
+        if (report.temp_samples < 2 || report.peak_temp_bytes == 0
+            || report.temp_sampling_failures > report.temp_samples) {
+            throw std::runtime_error(
+                "private-cluster temp-byte sampling was incomplete");
+        }
+        return report;
+    }
+
+private:
+    void sample_rss_once() noexcept {
+        try {
+            const std::optional<std::uint64_t> bytes =
+                resource_detail::postgres_cluster_rss_bytes(
+                    postmaster_pid_);
+            if (!bytes) {
+                rss_sampling_failures_.fetch_add(
+                    1, std::memory_order_relaxed);
+                return;
+            }
+            resource_detail::update_peak(
+                peak_postgres_rss_bytes_, *bytes);
+            rss_samples_.fetch_add(1, std::memory_order_relaxed);
+        } catch (...) {
+            rss_sampling_failures_.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
+
+    void sample_temp_once() noexcept {
+        try {
+            const std::optional<std::uint64_t> bytes =
+                resource_detail::strict_tree_bytes(cluster_root_);
+            if (!bytes) {
+                temp_sampling_failures_.fetch_add(
+                    1, std::memory_order_relaxed);
+                return;
+            }
+            resource_detail::update_peak(
+                peak_temp_bytes_, *bytes);
+            temp_samples_.fetch_add(1, std::memory_order_relaxed);
+        } catch (...) {
+            temp_sampling_failures_.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
+
+    std::filesystem::path cluster_root_;
+    std::uint64_t postmaster_pid_{};
+    std::atomic<std::uint64_t> peak_postgres_rss_bytes_{};
+    std::atomic<std::uint64_t> peak_temp_bytes_{};
+    std::atomic<std::uint64_t> rss_samples_{};
+    std::atomic<std::uint64_t> temp_samples_{};
+    std::atomic<std::uint64_t> rss_sampling_failures_{};
+    std::atomic<std::uint64_t> temp_sampling_failures_{};
+    std::jthread rss_thread_;
+    std::jthread temp_thread_;
+    benchmark_resource_report* destination_{};
+    bool finished_{};
 };
 
 [[nodiscard]] std::string_view scenario_name(scenario value) noexcept {
@@ -567,17 +1152,32 @@ void require_hit(const benchmark_sample& sample) {
         static_cast<std::uint64_t>(stored)};
 }
 
-[[nodiscard]] benchmark_report execute_benchmark(
-    const benchmark_options& options, std::string executable) {
-    benchmark_report report{
-        .selected_scenario = options.selected_scenario,
+[[nodiscard]] benchmark_report make_base_report(
+    scenario selected_scenario, std::string executable,
+    std::string_view argument_zero) {
+    return benchmark_report{
+        .selected_scenario = selected_scenario,
         .executable = std::move(executable),
-        .configured_samples = options.samples,
-        .configured_warmup_samples = options.warmup_samples};
+        .build_identity = build_identity(argument_zero),
+        .host_identity = host_identity()};
+}
+
+void execute_benchmark(
+    const benchmark_options& options, benchmark_report& report) {
+    report.configured_samples = options.samples;
+    report.configured_warmup_samples = options.warmup_samples;
 
     postgres_test::postgres_fixture fixture{cluster_options(options)};
+    report.artifacts = postgres_test::artifact_reports(
+        fixture.cluster().staged_artifacts());
+    finalize_build_identity(report);
     auto& admin = fixture.admin();
     auto data = fixture.connect(90s);
+    report.postgres_server_version = data.server_version();
+    benchmark_resource_tracker resource_tracker{
+        fixture.cluster().root_directory(),
+        fixture.cluster().data_directory(),
+        report.resources};
     const bool combined =
         options.selected_scenario == scenario::bioseq_2gbp;
     const std::chrono::milliseconds query_timeout =
@@ -602,6 +1202,7 @@ void require_hit(const benchmark_sample& sample) {
             .reference_base_count = 0,
             .query = std::string(query)};
     }
+    resource_tracker.observe_phase_boundary();
 
     execute(
         data,
@@ -617,6 +1218,7 @@ void require_hit(const benchmark_sample& sample) {
     const std::uint64_t oracle_rows =
         static_cast<std::uint64_t>(oracle.rows.rows());
     report.correctness_digest = oracle_digest.hex();
+    resource_tracker.observe_phase_boundary();
 
     execute(
         admin,
@@ -634,7 +1236,8 @@ void require_hit(const benchmark_sample& sample) {
         data, admin, query, query_timeout, "producer", 0,
         oracle_digest, oracle_rows);
     require_producer(producer);
-    report.samples.push_back(std::move(producer));
+    report.cold_producer = std::move(producer);
+    resource_tracker.observe_phase_boundary();
 
     for (std::uint32_t warmup = 0;
          warmup < options.warmup_samples; ++warmup) {
@@ -642,6 +1245,7 @@ void require_hit(const benchmark_sample& sample) {
             data, admin, query, query_timeout, "warmup", warmup,
             oracle_digest, oracle_rows);
         require_hit(discarded);
+        resource_tracker.observe_phase_boundary();
     }
 
     for (std::uint32_t sample = 0; sample < options.samples; ++sample) {
@@ -650,6 +1254,7 @@ void require_hit(const benchmark_sample& sample) {
             oracle_digest, oracle_rows);
         require_hit(warm);
         report.samples.push_back(std::move(warm));
+        resource_tracker.observe_phase_boundary();
         if (combined && sample == 0) {
             execute(
                 data, "SET bioseq.enable_column_cache = off", 30s);
@@ -670,15 +1275,7 @@ void require_hit(const benchmark_sample& sample) {
         entry_sizes(admin, query_timeout);
     report.logical_bytes = logical_bytes;
     report.stored_bytes = stored_bytes;
-    report.postgres_server_version = data.server_version();
-    report.artifacts = postgres_test::artifact_reports(
-        fixture.cluster().staged_artifacts());
-    const std::filesystem::path temp_root =
-        fixture.cluster().root_directory();
-    report.resources =
-        postgres_test::capture_resource_report(
-            std::span<const std::filesystem::path>(&temp_root, 1));
-    return report;
+    report.resources = resource_tracker.finish();
 }
 
 namespace json {
@@ -725,6 +1322,31 @@ void counters(std::ostream& output, const cache_counters& value) {
            << ",\"stored_bytes\":" << value.stored_bytes << '}';
 }
 
+void sample(std::ostream& output, const benchmark_sample& value) {
+    output.put('{');
+    key(output, "phase");
+    string(output, value.phase);
+    output.put(',');
+    key(output, "ordinal");
+    output << value.ordinal;
+    output.put(',');
+    key(output, "wall_time_ns");
+    output << value.wall_time_ns;
+    output.put(',');
+    key(output, "time_to_first_row_ns");
+    output << value.time_to_first_row_ns;
+    output.put(',');
+    key(output, "rows");
+    output << value.rows;
+    output.put(',');
+    key(output, "correctness_digest");
+    string(output, value.correctness_digest);
+    output.put(',');
+    key(output, "cache_counter_delta");
+    counters(output, value.counter_delta);
+    output.put('}');
+}
+
 [[nodiscard]] std::uint64_t percentile(
     std::vector<std::uint64_t> values,
     std::uint64_t numerator, std::uint64_t denominator) {
@@ -754,6 +1376,54 @@ void write(std::ostream& output, const benchmark_report& report) {
     key(output, "executable");
     string(output, report.executable);
     output.put(',');
+    key(output, "build_identity");
+    output.put('{');
+    key(output, "executable_path");
+    string(output, report.build_identity.executable_path.string());
+    output.put(',');
+    key(output, "executable_sha256");
+    string(output, report.build_identity.executable_sha256);
+    output.put(',');
+    key(output, "compiler");
+    string(output, report.build_identity.compiler);
+    output.put(',');
+    key(output, "compiler_version");
+    string(output, report.build_identity.compiler_version);
+    output.put(',');
+    key(output, "cxx_standard");
+    output << report.build_identity.cxx_standard;
+    output.put(',');
+    key(output, "build_mode");
+    string(output, report.build_identity.build_mode);
+    output.put(',');
+    key(output, "identity_sha256");
+    string(output, report.build_identity.identity_sha256);
+    output.put('}');
+    output.put(',');
+    key(output, "host_identity");
+    output.put('{');
+    key(output, "system_name");
+    string(output, report.host_identity.system_name);
+    output.put(',');
+    key(output, "node_name");
+    string(output, report.host_identity.node_name);
+    output.put(',');
+    key(output, "release");
+    string(output, report.host_identity.release);
+    output.put(',');
+    key(output, "version");
+    string(output, report.host_identity.version);
+    output.put(',');
+    key(output, "machine");
+    string(output, report.host_identity.machine);
+    output.put(',');
+    key(output, "logical_cpu_count");
+    output << report.host_identity.logical_cpu_count;
+    output.put(',');
+    key(output, "page_size_bytes");
+    output << report.host_identity.page_size_bytes;
+    output.put('}');
+    output.put(',');
     key(output, "postgres_server_version");
     string(output, report.postgres_server_version);
     output.put(',');
@@ -767,6 +1437,45 @@ void write(std::ostream& output, const benchmark_report& report) {
     string(
         output,
         "PQsetSingleRowMode first PGRES_SINGLE_TUPLE arrival");
+    output.put(',');
+    key(output, "resource_sampling");
+    output.put('{');
+    key(output, "measurement_window");
+    string(
+        output,
+        "from the running private-cluster fixture before workload setup "
+        "through the final measured cache-hit phase; excludes initdb, "
+        "server startup, shutdown, and cleanup");
+    output.put(',');
+    key(output, "rss_scope");
+    string(
+        output,
+        "sum of current RSS for the owned private PostgreSQL postmaster "
+        "and all descendant processes");
+    output.put(',');
+    key(output, "rss_sample_interval_ms");
+    output << rss_sample_interval.count();
+    output.put(',');
+    key(output, "rss_samples");
+    output << report.resources.rss_samples;
+    output.put(',');
+    key(output, "rss_sampling_failures");
+    output << report.resources.rss_sampling_failures;
+    output.put(',');
+    key(output, "temp_scope");
+    string(
+        output,
+        "all regular-file bytes below the owned private-cluster root");
+    output.put(',');
+    key(output, "temp_sample_interval_ms");
+    output << temp_sample_interval.count();
+    output.put(',');
+    key(output, "temp_samples");
+    output << report.resources.temp_samples;
+    output.put(',');
+    key(output, "temp_sampling_failures");
+    output << report.resources.temp_sampling_failures;
+    output.put('}');
     output.put(',');
     key(output, "artifacts");
     output.put('[');
@@ -789,6 +1498,15 @@ void write(std::ostream& output, const benchmark_report& report) {
         key(output, "dso");
         string(output, artifact.dso.string());
         output.put(',');
+        key(output, "staged_control_file");
+        string(output, artifact.staged_control_file.string());
+        output.put(',');
+        key(output, "staged_install_sql");
+        string(output, artifact.staged_install_sql.string());
+        output.put(',');
+        key(output, "staged_dso");
+        string(output, artifact.staged_dso.string());
+        output.put(',');
         key(output, "control_sha256");
         string(output, artifact.control_sha256);
         output.put(',');
@@ -797,6 +1515,9 @@ void write(std::ostream& output, const benchmark_report& report) {
         output.put(',');
         key(output, "dso_sha256");
         string(output, artifact.dso_sha256);
+        output.put(',');
+        key(output, "staged_control_sha256");
+        string(output, artifact.staged_control_sha256);
         output.put('}');
     }
     output << "]}";
@@ -822,6 +1543,13 @@ void write(std::ostream& output, const benchmark_report& report) {
     key(output, "correctness_digest");
     string(output, report.correctness_digest);
     output.put(',');
+    key(output, "cold_producer");
+    if (report.cold_producer) {
+        sample(output, *report.cold_producer);
+    } else {
+        output << "null";
+    }
+    output.put(',');
     key(output, "samples");
     output.put('[');
     std::vector<std::uint64_t> wall_samples;
@@ -830,35 +1558,20 @@ void write(std::ostream& output, const benchmark_report& report) {
         if (index != 0) {
             output.put(',');
         }
-        const benchmark_sample& sample = report.samples[index];
-        wall_samples.push_back(sample.wall_time_ns);
-        output.put('{');
-        key(output, "phase");
-        string(output, sample.phase);
-        output.put(',');
-        key(output, "ordinal");
-        output << sample.ordinal;
-        output.put(',');
-        key(output, "wall_time_ns");
-        output << sample.wall_time_ns;
-        output.put(',');
-        key(output, "time_to_first_row_ns");
-        output << sample.time_to_first_row_ns;
-        output.put(',');
-        key(output, "rows");
-        output << sample.rows;
-        output.put(',');
-        key(output, "correctness_digest");
-        string(output, sample.correctness_digest);
-        output.put(',');
-        key(output, "cache_counter_delta");
-        counters(output, sample.counter_delta);
-        output.put('}');
+        const benchmark_sample& warm_sample = report.samples[index];
+        wall_samples.push_back(warm_sample.wall_time_ns);
+        sample(output, warm_sample);
     }
     output.put(']');
     output.put(',');
     key(output, "summary");
     output.put('{');
+    key(output, "population");
+    string(output, "warm samples only");
+    output.put(',');
+    key(output, "sample_count");
+    output << wall_samples.size();
+    output.put(',');
     key(output, "p50");
     output << percentile(wall_samples, 50, 100);
     output.put(',');
@@ -888,14 +1601,99 @@ void write(std::ostream& output, const benchmark_report& report) {
     output << report.stored_bytes;
     output.put(',');
     key(output, "peak_rss_bytes");
-    output << report.resources.peak_rss_bytes;
+    output << report.resources.peak_postgres_rss_bytes;
     output.put(',');
     key(output, "peak_temp_bytes");
-    output << report.resources.observed_temp_bytes;
+    output << report.resources.peak_temp_bytes;
     output.put('}');
 }
 
 }  // namespace json
+
+[[nodiscard]] std::string render_contract_probe(bool passed) {
+    const std::string digest(64, 'a');
+    benchmark_report report{
+        .status = passed ? "passed" : "failed",
+        .error = passed ? "" : "contract probe failure",
+        .selected_scenario = scenario::standalone,
+        .executable = "bioseq_cache_report_contract_probe",
+        .build_identity =
+            build_identity_evidence{
+                .executable_path = "/build/cache-benchmark-probe",
+                .executable_sha256 = digest,
+                .compiler = "contract-compiler",
+                .compiler_version = "1.0",
+                .cxx_standard = 202302,
+                .build_mode = "ndebug",
+                .identity_sha256 = digest},
+        .host_identity =
+            host_identity_evidence{
+                .system_name = "contract-system",
+                .node_name = "contract-node",
+                .release = "contract-release",
+                .version = "contract-version",
+                .machine = "contract-machine",
+                .logical_cpu_count = 8,
+                .page_size_bytes = 4096},
+        .postgres_server_version = "PostgreSQL contract",
+        .configured_samples = 3,
+        .configured_warmup_samples = 1,
+        .fixture =
+            fixture_evidence{
+                .relation = "contract_fixture",
+                .source_rows = 4,
+                .reference_base_count = 0,
+                .query = "SELECT contract"},
+        .correctness_digest = passed ? digest : "",
+        .resources =
+            benchmark_resource_report{
+                .peak_postgres_rss_bytes = 8192,
+                .peak_temp_bytes = 16384,
+                .rss_samples = 4,
+                .temp_samples = 3}};
+    report.artifacts.push_back(postgres_test::artifact_report{
+        .name = "bioseq_cache",
+        .control_file = "/source/bioseq_cache.control",
+        .install_sql = "/source/bioseq_cache--1.0.sql",
+        .dso = "/source/bioseq_cache.so",
+        .staged_control_file = "/stage/bioseq_cache.control",
+        .staged_install_sql = "/stage/bioseq_cache--1.0.sql",
+        .staged_dso = "/stage/bioseq_cache.so",
+        .control_sha256 = digest,
+        .install_sql_sha256 = digest,
+        .dso_sha256 = digest,
+        .staged_control_sha256 = digest});
+    if (passed) {
+        report.cold_producer = benchmark_sample{
+            .phase = "producer",
+            .ordinal = 0,
+            .wall_time_ns = 999,
+            .time_to_first_row_ns = 500,
+            .rows = 4,
+            .correctness_digest = digest,
+            .counter_delta = cache_counters{.produced = 1}};
+        for (const std::uint64_t wall_time : {30U, 10U, 20U}) {
+            report.samples.push_back(benchmark_sample{
+                .phase = "warm",
+                .ordinal =
+                    static_cast<std::uint32_t>(report.samples.size()),
+                .wall_time_ns = wall_time,
+                .time_to_first_row_ns = wall_time / 2U,
+                .rows = 4,
+                .correctness_digest = digest,
+                .counter_delta =
+                    cache_counters{.completed_hits = 1}});
+        }
+        report.counter_deltas = cache_counters{
+            .produced = 1,
+            .completed_hits = 4};
+        report.logical_bytes = 2048;
+        report.stored_bytes = 1024;
+    }
+    std::ostringstream output;
+    json::write(output, report);
+    return output.str();
+}
 
 void write_report(
     const std::filesystem::path& path,
@@ -930,43 +1728,68 @@ void write_report(
     }
 }
 
+void write_failure_report(
+    const std::optional<std::filesystem::path>& path,
+    std::optional<benchmark_report>& report,
+    scenario selected_scenario, const std::string& executable,
+    std::string_view argument_zero, std::string_view error) noexcept {
+    if (!path) {
+        return;
+    }
+    try {
+        if (!report) {
+            report.emplace(make_base_report(
+                selected_scenario, executable, argument_zero));
+        }
+        report->status = "failed";
+        report->error = error;
+        finalize_build_identity(*report);
+        write_report(*path, *report);
+    } catch (...) {
+        // The process still fails closed when its diagnostic report cannot
+        // be published.
+    }
+}
+
 }  // namespace bioseq::cache_benchmark
 
 export namespace bioseq::cache_benchmark {
+
+/// @brief Renders deterministic success/failure documents for schema tests.
+[[nodiscard]] std::string render_report_contract_probe(bool passed) {
+    return render_contract_probe(passed);
+}
 
 /// @brief Parse, execute, validate, and report one fixed native benchmark.
 int run(int argc, char** argv, scenario required_scenario) noexcept {
     const std::optional<std::filesystem::path> report_hint =
         report_path_hint(argc, argv);
+    const std::string_view argument_zero =
+        argc > 0 && argv != nullptr && argv[0] != nullptr
+            ? std::string_view(argv[0])
+            : std::string_view{};
+    const std::string executable =
+        required_scenario == scenario::standalone
+            ? "bioseq_cache_bench"
+            : "bioseq_cache_bioseq_bench";
+    std::optional<benchmark_report> report;
     try {
+        report.emplace(make_base_report(
+            required_scenario, executable, argument_zero));
         const benchmark_options options =
             parse_options(argc, argv, required_scenario);
-        benchmark_report report = execute_benchmark(
-            options,
-            required_scenario == scenario::standalone
-                ? "bioseq_cache_bench"
-                : "bioseq_cache_bioseq_bench");
-        write_report(options.report, report);
+        execute_benchmark(options, *report);
+        write_report(options.report, *report);
         return 0;
     } catch (const std::exception& error) {
-        if (report_hint) {
-            try {
-                benchmark_report report{
-                    .status = "failed",
-                    .error = error.what(),
-                    .selected_scenario = required_scenario,
-                    .executable =
-                        required_scenario == scenario::standalone
-                            ? "bioseq_cache_bench"
-                            : "bioseq_cache_bioseq_bench"};
-                write_report(*report_hint, report);
-            } catch (...) {
-                // The process still fails closed when its diagnostic report
-                // cannot be published.
-            }
-        }
+        write_failure_report(
+            report_hint, report, required_scenario, executable,
+            argument_zero, error.what());
         return 1;
     } catch (...) {
+        write_failure_report(
+            report_hint, report, required_scenario, executable,
+            argument_zero, "unknown benchmark failure");
         return 1;
     }
 }

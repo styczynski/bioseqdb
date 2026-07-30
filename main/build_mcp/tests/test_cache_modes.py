@@ -230,6 +230,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             "scenario",
             "fixture",
             "correctness_digest",
+            "cold_producer",
             "samples",
             "summary",
             "p50",
@@ -239,11 +240,113 @@ class CacheModeRoutingTest(unittest.TestCase):
             "stored_bytes",
             "peak_rss_bytes",
             "peak_temp_bytes",
+            "build_identity",
+            "host_identity",
+            "staged_control_file",
+            "staged_install_sql",
+            "staged_dso",
+            "staged_control_sha256",
             "2'000'000'000ULL",
             "PQsetSingleRowMode first PGRES_SINGLE_TUPLE arrival",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, source)
+
+    def test_native_benchmark_report_schema_and_measurement_contract(
+            self) -> None:
+        bench_dir = MAIN_DIR / "bioseq_caching" / "bench"
+        source = (
+            bench_dir / "cache_benchmark.cppm"
+        ).read_text(encoding="utf-8")
+        contract = json.loads(
+            (bench_dir / "report_schema_v1.json").read_text(
+                encoding="utf-8"))
+
+        self.assertEqual(
+            contract["schema_version"], "bioseq-cache-benchmark-v1")
+        self.assertEqual(
+            contract["$schema"],
+            "https://json-schema.org/draft/2020-12/schema",
+        )
+        self.assertEqual(contract["type"], "object")
+        self.assertFalse(contract["additionalProperties"])
+        self.assertEqual(
+            set(contract["required"]),
+            set(contract["required_fields"]["top_level"]),
+        )
+        self.assertEqual(
+            contract["semantics"]["samples"],
+            "measured warm cache-hit samples only",
+        )
+        self.assertIn(
+            "PostgreSQL postmaster and all descendant processes",
+            contract["semantics"]["peak_rss_bytes"],
+        )
+        self.assertIn(
+            "maximum sampled regular-file bytes",
+            contract["semantics"]["peak_temp_bytes"],
+        )
+        schema_sections = {
+            "metadata": "metadata",
+            "build_identity": "build_identity",
+            "host_identity": "host_identity",
+            "resource_sampling": "resource_sampling",
+            "artifact": "artifact",
+            "fixture": "fixture",
+            "sample": "sample",
+            "summary": "summary",
+            "counter": "counter",
+        }
+        for section, fields in contract["required_fields"].items():
+            with self.subTest(section=section):
+                self.assertTrue(fields)
+                self.assertEqual(len(fields), len(set(fields)))
+                if section in schema_sections:
+                    self.assertEqual(
+                        set(fields),
+                        set(contract["$defs"][
+                            schema_sections[section]]["required"]),
+                    )
+            for field in fields:
+                with self.subTest(section=section, field=field):
+                    self.assertIn(f'"{field}"', source)
+
+        self.assertIn(
+            "std::optional<benchmark_sample> cold_producer", source)
+        self.assertIn("report.cold_producer = std::move(producer)", source)
+        self.assertNotIn(
+            "report.samples.push_back(std::move(producer))", source)
+        self.assertIn(
+            "report.samples.push_back(std::move(warm))", source)
+        self.assertIn(
+            "wall_samples.push_back(warm_sample.wall_time_ns)", source)
+        self.assertIn('"warm samples only"', source)
+
+        self.assertIn("postgres_cluster_rss_bytes", source)
+        self.assertIn("descendants{postmaster_pid}", source)
+        self.assertIn("peak_postgres_rss_bytes", source)
+        self.assertIn("benchmark_resource_tracker", source)
+        self.assertIn("rss_sample_interval", source)
+        self.assertIn("temp_sample_interval", source)
+        self.assertNotIn("RUSAGE_SELF", source)
+
+        self.assertIn(
+            "postgres_test::artifact_reports("
+            "\n        fixture.cluster().staged_artifacts())",
+            source,
+        )
+        self.assertLess(
+            source.index("report.artifacts = postgres_test::artifact_reports"),
+            source.index("benchmark_resource_tracker resource_tracker"),
+        )
+        self.assertIn(
+            "benchmark_resource_report* destination_", source)
+        self.assertIn(
+            "write_failure_report(", source)
+        self.assertIn(
+            "postgres_test::sha256_file(executable).hex()", source)
+        self.assertIn("::uname(&information)", source)
+        self.assertIn("finalize_build_identity(report)", source)
 
     def test_cache_cmake_generates_artifact_manifest_from_target_properties(
             self) -> None:
@@ -257,7 +360,24 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("BIOSEQ_EXTENSION_CONTROL_FILE", cmake)
         self.assertIn("BIOSEQ_EXTENSION_INSTALL_SQL", cmake)
         self.assertIn("BIOSEQ_EXTENSION_DSO", cmake)
+        self.assertIn("Threads::Threads", cmake)
+        self.assertIn(
+            "bioseq_cache_benchmark_report_contract_tests", cmake)
+        self.assertIn("cache_benchmark_report_tests.cpp", cmake)
         self.assertNotIn("run_private_cluster_bench.py", cmake)
+        cache_unit = server.MODES["cache-unit"]
+        self.assertIn(
+            "bioseq_cache_benchmark_report_contract_tests",
+            cache_unit.targets,
+        )
+        self.assertIn(
+            [
+                "bioseq_cache_benchmark_report_contract_tests",
+                "--reporter",
+                "console::out=-::colour-mode=ansi",
+            ],
+            cache_unit.commands,
+        )
 
     def test_cache_runtime_modes_have_no_legacy_post_build_targets(
             self) -> None:

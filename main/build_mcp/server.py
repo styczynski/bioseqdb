@@ -1158,9 +1158,15 @@ MODES: Dict[str, ModeDefinition] = {
         is_verb_plular=True,
         preset_family="cache",
         binary_subdir="bioseq_caching",
-        targets=["postgresql_bioseq_cache", "bioseq_cache_unit_tests"],
+        targets=[
+            "postgresql_bioseq_cache",
+            "bioseq_cache_unit_tests",
+            "bioseq_cache_benchmark_report_contract_tests",
+        ],
         commands=[
             ["bioseq_cache_unit_tests",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            ["bioseq_cache_benchmark_report_contract_tests",
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
     ),

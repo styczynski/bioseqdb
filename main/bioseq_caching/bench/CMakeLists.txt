@@ -1,3 +1,5 @@
+find_package(Threads REQUIRED)
+
 add_library(bioseq_cache_benchmark_support STATIC)
 target_sources(bioseq_cache_benchmark_support
   PUBLIC FILE_SET CXX_MODULES
@@ -11,7 +13,9 @@ set_target_properties(bioseq_cache_benchmark_support PROPERTIES
   POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 target_link_libraries(bioseq_cache_benchmark_support
-  PUBLIC bioseq_postgres_test_support)
+  PUBLIC
+    bioseq_postgres_test_support
+    Threads::Threads)
 
 add_executable(
   bioseq_cache_bench
@@ -40,6 +44,28 @@ foreach(_bioseq_cache_benchmark_target IN ITEMS
     postgresql_bioseq_cache)
 endforeach()
 
+find_package(Catch2 3 REQUIRED)
+add_executable(
+  bioseq_cache_benchmark_report_contract_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cache_benchmark_report_tests.cpp")
+set_target_properties(
+  bioseq_cache_benchmark_report_contract_tests
+  PROPERTIES
+    CXX_STANDARD 26
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS ON
+    CXX_MODULE_STD ON
+    INTERPROCEDURAL_OPTIMIZATION FALSE
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bioseq_caching")
+target_link_libraries(
+  bioseq_cache_benchmark_report_contract_tests
+  PRIVATE
+    bioseq_cache_benchmark_support
+    Catch2::Catch2WithMain)
+add_test(
+  NAME bioseq_cache_benchmark_report_contract_tests
+  COMMAND bioseq_cache_benchmark_report_contract_tests)
+
 # The MCP reads this generated target-property inventory and passes the exact
 # build-tree artifacts to native private-cluster executables. Forward slashes
 # keep the JSON portable across CMake hosts.
@@ -50,7 +76,7 @@ if(TARGET postgresql_bioseq_cache_test_support)
   set(_bioseq_cache_test_control
     "$<SHELL_PATH:$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_CONTROL_FILE>>")
   set(_bioseq_cache_test_install_sql
-    "$<SHELL_PATH:$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_INSTALL_SQL>>")
+    "$<SHELL_PATH:$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_TEST_INSTALL_SQL>>")
   set(_bioseq_cache_test_dso
     "$<SHELL_PATH:$<TARGET_GENEX_EVAL:postgresql_bioseq_cache_test_support,$<TARGET_PROPERTY:postgresql_bioseq_cache_test_support,BIOSEQ_EXTENSION_DSO>>>")
 endif()
