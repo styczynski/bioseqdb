@@ -88,6 +88,7 @@ REMOTE_POETRY_VENV_ROOT = f"{REMOTE_WORKSPACE}/caches/poetry-venvs"
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+RUN_ID_RE = re.compile(r"^(?P<timestamp>\d{8}T\d{6}Z)-(?P<revision>[0-9a-f]{12})$")
 ACTIVE_CHILDREN: set[subprocess.Popen[str]] = set()
 ACTIVE_CHILDREN_LOCK = threading.RLock()
 
@@ -324,6 +325,8 @@ class RemoteBuildHandle:
     manifest_path: str
     build_root: str
     local_log_path: Path
+    worker_argv: tuple[str, ...]
+    launch_acknowledged: bool
 
 
 def load_matrix(path: Path = MATRIX_FILE) -> Matrix:
@@ -1202,10 +1205,19 @@ def create_cached_ami(
     lock_sha256: str,
     matrix_fingerprint: str,
     unit_name: str,
+    worker_argv: Sequence[str],
+    *,
+    allow_not_found: bool,
 ) -> dict[str, Any]:
     """Create a no-reboot image from a quiescent, still-running builder."""
 
-    require_successful_remote_unit(builder, key_path, unit_name)
+    require_quiescent_remote_worker(
+        builder,
+        key_path,
+        unit_name,
+        worker_argv,
+        allow_not_found=allow_not_found,
+    )
     record = describe_builder(region, builder, architecture)
     if instance_state(record) != "running":
         raise PackageBuilderError(
@@ -1518,6 +1530,54 @@ def initialize_signing_key(
     ssh_run(builder, key_path, command)
 
 
+def remote_worker_argv(
+    *,
+    builder: Builder,
+    remote_source: str,
+    revision: str,
+    poetry_environment: PoetryEnvironment,
+    selection: Selection,
+    region: str,
+    bucket: str,
+    s3_prefix: str,
+    secret_arn: str,
+    manifest_path: str,
+    build_root: str,
+) -> tuple[str, ...]:
+    """Return the exact argv used to identify one authoritative worker."""
+
+    packaging_dir = f"{remote_source}/main/infra/packaging"
+    return (
+        f"{poetry_environment.venv_path}/bin/python",
+        f"{packaging_dir}/build_packages.py",
+        "--architecture",
+        builder.architecture,
+        "--bucket",
+        bucket,
+        "--region",
+        region,
+        "--source-dir",
+        f"{remote_source}/main",
+        "--build-root",
+        build_root,
+        "--manifest",
+        manifest_path,
+        "--s3-prefix",
+        s3_prefix,
+        "--signing-secret-arn",
+        secret_arn,
+        "--postgres",
+        ",".join(str(value) for value in selection.postgresql_majors),
+        "--distros",
+        ",".join(selection.distributions),
+        "--source-revision",
+        revision,
+        "--poetry-lock-sha256",
+        poetry_environment.lock_sha256,
+        "--fail-fast",
+    )
+
+
 def remote_unit_status(
     builder: Builder, key_path: Path, unit_name: str
 ) -> dict[str, str]:
@@ -1556,21 +1616,122 @@ def remote_unit_status(
     return status
 
 
+def exact_worker_processes(
+    builder: Builder,
+    key_path: Path,
+    worker_argv: Sequence[str],
+) -> tuple[int, ...]:
+    """Return PIDs whose complete NUL-delimited argv equals the worker argv."""
+
+    expected = tuple(str(value) for value in worker_argv)
+    if (
+        len(expected) < 2
+        or not expected[0].startswith(f"{REMOTE_POETRY_VENV_ROOT}/")
+        or not expected[0].endswith("/bin/python")
+        or not expected[1].endswith("/main/infra/packaging/build_packages.py")
+    ):
+        raise PackageBuilderError(
+            f"{builder.architecture} exact worker argv is missing or malformed"
+        )
+    scanner = """import json
+import pathlib
+import sys
+
+expected = json.loads(sys.argv[1])
+found = []
+for process in pathlib.Path("/proc").glob("[0-9]*"):
+    try:
+        raw = process.joinpath("cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    argv = [value.decode("utf-8", "replace") for value in raw.rstrip(b"\\0").split(b"\\0")]
+    if argv == expected:
+        found.append(int(process.name))
+print(json.dumps(sorted(found)))
+"""
+    result = ssh_run(
+        builder,
+        key_path,
+        command_text(
+            ["sudo", "python3", "-c", scanner, json.dumps(list(expected))]
+        ),
+        capture=True,
+    )
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise PackageBuilderError(
+            f"{builder.architecture} exact worker probe returned invalid JSON"
+        ) from error
+    if (
+        not isinstance(raw, list)
+        or any(not isinstance(pid, int) or pid <= 0 for pid in raw)
+    ):
+        raise PackageBuilderError(
+            f"{builder.architecture} exact worker probe returned malformed PIDs"
+        )
+    return tuple(raw)
+
+
+def require_exact_worker_absent(
+    builder: Builder,
+    key_path: Path,
+    worker_argv: Sequence[str],
+) -> None:
+    pids = exact_worker_processes(builder, key_path, worker_argv)
+    if pids:
+        raise PackageBuilderError(
+            f"{builder.architecture} authoritative package worker is still running: "
+            f"PIDs {list(pids)}"
+        )
+
+
+def successful_terminal_unit_status(
+    status: dict[str, str], *, allow_not_found: bool
+) -> bool:
+    load_state = status.get("LoadState")
+    return (
+        (load_state == "loaded" or (allow_not_found and load_state == "not-found"))
+        and status.get("ActiveState") == "inactive"
+        and status.get("SubState") == "dead"
+        and status.get("Result") == "success"
+        and status.get("ExecMainStatus") == "0"
+    )
+
+
 def require_successful_remote_unit(
-    builder: Builder, key_path: Path, unit_name: str
+    builder: Builder,
+    key_path: Path,
+    unit_name: str,
+    *,
+    allow_not_found: bool = False,
 ) -> dict[str, str]:
     status = remote_unit_status(builder, key_path, unit_name)
-    if (
-        status.get("LoadState") != "loaded"
-        or status.get("ActiveState") != "inactive"
-        or status.get("Result") != "success"
-        or status.get("ExecMainStatus") != "0"
+    if not successful_terminal_unit_status(
+        status, allow_not_found=allow_not_found
     ):
         raise PackageBuilderError(
             f"{builder.architecture} systemd unit {unit_name} is not a completed "
             f"success: {status}"
         )
     return status
+
+
+def require_quiescent_remote_worker(
+    builder: Builder,
+    key_path: Path,
+    unit_name: str,
+    worker_argv: Sequence[str],
+    *,
+    allow_not_found: bool,
+) -> dict[str, str]:
+    require_exact_worker_absent(builder, key_path, worker_argv)
+    return require_successful_remote_unit(
+        builder,
+        key_path,
+        unit_name,
+        allow_not_found=allow_not_found,
+    )
 
 
 def launch_remote_build(
@@ -1595,35 +1756,19 @@ def launch_remote_build(
     safe_run_id = re.sub(r"[^A-Za-z0-9_.-]", "-", run_id)
     unit_name = f"bioseq-package-{safe_run_id}-{builder.architecture}.service"
     remote_log_path = f"{build_root}/build.log"
-    worker_argv = [
-        f"{poetry_environment.venv_path}/bin/python",
-        f"{packaging_dir}/build_packages.py",
-        "--architecture",
-        builder.architecture,
-        "--bucket",
-        bucket,
-        "--region",
-        region,
-        "--source-dir",
-        f"{remote_source}/main",
-        "--build-root",
-        build_root,
-        "--manifest",
-        manifest_path,
-        "--s3-prefix",
-        s3_prefix,
-        "--signing-secret-arn",
-        secret_arn,
-        "--postgres",
-        ",".join(str(value) for value in selection.postgresql_majors),
-        "--distros",
-        ",".join(selection.distributions),
-        "--source-revision",
-        revision,
-        "--poetry-lock-sha256",
-        poetry_environment.lock_sha256,
-        "--fail-fast",
-    ]
+    worker_argv = remote_worker_argv(
+        builder=builder,
+        remote_source=remote_source,
+        revision=revision,
+        poetry_environment=poetry_environment,
+        selection=selection,
+        region=region,
+        bucket=bucket,
+        s3_prefix=s3_prefix,
+        secret_arn=secret_arn,
+        manifest_path=manifest_path,
+        build_root=build_root,
+    )
     systemd_argv = [
         "sudo",
         "systemd-run",
@@ -1672,6 +1817,8 @@ def launch_remote_build(
         manifest_path=manifest_path,
         build_root=build_root,
         local_log_path=log_path,
+        worker_argv=worker_argv,
+        launch_acknowledged=True,
     )
 
 
@@ -1683,9 +1830,17 @@ def wait_remote_build(
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     terminal_status: dict[str, str] | None = None
+    unit_was_observed = handle.launch_acknowledged
     while time.monotonic() < deadline:
         status = remote_unit_status(handle.builder, key_path, handle.unit_name)
+        if status["LoadState"] == "loaded":
+            unit_was_observed = True
         if status["ActiveState"] in {"active", "activating", "reloading", "deactivating"}:
+            if status["LoadState"] != "loaded":
+                raise PackageBuilderError(
+                    f"{handle.builder.architecture} systemd unit {handle.unit_name} "
+                    f"has ambiguous active status: {status}"
+                )
             time.sleep(15)
             continue
         terminal_status = status
@@ -1723,10 +1878,26 @@ def wait_remote_build(
             f"{handle.builder.architecture} manifest is invalid JSON: {error}"
         ) from error
     if (
-        terminal_status.get("LoadState") != "loaded"
-        or terminal_status.get("ActiveState") != "inactive"
-        or terminal_status.get("Result") != "success"
-        or terminal_status.get("ExecMainStatus") != "0"
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != 1
+        or manifest.get("status") != "success"
+        or manifest.get("architecture") != handle.builder.architecture
+        or manifest.get("errors") != []
+    ):
+        raise PackageBuilderError(
+            f"{handle.builder.architecture} package build has no authoritative "
+            f"terminal success manifest; unit status {terminal_status}; "
+            f"see {handle.local_log_path}"
+        )
+    allow_not_found = unit_was_observed and terminal_status.get("LoadState") == "not-found"
+    if terminal_status.get("LoadState") == "not-found" and not allow_not_found:
+        raise PackageBuilderError(
+            f"{handle.builder.architecture} systemd unit {handle.unit_name} was "
+            "missing before any authoritative launch/load observation"
+        )
+    require_exact_worker_absent(handle.builder, key_path, handle.worker_argv)
+    if not successful_terminal_unit_status(
+        terminal_status, allow_not_found=allow_not_found
     ):
         raise PackageBuilderError(
             f"{handle.builder.architecture} package build failed with unit status "
@@ -2312,6 +2483,10 @@ def create_post_build_amis(
     revision = str(build_result.get("revision", ""))
     if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
         raise PackageBuilderError("post-build AMIs require committed source provenance")
+    run_id = str(build_result.get("run_id", ""))
+    run_match = RUN_ID_RE.fullmatch(run_id)
+    if run_match is None or run_match.group("revision") != revision[:12]:
+        raise PackageBuilderError("post-build AMIs require an exact revision-bound run ID")
     if build_result.get("poetry_lock_sha256") != lock_sha256:
         raise PackageBuilderError("post-build AMI Poetry lock provenance mismatch")
     manifests = build_result.get("manifests")
@@ -2321,9 +2496,33 @@ def create_post_build_amis(
         raise PackageBuilderError("post-build AMIs require both exact architecture manifests")
     if not isinstance(worker_units, dict) or set(worker_units) != expected_architectures:
         raise PackageBuilderError("post-build AMIs require both exact worker units")
+    for name in expected_architectures:
+        expected_unit = f"bioseq-package-{run_id}-{name}.service"
+        if worker_units.get(name) != expected_unit:
+            raise PackageBuilderError(
+                f"post-build AMI worker unit mismatch for {name}: "
+                f"{worker_units.get(name)!r}"
+            )
     bucket = outputs.get("package_bucket_name")
     if not isinstance(bucket, str) or not bucket:
         raise PackageBuilderError("OpenTofu output `package_bucket_name` is missing")
+    secret_arn = outputs.get("signing_key_secret_arn")
+    if not isinstance(secret_arn, str) or not secret_arn.startswith(
+        "arn:aws:secretsmanager:"
+    ):
+        raise PackageBuilderError("OpenTofu output `signing_key_secret_arn` is missing")
+    finalized_from_manifests = (
+        build_result.get("finalized_from_completed_manifests") is True
+    )
+    launch_acknowledgements = build_result.get("worker_launch_acknowledged")
+    if not finalized_from_manifests and (
+        not isinstance(launch_acknowledgements, dict)
+        or set(launch_acknowledgements) != expected_architectures
+        or any(launch_acknowledgements.get(name) is not True for name in expected_architectures)
+    ):
+        raise PackageBuilderError(
+            "post-build AMIs require authoritative worker launch observations"
+        )
     expected_artifact_count = (
         len(matrix.architectures)
         * len(matrix.distributions)
@@ -2359,6 +2558,59 @@ def create_post_build_amis(
 
     matrix_fingerprint = complete_matrix_fingerprint(matrix, lock_sha256)
     key_path = ssh_key_path(outputs)
+    remote_source = f"{REMOTE_WORKSPACE}/source-{revision}"
+    worker_argv_by_architecture = {
+        name: remote_worker_argv(
+            builder=builders[name],
+            remote_source=remote_source,
+            revision=revision,
+            poetry_environment=_result_poetry_environment(
+                build_result, name, lock_sha256
+            ),
+            selection=selection,
+            region=args.region,
+            bucket=bucket,
+            s3_prefix=args.s3_prefix,
+            secret_arn=secret_arn,
+            manifest_path=f"{REMOTE_ROOT}/{run_id}-{name}-manifest.json",
+            build_root=f"{REMOTE_ROOT}/{run_id}-{name}",
+        )
+        for name in matrix.architectures
+    }
+    allow_not_found_by_architecture = {
+        name: (
+            finalized_from_manifests
+            or bool(launch_acknowledgements.get(name))
+        )
+        for name in matrix.architectures
+    }
+    quiescence_errors: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(matrix.architectures),
+        thread_name_prefix="bioseq-cache-preflight",
+    ) as executor:
+        futures = {
+            executor.submit(
+                require_quiescent_remote_worker,
+                builders[name],
+                key_path,
+                str(worker_units[name]),
+                worker_argv_by_architecture[name],
+                allow_not_found=allow_not_found_by_architecture[name],
+            ): name
+            for name in matrix.architectures
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+            except Exception as error:
+                quiescence_errors.append(f"{name}: {error}")
+    if quiescence_errors:
+        raise PackageBuilderError(
+            "post-build workers are not jointly quiescent: "
+            + "; ".join(quiescence_errors)
+        )
     images: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(
@@ -2375,6 +2627,8 @@ def create_post_build_amis(
                 lock_sha256,
                 matrix_fingerprint,
                 str(worker_units[name]),
+                worker_argv_by_architecture[name],
+                allow_not_found=allow_not_found_by_architecture[name],
             ): name
             for name in matrix.architectures
         }
@@ -2581,8 +2835,185 @@ def execute_build(
         "worker_units": {
             name: handle.unit_name for name, handle in handles.items()
         },
+        "worker_launch_acknowledged": {
+            name: handle.launch_acknowledged for name, handle in handles.items()
+        },
         "manifests": build_results,
     }
+    return result
+
+
+def fetch_completed_manifest(
+    builder: Builder,
+    key_path: Path,
+    run_id: str,
+) -> dict[str, Any]:
+    manifest_path = f"{REMOTE_ROOT}/{run_id}-{builder.architecture}-manifest.json"
+    result = ssh_run(
+        builder,
+        key_path,
+        f"cat {shlex.quote(manifest_path)}",
+        capture=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise PackageBuilderError(
+            f"{builder.architecture} completed manifest is missing for run {run_id}"
+        )
+    try:
+        manifest = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise PackageBuilderError(
+            f"{builder.architecture} completed manifest is invalid JSON: {error}"
+        ) from error
+    if not isinstance(manifest, dict):
+        raise PackageBuilderError(
+            f"{builder.architecture} completed manifest must be an object"
+        )
+    return manifest
+
+
+def finalize_completed_run(
+    args: argparse.Namespace,
+    matrix: Matrix,
+    outputs: dict[str, Any],
+    builders: dict[str, Builder],
+) -> dict[str, Any]:
+    """Validate and image one already-completed canonical remote run."""
+
+    run_match = RUN_ID_RE.fullmatch(str(args.run_id))
+    if run_match is None:
+        raise PackageBuilderError(
+            "--run-id must have form YYYYMMDDTHHMMSSZ-<12 lowercase revision hex>"
+        )
+    args.s3_prefix = normalize_s3_prefix(args.s3_prefix)
+    records = validate_builders(args.region, builders, matrix)
+    non_running = {
+        name: instance_state(records[name])
+        for name in matrix.architectures
+        if instance_state(records[name]) != "running"
+    }
+    if non_running:
+        raise PackageBuilderError(
+            f"finalize-run requires both builders already running: {non_running}"
+        )
+    builders = refreshed_builders(records, builders)
+    key_path = ssh_key_path(outputs)
+
+    manifests: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+
+    def fetch(name: str) -> dict[str, Any]:
+        wait_for_ssh(builders[name], key_path)
+        return fetch_completed_manifest(builders[name], key_path, args.run_id)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(matrix.architectures), thread_name_prefix="bioseq-finalize-fetch"
+    ) as executor:
+        futures = {
+            executor.submit(fetch, name): name for name in matrix.architectures
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                manifests[name] = future.result()
+            except Exception as error:
+                errors.append(f"{name}: {error}")
+    if errors:
+        raise PackageBuilderError(
+            "could not fetch completed canonical manifests: " + "; ".join(errors)
+        )
+
+    revisions = {str(manifest.get("source_revision", "")) for manifest in manifests.values()}
+    locks = {str(manifest.get("poetry_lock_sha256", "")) for manifest in manifests.values()}
+    if len(revisions) != 1:
+        raise PackageBuilderError("completed manifests disagree on source revision")
+    revision = revisions.pop()
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        or revision[:12] != run_match.group("revision")
+    ):
+        raise PackageBuilderError(
+            "completed manifest revision does not match the requested run ID"
+        )
+    if len(locks) != 1:
+        raise PackageBuilderError("completed manifests disagree on Poetry lock hash")
+    lock_sha256 = locks.pop()
+    if re.fullmatch(r"[0-9a-f]{64}", lock_sha256) is None:
+        raise PackageBuilderError("completed manifest Poetry lock hash is invalid")
+    if committed_poetry_lock_sha256(revision) != lock_sha256:
+        raise PackageBuilderError(
+            "completed manifest Poetry lock does not match its committed revision"
+        )
+
+    python_environments: dict[str, dict[str, str]] = {}
+    for name, manifest in manifests.items():
+        value = manifest.get("python_environment")
+        if not isinstance(value, dict):
+            raise PackageBuilderError(
+                f"{name} completed manifest has no Python environment provenance"
+            )
+        python_environments[name] = {
+            "venv_path": f"{REMOTE_POETRY_VENV_ROOT}/{lock_sha256}",
+            "python": str(value.get("python", "")),
+            "poetry": str(value.get("poetry", "")),
+        }
+
+    selection = Selection(
+        tuple(matrix.architectures),
+        tuple(matrix.distributions),
+        matrix.postgresql_majors,
+    )
+    expected_artifact_count = (
+        len(matrix.architectures)
+        * len(matrix.distributions)
+        * len(matrix.postgresql_majors)
+    )
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "success",
+        "run_id": args.run_id,
+        "revision": revision,
+        "source_revision": revision,
+        "poetry_lock_sha256": lock_sha256,
+        "worker_generation": WORKER_GENERATION,
+        "selection": {
+            "architectures": list(selection.architectures),
+            "distributions": list(selection.distributions),
+            "postgresql_majors": list(selection.postgresql_majors),
+        },
+        "bucket": outputs.get("package_bucket_name"),
+        "s3_prefix": args.s3_prefix,
+        "artifact_count": expected_artifact_count,
+        "python_environments": python_environments,
+        "worker_units": {
+            name: f"bioseq-package-{args.run_id}-{name}.service"
+            for name in matrix.architectures
+        },
+        "manifests": manifests,
+        "finalized_from_completed_manifests": True,
+    }
+    images = create_post_build_amis(
+        args=args,
+        matrix=matrix,
+        selection=selection,
+        outputs=outputs,
+        builders=builders,
+        build_result=result,
+        lock_sha256=lock_sha256,
+    )
+    result["cache_images"] = {
+        name: {
+            "image_id": str(image["ImageId"]),
+            "source_instance_id": builders[name].instance_id,
+        }
+        for name, image in images.items()
+    }
+    result["completed_at"] = utc_now()
+    result["builders_left_running"] = {
+        name: builder.instance_id for name, builder in builders.items()
+    }
+    write_last_run(result)
     return result
 
 
@@ -2678,6 +3109,22 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
+def cmd_finalize_run(args: argparse.Namespace) -> None:
+    matrix = load_matrix()
+    outputs = tofu_outputs()
+    if not outputs:
+        raise PackageBuilderError("finalize-run requires an applied OpenTofu stack")
+    if outputs.get("region") != args.region:
+        raise PackageBuilderError(
+            f"OpenTofu region output {outputs.get('region')!r} does not match "
+            f"{args.region!r}"
+        )
+    builders = output_builders(outputs, matrix)
+    result = finalize_completed_run(args, matrix, outputs, builders)
+    info("completed run finalized; both package builders remain running")
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
 def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--region", default=DEFAULT_REGION)
     parser.add_argument(
@@ -2733,6 +3180,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_options(run_parser)
     add_matrix_options(run_parser)
     run_parser.set_defaults(handler=cmd_run)
+
+    finalize_parser = subparsers.add_parser(
+        "finalize-run",
+        help="validate and image an already-completed canonical run; leave running",
+    )
+    finalize_parser.add_argument("--run-id", required=True)
+    finalize_parser.add_argument("--region", default=DEFAULT_REGION)
+    finalize_parser.add_argument("--s3-prefix", default=DEFAULT_S3_PREFIX)
+    finalize_parser.set_defaults(handler=cmd_finalize_run)
 
     up_parser = subparsers.add_parser(
         "up", help="provision/start both builders for explicit debugging"
