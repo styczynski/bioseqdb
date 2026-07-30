@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import runpy
 import stat
 import subprocess
 import tarfile
@@ -1432,6 +1433,106 @@ class PipelineOrchestrationTests(unittest.TestCase):
                 events,
                 ["start-cell", "build-package", "validate-built", "fail-cell"],
             )
+
+
+class BuildAndStageContractTests(unittest.TestCase):
+    def test_build_consumes_exact_generated_production_dso_inventory(self) -> None:
+        manifest_name = "bioseq-package-target-artifacts.tsv"
+        build_script = (
+            PACKAGING_ROOT / "scripts" / "build_and_stage.sh"
+        ).read_text(encoding="utf-8")
+        root_cmake = (MAIN_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+
+        self.assertIn(manifest_name, root_cmake)
+        self.assertIn(manifest_name, build_script)
+        for target, basename in (
+            ("postgresql_bioseq", "bioseq.so"),
+            ("postgresql_bioseq_cache", "bioseq_cache.so"),
+        ):
+            with self.subTest(target=target):
+                self.assertRegex(
+                    root_cmake,
+                    rf"{target}(?:\\t|\t)\$<TARGET_FILE:{target}>",
+                )
+                self.assertRegex(
+                    build_script,
+                    rf"(?m)^[^\n]*{target}[^\n]*{basename}[^\n]*$",
+                )
+
+        self.assertIn("IFS=$'\\t'", build_script)
+        self.assertRegex(
+            build_script,
+            (
+                r'\[\[[^\]\n]*\$\{#[A-Za-z_][A-Za-z0-9_]*\[@\]\}'
+                r'[^\]\n]*(?:==|-eq)[^\]\n]*"?2"?[^\]\n]*\]\]'
+            ),
+        )
+        self.assertNotIn("-name bioseq.so", build_script)
+        self.assertNotIn("-name bioseq_cache.so", build_script)
+
+    def test_install_enforces_cache_inclusive_exact_six_artifact_gate(self) -> None:
+        build_script = (
+            PACKAGING_ROOT / "scripts" / "build_and_stage.sh"
+        ).read_text(encoding="utf-8")
+        validator_namespace = runpy.run_path(
+            str(PACKAGING_ROOT / "scripts" / "validate_package.py")
+        )
+        expected_basenames = frozenset(
+            {
+                "bioseq.so",
+                "bioseq_cache.so",
+                "bioseq--1.0.sql",
+                "bioseq_cache--1.0.sql",
+                "bioseq.control",
+                "bioseq_cache.control",
+            }
+        )
+
+        self.assertEqual(
+            validator_namespace["REQUIRED_BASENAMES"],
+            expected_basenames,
+        )
+        install_index = build_script.index(
+            '"${cmake_bin}" --install "${build_dir}" --component bioseq'
+        )
+        validation_index = build_script.index("--staged-root", install_index)
+        inventory_index = build_script.index(
+            '"${package_metadata_dir}/package-files.list"',
+            validation_index,
+        )
+        exact_count_index = build_script.index(
+            '"6"',
+            inventory_index,
+        )
+        self.assertIn(
+            (
+                '[[ "$(wc -l < "${package_metadata_dir}/package-files.list")" '
+                '== "6" ]]'
+            ),
+            build_script,
+        )
+        self.assertLess(
+            install_index,
+            validation_index,
+        )
+        self.assertLess(
+            validation_index,
+            inventory_index,
+        )
+        self.assertLess(
+            inventory_index,
+            exact_count_index,
+        )
+        for option in (
+            "--pg-config",
+            "--postgres-major",
+            "--architecture",
+        ):
+            with self.subTest(option=option):
+                self.assertIn(
+                    option,
+                    build_script[validation_index:inventory_index],
+                )
 
 
 class ManifestAndLegacyTests(unittest.TestCase):
