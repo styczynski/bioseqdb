@@ -14,6 +14,9 @@ using namespace std::chrono_literals;
 
 namespace {
 
+inline constexpr std::string_view cancelled_waiter_query{
+    "SELECT sum(id) FROM cache_cancel_wait_rows WHERE id <= 10"};
+
 void create_wait_rows(bioseq::libpq::connection& connection,
                       std::string_view table) {
     const std::string identifier = connection.escape_identifier(table);
@@ -186,9 +189,7 @@ TEST_CASE("cancelled waiter drains without disturbing its producer",
             static_cast<void>(session.exec(
                 "SET application_name = 'cache_cancel_producer'; "
                 "SET bioseq.query_cache_optimisation_mode = 'same'"));
-            const auto result = session.exec(
-                "SELECT sum(id) FROM cache_cancel_wait_rows "
-                "WHERE id <= 10");
+            const auto result = session.exec(cancelled_waiter_query);
             producer_sum = std::string(result.value(0, 0));
         }});
     tasks.push_back(bioseq::postgres_test::session_task{
@@ -206,9 +207,7 @@ TEST_CASE("cancelled waiter drains without disturbing its producer",
             static_cast<void>(session.exec(
                 "SET application_name = 'cache_cancel_waiter'; "
                 "SET bioseq.query_cache_optimisation_mode = 'same'"));
-            static_cast<void>(session.exec(
-                "SELECT count(*) FROM cache_cancel_wait_rows "
-                "WHERE id <= 10"));
+            static_cast<void>(session.exec(cancelled_waiter_query));
         }});
     tasks.push_back(bioseq::postgres_test::session_task{
         .name = "controller",
