@@ -158,8 +158,20 @@ package_cmake_invariants() {
     CMAKE_GENERATOR Ninja \
     CMAKE_BUILD_TYPE Release \
     CMAKE_TOOLCHAIN_FILE "${vcpkg_root}/scripts/buildsystems/vcpkg.cmake" \
+    CMAKE_C_COMPILER_LAUNCHER "${compiler_launcher}" \
+    CMAKE_CXX_COMPILER_LAUNCHER "${compiler_launcher}" \
+    CMAKE_C_FLAGS "" \
+    CMAKE_CXX_FLAGS "-stdlib=libc++" \
+    CMAKE_C_FLAGS_RELEASE "-O0 -DNDEBUG -fno-omit-frame-pointer" \
+    CMAKE_CXX_FLAGS_RELEASE "-O0 -DNDEBUG -fno-omit-frame-pointer" \
+    CMAKE_EXE_LINKER_FLAGS "-stdlib=libc++ -static-libstdc++ -static-libgcc" \
+    CMAKE_SKIP_RPATH ON \
     PostgreSQL_CONFIG "${pg_config}" \
     BIOSEQ_PACKAGE_BUILD ON \
+    BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON "${libcxx_modules}" \
+    BIOSEQ_PACKAGE_LIBCXX_ARCHIVE "${libcxx_archive}" \
+    BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE "${libcxxabi_archive}" \
+    BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE "${libunwind_archive}" \
     BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE 0 \
     BIOSEQ_BUILD_CORE ON \
     BIOSEQ_BUILD_CACHE ON \

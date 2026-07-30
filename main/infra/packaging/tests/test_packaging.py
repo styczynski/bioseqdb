@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import stat
 import subprocess
@@ -1443,7 +1444,54 @@ class BuildAndStageContractTests(unittest.TestCase):
 
         self.assertIn("cmake_cache_matches_package_profile", build_script)
         self.assertIn("require_package_cmake_profile", build_script)
+        invariant_body = build_script.split(
+            "package_cmake_invariants() {", maxsplit=1
+        )[1].split("\n}", maxsplit=1)[0]
+        configure_body = build_script.split(
+            '"${cmake_bin}" -S "${persistent_source_dir}"',
+            maxsplit=1,
+        )[1].split("\n  fi", maxsplit=1)[0]
+        configured_cache_keys = set(
+            re.findall(r"-D([A-Za-z0-9_]+)(?::[^=]+)?=", configure_body)
+        )
+        for key in configured_cache_keys:
+            with self.subTest(configured_cache_key=key):
+                self.assertRegex(
+                    invariant_body,
+                    rf"(?m)^\s*{re.escape(key)}\s+",
+                )
         for key, value in (
+            ("CMAKE_BUILD_TYPE", "Release"),
+            ("CMAKE_C_COMPILER_LAUNCHER", "${compiler_launcher}"),
+            ("CMAKE_CXX_COMPILER_LAUNCHER", "${compiler_launcher}"),
+            ("CMAKE_C_FLAGS", '""'),
+            ("CMAKE_CXX_FLAGS", "-stdlib=libc++"),
+            (
+                "CMAKE_C_FLAGS_RELEASE",
+                "-O0 -DNDEBUG -fno-omit-frame-pointer",
+            ),
+            (
+                "CMAKE_CXX_FLAGS_RELEASE",
+                "-O0 -DNDEBUG -fno-omit-frame-pointer",
+            ),
+            (
+                "CMAKE_EXE_LINKER_FLAGS",
+                "-stdlib=libc++ -static-libstdc++ -static-libgcc",
+            ),
+            ("CMAKE_SKIP_RPATH", "ON"),
+            (
+                "BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON",
+                "${libcxx_modules}",
+            ),
+            ("BIOSEQ_PACKAGE_LIBCXX_ARCHIVE", "${libcxx_archive}"),
+            (
+                "BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE",
+                "${libcxxabi_archive}",
+            ),
+            (
+                "BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE",
+                "${libunwind_archive}",
+            ),
             ("BIOSEQ_PACKAGE_BUILD", "ON"),
             ("BIOSEQ_BUILD_CORE", "ON"),
             ("BIOSEQ_BUILD_CACHE", "ON"),
@@ -1454,7 +1502,7 @@ class BuildAndStageContractTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertRegex(
                     build_script,
-                    rf"(?m)^\s*{key}\s+{value}\s*\\?$",
+                    rf"(?m)^\s*{key}\s+{re.escape(value)}\s*\\?$",
                 )
 
         profile_check = build_script.index(
