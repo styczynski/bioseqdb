@@ -427,6 +427,7 @@ TEST_CASE("successful late fetch preserves missing text datums",
     bioseq::cache_test::exec(
         connection,
         "SET bioseq.query_cache_optimisation_mode = 'reuse'; "
+        "SET enable_indexscan = off; "
         "SELECT bioseq_cache.invalidate_all(); "
         "SELECT bioseq_cache_test.request_janitor_sweep(); "
         "SELECT bioseq_cache_test.provider_set_mapping_fault('none')");
@@ -456,6 +457,7 @@ TEST_CASE("successful late fetch preserves missing text datums",
           == 1);
     bioseq::cache_test::exec(
         connection,
+        "RESET enable_indexscan; "
         "SELECT bioseq_cache_test.provider_reset(); "
         "SELECT bioseq_cache.reset_stats(); "
         "DISCARD PLANS");
