@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
+import multiprocessing
+import queue
+import re
 import sys
 import tempfile
 import unittest
@@ -20,6 +24,35 @@ import server  # noqa: E402
 LOCAL = ("bench-opt", "bench-opt-debug")
 AWS_CLANG = ("aws-x64-linux", "aws-x64-linux-debug")
 AWS_GCC = ("aws-x64-linux-gcc161", "aws-x64-linux-gcc161-debug")
+
+EXPECTED_CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
+    "cache_test_support_postgres_bin_dir",
+    "cache_test_support_postgres_stage_root",
+    "cache_test_support_postgres_stage_manifest",
+    "cache_production_postgres_bin_dir",
+    "cache_production_postgres_stage_root",
+    "cache_production_postgres_stage_manifest",
+    "cache_bioseq_support_postgres_bin_dir",
+    "cache_bioseq_support_postgres_stage_root",
+    "cache_bioseq_support_postgres_stage_manifest",
+    "cache_bioseq_only_postgres_bin_dir",
+    "cache_bioseq_only_postgres_stage_root",
+    "cache_bioseq_only_postgres_stage_manifest",
+    "cache_bioseq_production_postgres_bin_dir",
+    "cache_bioseq_production_postgres_stage_root",
+    "cache_bioseq_production_postgres_stage_manifest",
+    "cache_control",
+    "cache_install_sql",
+    "cache_dso",
+    "cache_test_control",
+    "cache_test_install_sql",
+    "cache_test_dso",
+    "bioseq_control",
+    "bioseq_install_sql",
+    "bioseq_dso",
+    "provider_peer_test_dso",
+    "migration_ledger",
+})
 
 
 class CachePresetContractTest(unittest.TestCase):
@@ -255,6 +288,12 @@ class CacheModeRoutingTest(unittest.TestCase):
             "bioseq.inspect_locator(sample.query)",
             "bioseq.inspect_locator(sample.target)",
             "PQsetSingleRowMode first PGRES_SINGLE_TUPLE arrival",
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            ".preinstalled_stage_root = options.postgres_stage_root",
+            ".preinstalled_stage_manifest = "
+            "options.postgres_stage_manifest",
+            ".allowed_runtime_dso_overrides = {}",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, source)
@@ -428,6 +467,10 @@ class CacheModeRoutingTest(unittest.TestCase):
             "BIOSEQ_EXTENSION_DSO>>",
             cmake,
         )
+        self.assertEqual(
+            server._CACHE_NATIVE_ARTIFACT_KEYS,
+            EXPECTED_CACHE_NATIVE_ARTIFACT_KEYS,
+        )
         for key in server._CACHE_NATIVE_ARTIFACT_KEYS:
             with self.subTest(native_artifact_key=key):
                 self.assertIn(f'\\"{key}\\"', cmake)
@@ -435,14 +478,20 @@ class CacheModeRoutingTest(unittest.TestCase):
             "bioseq_cache_test_support_postgres_stage",
             "bioseq_cache_production_postgres_stage",
             "bioseq_cache_bioseq_support_postgres_stage",
+            "bioseq_cache_bioseq_only_postgres_stage",
             "bioseq_cache_bioseq_production_postgres_stage",
         ):
             with self.subTest(stage_target=stage_target):
-                self.assertIn(
-                    f"$<TARGET_PROPERTY:{stage_target},"
-                    "BIOSEQ_POSTGRES_BIN_DIR>",
-                    cmake,
-                )
+                for stage_property in (
+                    "BIOSEQ_POSTGRES_BIN_DIR",
+                    "BIOSEQ_POSTGRES_STAGE_ROOT",
+                    "BIOSEQ_POSTGRES_STAGE_MANIFEST",
+                ):
+                    self.assertIn(
+                        f"$<TARGET_PROPERTY:{stage_target},"
+                        f"{stage_property}>",
+                        cmake,
+                    )
         self.assertNotIn('\\"postgres_bin_dir\\"', cmake)
         self.assertIn(
             "$<TARGET_FILE:bioseq_cache_provider_peer_test>", cmake)
@@ -509,64 +558,330 @@ class CacheModeRoutingTest(unittest.TestCase):
             / "bench"
             / "CMakeLists.txt"
         ).read_text(encoding="utf-8")
+        helper_cmake = (
+            MAIN_DIR
+            / "cmake"
+            / "BioseqPrivatePostgresStage.cmake"
+        ).read_text(encoding="utf-8")
 
-        expected = (
-            (
-                integration_cmake,
-                "bioseq_cache_test_support_postgres_stage",
-            ),
-            (
-                bench_cmake,
-                "bioseq_cache_production_postgres_stage",
-            ),
-            (
-                combined_cmake,
-                "bioseq_cache_bioseq_support_postgres_stage",
-            ),
-            (
-                combined_cmake,
-                "bioseq_cache_bioseq_production_postgres_stage",
+        keywords = {
+            "TARGET",
+            "PG_CONFIG",
+            "STAGE_ROOT",
+            "EXTENSION_NAMES",
+            "EXTENSION_TARGETS",
+            "CONTROL_PROPERTIES",
+            "INSTALL_SQL_PROPERTIES",
+            "MODULE_PATHNAME_OVERRIDES",
+        }
+
+        def parse_stage_calls(source: str) -> dict[str, dict[str, list[str]]]:
+            parsed: dict[str, dict[str, list[str]]] = {}
+            call_bodies = re.findall(
+                r"bioseq_add_private_postgres_stage\s*\((.*?)\)",
+                source,
+                flags=re.DOTALL,
+            )
+            for body in call_bodies:
+                fields: dict[str, list[str]] = {}
+                current: str | None = None
+                for raw_token in re.findall(r'"[^"]*"|[^\s]+', body):
+                    token = raw_token.strip('"')
+                    if token in keywords:
+                        current = token
+                        fields.setdefault(current, [])
+                    else:
+                        self.assertIsNotNone(
+                            current,
+                            f"unkeyed stage token {token!r}",
+                        )
+                        fields[current].append(token)
+                self.assertEqual(len(fields.get("TARGET", [])), 1)
+                target = fields.pop("TARGET")[0]
+                self.assertNotIn(target, parsed)
+                parsed[target] = fields
+            return parsed
+
+        cache_stage_calls = parse_stage_calls(cache_cmake)
+        main_stage_calls = parse_stage_calls(main_cmake)
+        self.assertTrue(
+            set(cache_stage_calls).isdisjoint(main_stage_calls),
+            "cache-owned private-stage target names must be globally unique",
+        )
+        stage_calls = {**cache_stage_calls, **main_stage_calls}
+        expected_profiles = {
+            "bioseq_cache_test_support_postgres_stage": {
+                "PG_CONFIG": ["${PostgreSQL_CONFIG}"],
+                "EXTENSION_NAMES": ["bioseq_cache"],
+                "EXTENSION_TARGETS": [
+                    "postgresql_bioseq_cache_test_support"],
+                "CONTROL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_CONTROL_FILE"],
+                "INSTALL_SQL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_TEST_INSTALL_SQL"],
+            },
+            "bioseq_cache_production_postgres_stage": {
+                "PG_CONFIG": ["${PostgreSQL_CONFIG}"],
+                "EXTENSION_NAMES": ["bioseq_cache"],
+                "EXTENSION_TARGETS": ["postgresql_bioseq_cache"],
+                "CONTROL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_CONTROL_FILE"],
+                "INSTALL_SQL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_INSTALL_SQL"],
+            },
+            "bioseq_cache_bioseq_support_postgres_stage": {
+                "PG_CONFIG": ["${PostgreSQL_CONFIG}"],
+                "EXTENSION_NAMES": ["bioseq_cache", "bioseq"],
+                "EXTENSION_TARGETS": [
+                    "postgresql_bioseq_cache_test_support",
+                    "postgresql_bioseq",
+                ],
+                "CONTROL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_CONTROL_FILE",
+                    "BIOSEQ_EXTENSION_CONTROL_FILE",
+                ],
+                "INSTALL_SQL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_TEST_INSTALL_SQL",
+                    "BIOSEQ_EXTENSION_INSTALL_SQL",
+                ],
+            },
+            "bioseq_cache_bioseq_production_postgres_stage": {
+                "PG_CONFIG": ["${PostgreSQL_CONFIG}"],
+                "EXTENSION_NAMES": ["bioseq_cache", "bioseq"],
+                "EXTENSION_TARGETS": [
+                    "postgresql_bioseq_cache",
+                    "postgresql_bioseq",
+                ],
+                "CONTROL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_CONTROL_FILE",
+                    "BIOSEQ_EXTENSION_CONTROL_FILE",
+                ],
+                "INSTALL_SQL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_INSTALL_SQL",
+                    "BIOSEQ_EXTENSION_INSTALL_SQL",
+                ],
+            },
+            "bioseq_cache_bioseq_only_postgres_stage": {
+                "PG_CONFIG": ["${PostgreSQL_CONFIG}"],
+                "EXTENSION_NAMES": ["bioseq"],
+                "EXTENSION_TARGETS": ["postgresql_bioseq"],
+                "CONTROL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_CONTROL_FILE"],
+                "INSTALL_SQL_PROPERTIES": [
+                    "BIOSEQ_EXTENSION_INSTALL_SQL"],
+            },
+        }
+        self.assertEqual(stage_calls, expected_profiles)
+        self.assertEqual(len(stage_calls), 5)
+        self.assertEqual(len(stage_calls), len(set(stage_calls)))
+        for target, profile in stage_calls.items():
+            with self.subTest(stage_target=target):
+                names = profile["EXTENSION_NAMES"]
+                self.assertEqual(len(names), len(set(names)))
+                vector_lengths = {
+                    len(profile[field])
+                    for field in (
+                        "EXTENSION_NAMES",
+                        "EXTENSION_TARGETS",
+                        "CONTROL_PROPERTIES",
+                        "INSTALL_SQL_PROPERTIES",
+                    )
+                }
+                self.assertEqual(vector_lengths, {len(names)})
+                self.assertNotIn("STAGE_ROOT", profile)
+                self.assertNotIn("MODULE_PATHNAME_OVERRIDES", profile)
+
+        self.assertIn(
+            '"${_safe_stage_parent}/${BIOSEQ_STAGE_TARGET}"',
+            helper_cmake,
+        )
+        self.assertRegex(
+            helper_cmake,
+            re.compile(
+                r"string\(CONCAT\s+_metadata_root\s+"
+                r'"\$\{CMAKE_CURRENT_BINARY_DIR\}/generated/'
+                r'private_postgres/"\s+'
+                r'"\$\{BIOSEQ_STAGE_TARGET\}"\s*\)',
+                flags=re.DOTALL,
             ),
         )
-        for cmake, stage_target in expected:
-            with self.subTest(stage_target=stage_target):
-                self.assertIn(stage_target, cmake)
-                self.assertIn(
-                    f"$<TARGET_PROPERTY:{stage_target},"
-                    "BIOSEQ_POSTGRES_BIN_DIR>",
-                    cmake,
-                )
+        self.assertIn(
+            'BIOSEQ_POSTGRES_STAGE_ROOT "${_stage_root}"',
+            helper_cmake,
+        )
+        self.assertIn(
+            'BIOSEQ_POSTGRES_STAGE_MANIFEST "${_stage_manifest}"',
+            helper_cmake,
+        )
+
+        inventory_targets = {
+            "cache_test_support_postgres":
+                "bioseq_cache_test_support_postgres_stage",
+            "cache_production_postgres":
+                "bioseq_cache_production_postgres_stage",
+            "cache_bioseq_support_postgres":
+                "bioseq_cache_bioseq_support_postgres_stage",
+            "cache_bioseq_only_postgres":
+                "bioseq_cache_bioseq_only_postgres_stage",
+            "cache_bioseq_production_postgres":
+                "bioseq_cache_bioseq_production_postgres_stage",
+        }
+        self.assertEqual(
+            len(inventory_targets.values()),
+            len(set(inventory_targets.values())),
+        )
+        inventory_properties = {
+            "bin_dir": "BIOSEQ_POSTGRES_BIN_DIR",
+            "stage_root": "BIOSEQ_POSTGRES_STAGE_ROOT",
+            "stage_manifest": "BIOSEQ_POSTGRES_STAGE_MANIFEST",
+        }
+        for prefix, stage_target in inventory_targets.items():
+            for suffix, stage_property in inventory_properties.items():
+                key = f"{prefix}_{suffix}"
+                variable = f"_bioseq_{key}"
+                with self.subTest(
+                        inventory_key=key, stage_target=stage_target):
+                    expected_expression = (
+                        '"$<SHELL_PATH:$<TARGET_GENEX_EVAL:'
+                        f"{stage_target},"
+                        f"$<TARGET_PROPERTY:{stage_target},"
+                        f'{stage_property}>>>"'
+                    )
+                    self.assertRegex(
+                        bench_cmake,
+                        re.compile(
+                            r"set\(\s*"
+                            + re.escape(variable)
+                            + r"\s+"
+                            + re.escape(expected_expression)
+                            + r"\s*\)",
+                            flags=re.DOTALL,
+                        ),
+                    )
+                    self.assertIn(
+                        f'\\"{key}\\": \\"${{{variable}}}\\"',
+                        bench_cmake,
+                    )
+
+        consumer_sources = {
+            "bioseq_cache_test_support_postgres_stage":
+                integration_cmake,
+            "bioseq_cache_production_postgres_stage": bench_cmake,
+            "bioseq_cache_bioseq_support_postgres_stage":
+                combined_cmake,
+            "bioseq_cache_bioseq_only_postgres_stage": combined_cmake,
+            "bioseq_cache_bioseq_production_postgres_stage":
+                combined_cmake,
+        }
+        for stage_target, source in consumer_sources.items():
+            for stage_property in inventory_properties.values():
+                with self.subTest(
+                        consumer_stage=stage_target,
+                        stage_property=stage_property):
+                    self.assertIn(
+                        f"$<TARGET_PROPERTY:{stage_target},"
+                        f"{stage_property}>",
+                        source,
+                    )
         for cmake in (integration_cmake, combined_cmake):
             self.assertNotIn(
                 '--postgres-bin-dir "${PostgreSQL_BIN_DIR}"', cmake)
+        self.assertNotIn("MODULE_PATHNAME_OVERRIDES", cache_cmake)
+        self.assertNotIn("MODULE_PATHNAME_OVERRIDES", main_cmake)
+
+    def test_cache_runner_uses_attested_preinstalled_stage_and_narrow_peer_override(
+            self) -> None:
+        support_dir = (
+            MAIN_DIR
+            / "bioseq_caching"
+            / "test"
+            / "support"
+        )
+        context = (support_dir / "cache_test_context.cppm").read_text(
+            encoding="utf-8")
+        runner = (support_dir / "cache_catch_runner.cpp").read_text(
+            encoding="utf-8")
+        peer = (
+            MAIN_DIR
+            / "bioseq_caching"
+            / "test"
+            / "bioseq"
+            / "test_provider_peer_failopen.cpp"
+        ).read_text(encoding="utf-8")
+        coexistence = (
+            MAIN_DIR
+            / "bioseq_caching"
+            / "test"
+            / "bioseq"
+            / "test_coexistence.cpp"
+        ).read_text(encoding="utf-8")
+        acceptance = (
+            MAIN_DIR
+            / "bioseq_caching"
+            / "test"
+            / "bioseq"
+            / "test_coexistence_acceptance.cpp"
+        ).read_text(encoding="utf-8")
+
+        for source_name, source in (
+                ("context", context), ("runner", runner)):
+            with self.subTest(source=source_name):
+                self.assertIn("postgres_stage_root", source)
+                self.assertIn("postgres_stage_manifest", source)
+        self.assertIn("--postgres-stage-root", runner)
+        self.assertIn("--postgres-stage-manifest", runner)
+        for option in (
+            "--bioseq-only-postgres-bin-dir",
+            "--bioseq-only-postgres-stage-root",
+            "--bioseq-only-postgres-stage-manifest",
+        ):
+            self.assertEqual(runner.count(option), 1)
+        for field in (
+            "bioseq_only_postgres_bin_dir",
+            "bioseq_only_postgres_stage_root",
+            "bioseq_only_postgres_stage_manifest",
+        ):
+            self.assertIn(field, context)
+            self.assertIn(field, runner)
         self.assertIn(
-            "bioseq_add_private_postgres_stage(\n"
-            "      TARGET bioseq_cache_test_support_postgres_stage",
-            cache_cmake,
+            ".preinstalled_stage_root = value.postgres_stage_root",
+            context,
         )
         self.assertIn(
-            "bioseq_add_private_postgres_stage(\n"
-            "    TARGET bioseq_cache_production_postgres_stage",
-            cache_cmake,
+            ".preinstalled_stage_manifest = "
+            "value.postgres_stage_manifest",
+            context,
         )
-        self.assertIn(
-            "bioseq_add_private_postgres_stage(\n"
-            "        TARGET bioseq_cache_bioseq_support_postgres_stage",
-            main_cmake,
-        )
-        self.assertIn(
-            "bioseq_add_private_postgres_stage(\n"
-            "      TARGET bioseq_cache_bioseq_production_postgres_stage",
-            main_cmake,
-        )
+        self.assertIn(".allowed_runtime_dso_overrides = {}", context)
         self.assertEqual(
-            cache_cmake.count("MODULE_PATHNAME_OVERRIDES"),
-            2,
+            peer.count(
+                'allowed_runtime_dso_overrides.insert("bioseq_cache")'),
+            1,
         )
-        self.assertEqual(
-            main_cmake.count("MODULE_PATHNAME_OVERRIDES"),
-            2,
+        self.assertIn("bioseq_only_cluster_options", context)
+        self.assertIn(
+            "canonical_cache_stage_artifact_paths", context)
+        self.assertIn(
+            'stage.control_directory / "bioseq_cache.control"', context)
+        self.assertIn(
+            'stage.control_directory / "bioseq_cache--1.0.sql"', context)
+        self.assertIn(
+            "stage.library_directory / "
+            "configuration().cache_dso.filename()",
+            context,
         )
+        for source in (coexistence, acceptance):
+            self.assertIn("bioseq_only_cluster_options", source)
+            self.assertIn("staged_artifacts()", source)
+            self.assertIn("stage.extensions.size() == 1", source)
+            self.assertIn('stage.extensions.front().name == "bioseq"', source)
+            self.assertIn(
+                "canonical_cache_stage_artifact_paths(stage)", source)
+            self.assertEqual(
+                source.count(
+                    "CHECK_FALSE(std::filesystem::exists(cache_paths["),
+                3,
+            )
 
     def test_cache_unit_common_contract_binaries_share_runtime_directory(
             self) -> None:
@@ -642,7 +957,7 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("cache-bench", result)
 
     def test_native_cache_mode_commands_and_timeouts(self) -> None:
-        postgres_bin_dir_key_by_executable = {
+        primary_postgres_bin_dir_key_by_executable = {
             "bioseq_cache_integration_tests":
                 "cache_test_support_postgres_bin_dir",
             "bioseq_cache_bench":
@@ -653,6 +968,13 @@ class CacheModeRoutingTest(unittest.TestCase):
                 "cache_bioseq_production_postgres_bin_dir",
             "bioseq_cache_bioseq_bench":
                 "cache_bioseq_production_postgres_bin_dir",
+        }
+        all_stage_prefixes = {
+            "cache_test_support_postgres",
+            "cache_production_postgres",
+            "cache_bioseq_support_postgres",
+            "cache_bioseq_only_postgres",
+            "cache_bioseq_production_postgres",
         }
         expected = {
             "cache-integration": (
@@ -694,21 +1016,84 @@ class CacheModeRoutingTest(unittest.TestCase):
                 )
                 self.assertTrue(details.reporting_subdir_name)
                 for command in details.commands:
-                    self.assertIn("--postgres-bin-dir", command)
-                    postgres_bin_dir_key = (
-                        postgres_bin_dir_key_by_executable[command[0]])
-                    self.assertIn(
-                        f"{{{postgres_bin_dir_key}}}", command)
-                    for other_key in (
-                            key for key in
-                            postgres_bin_dir_key_by_executable.values()
-                            if key != postgres_bin_dir_key):
-                        self.assertNotIn(f"{{{other_key}}}", command)
+                    primary_bin_key = (
+                        primary_postgres_bin_dir_key_by_executable[
+                            command[0]])
+                    primary_prefix = primary_bin_key.removesuffix("_bin_dir")
+                    expected_stage_prefixes = {primary_prefix}
+                    is_combined_support = (
+                        command[0]
+                        == "bioseq_cache_bioseq_support_integration_tests"
+                    )
+                    if is_combined_support:
+                        expected_stage_prefixes.add(
+                            "cache_bioseq_only_postgres")
+
+                    expected_stage_placeholders = {
+                        f"{prefix}_{suffix}"
+                        for prefix in expected_stage_prefixes
+                        for suffix in (
+                            "bin_dir",
+                            "stage_root",
+                            "stage_manifest",
+                        )
+                    }
+                    actual_stage_placeholders = {
+                        argument[1:-1]
+                        for argument in command
+                        if (
+                            argument.startswith("{")
+                            and argument.endswith("}")
+                            and "_postgres_" in argument
+                        )
+                    }
+                    self.assertEqual(
+                        actual_stage_placeholders,
+                        expected_stage_placeholders,
+                    )
+
+                    primary_flags = {
+                        "--postgres-bin-dir":
+                            f"{{{primary_prefix}_bin_dir}}",
+                        "--postgres-stage-root":
+                            f"{{{primary_prefix}_stage_root}}",
+                        "--postgres-stage-manifest":
+                            f"{{{primary_prefix}_stage_manifest}}",
+                    }
+                    for flag, placeholder in primary_flags.items():
+                        self.assertEqual(command.count(flag), 1)
+                        flag_index = command.index(flag)
+                        self.assertEqual(
+                            command[flag_index + 1], placeholder)
+
+                    bioseq_only_flags = {
+                        "--bioseq-only-postgres-bin-dir":
+                            "{cache_bioseq_only_postgres_bin_dir}",
+                        "--bioseq-only-postgres-stage-root":
+                            "{cache_bioseq_only_postgres_stage_root}",
+                        "--bioseq-only-postgres-stage-manifest":
+                            "{cache_bioseq_only_postgres_stage_manifest}",
+                    }
+                    for flag, placeholder in bioseq_only_flags.items():
+                        self.assertEqual(
+                            command.count(flag),
+                            1 if is_combined_support else 0,
+                        )
+                        if is_combined_support:
+                            flag_index = command.index(flag)
+                            self.assertEqual(
+                                command[flag_index + 1], placeholder)
+                        else:
+                            self.assertNotIn(placeholder, command)
+                    self.assertEqual(
+                        expected_stage_prefixes - all_stage_prefixes,
+                        set(),
+                    )
                     self.assertIn("--cache-control", command)
                     self.assertIn("--cache-install-sql", command)
                     self.assertIn("--cache-dso", command)
                     self.assertIn("--report", command)
-                    self.assertIn("{report}", command)
+                    self.assertEqual(command.count("{report}"), 1)
                     if case_timeout is not None:
                         timeout_index = command.index(
                             "--case-timeout-seconds")
@@ -747,7 +1132,8 @@ class CacheModeRoutingTest(unittest.TestCase):
                 if not value:
                     continue
                 path = Path(value)
-                if key.endswith("_postgres_bin_dir"):
+                if key.endswith(
+                        ("_postgres_bin_dir", "_postgres_stage_root")):
                     path.mkdir()
                 else:
                     path.touch()
@@ -768,6 +1154,10 @@ class CacheModeRoutingTest(unittest.TestCase):
                 str(binary_dir / "bioseq_cache_integration_tests"),
                 "--postgres-bin-dir",
                 manifest["cache_test_support_postgres_bin_dir"],
+                "--postgres-stage-root",
+                manifest["cache_test_support_postgres_stage_root"],
+                "--postgres-stage-manifest",
+                manifest["cache_test_support_postgres_stage_manifest"],
                 "--cache-control", manifest["cache_test_control"],
                 "--cache-install-sql", manifest["cache_test_install_sql"],
                 "--cache-dso", manifest["cache_test_dso"],
@@ -788,7 +1178,8 @@ class CacheModeRoutingTest(unittest.TestCase):
             }
             for key, value in manifest.items():
                 path = Path(value)
-                if key.endswith("_postgres_bin_dir"):
+                if key.endswith(
+                        ("_postgres_bin_dir", "_postgres_stage_root")):
                     path.mkdir()
                 else:
                     path.touch()
@@ -821,6 +1212,18 @@ class CacheModeRoutingTest(unittest.TestCase):
                 ),
                 "--postgres-bin-dir",
                 manifest["cache_bioseq_support_postgres_bin_dir"],
+                "--postgres-stage-root",
+                manifest["cache_bioseq_support_postgres_stage_root"],
+                "--postgres-stage-manifest",
+                manifest[
+                    "cache_bioseq_support_postgres_stage_manifest"],
+                "--bioseq-only-postgres-bin-dir",
+                manifest["cache_bioseq_only_postgres_bin_dir"],
+                "--bioseq-only-postgres-stage-root",
+                manifest["cache_bioseq_only_postgres_stage_root"],
+                "--bioseq-only-postgres-stage-manifest",
+                manifest[
+                    "cache_bioseq_only_postgres_stage_manifest"],
                 "--cache-control", manifest["cache_test_control"],
                 "--cache-install-sql", manifest["cache_test_install_sql"],
                 "--cache-dso", manifest["cache_test_dso"],
@@ -844,6 +1247,11 @@ class CacheModeRoutingTest(unittest.TestCase):
                 ),
                 "--postgres-bin-dir",
                 manifest["cache_bioseq_production_postgres_bin_dir"],
+                "--postgres-stage-root",
+                manifest["cache_bioseq_production_postgres_stage_root"],
+                "--postgres-stage-manifest",
+                manifest[
+                    "cache_bioseq_production_postgres_stage_manifest"],
                 "--cache-control", manifest["cache_control"],
                 "--cache-install-sql", manifest["cache_install_sql"],
                 "--cache-dso", manifest["cache_dso"],
@@ -879,7 +1287,8 @@ class CacheModeRoutingTest(unittest.TestCase):
             }
             for key, value in manifest.items():
                 path = Path(value)
-                if key.endswith("_postgres_bin_dir"):
+                if key.endswith(
+                        ("_postgres_bin_dir", "_postgres_stage_root")):
                     path.mkdir()
                 else:
                     path.touch()
@@ -897,6 +1306,20 @@ class CacheModeRoutingTest(unittest.TestCase):
             resolved[0], str(binary_dir / "bioseq_cache_bioseq_bench"))
         self.assertIn(
             str(binary_dir / "cache_bioseq_production_postgres_bin_dir"),
+            resolved,
+        )
+        self.assertIn(
+            str(
+                binary_dir
+                / "cache_bioseq_production_postgres_stage_root"
+            ),
+            resolved,
+        )
+        self.assertIn(
+            str(
+                binary_dir
+                / "cache_bioseq_production_postgres_stage_manifest"
+            ),
             resolved,
         )
         self.assertIn(str(binary_dir / "cache_control"), resolved)
@@ -917,7 +1340,8 @@ class CacheModeRoutingTest(unittest.TestCase):
                 if not value:
                     continue
                 path = Path(value)
-                if key.endswith("_postgres_bin_dir"):
+                if key.endswith(
+                        ("_postgres_bin_dir", "_postgres_stage_root")):
                     path.mkdir()
                 else:
                     path.touch()
@@ -944,6 +1368,330 @@ class CacheModeRoutingTest(unittest.TestCase):
                 server._next_report_path(reporting_dir),
                 reporting_dir / "report_1.json",
             )
+
+    def test_concurrent_worker_state_updates_are_lossless_and_collision_safe(
+            self) -> None:
+        if "fork" not in multiprocessing.get_all_start_methods():
+            self.skipTest("state locking contract requires POSIX fork/flock")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "state.json"
+            lock_path = Path(tmp) / "state.lock"
+            context = multiprocessing.get_context("fork")
+            start_barrier = context.Barrier(3)
+            results = context.Queue()
+            real_named_temporary_file = (
+                server.tempfile.NamedTemporaryFile)
+
+            def update_from_worker(
+                    mode: str, fields: dict[str, object],
+                    nested_lock: bool) -> None:
+                server.STATE_FILE = state_path
+                server.LOCK_FILE = lock_path
+
+                def tracked_temporary_file(*args, **kwargs):
+                    handle = real_named_temporary_file(*args, **kwargs)
+                    results.put(("temporary", handle.name))
+                    return handle
+
+                server.tempfile.NamedTemporaryFile = tracked_temporary_file
+                try:
+                    start_barrier.wait(timeout=5.0)
+                    if nested_lock:
+                        with server._global_lock():
+                            server._update_entry(mode, **fields)
+                    else:
+                        server._update_entry(mode, **fields)
+                    results.put(("completed", mode))
+                except BaseException as exc:
+                    results.put(
+                        ("error", f"{type(exc).__name__}: {exc}"))
+
+            workers = [
+                context.Process(
+                    target=update_from_worker,
+                    args=(
+                        "cache-integration",
+                        {
+                            "step": "support-report-published",
+                            "report_files": ["/reports/report_0.json"],
+                        },
+                        True,
+                    ),
+                ),
+                context.Process(
+                    target=update_from_worker,
+                    args=(
+                        "cache-bioseq-bench",
+                        {
+                            "notes": "production-benchmark-ready",
+                            "report_file": "/reports/report_1.json",
+                        },
+                        False,
+                    ),
+                ),
+            ]
+            for worker in workers:
+                worker.start()
+            try:
+                start_barrier.wait(timeout=5.0)
+                for worker in workers:
+                    worker.join(timeout=10.0)
+            finally:
+                timed_out = [
+                    worker.pid for worker in workers if worker.is_alive()
+                ]
+                for worker in workers:
+                    if worker.is_alive():
+                        worker.terminate()
+                    worker.join(timeout=2.0)
+
+            self.assertEqual(timed_out, [], "state update deadlocked")
+            self.assertEqual(
+                [worker.exitcode for worker in workers], [0, 0])
+
+            messages: list[tuple[str, str]] = []
+            while True:
+                try:
+                    messages.append(results.get(timeout=0.1))
+                except queue.Empty:
+                    break
+            results.close()
+            results.join_thread()
+
+            errors = [
+                detail for kind, detail in messages if kind == "error"
+            ]
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                {
+                    detail
+                    for kind, detail in messages
+                    if kind == "completed"
+                },
+                {"cache-integration", "cache-bioseq-bench"},
+            )
+            temporary_paths = [
+                Path(detail)
+                for kind, detail in messages
+                if kind == "temporary"
+            ]
+            self.assertEqual(len(temporary_paths), 2)
+            self.assertEqual(len(set(temporary_paths)), 2)
+            self.assertTrue(
+                all(path.parent == state_path.parent
+                    for path in temporary_paths))
+            self.assertTrue(
+                all(not path.exists() for path in temporary_paths))
+            self.assertFalse(
+                state_path.with_suffix(".json.tmp").exists())
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                state["cache-integration"]["step"],
+                "support-report-published",
+            )
+            self.assertEqual(
+                state["cache-integration"]["report_files"],
+                ["/reports/report_0.json"],
+            )
+            self.assertEqual(
+                state["cache-bioseq-bench"]["notes"],
+                "production-benchmark-ready",
+            )
+            self.assertEqual(
+                state["cache-bioseq-bench"]["report_file"],
+                "/reports/report_1.json",
+            )
+
+    def test_combined_commands_persist_two_ordered_report_receipts(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            reporting_root = Path(tmp) / "reporting"
+            command_receipts: list[tuple[str, Path]] = []
+            state_updates: list[dict[str, object]] = []
+
+            def resolve_command(
+                    _mode, _active_bin_dir, command, *,
+                    bench_flags=None, test_flags=None,
+                    report_path=None):
+                self.assertIsNone(bench_flags)
+                self.assertIsNone(test_flags)
+                self.assertIsNotNone(report_path)
+                command_receipts.append((command[0], report_path))
+                return [command[0], str(report_path)]
+
+            def publish_report(argv, *_args, **_kwargs):
+                Path(argv[-1]).write_text("{}", encoding="utf-8")
+                return 0
+
+            def record_update(_mode, **fields):
+                state_updates.append(fields)
+
+            with (
+                mock.patch.object(server, "REPORTING_DIR", reporting_root),
+                mock.patch.object(
+                    server,
+                    "_run_command_argv",
+                    side_effect=resolve_command,
+                ),
+                mock.patch.object(
+                    server,
+                    "_stream_subprocess",
+                    side_effect=publish_report,
+                ),
+                mock.patch.object(
+                    server,
+                    "_update_entry",
+                    side_effect=record_update,
+                ),
+            ):
+                report_file, report_files = server._run_mode_commands(
+                    "cache-bioseq-integration",
+                    Path(tmp) / "bin",
+                    Path(tmp) / "build",
+                    {},
+                    io.StringIO(),
+                    float("inf"),
+                    set(),
+                )
+
+            report_dir = (
+                reporting_root / "bioseq_cache_bioseq_integration")
+            expected_reports = [
+                report_dir / "report_0.json",
+                report_dir / "report_1.json",
+            ]
+            self.assertEqual(report_files, expected_reports)
+            self.assertEqual(report_file, expected_reports[-1])
+            self.assertEqual(
+                command_receipts,
+                [
+                    (
+                        "bioseq_cache_bioseq_support_integration_tests",
+                        expected_reports[0],
+                    ),
+                    (
+                        "bioseq_cache_bioseq_production_integration_tests",
+                        expected_reports[1],
+                    ),
+                ],
+            )
+            self.assertEqual(
+                state_updates,
+                [
+                    {
+                        "report_file": str(expected_reports[0]),
+                        "report_files": [str(expected_reports[0])],
+                    },
+                    {
+                        "report_file": str(expected_reports[1]),
+                        "report_files": [
+                            str(expected_reports[0]),
+                            str(expected_reports[1]),
+                        ],
+                    },
+                ],
+            )
+
+    def test_missing_support_report_fails_before_production_command(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            reporting_root = Path(tmp) / "reporting"
+            resolved_commands: list[str] = []
+
+            def resolve_command(
+                    _mode, _active_bin_dir, command, *,
+                    bench_flags=None, test_flags=None,
+                    report_path=None):
+                self.assertIsNone(bench_flags)
+                self.assertIsNone(test_flags)
+                self.assertIsNotNone(report_path)
+                resolved_commands.append(command[0])
+                return [command[0], str(report_path)]
+
+            with (
+                mock.patch.object(server, "REPORTING_DIR", reporting_root),
+                mock.patch.object(
+                    server,
+                    "_run_command_argv",
+                    side_effect=resolve_command,
+                ),
+                mock.patch.object(
+                    server,
+                    "_stream_subprocess",
+                    return_value=0,
+                ) as stream,
+                mock.patch.object(server, "_update_entry") as update,
+            ):
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "support_integration_tests.*allocated regular "
+                        "JSON report"):
+                    server._run_mode_commands(
+                        "cache-bioseq-integration",
+                        Path(tmp) / "bin",
+                        Path(tmp) / "build",
+                        {},
+                        io.StringIO(),
+                        float("inf"),
+                        set(),
+                    )
+
+            self.assertEqual(
+                resolved_commands,
+                ["bioseq_cache_bioseq_support_integration_tests"],
+            )
+            self.assertEqual(stream.call_count, 1)
+            update.assert_not_called()
+            self.assertFalse(
+                (
+                    reporting_root
+                    / "bioseq_cache_bioseq_integration"
+                    / "report_1.json"
+                ).exists()
+            )
+
+    def test_status_exposes_ordered_reports_and_legacy_singular_fallback(
+            self) -> None:
+        now = 1_000_000.0
+        support = "/reports/report_0.json"
+        production = "/reports/report_1.json"
+        base_entry = {
+            "status": "completed",
+            "started_at": now - 60.0,
+            "completed_at": now,
+            "build_only": False,
+            "debug": False,
+            "preset": "cache-bioseq-opt",
+            "uses_private_cluster": True,
+            "focused_test_args": [],
+            "log_file": "/logs/cache.log",
+            "report_file": production,
+        }
+        with mock.patch.object(
+                server,
+                "_load_state",
+                return_value={
+                    "cache-bioseq-integration": {
+                        **base_entry,
+                        "report_files": [support, production],
+                    },
+                }):
+            status = server.tool_status("cache-bioseq-integration")
+        self.assertIn(f"Reports: {support}, {production}", status)
+        self.assertLess(status.index(support), status.index(production))
+
+        with mock.patch.object(
+                server,
+                "_load_state",
+                return_value={
+                    "cache-bioseq-integration": base_entry,
+                }):
+            legacy_status = server.tool_status(
+                "cache-bioseq-integration")
+        self.assertIn(f"Report: {production}", legacy_status)
+        self.assertNotIn("Reports:", legacy_status)
 
     def test_mcp_schemas_expose_cache_modes_and_inspect_targets(self) -> None:
         definitions = {

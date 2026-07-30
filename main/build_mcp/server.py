@@ -1192,6 +1192,10 @@ MODES: Dict[str, ModeDefinition] = {
                 "bioseq_cache_integration_tests",
                 "--postgres-bin-dir",
                 "{cache_test_support_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_test_support_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_test_support_postgres_stage_manifest}",
                 "--cache-control", "{cache_test_control}",
                 "--cache-install-sql", "{cache_test_install_sql}",
                 "--cache-dso", "{cache_test_dso}",
@@ -1219,6 +1223,10 @@ MODES: Dict[str, ModeDefinition] = {
                 "bioseq_cache_bench",
                 "--postgres-bin-dir",
                 "{cache_production_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_production_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_production_postgres_stage_manifest}",
                 "--cache-control", "{cache_control}",
                 "--cache-install-sql", "{cache_install_sql}",
                 "--cache-dso", "{cache_dso}",
@@ -1256,6 +1264,16 @@ MODES: Dict[str, ModeDefinition] = {
                 "bioseq_cache_bioseq_support_integration_tests",
                 "--postgres-bin-dir",
                 "{cache_bioseq_support_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_bioseq_support_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_bioseq_support_postgres_stage_manifest}",
+                "--bioseq-only-postgres-bin-dir",
+                "{cache_bioseq_only_postgres_bin_dir}",
+                "--bioseq-only-postgres-stage-root",
+                "{cache_bioseq_only_postgres_stage_root}",
+                "--bioseq-only-postgres-stage-manifest",
+                "{cache_bioseq_only_postgres_stage_manifest}",
                 "--cache-control", "{cache_test_control}",
                 "--cache-install-sql", "{cache_test_install_sql}",
                 "--cache-dso", "{cache_test_dso}",
@@ -1272,6 +1290,10 @@ MODES: Dict[str, ModeDefinition] = {
                 "bioseq_cache_bioseq_production_integration_tests",
                 "--postgres-bin-dir",
                 "{cache_bioseq_production_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_bioseq_production_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_bioseq_production_postgres_stage_manifest}",
                 "--cache-control", "{cache_control}",
                 "--cache-install-sql", "{cache_install_sql}",
                 "--cache-dso", "{cache_dso}",
@@ -1307,6 +1329,10 @@ MODES: Dict[str, ModeDefinition] = {
                 "bioseq_cache_bioseq_bench",
                 "--postgres-bin-dir",
                 "{cache_bioseq_production_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_bioseq_production_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_bioseq_production_postgres_stage_manifest}",
                 "--cache-control", "{cache_control}",
                 "--cache-install-sql", "{cache_install_sql}",
                 "--cache-dso", "{cache_dso}",
@@ -1416,24 +1442,45 @@ def _log(msg: str) -> None:
 
 # --------------------------- state file I/O --------------------------------
 
+_STATE_THREAD_LOCK = threading.RLock()
+_STATE_LOCK_CONTEXT = threading.local()
+
+
 @contextlib.contextmanager
 def _global_lock():
-    """Cross-process advisory lock around state-file mutations.
+    """Reentrant thread/process lock around state-file mutations.
 
     MCP servers are spawned per Claude Code session, so two sessions can
     race on start_build for the same mode. The lock makes the read-check-
-    spawn-write critical section atomic across processes.
+    spawn-write critical section atomic across processes. A process-local
+    RLock and thread-local depth make nested state helpers safe: opening a
+    second independent fd and calling flock again can otherwise deadlock the
+    calling process against its own first lock.
     """
-    LOCK_FILE.touch()
-    fd = os.open(str(LOCK_FILE), os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
+    with _STATE_THREAD_LOCK:
+        depth = getattr(_STATE_LOCK_CONTEXT, "depth", 0)
+        if depth:
+            _STATE_LOCK_CONTEXT.depth = depth + 1
+            try:
+                yield
+            finally:
+                _STATE_LOCK_CONTEXT.depth = depth
+            return
+
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(str(LOCK_FILE), flags, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            _STATE_LOCK_CONTEXT.depth = 1
+            yield
         finally:
-            os.close(fd)
+            _STATE_LOCK_CONTEXT.depth = 0
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def _load_state() -> dict:
@@ -1449,24 +1496,58 @@ def _load_state() -> dict:
         return {}
 
 
-def _save_state(state: dict) -> None:
+def _save_state_locked(state: dict) -> None:
+    """Durably replace the state file while `_global_lock` is held."""
+    if getattr(_STATE_LOCK_CONTEXT, "depth", 0) <= 0:
+        raise RuntimeError(
+            "_save_state_locked requires the global state lock")
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".json.tmp")
-    with tmp.open("w") as f:
-        json.dump(state, f, indent=2, sort_keys=True)
-    tmp.replace(STATE_FILE)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=f".{STATE_FILE.name}.",
+                suffix=".tmp",
+                dir=STATE_FILE.parent,
+                delete=False) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, STATE_FILE)
+        temporary_path = None
+
+        directory_flags = os.O_RDONLY
+        directory_flags |= getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(str(STATE_FILE.parent), directory_flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _save_state(state: dict) -> None:
+    """Durably replace the complete state under the reentrant global lock."""
+    with _global_lock():
+        _save_state_locked(state)
 
 
 def _update_entry(mode: str, **fields) -> None:
-    """Merge `fields` into the per-mode state entry. Caller is responsible
-    for any locking — workers do their own atomic writes via tmp+rename
-    and only mutate their own mode's slot, which is already reserved by
-    the parent server under the global lock."""
-    state = _load_state()
-    entry = dict(state.get(mode) or {})
-    entry.update(fields)
-    state[mode] = entry
-    _save_state(state)
+    """Atomically merge fields without losing another worker's state."""
+    with _global_lock():
+        state = _load_state()
+        entry = dict(state.get(mode) or {})
+        entry.update(fields)
+        state[mode] = entry
+        _save_state_locked(state)
 
 
 # --------------------------- pid liveness ----------------------------------
@@ -2029,9 +2110,20 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
 
 _CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
     "cache_test_support_postgres_bin_dir",
+    "cache_test_support_postgres_stage_root",
+    "cache_test_support_postgres_stage_manifest",
     "cache_production_postgres_bin_dir",
+    "cache_production_postgres_stage_root",
+    "cache_production_postgres_stage_manifest",
     "cache_bioseq_support_postgres_bin_dir",
+    "cache_bioseq_support_postgres_stage_root",
+    "cache_bioseq_support_postgres_stage_manifest",
+    "cache_bioseq_only_postgres_bin_dir",
+    "cache_bioseq_only_postgres_stage_root",
+    "cache_bioseq_only_postgres_stage_manifest",
     "cache_bioseq_production_postgres_bin_dir",
+    "cache_bioseq_production_postgres_stage_root",
+    "cache_bioseq_production_postgres_stage_manifest",
     "cache_control",
     "cache_install_sql",
     "cache_dso",
@@ -2085,6 +2177,108 @@ def _next_report_path(reporting_dir: Path) -> Path:
     ]
     next_ordinal = max(ordinals, default=-1) + 1
     return reporting_dir / f"report_{next_ordinal}.json"
+
+
+def _require_allocated_command_report(
+        mode: str, command: List[str], report_path: Path) -> None:
+    """Fail closed unless one native command published its exact receipt."""
+    try:
+        metadata = report_path.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            f"{mode} command {command[0]!r} completed without publishing "
+            f"its allocated regular JSON report: {report_path}"
+        ) from exc
+    if report_path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(
+            f"{mode} command {command[0]!r} did not publish its allocated "
+            f"path as a regular non-symlink JSON report: {report_path}")
+
+
+def _run_mode_commands(
+        mode: str,
+        active_bin_dir: Path,
+        active_build_dir: Path,
+        run_env: dict[str, str],
+        log_handle,
+        deadline: float,
+        pre_reports: set[Path],
+        bench_flags=None,
+        test_flags=None,
+) -> tuple[Path | None, list[Path]]:
+    """Run configured commands and persist every ordered report receipt."""
+    mode_details = MODES[mode]
+    expected_report_count = sum(
+        1 for command in mode_details.commands if "{report}" in command)
+    command_report_files: list[Path] = []
+
+    for command in mode_details.commands:
+        # MODES.commands store binary BASENAMES; resolve against the active
+        # build's bin dir (DOC0270). Args after the first slot are passed
+        # through verbatim.
+        command_report_path = (
+            _next_report_path(mode_details.reporting_dir)
+            if "{report}" in command else None
+        )
+        full_command = _run_command_argv(
+            mode,
+            active_bin_dir,
+            command,
+            bench_flags=bench_flags,
+            test_flags=test_flags,
+            report_path=command_report_path,
+        )
+        rc = _stream_subprocess(
+            full_command,
+            log_handle,
+            deadline,
+            cwd=active_build_dir,
+            env=run_env,
+        )
+
+        if command_report_path is not None:
+            _require_allocated_command_report(
+                mode, command, command_report_path)
+            command_report_files.append(command_report_path)
+            ordered_receipts = [
+                str(path) for path in command_report_files
+            ]
+            _update_entry(
+                mode,
+                report_file=ordered_receipts[-1],
+                report_files=ordered_receipts,
+            )
+
+        if rc != 0:
+            # Bench exits non-zero when regression rules are violated
+            # (exit code 2) — the report is still a valid receipt, so this is
+            # a "completed with violations" outcome rather than a worker
+            # failure. The console log already explains the violations.
+            if mode_details.is_bench_mode and rc == 2:
+                _log(
+                    f"bench reported regression violations (exit {rc}); "
+                    "treating as completed-with-violations")
+                break
+            raise RuntimeError(
+                f"run failed with exit code {rc}: {' '.join(command)}")
+
+    if expected_report_count:
+        if len(command_report_files) != expected_report_count:
+            raise RuntimeError(
+                f"{mode} published {len(command_report_files)} ordered "
+                "command reports, but its command contract requires exactly "
+                f"{expected_report_count}")
+        return command_report_files[-1], command_report_files
+
+    report_path = (
+        _newest_report(pre_reports, mode)
+        if mode_details.reporting_subdir_name else None
+    )
+    if mode_details.reporting_subdir_name and report_path is None:
+        raise RuntimeError(
+            f"{mode} completed without publishing its required native "
+            "JSON report")
+    return report_path, ([report_path] if report_path is not None else [])
 
 
 def _sql_guardrail_workflow_manifest(
@@ -4154,14 +4348,16 @@ def _run_command_argv(mode: str, active_bin_dir: Path,
                     f"native cache artifact {key!r} is unavailable in "
                     f"the {mode!r} build tree")
             artifact_path = Path(value)
+            directory_key = key.endswith(
+                ("_postgres_bin_dir", "_postgres_stage_root"))
             usable = (
                 artifact_path.is_dir()
-                if key.endswith("_postgres_bin_dir")
+                if directory_key
                 else artifact_path.is_file()
             )
             if not usable:
                 expected_kind = (
-                    "directory" if key.endswith("_postgres_bin_dir")
+                    "directory" if directory_key
                     else "file"
                 )
                 raise RuntimeError(
@@ -4723,6 +4919,10 @@ def _run_postgres_error_safety_worker(
                 str(qualification_report)
                 if qualification_report is not None else None
             ),
+            report_files=(
+                [str(qualification_report)]
+                if qualification_report is not None else []
+            ),
             build_only=build_only,
             debug=False,
         )
@@ -4904,6 +5104,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 completed_at=completed_at,
                 exit_code=0,
                 report_file=None,
+                report_files=[],
                 sql_guardrail_workflow=workflow_evidence,
                 build_only=False,
                 debug=debug,
@@ -5259,6 +5460,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 completed_at=completed_at,
                 exit_code=0,
                 report_file=None,
+                report_files=[],
                 build_only=True,
                 debug=debug,
             )
@@ -5326,6 +5528,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     exit_code=0,
                     report_file=(
                         str(report_path) if report_path else None),
+                    report_files=(
+                        [str(report_path)] if report_path else []),
                     build_only=False,
                     debug=debug,
                     sql_guardrail_workflow=workflow_evidence,
@@ -5358,46 +5562,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "# BIOSEQ_E2E_CONFIG_OVERRIDE="
                     f"{bench_e2e_config}\n")
                 log_handle.flush()
-            for cmd in mode_details.commands:
-                # MODES.commands store binary BASENAMES; resolve against the
-                # active build's bin dir (DOC0270). Args after the first slot
-                # are passed through verbatim.
-                command_report_path = (
-                    _next_report_path(mode_details.reporting_dir)
-                    if "{report}" in cmd else None
-                )
-                full_cmd = _run_command_argv(
-                    mode, active_bin_dir, cmd,
-                    bench_flags=bench_flags, test_flags=test_flags,
-                    report_path=command_report_path)
-                rc = _stream_subprocess(
-                    full_cmd, log_handle, deadline,
-                    cwd=active_build_dir, env=run_env,
-                )
-                if rc != 0:
-                    if (command_report_path is not None
-                            and command_report_path.is_file()):
-                        _update_entry(
-                            mode, report_file=str(command_report_path))
-                    # Bench exits non-zero when regression rules are violated
-                    # (exit code 2) — we still want to surface the report path,
-                    # so this is a "completed with violations" outcome rather
-                    # than a worker failure. The console log already explains
-                    # the violations.
-                    if mode_details.is_bench_mode and rc == 2:
-                        _log(f"bench reported regression violations (exit {rc}); "
-                            "treating as completed-with-violations")
-                        break
-                    raise RuntimeError(f"run failed with exit code {rc}: {' '.join(cmd)}")
-            report_path = (
-                _newest_report(pre_reports, mode)
-                if mode_details.reporting_subdir_name else None
+            report_path, report_files = _run_mode_commands(
+                mode,
+                active_bin_dir,
+                active_build_dir,
+                run_env,
+                log_handle,
+                deadline,
+                pre_reports,
+                bench_flags=bench_flags,
+                test_flags=test_flags,
             )
-            if (mode_details.reporting_subdir_name
-                    and report_path is None):
-                raise RuntimeError(
-                    f"{mode} completed without publishing its required "
-                    "native JSON report")
             completed_at = time.time()
             _update_entry(
                 mode,
@@ -5406,6 +5581,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 completed_at=completed_at,
                 exit_code=0,
                 report_file=str(report_path) if report_path else None,
+                report_files=[str(path) for path in report_files],
                 build_only=False,
                 debug=debug,
             )
@@ -6583,6 +6759,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             "log_file": str(log_path),
             "exit_code": None,
             "report_file": None,
+            "report_files": [],
             "notes": None,
             "debug": debug,
             "build_only": build_only,
@@ -6832,6 +7009,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "log_file": str(log_path),
             "exit_code": None,
             "report_file": None,
+            "report_files": [],
             "notes": None,
             "debug": debug,
             "build_only": build_only,
@@ -6981,8 +7159,13 @@ def tool_status(mode: str) -> str:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
-    state = _load_state()
-    entry = _refresh(state, mode)
+    with _global_lock():
+        state = _load_state()
+        refreshed_entry = _refresh(state, mode)
+        entry = (
+            dict(refreshed_entry)
+            if refreshed_entry is not None else None
+        )
     mode_details = MODES[mode]
 
     if not entry:
@@ -7006,6 +7189,15 @@ def tool_status(mode: str) -> str:
         f" Focused Catch2 args: {shlex.join(focused_test_args)}."
         if focused_test_args else ""
     )
+    report_files = entry.get("report_files")
+    if isinstance(report_files, list) and report_files:
+        report_suffix = ". Reports: " + ", ".join(
+            str(path) for path in report_files)
+    elif entry.get("report_file"):
+        # Compatibility with state entries created before ordered receipts.
+        report_suffix = f". Report: {entry['report_file']}"
+    else:
+        report_suffix = ""
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
@@ -7016,7 +7208,7 @@ def tool_status(mode: str) -> str:
                 f"Current step: {step}. "
                 f"Predicted finish in {_format_minutes(eta_min)}. "
                 f"{focus_suffix} "
-                f"Log: {log_path}")
+                f"Log: {log_path}{report_suffix}")
 
     completed_at = entry.get("completed_at") or time.time()
     duration_min = (completed_at - entry["started_at"]) / 60.0
@@ -7026,9 +7218,7 @@ def tool_status(mode: str) -> str:
                f"{preset_suffix} "
                f"(total time: {_format_minutes(duration_min, plural_int=True)}). "
                f"{focus_suffix} "
-               f"Log: {log_path}")
-        if entry.get("report_file"):
-            msg += f". Report: {entry['report_file']}"
+               f"Log: {log_path}{report_suffix}")
         workflow_evidence = entry.get("sql_guardrail_workflow")
         if isinstance(workflow_evidence, dict):
             surfaced = {
@@ -7061,28 +7251,29 @@ def tool_status(mode: str) -> str:
     if status == "killed_timeout":
         return ("Last run was forcefully killed due to timeout. "
                 f"{focus_suffix} "
-                f"Logs for inspection are available here: {log_path}")
+                f"Logs for inspection are available here: "
+                f"{log_path}{report_suffix}")
 
     if status == "failed":
         notes = entry.get("notes") or "(no notes)"
         private_note = (
-            " The CMake-owned private-cluster runner is responsible for "
+            " The native private-cluster executable is responsible for "
             "capturing logs and cleanup."
             if private_cluster else ""
         )
         return (f"{mode_details.label} run failed after "
                 f"{_format_minutes(duration_min)}: {notes}. "
                 f"{focus_suffix} "
-                f"Log: {log_path}.{private_note}")
+                f"Log: {log_path}{report_suffix}.{private_note}")
 
     if status == "aborted":
         return (f"{mode_details.label} run was aborted (worker process died "
                 f"unexpectedly after {_format_minutes(duration_min)}). "
                 f"{focus_suffix} "
-                f"Log: {log_path}")
+                f"Log: {log_path}{report_suffix}")
 
     return (f"{mode_details.label} status: {status}."
-            f"{focus_suffix} Log: {log_path}")
+            f"{focus_suffix} Log: {log_path}{report_suffix}")
 
 
 def _sha256_file(path: Path) -> str:
