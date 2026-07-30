@@ -43,7 +43,7 @@ struct staged_extension_artifact {
     sha256_digest staged_control_digest;
 };
 
-/// @brief Exact private directories searched by PostgreSQL 18 for staged files.
+/// @brief Exact private directories holding staged extension artifacts.
 struct extension_stage {
     std::filesystem::path root;
     std::filesystem::path control_directory;
@@ -144,10 +144,10 @@ inline void copy_exact(const std::filesystem::path& source,
 
 /// @brief Copies a control file and pins MODULE_PATHNAME to the staged DSO stem.
 ///
-/// PostgreSQL 18's `extension_control_path` locates the control/install files,
-/// while `$libdir` remains the compiled-in library directory. Rewriting only
-/// this staged copy lets ordinary CREATE EXTENSION use the selected build DSO
-/// without mutating the source artifact or installing into the host prefix.
+/// The staged control/install files form the fixture's immutable artifact
+/// bundle. Rewriting only the staged control copy directs MODULE_PATHNAME to
+/// the per-case DSO without mutating the source artifact or relying on a
+/// server-version-specific control-file search setting.
 inline void stage_control_file(
     const std::filesystem::path& source,
     const std::filesystem::path& destination,

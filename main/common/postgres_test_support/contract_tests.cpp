@@ -139,6 +139,35 @@ TEST_CASE("libpq first-row observation has explicit empty-result semantics",
     CHECK(observation.rows.rows() == 0);
 }
 
+TEST_CASE("private cluster configuration is portable and stage-first",
+          "[postgres-test-support][unit][cluster][configuration]") {
+    const std::filesystem::path socket_directory{"/private/socket"};
+    const std::filesystem::path staged_library_directory{
+        "/private/stage/lib/postgresql"};
+    const std::array<std::string, 1> preload_libraries{"bioseq_cache"};
+    const std::array<std::pair<std::string, std::string>, 1> startup_gucs{{
+        {"bioseq.query_cache_optimisation_mode", "on"},
+    }};
+
+    const std::string configuration = render_private_cluster_configuration(
+        54321, socket_directory, staged_library_directory,
+        preload_libraries, startup_gucs);
+
+    CHECK(configuration.find("extension_control_path")
+          == std::string::npos);
+    CHECK(configuration.find(
+              "dynamic_library_path = "
+              "'/private/stage/lib/postgresql:$libdir'\n")
+          != std::string::npos);
+    const std::size_t staged_directory_position =
+        configuration.find(staged_library_directory.string());
+    REQUIRE(staged_directory_position != std::string::npos);
+    const std::size_t system_library_position =
+        configuration.find("$libdir", staged_directory_position);
+    REQUIRE(system_library_position != std::string::npos);
+    CHECK(staged_directory_position < system_library_position);
+}
+
 TEST_CASE("process report collectors preserve case SQL and cleanup evidence",
           "[postgres-test-support][unit][report]") {
     const report_state_reset reset;

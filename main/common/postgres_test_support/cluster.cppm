@@ -574,7 +574,52 @@ freeze_process_tree(
 
 export namespace bioseq::postgres_test {
 
-/// @brief RAII owner of a staged, private PostgreSQL 18 cluster.
+/// @brief Renders version-portable settings for one staged private cluster.
+/// @param port Private postmaster port paired with its Unix socket directory.
+/// @param socket_directory Private Unix-domain socket directory.
+/// @param staged_library_directory Per-case DSO directory searched first.
+/// @param preload_libraries Validated shared-preload library names.
+/// @param startup_gucs Additional validated startup settings.
+/// @return Complete configuration text appended after initdb.
+[[nodiscard]] inline std::string render_private_cluster_configuration(
+    int port,
+    const std::filesystem::path& socket_directory,
+    const std::filesystem::path& staged_library_directory,
+    std::span<const std::string> preload_libraries,
+    std::span<const std::pair<std::string, std::string>> startup_gucs) {
+    std::string configuration =
+        "\n# Appended by bioseq.test.postgres\n"
+        "listen_addresses = ''\n"
+        "port = "
+        + std::to_string(port)
+        + "\nunix_socket_directories = "
+        + cluster_detail::configuration_literal(socket_directory.string())
+        + "\ndynamic_library_path = "
+        + cluster_detail::configuration_literal(
+            staged_library_directory.string() + ":$libdir")
+        + '\n';
+    if (!preload_libraries.empty()) {
+        std::string preloads;
+        for (std::size_t index = 0;
+             index < preload_libraries.size(); ++index) {
+            cluster_detail::validate_library_name(preload_libraries[index]);
+            if (index != 0) {
+                preloads.push_back(',');
+            }
+            preloads += preload_libraries[index];
+        }
+        configuration += "shared_preload_libraries = "
+            + cluster_detail::configuration_literal(preloads) + '\n';
+    }
+    for (const auto& [name, value] : startup_gucs) {
+        cluster_detail::validate_guc_name(name);
+        configuration += name + " = "
+            + cluster_detail::configuration_literal(value) + '\n';
+    }
+    return configuration;
+}
+
+/// @brief RAII owner of a staged, private PostgreSQL cluster.
 class private_cluster {
 public:
     explicit private_cluster(cluster_options options)
@@ -1072,40 +1117,9 @@ private:
         if (!configuration) {
             throw std::runtime_error("cannot open private postgresql.conf");
         }
-        configuration
-            << "\n# Appended by bioseq.test.postgres\n"
-            << "listen_addresses = ''\n"
-            << "port = " << port_ << '\n'
-            << "unix_socket_directories = "
-            << cluster_detail::configuration_literal(
-                   socket_directory_.string()) << '\n'
-            << "extension_control_path = "
-            << cluster_detail::configuration_literal(
-                   stage_->control_directory.string() + ":$system") << '\n'
-            << "dynamic_library_path = "
-            << cluster_detail::configuration_literal(
-                   stage_->library_directory.string() + ":$libdir") << '\n';
-        if (!options_.preload_libraries.empty()) {
-            std::string preloads;
-            for (std::size_t index = 0;
-                 index < options_.preload_libraries.size(); ++index) {
-                cluster_detail::validate_library_name(
-                    options_.preload_libraries[index]);
-                if (index != 0) {
-                    preloads.push_back(',');
-                }
-                preloads += options_.preload_libraries[index];
-            }
-            configuration << "shared_preload_libraries = "
-                          << cluster_detail::configuration_literal(preloads)
-                          << '\n';
-        }
-        for (const auto& [name, value] : options_.startup_gucs) {
-            cluster_detail::validate_guc_name(name);
-            configuration << name << " = "
-                          << cluster_detail::configuration_literal(value)
-                          << '\n';
-        }
+        configuration << render_private_cluster_configuration(
+            port_, socket_directory_, stage_->library_directory,
+            options_.preload_libraries, options_.startup_gucs);
         configuration.close();
         if (!configuration) {
             throw std::runtime_error("failed writing private postgresql.conf");
