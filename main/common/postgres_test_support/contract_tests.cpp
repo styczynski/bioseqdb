@@ -1,10 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -19,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -174,6 +178,31 @@ public:
               "createdb", "dropdb", "psql"}) {
             write(bin_directory_ / tool, std::string(tool) + "\n");
         }
+        for (const std::string_view sentinel :
+             {"postgres.bki",
+              "postgresql.conf.sample",
+              "pg_hba.conf.sample",
+              "pg_ident.conf.sample",
+              "information_schema.sql",
+              "system_functions.sql",
+              "system_views.sql",
+              "system_constraints.sql",
+              "snowball_create.sql"}) {
+            write(
+                shared_directory_ / sentinel,
+                std::string(sentinel) + " contract\n");
+        }
+        for (const std::string_view directory :
+             {"timezone", "timezonesets", "tsearch_data"}) {
+            std::filesystem::create_directories(
+                shared_directory_ / directory);
+        }
+        write(
+            library_directory_ / plpgsql_filename(),
+            "plpgsql contract module\n");
+        write(
+            shared_directory_ / "contract-runtime.dat",
+            "runtime contract payload\n");
         write(
             control_file_,
             "comment = 'stage contract'\n"
@@ -258,6 +287,11 @@ public:
 
     [[nodiscard]] std::filesystem::path control_directory() const {
         return shared_directory_ / "extension";
+    }
+
+    [[nodiscard]] const std::filesystem::path& shared_directory()
+        const noexcept {
+        return shared_directory_;
     }
 
     [[nodiscard]] const std::filesystem::path& library_directory()
@@ -351,14 +385,124 @@ public:
             true);
     }
 
-    void corrupt_aggregate_hash() {
-        corrupt_hash_after("\"aggregate_sha256\": \"");
+    void write_manifest_with_reordered_runtime_entries() {
+        write_manifest(
+            {"postgres", "initdb", "pg_ctl",
+             "createdb", "dropdb", "psql"},
+            false,
+            true);
+    }
+
+    void corrupt_extension_aggregate_hash() {
+        corrupt_hash_after(
+            "\"extension_artifacts\": {",
+            "\"aggregate_sha256\": \"");
+    }
+
+    void corrupt_runtime_aggregate_hash() {
+        corrupt_hash_after(
+            "\"runtime_closure\": {",
+            "\"aggregate_sha256\": \"");
+    }
+
+    void corrupt_loader_aggregate_hash() {
+        corrupt_hash_after(
+            "\"loader_dependencies\": {",
+            "\"aggregate_sha256\": \"");
+    }
+
+    void add_overlay_loader_dependency() {
+        const std::filesystem::path staged_file =
+            library_directory_ / normal_dso_.filename();
+        const std::string source =
+            "/pg/lib/" + normal_dso_.filename().string();
+        const std::string staged =
+            "pg/lib/" + normal_dso_.filename().string();
+        const std::uintmax_t size =
+            std::filesystem::file_size(staged_file);
+        const std::string digest = sha256_file(staged_file).hex();
+        const std::string record =
+            "source:" + source + '\n'
+            + "staged:" + staged + '\n'
+            + "size:" + std::to_string(size) + '\n'
+            + "sha256:" + digest + '\n';
+        const std::string empty_block =
+            "    \"loader_dependencies\": {\n"
+            "      \"entry_count\": 0,\n"
+            "      \"aggregate_sha256\": \""
+            + sha256("").hex() + "\",\n"
+            "      \"entries\": []\n"
+            "    },\n";
+        const std::string overlapping_block =
+            "    \"loader_dependencies\": {\n"
+            "      \"entry_count\": 1,\n"
+            "      \"aggregate_sha256\": \""
+            + sha256(record).hex() + "\",\n"
+            "      \"entries\": [\n"
+            "        {\"source\": \"" + source
+            + "\", \"staged\": \"" + staged
+            + "\", \"size\": " + std::to_string(size)
+            + ", \"sha256\": \"" + digest + "\"}\n"
+            "      ]\n"
+            "    },\n";
+        replace_manifest_once(empty_block, overlapping_block);
     }
 
     void corrupt_tool_hash(std::string_view tool) {
         corrupt_hash_after(
             "\"tool\": \"" + std::string(tool) + "\"",
             "\"sha256\": \"");
+    }
+
+    void add_runtime_file() {
+        write(
+            shared_directory_ / "unexpected-runtime.dat",
+            "unexpected runtime file\n");
+    }
+
+    void delete_runtime_file() {
+        if (!std::filesystem::remove(
+                shared_directory_ / "contract-runtime.dat")) {
+            throw std::runtime_error(
+                "cannot delete runtime-closure contract file");
+        }
+    }
+
+    void tamper_runtime_file() {
+        write(
+            shared_directory_ / "contract-runtime.dat",
+            "tampered runtime payload\n");
+    }
+
+    void add_runtime_symlink() {
+        const std::filesystem::path target =
+            source_root_ / "runtime-symlink-target";
+        write(target, "runtime symlink target\n");
+        std::filesystem::create_symlink(
+            target, shared_directory_ / "runtime-symlink");
+    }
+
+    void add_runtime_special_file() {
+        const std::filesystem::path fifo =
+            shared_directory_ / "runtime-fifo";
+        if (::mkfifo(fifo.c_str(), 0600) != 0) {
+            throw std::runtime_error(
+                "cannot create runtime-closure FIFO contract: "
+                + std::string(std::strerror(errno)));
+        }
+    }
+
+    void add_unknown_runtime_closure_member() {
+        replace_manifest_once(
+            "  \"runtime_closure\": {\n",
+            "  \"runtime_closure\": {\n"
+            "    \"unknown\": null,\n");
+    }
+
+    void downgrade_manifest_to_v2() {
+        replace_manifest_once(
+            "\"schema\": \"stage_manifest/v3\"",
+            "\"schema\": \"stage_manifest/v2\"");
     }
 
 private:
@@ -392,14 +536,248 @@ private:
         return result;
     }
 
-    [[nodiscard]] static std::string json_string(
-        const std::filesystem::path& path) {
+    [[nodiscard]] static std::string json_text(std::string_view text) {
         std::string result;
-        for (const char character : path.string()) {
+        for (const char character : text) {
             if (character == '\\' || character == '"') {
                 result.push_back('\\');
             }
             result.push_back(character);
+        }
+        return result;
+    }
+
+    [[nodiscard]] static std::string json_string(
+        const std::filesystem::path& path) {
+        return json_text(path.string());
+    }
+
+    [[nodiscard]] static constexpr std::string_view plpgsql_filename() {
+#if defined(__APPLE__)
+        return "plpgsql.dylib";
+#else
+        return "plpgsql.so";
+#endif
+    }
+
+    struct runtime_fixture_entry {
+        std::string root;
+        std::string path;
+        std::string kind;
+        std::string source_kind;
+        std::string source_path;
+        std::optional<std::string> source_link_target;
+        std::string resolved_source_path;
+        std::optional<std::uintmax_t> size;
+        std::optional<std::string> digest;
+    };
+
+    [[nodiscard]] std::set<std::pair<std::string, std::string>>
+    runtime_overlay_coordinates() const {
+        return {
+            {"sharedir",
+             "extension/" + control_file_.filename().string()},
+            {"sharedir",
+             "extension/" + install_sql_.filename().string()},
+            {"sharedir",
+             "extension/" + bioseq_control_.filename().string()},
+            {"sharedir",
+             "extension/" + bioseq_install_sql_.filename().string()},
+            {"pkglibdir", normal_dso_.filename().string()},
+            {"pkglibdir", bioseq_dso_.filename().string()}};
+    }
+
+    [[nodiscard]] std::vector<runtime_fixture_entry> runtime_entries(
+        bool reorder) const {
+        const std::array roots{
+            std::pair{
+                std::string_view{"bindir"},
+                std::pair{
+                    std::filesystem::path{"/pg/bin"},
+                    bin_directory_}},
+            std::pair{
+                std::string_view{"sharedir"},
+                std::pair{
+                    std::filesystem::path{"/pg/share"},
+                    shared_directory_}},
+            std::pair{
+                std::string_view{"pkglibdir"},
+                std::pair{
+                    std::filesystem::path{"/pg/lib"},
+                    library_directory_}}};
+        const auto excluded = runtime_overlay_coordinates();
+        std::vector<runtime_fixture_entry> result;
+        for (const auto& [root_name, paths] : roots) {
+            const auto& [source_root, staged_root] = paths;
+            std::vector<std::filesystem::path> descendants;
+            for (const auto& entry :
+                 std::filesystem::recursive_directory_iterator(
+                     staged_root)) {
+                descendants.push_back(entry.path());
+            }
+            std::ranges::sort(
+                descendants,
+                [&](const std::filesystem::path& lhs,
+                    const std::filesystem::path& rhs) {
+                    return lhs.lexically_relative(staged_root)
+                               .generic_string()
+                        < rhs.lexically_relative(staged_root)
+                              .generic_string();
+                });
+            for (const std::filesystem::path& descendant : descendants) {
+                const std::string relative =
+                    descendant.lexically_relative(staged_root)
+                        .generic_string();
+                if (excluded.contains({
+                        std::string(root_name), relative})) {
+                    continue;
+                }
+                const bool directory =
+                    std::filesystem::is_directory(descendant);
+                const std::string source =
+                    (source_root / relative).generic_string();
+                runtime_fixture_entry entry{
+                    .root = std::string(root_name),
+                    .path = relative,
+                    .kind = directory ? "dir" : "file",
+                    .source_kind = directory ? "dir" : "file",
+                    .source_path = source,
+                    .source_link_target = std::nullopt,
+                    .resolved_source_path = source,
+                    .size = std::nullopt,
+                    .digest = std::nullopt};
+                if (!directory) {
+                    entry.size =
+                        std::filesystem::file_size(descendant);
+                    entry.digest = sha256_file(descendant).hex();
+                }
+                result.push_back(std::move(entry));
+            }
+        }
+        if (reorder) {
+            if (result.size() < 2U) {
+                throw std::runtime_error(
+                    "runtime-closure contract requires two entries");
+            }
+            std::swap(result[0], result[1]);
+        }
+        return result;
+    }
+
+    [[nodiscard]] static std::string runtime_entry_record(
+        const runtime_fixture_entry& entry) {
+        return "root:" + entry.root + '\n'
+            + "path:" + entry.path + '\n'
+            + "kind:" + entry.kind + '\n'
+            + "source_kind:" + entry.source_kind + '\n'
+            + "source_path:" + entry.source_path + '\n'
+            + "source_link_target:"
+            + entry.source_link_target.value_or("-") + '\n'
+            + "resolved_source_path:" + entry.resolved_source_path + '\n'
+            + "size:"
+            + (entry.size ? std::to_string(*entry.size) : "-") + '\n'
+            + "sha256:" + entry.digest.value_or("-") + '\n';
+    }
+
+    [[nodiscard]] static std::string runtime_entry_json(
+        const runtime_fixture_entry& entry) {
+        std::string result;
+        result += "      {\"root\": \"" + json_text(entry.root);
+        result += "\", \"path\": \"" + json_text(entry.path);
+        result += "\", \"kind\": \"" + json_text(entry.kind);
+        result += "\", \"source_kind\": \""
+            + json_text(entry.source_kind);
+        result += "\", \"source_path\": \""
+            + json_text(entry.source_path);
+        result += "\", \"source_link_target\": ";
+        if (entry.source_link_target) {
+            result += "\"" + json_text(*entry.source_link_target) + "\"";
+        } else {
+            result += "null";
+        }
+        result += ", \"resolved_source_path\": \""
+            + json_text(entry.resolved_source_path) + "\", \"size\": ";
+        if (entry.size) {
+            result += std::to_string(*entry.size);
+        } else {
+            result += "null";
+        }
+        result += ", \"sha256\": ";
+        if (entry.digest) {
+            result += "\"" + *entry.digest + "\"";
+        } else {
+            result += "null";
+        }
+        result += "}";
+        return result;
+    }
+
+    [[nodiscard]] std::string required_sentinels_json() const {
+        struct sentinel_fixture {
+            std::string_view name;
+            std::string_view root;
+            std::string_view path;
+            std::string_view kind;
+        };
+        const std::array sentinels{
+            sentinel_fixture{
+                "postgres_bki", "sharedir", "postgres.bki", "file"},
+            sentinel_fixture{
+                "postgresql_conf_sample", "sharedir",
+                "postgresql.conf.sample", "file"},
+            sentinel_fixture{
+                "pg_hba_conf_sample", "sharedir",
+                "pg_hba.conf.sample", "file"},
+            sentinel_fixture{
+                "pg_ident_conf_sample", "sharedir",
+                "pg_ident.conf.sample", "file"},
+            sentinel_fixture{
+                "information_schema_sql", "sharedir",
+                "information_schema.sql", "file"},
+            sentinel_fixture{
+                "system_functions_sql", "sharedir",
+                "system_functions.sql", "file"},
+            sentinel_fixture{
+                "system_views_sql", "sharedir",
+                "system_views.sql", "file"},
+            sentinel_fixture{
+                "system_constraints_sql", "sharedir",
+                "system_constraints.sql", "file"},
+            sentinel_fixture{
+                "snowball_create_sql", "sharedir",
+                "snowball_create.sql", "file"},
+            sentinel_fixture{
+                "timezone", "sharedir", "timezone", "dir"},
+            sentinel_fixture{
+                "timezonesets", "sharedir", "timezonesets", "dir"},
+            sentinel_fixture{
+                "tsearch_data", "sharedir", "tsearch_data", "dir"},
+            sentinel_fixture{
+                "extension", "sharedir", "extension", "dir"},
+            sentinel_fixture{
+                "plpgsql", "pkglibdir", plpgsql_filename(), "file"}};
+        std::string result;
+        for (std::size_t index = 0; index != sentinels.size(); ++index) {
+            const sentinel_fixture& sentinel = sentinels[index];
+            if (index != 0U) {
+                result += ",\n";
+            }
+            result += "      \"" + std::string(sentinel.name)
+                + "\": {\"root\": \"" + std::string(sentinel.root)
+                + "\", \"path\": \"" + std::string(sentinel.path)
+                + "\", \"kind\": \"" + std::string(sentinel.kind)
+                + "\", \"sha256\": ";
+            if (sentinel.kind == "dir") {
+                result += "null}";
+                continue;
+            }
+            const std::filesystem::path root =
+                sentinel.root == "sharedir"
+                ? shared_directory_
+                : library_directory_;
+            result += "\""
+                + sha256_file(root / sentinel.path).hex()
+                + "\"}";
         }
         return result;
     }
@@ -508,11 +886,27 @@ private:
         std::array<std::string_view, 6> tool_order = {
             "postgres", "initdb", "pg_ctl",
             "createdb", "dropdb", "psql"},
-        bool duplicate_cache_artifact = false) {
+        bool duplicate_cache_artifact = false,
+        bool reorder_runtime_entries = false) {
         const std::string cache_json = artifact_json(
             "bioseq_cache", control_file_, install_sql_, normal_dso_);
         const std::string bioseq_json = artifact_json(
             "bioseq", bioseq_control_, bioseq_install_sql_, bioseq_dso_);
+        const std::vector<runtime_fixture_entry> closure_entries =
+            runtime_entries(reorder_runtime_entries);
+        std::string closure_entry_json;
+        std::string closure_aggregate_record;
+        for (std::size_t index = 0;
+             index != closure_entries.size();
+             ++index) {
+            if (index != 0U) {
+                closure_entry_json += ",\n";
+            }
+            closure_entry_json +=
+                runtime_entry_json(closure_entries[index]);
+            closure_aggregate_record +=
+                runtime_entry_record(closure_entries[index]);
+        }
         std::string signatures;
         for (std::size_t index = 0; index != tool_order.size(); ++index) {
             const std::string tool{tool_order[index]};
@@ -529,7 +923,7 @@ private:
 
         std::string contents;
         contents += "{\n";
-        contents += "  \"schema\": \"stage_manifest/v2\",\n";
+        contents += "  \"schema\": \"stage_manifest/v3\",\n";
         contents +=
             "  \"postgresql_version\": "
             "\"PostgreSQL 17.0-contract\",\n";
@@ -543,6 +937,41 @@ private:
             "  \"staged\": {\"bindir\": \"pg/bin\", "
             "\"sharedir\": \"pg/share\", "
             "\"pkglibdir\": \"pg/lib\"},\n";
+        contents += "  \"runtime_closure\": {\n";
+        contents +=
+            "    \"algorithm\": "
+            "\"postgresql-materialized-package/v1\",\n";
+        contents += "    \"entry_count\": "
+            + std::to_string(closure_entries.size()) + ",\n";
+        contents += "    \"aggregate_sha256\": \""
+            + sha256(closure_aggregate_record).hex() + "\",\n";
+        contents += "    \"roots\": {\n";
+        contents +=
+            "      \"bindir\": {\"reported_source\": \"/pg/bin\", "
+            "\"canonical_source\": \"/pg/bin\", "
+            "\"staged\": \"pg/bin\"},\n";
+        contents +=
+            "      \"sharedir\": {\"reported_source\": \"/pg/share\", "
+            "\"canonical_source\": \"/pg/share\", "
+            "\"staged\": \"pg/share\"},\n";
+        contents +=
+            "      \"pkglibdir\": {\"reported_source\": \"/pg/lib\", "
+            "\"canonical_source\": \"/pg/lib\", "
+            "\"staged\": \"pg/lib\"}\n";
+        contents += "    },\n";
+        contents += "    \"required_sentinels\": {\n";
+        contents += required_sentinels_json() + "\n";
+        contents += "    },\n";
+        contents += "    \"loader_dependencies\": {\n";
+        contents += "      \"entry_count\": 0,\n";
+        contents += "      \"aggregate_sha256\": \""
+            + sha256("").hex() + "\",\n";
+        contents += "      \"entries\": []\n";
+        contents += "    },\n";
+        contents += "    \"entries\": [\n";
+        contents += closure_entry_json + "\n";
+        contents += "    ]\n";
+        contents += "  },\n";
         contents += "  \"extension_artifacts\": {\n";
         contents += "    \"aggregate_sha256\": \""
             + sha256(aggregate_record()).hex() + "\",\n";
@@ -646,6 +1075,8 @@ TEST_CASE("preinstalled stage attestation consumes suite artifacts in place",
           == std::filesystem::canonical(tree.manifest()));
     REQUIRE(stage.manifest_digest.has_value());
     CHECK(*stage.manifest_digest == sha256_file(tree.manifest()));
+    CHECK(stage.shared_directory
+          == std::filesystem::canonical(tree.shared_directory()));
     CHECK(stage.control_directory
           == std::filesystem::canonical(tree.control_directory()));
     CHECK(stage.library_directory
@@ -834,8 +1265,8 @@ TEST_CASE("preinstalled stage rejects missing unknown and duplicate members",
 
     SECTION("unknown member") {
         tree.replace_manifest_once(
-            "  \"schema\": \"stage_manifest/v2\",\n",
-            "  \"schema\": \"stage_manifest/v2\",\n"
+            "  \"schema\": \"stage_manifest/v3\",\n",
+            "  \"schema\": \"stage_manifest/v3\",\n"
             "  \"unknown\": \"forbidden\",\n");
         CHECK_THROWS_WITH(
             attest_preinstalled_extension_stage(
@@ -848,9 +1279,9 @@ TEST_CASE("preinstalled stage rejects missing unknown and duplicate members",
 
     SECTION("duplicate JSON member") {
         tree.replace_manifest_once(
-            "  \"schema\": \"stage_manifest/v2\",\n",
-            "  \"schema\": \"stage_manifest/v2\",\n"
-            "  \"schema\": \"stage_manifest/v2\",\n");
+            "  \"schema\": \"stage_manifest/v3\",\n",
+            "  \"schema\": \"stage_manifest/v3\",\n"
+            "  \"schema\": \"stage_manifest/v3\",\n");
         CHECK_THROWS_WITH(
             attest_preinstalled_extension_stage(
                 tree.stage_root(), tree.manifest(),
@@ -946,13 +1377,118 @@ TEST_CASE("preinstalled stage rejects an extension aggregate mismatch",
           "[aggregate]") {
     temporary_preinstalled_stage_tree tree;
     const std::array artifacts{tree.normal_artifact()};
-    tree.corrupt_aggregate_hash();
+    tree.corrupt_extension_aggregate_hash();
     CHECK_THROWS_WITH(
         attest_preinstalled_extension_stage(
             tree.stage_root(), tree.manifest(), tree.bin_directory(),
             tree.runtime_library_directory(), artifacts, {}),
         Catch::Matchers::ContainsSubstring(
             "extension aggregate SHA-256 mismatch"));
+}
+
+TEST_CASE("preinstalled stage requires the closed v3 runtime manifest",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[runtime-closure][schema]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+    tree.downgrade_manifest_to_v2();
+    CHECK_THROWS_WITH(
+        attest_preinstalled_extension_stage(
+            tree.stage_root(), tree.manifest(), tree.bin_directory(),
+            tree.runtime_library_directory(), artifacts, {}),
+        Catch::Matchers::ContainsSubstring("stage_manifest/v3"));
+}
+
+TEST_CASE("preinstalled stage rejects runtime closure divergence",
+          "[postgres-test-support][unit][artifact][preinstalled-stage]"
+          "[runtime-closure]") {
+    temporary_preinstalled_stage_tree tree;
+    const std::array artifacts{tree.normal_artifact()};
+    const auto attest = [&]() {
+        return attest_preinstalled_extension_stage(
+            tree.stage_root(), tree.manifest(), tree.bin_directory(),
+            tree.runtime_library_directory(), artifacts, {});
+    };
+
+    SECTION("addition") {
+        tree.add_runtime_file();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "additions or deletions"));
+    }
+
+    SECTION("deletion") {
+        tree.delete_runtime_file();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "additions or deletions"));
+    }
+
+    SECTION("symlink") {
+        tree.add_runtime_symlink();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "contains a symlink"));
+    }
+
+    SECTION("special file") {
+        tree.add_runtime_special_file();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "contains a special file"));
+    }
+
+    SECTION("file tamper") {
+        tree.tamper_runtime_file();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "type, size, or SHA-256 mismatch"));
+    }
+
+    SECTION("aggregate mismatch") {
+        tree.corrupt_runtime_aggregate_hash();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "runtime closure aggregate SHA-256 mismatch"));
+    }
+
+    SECTION("empty loader aggregate mismatch") {
+        tree.corrupt_loader_aggregate_hash();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "loader dependency aggregate SHA-256 mismatch"));
+    }
+
+    SECTION("loader and explicit overlay collision") {
+        tree.add_overlay_loader_dependency();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "overlaps an explicit extension overlay coordinate"));
+    }
+
+    SECTION("entry order") {
+        tree.write_manifest_with_reordered_runtime_entries();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "not sorted unique"));
+    }
+
+    SECTION("unknown closure member") {
+        tree.add_unknown_runtime_closure_member();
+        CHECK_THROWS_WITH(
+            attest(),
+            Catch::Matchers::ContainsSubstring(
+                "runtime_closure"));
+    }
 }
 
 TEST_CASE("process report collectors preserve case SQL and cleanup evidence",

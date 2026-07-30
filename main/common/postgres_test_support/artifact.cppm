@@ -2,6 +2,8 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <charconv>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -12,13 +14,19 @@ module;
 #include <iterator>
 #include <map>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 export module bioseq.test.postgres:artifact;
 
@@ -54,6 +62,7 @@ struct extension_stage {
     std::filesystem::path stage_root;
     std::optional<std::filesystem::path> manifest_file;
     std::optional<sha256_digest> manifest_digest;
+    std::filesystem::path shared_directory;
     std::filesystem::path control_directory;
     std::filesystem::path library_directory;
     std::optional<std::filesystem::path> runtime_library_directory;
@@ -483,6 +492,73 @@ inline void require_exact_object_members(
     return member.scalar;
 }
 
+[[nodiscard]] inline std::uintmax_t unsigned_integer_member(
+    const manifest_json_value& object,
+    std::string_view name) {
+    const manifest_json_value& member = object_member(object, name);
+    if (member.kind != manifest_json_kind::number
+        || member.scalar.empty()
+        || (member.scalar.size() > 1U && member.scalar.front() == '0')
+        || !std::ranges::all_of(
+            member.scalar,
+            [](const char character) {
+                return character >= '0' && character <= '9';
+            })) {
+        throw std::invalid_argument(
+            "preinstalled PostgreSQL stage manifest member must be a "
+            "canonical unsigned integer: " + std::string(name));
+    }
+    std::uintmax_t result{};
+    const auto [end, error] = std::from_chars(
+        member.scalar.data(),
+        member.scalar.data() + member.scalar.size(),
+        result);
+    if (error != std::errc{}
+        || end != member.scalar.data() + member.scalar.size()) {
+        throw std::invalid_argument(
+            "preinstalled PostgreSQL stage manifest unsigned integer is "
+            "out of range: " + std::string(name));
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::optional<std::uintmax_t>
+nullable_unsigned_integer_member(
+    const manifest_json_value& object,
+    std::string_view name) {
+    const manifest_json_value& member = object_member(object, name);
+    if (member.kind == manifest_json_kind::null) {
+        return std::nullopt;
+    }
+    return unsigned_integer_member(object, name);
+}
+
+[[nodiscard]] inline bool valid_sha256_text(std::string_view digest) {
+    return digest.size() == 64U
+        && std::ranges::all_of(
+            digest,
+            [](const char character) {
+                return (character >= '0' && character <= '9')
+                    || (character >= 'a' && character <= 'f');
+            });
+}
+
+[[nodiscard]] inline std::optional<std::string> nullable_digest_member(
+    const manifest_json_value& object,
+    std::string_view name) {
+    const manifest_json_value& member = object_member(object, name);
+    if (member.kind == manifest_json_kind::null) {
+        return std::nullopt;
+    }
+    const std::string& digest = string_member(object, name);
+    if (!valid_sha256_text(digest)) {
+        throw std::invalid_argument(
+            "preinstalled PostgreSQL stage manifest member must be a "
+            "lower-case SHA-256 digest or null: " + std::string(name));
+    }
+    return digest;
+}
+
 [[nodiscard]] inline bool path_is_within(
     const std::filesystem::path& root,
     const std::filesystem::path& candidate) {
@@ -573,15 +649,8 @@ inline void require_digest(
     const std::filesystem::path& path,
     std::string_view expected,
     std::string_view label) {
-    const bool valid_hex =
-        expected.size() == 64U
-        && std::ranges::all_of(
-            expected,
-            [](char character) {
-                return (character >= '0' && character <= '9')
-                    || (character >= 'a' && character <= 'f');
-            });
-    if (!valid_hex || sha256_file(path).hex() != expected) {
+    if (!valid_sha256_text(expected)
+        || sha256_file(path).hex() != expected) {
         throw std::invalid_argument(
             std::string(label) + " SHA-256 mismatch: " + path.string());
     }
@@ -958,6 +1027,774 @@ inline void validate_postgresql_tools(
     return record;
 }
 
+inline void require_runtime_record_text(
+    std::string_view text,
+    std::string_view label) {
+    if (text.find_first_of("\r\n;") != std::string_view::npos) {
+        throw std::invalid_argument(
+            std::string(label)
+            + " contains a forbidden runtime-closure record delimiter");
+    }
+}
+
+[[nodiscard]] inline std::filesystem::path
+normalized_relative_metadata_path(
+    std::string_view text,
+    std::string_view label) {
+    require_runtime_record_text(text, label);
+    const std::filesystem::path path{text};
+    if (path.empty() || path.is_absolute()
+        || path.has_root_name() || path.has_root_directory()
+        || path.lexically_normal() != path
+        || path.generic_string() != text) {
+        throw std::invalid_argument(
+            std::string(label)
+            + " must be a normalized relative path");
+    }
+    for (const std::filesystem::path& component : path) {
+        if (component.empty() || component == "." || component == "..") {
+            throw std::invalid_argument(
+                std::string(label)
+                + " contains a forbidden relative component");
+        }
+    }
+    return path;
+}
+
+struct no_follow_file_evidence {
+    std::uintmax_t size{};
+    std::string sha256;
+};
+
+[[nodiscard]] inline no_follow_file_evidence
+inspect_regular_file_no_follow(
+    const std::filesystem::path& path,
+    std::string_view label) {
+    int flags = O_RDONLY;
+#if defined(O_CLOEXEC)
+    flags |= O_CLOEXEC;
+#endif
+#if defined(O_NOFOLLOW)
+    flags |= O_NOFOLLOW;
+#endif
+    const int descriptor = ::open(path.c_str(), flags);
+    if (descriptor < 0) {
+        throw std::invalid_argument(
+            "cannot open " + std::string(label)
+            + " without following links: " + path.string());
+    }
+
+    const auto close_descriptor = [&]() noexcept {
+        static_cast<void>(::close(descriptor));
+    };
+    struct stat status {};
+    if (::fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode)
+        || status.st_size < 0) {
+        close_descriptor();
+        throw std::invalid_argument(
+            std::string(label)
+            + " is not a no-follow regular file: " + path.string());
+    }
+
+    sha256_hasher hasher;
+    std::array<char, 64U * 1024U> buffer{};
+    std::uintmax_t bytes_read{};
+    for (;;) {
+        const ssize_t amount =
+            ::read(descriptor, buffer.data(), buffer.size());
+        if (amount > 0) {
+            const auto count = static_cast<std::size_t>(amount);
+            hasher.update(std::string_view(buffer.data(), count));
+            bytes_read += count;
+            continue;
+        }
+        if (amount == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        close_descriptor();
+        throw std::invalid_argument(
+            "cannot read " + std::string(label)
+            + " without following links: " + path.string());
+    }
+    if (bytes_read != static_cast<std::uintmax_t>(status.st_size)) {
+        close_descriptor();
+        throw std::invalid_argument(
+            std::string(label)
+            + " changed size while being attested: " + path.string());
+    }
+    close_descriptor();
+    return {
+        .size = bytes_read,
+        .sha256 = hasher.finalize().hex()};
+}
+
+struct runtime_root_metadata {
+    std::string name;
+    std::filesystem::path reported_source;
+    std::filesystem::path canonical_source;
+    std::filesystem::path staged_relative;
+    std::filesystem::path staged_directory;
+};
+
+struct validated_runtime_entry {
+    std::string root;
+    std::string path;
+    std::string kind;
+    std::string source_kind;
+    std::string source_path;
+    std::optional<std::string> source_link_target;
+    std::string resolved_source_path;
+    std::optional<std::uintmax_t> size;
+    std::optional<std::string> sha256;
+};
+
+[[nodiscard]] inline std::size_t runtime_root_index(
+    std::string_view root) {
+    constexpr std::array<std::string_view, 3> roots{
+        "bindir", "sharedir", "pkglibdir"};
+    const auto found = std::ranges::find(roots, root);
+    if (found == roots.end()) {
+        throw std::invalid_argument(
+            "stage manifest runtime entry has unknown root: "
+            + std::string(root));
+    }
+    return static_cast<std::size_t>(
+        std::distance(roots.begin(), found));
+}
+
+[[nodiscard]] inline std::string runtime_entry_record(
+    const validated_runtime_entry& entry) {
+    return "root:" + entry.root + '\n'
+        + "path:" + entry.path + '\n'
+        + "kind:" + entry.kind + '\n'
+        + "source_kind:" + entry.source_kind + '\n'
+        + "source_path:" + entry.source_path + '\n'
+        + "source_link_target:"
+        + entry.source_link_target.value_or("-") + '\n'
+        + "resolved_source_path:" + entry.resolved_source_path + '\n'
+        + "size:"
+        + (entry.size ? std::to_string(*entry.size) : "-") + '\n'
+        + "sha256:" + entry.sha256.value_or("-") + '\n';
+}
+
+inline void validate_runtime_sentinels(
+    const manifest_json_value& sentinels,
+    const std::map<
+        std::pair<std::string, std::string>,
+        validated_runtime_entry,
+        std::less<>>& entries) {
+    struct sentinel_contract {
+        std::string_view name;
+        std::string_view root;
+        std::string_view path;
+        std::string_view kind;
+    };
+#if defined(__APPLE__)
+    constexpr std::string_view plpgsql_filename{"plpgsql.dylib"};
+#else
+    constexpr std::string_view plpgsql_filename{"plpgsql.so"};
+#endif
+    const std::array contracts{
+        sentinel_contract{
+            "postgres_bki", "sharedir", "postgres.bki", "file"},
+        sentinel_contract{
+            "postgresql_conf_sample", "sharedir",
+            "postgresql.conf.sample", "file"},
+        sentinel_contract{
+            "pg_hba_conf_sample", "sharedir",
+            "pg_hba.conf.sample", "file"},
+        sentinel_contract{
+            "pg_ident_conf_sample", "sharedir",
+            "pg_ident.conf.sample", "file"},
+        sentinel_contract{
+            "information_schema_sql", "sharedir",
+            "information_schema.sql", "file"},
+        sentinel_contract{
+            "system_functions_sql", "sharedir",
+            "system_functions.sql", "file"},
+        sentinel_contract{
+            "system_views_sql", "sharedir",
+            "system_views.sql", "file"},
+        sentinel_contract{
+            "system_constraints_sql", "sharedir",
+            "system_constraints.sql", "file"},
+        sentinel_contract{
+            "snowball_create_sql", "sharedir",
+            "snowball_create.sql", "file"},
+        sentinel_contract{
+            "timezone", "sharedir", "timezone", "dir"},
+        sentinel_contract{
+            "timezonesets", "sharedir", "timezonesets", "dir"},
+        sentinel_contract{
+            "tsearch_data", "sharedir", "tsearch_data", "dir"},
+        sentinel_contract{
+            "extension", "sharedir", "extension", "dir"},
+        sentinel_contract{
+            "plpgsql", "pkglibdir", plpgsql_filename, "file"}};
+    require_exact_object_members(
+        sentinels,
+        {"postgres_bki", "postgresql_conf_sample",
+         "pg_hba_conf_sample", "pg_ident_conf_sample",
+         "information_schema_sql", "system_functions_sql",
+         "system_views_sql", "system_constraints_sql",
+         "snowball_create_sql", "timezone", "timezonesets",
+         "tsearch_data", "extension", "plpgsql"},
+        "stage manifest runtime required_sentinels");
+    for (const sentinel_contract& contract : contracts) {
+        const manifest_json_value& sentinel =
+            object_member(sentinels, contract.name);
+        require_exact_object_members(
+            sentinel, {"root", "path", "kind", "sha256"},
+            "stage manifest runtime sentinel");
+        if (string_member(sentinel, "root") != contract.root
+            || string_member(sentinel, "path") != contract.path
+            || string_member(sentinel, "kind") != contract.kind) {
+            throw std::invalid_argument(
+                "stage manifest runtime sentinel has a noncanonical "
+                "PostgreSQL 17 coordinate: "
+                + std::string(contract.name));
+        }
+        const auto entry = entries.find({
+            std::string(contract.root), std::string(contract.path)});
+        if (entry == entries.end()
+            || entry->second.kind != contract.kind) {
+            throw std::invalid_argument(
+                "stage manifest runtime sentinel is absent from the "
+                "materialized closure: " + std::string(contract.name));
+        }
+        const std::optional<std::string> digest =
+            nullable_digest_member(sentinel, "sha256");
+        if (contract.kind == "dir") {
+            if (digest || entry->second.sha256) {
+                throw std::invalid_argument(
+                    "stage manifest runtime directory sentinel must have "
+                    "a null SHA-256: " + std::string(contract.name));
+            }
+        } else if (!digest || !entry->second.sha256
+                   || *digest != *entry->second.sha256) {
+            throw std::invalid_argument(
+                "stage manifest runtime file sentinel SHA-256 disagrees "
+                "with its closure entry: " + std::string(contract.name));
+        }
+    }
+}
+
+[[nodiscard]] inline std::set<std::filesystem::path>
+validate_loader_dependencies(
+    const manifest_json_value& loader_dependencies,
+    const std::filesystem::path& canonical_root) {
+    require_exact_object_members(
+        loader_dependencies,
+        {"entry_count", "aggregate_sha256", "entries"},
+        "stage manifest loader_dependencies");
+    const auto& entries =
+        array_member(loader_dependencies, "entries");
+    const std::uintmax_t entry_count =
+        unsigned_integer_member(loader_dependencies, "entry_count");
+    if (entry_count != entries.size()) {
+        throw std::invalid_argument(
+            "stage manifest loader dependency entry_count mismatch");
+    }
+
+    std::string aggregate_record;
+    std::optional<std::pair<std::string, std::string>> previous_key;
+    std::set<std::string> staged_coordinates;
+    std::set<std::filesystem::path> staged_files;
+    for (const manifest_json_value& entry : entries) {
+        require_exact_object_members(
+            entry, {"source", "staged", "size", "sha256"},
+            "stage manifest loader dependency");
+        const std::string& source_text = string_member(entry, "source");
+        const std::string& staged_text = string_member(entry, "staged");
+        require_runtime_record_text(
+            source_text, "loader dependency source");
+        require_runtime_record_text(
+            staged_text, "loader dependency staged coordinate");
+        static_cast<void>(normalized_absolute_metadata_path(
+            source_text, "loader dependency source"));
+        const std::filesystem::path staged_relative =
+            normalized_relative_metadata_path(
+                staged_text, "loader dependency staged coordinate");
+        const std::pair<std::string, std::string> key{
+            staged_text, source_text};
+        if (previous_key && key <= *previous_key) {
+            throw std::invalid_argument(
+                "stage manifest loader dependencies are not sorted unique "
+                "by staged path then source");
+        }
+        previous_key = key;
+        if (!staged_coordinates.insert(staged_text).second) {
+            throw std::invalid_argument(
+                "stage manifest loader dependencies reuse a staged path");
+        }
+        const std::filesystem::path staged_file =
+            resolve_stage_coordinate(
+                canonical_root, staged_relative.string(),
+                "staged PostgreSQL loader dependency", false);
+        staged_files.insert(staged_file);
+        const std::uintmax_t expected_size =
+            unsigned_integer_member(entry, "size");
+        const std::string& expected_digest =
+            string_member(entry, "sha256");
+        if (!valid_sha256_text(expected_digest)) {
+            throw std::invalid_argument(
+                "stage manifest loader dependency has an invalid SHA-256");
+        }
+        const no_follow_file_evidence observed =
+            inspect_regular_file_no_follow(
+                staged_file, "staged PostgreSQL loader dependency");
+        if (observed.size != expected_size
+            || observed.sha256 != expected_digest) {
+            throw std::invalid_argument(
+                "staged PostgreSQL loader dependency size or SHA-256 "
+                "mismatch: " + staged_text);
+        }
+        aggregate_record += "source:" + source_text + '\n'
+            + "staged:" + staged_text + '\n'
+            + "size:" + std::to_string(expected_size) + '\n'
+            + "sha256:" + expected_digest + '\n';
+    }
+    const std::string& expected_aggregate =
+        string_member(loader_dependencies, "aggregate_sha256");
+    if (!valid_sha256_text(expected_aggregate)
+        || sha256(aggregate_record).hex() != expected_aggregate) {
+        throw std::invalid_argument(
+            "stage manifest loader dependency aggregate SHA-256 mismatch");
+    }
+    return staged_files;
+}
+
+inline void validate_runtime_closure(
+    const manifest_json_value& closure,
+    const std::filesystem::path& canonical_root,
+    const std::array<std::filesystem::path, 3>& reported_sources,
+    const std::array<std::filesystem::path, 3>& staged_relatives,
+    const std::array<std::filesystem::path, 3>& staged_directories,
+    const std::set<std::pair<std::string, std::string>>&
+        excluded_overlay_coordinates) {
+    require_exact_object_members(
+        closure,
+        {"algorithm", "entry_count", "aggregate_sha256", "roots",
+         "required_sentinels", "loader_dependencies", "entries"},
+        "stage manifest runtime_closure");
+    if (string_member(closure, "algorithm")
+        != "postgresql-materialized-package/v1") {
+        throw std::invalid_argument(
+            "stage manifest runtime_closure has an unsupported algorithm");
+    }
+
+    constexpr std::array<std::string_view, 3> root_names{
+        "bindir", "sharedir", "pkglibdir"};
+    const manifest_json_value& roots_json =
+        object_member(closure, "roots");
+    require_exact_object_members(
+        roots_json, {"bindir", "sharedir", "pkglibdir"},
+        "stage manifest runtime roots");
+    std::array<runtime_root_metadata, 3> roots;
+    for (std::size_t index = 0; index != roots.size(); ++index) {
+        const manifest_json_value& root =
+            object_member(roots_json, root_names[index]);
+        require_exact_object_members(
+            root, {"reported_source", "canonical_source", "staged"},
+            "stage manifest runtime root");
+        const std::string& reported_text =
+            string_member(root, "reported_source");
+        const std::string& canonical_text =
+            string_member(root, "canonical_source");
+        const std::string& staged_text =
+            string_member(root, "staged");
+        require_runtime_record_text(
+            reported_text, "runtime reported source root");
+        require_runtime_record_text(
+            canonical_text, "runtime canonical source root");
+        require_runtime_record_text(
+            staged_text, "runtime staged root");
+        const std::filesystem::path reported =
+            normalized_absolute_metadata_path(
+                reported_text, "runtime reported source root");
+        const std::filesystem::path canonical_source =
+            normalized_absolute_metadata_path(
+                canonical_text, "runtime canonical source root");
+        const std::filesystem::path staged_relative =
+            normalized_relative_metadata_path(
+                staged_text, "runtime staged root");
+        if (reported != reported_sources[index]
+            || staged_relative != staged_relatives[index]) {
+            throw std::invalid_argument(
+                "stage manifest runtime root disagrees with top-level "
+                "PostgreSQL coordinates: "
+                + std::string(root_names[index]));
+        }
+        roots[index] = {
+            .name = std::string(root_names[index]),
+            .reported_source = reported,
+            .canonical_source = canonical_source,
+            .staged_relative = staged_relative,
+            .staged_directory = staged_directories[index]};
+    }
+
+    const auto& entries_json = array_member(closure, "entries");
+    const std::uintmax_t entry_count =
+        unsigned_integer_member(closure, "entry_count");
+    if (entry_count != entries_json.size()) {
+        throw std::invalid_argument(
+            "stage manifest runtime_closure entry_count mismatch");
+    }
+    std::map<
+        std::pair<std::string, std::string>,
+        validated_runtime_entry,
+        std::less<>>
+        entries;
+    std::string aggregate_record;
+    std::optional<std::pair<std::size_t, std::string>> previous_key;
+    for (const manifest_json_value& entry_json : entries_json) {
+        require_exact_object_members(
+            entry_json,
+            {"root", "path", "kind", "source_kind", "source_path",
+             "source_link_target", "resolved_source_path", "size",
+             "sha256"},
+            "stage manifest runtime closure entry");
+        validated_runtime_entry entry{
+            .root = string_member(entry_json, "root"),
+            .path = string_member(entry_json, "path"),
+            .kind = string_member(entry_json, "kind"),
+            .source_kind = string_member(entry_json, "source_kind"),
+            .source_path = string_member(entry_json, "source_path"),
+            .source_link_target =
+                nullable_string_member(entry_json, "source_link_target"),
+            .resolved_source_path =
+                string_member(entry_json, "resolved_source_path"),
+            .size =
+                nullable_unsigned_integer_member(entry_json, "size"),
+            .sha256 = nullable_digest_member(entry_json, "sha256")};
+        const std::size_t root_index =
+            runtime_root_index(entry.root);
+        static_cast<void>(normalized_relative_metadata_path(
+            entry.path, "runtime closure entry path"));
+        require_runtime_record_text(
+            entry.source_path, "runtime closure source path");
+        require_runtime_record_text(
+            entry.resolved_source_path,
+            "runtime closure resolved source path");
+        if (entry.source_link_target) {
+            require_runtime_record_text(
+                *entry.source_link_target,
+                "runtime closure source link target");
+        }
+        const std::filesystem::path source_path =
+            normalized_absolute_metadata_path(
+                entry.source_path, "runtime closure source path");
+        const std::filesystem::path resolved_source_path =
+            normalized_absolute_metadata_path(
+                entry.resolved_source_path,
+                "runtime closure resolved source path");
+        const runtime_root_metadata& root = roots[root_index];
+        const std::filesystem::path expected_reported_source =
+            (root.reported_source
+             / std::filesystem::path(entry.path)).lexically_normal();
+        const std::filesystem::path expected_canonical_source =
+            (root.canonical_source
+             / std::filesystem::path(entry.path)).lexically_normal();
+        if ((source_path != expected_reported_source
+             && source_path != expected_canonical_source)
+            || !path_is_within(
+                root.canonical_source, resolved_source_path)) {
+            throw std::invalid_argument(
+                "stage manifest runtime entry source provenance escapes "
+                "its declared root: " + entry.root + ':' + entry.path);
+        }
+        if (entry.kind != "dir" && entry.kind != "file") {
+            throw std::invalid_argument(
+                "stage manifest runtime entry kind must be dir or file");
+        }
+        if (entry.source_kind != "dir"
+            && entry.source_kind != "file"
+            && entry.source_kind != "symlink") {
+            throw std::invalid_argument(
+                "stage manifest runtime entry source_kind is invalid");
+        }
+        if ((entry.source_kind == "symlink")
+                != entry.source_link_target.has_value()
+            || (entry.source_link_target
+                && entry.source_link_target->empty())
+            || (entry.source_kind == "dir" && entry.kind != "dir")
+            || (entry.source_kind == "file" && entry.kind != "file")) {
+            throw std::invalid_argument(
+                "stage manifest runtime entry source-kind metadata is "
+                "inconsistent");
+        }
+        if ((entry.kind == "dir"
+             && (entry.size || entry.sha256))
+            || (entry.kind == "file"
+                && (!entry.size || !entry.sha256))) {
+            throw std::invalid_argument(
+                "stage manifest runtime entry size/SHA-256 nullability "
+                "disagrees with its kind");
+        }
+        const std::pair<std::size_t, std::string> order_key{
+            root_index, entry.path};
+        if (previous_key && order_key <= *previous_key) {
+            throw std::invalid_argument(
+                "stage manifest runtime entries are not sorted unique by "
+                "bindir/sharedir/pkglibdir and normalized path");
+        }
+        previous_key = order_key;
+        aggregate_record += runtime_entry_record(entry);
+        const std::pair<std::string, std::string> identity{
+            entry.root, entry.path};
+        if (!entries.emplace(identity, std::move(entry)).second) {
+            throw std::invalid_argument(
+                "stage manifest runtime_closure has a duplicate entry");
+        }
+    }
+    const std::string& expected_aggregate =
+        string_member(closure, "aggregate_sha256");
+    if (!valid_sha256_text(expected_aggregate)
+        || sha256(aggregate_record).hex() != expected_aggregate) {
+        throw std::invalid_argument(
+            "stage manifest runtime closure aggregate SHA-256 mismatch");
+    }
+
+    validate_runtime_sentinels(
+        object_member(closure, "required_sentinels"), entries);
+    const std::set<std::filesystem::path> loader_dependency_files =
+        validate_loader_dependencies(
+            object_member(closure, "loader_dependencies"),
+            canonical_root);
+    std::set<std::filesystem::path> loader_dependency_directories;
+    for (const std::filesystem::path& dependency :
+         loader_dependency_files) {
+        for (const runtime_root_metadata& root : roots) {
+            if (!path_is_within(root.staged_directory, dependency)) {
+                continue;
+            }
+            const std::string dependency_relative =
+                dependency
+                    .lexically_relative(root.staged_directory)
+                    .generic_string();
+            if (excluded_overlay_coordinates.contains({
+                    root.name, dependency_relative})) {
+                throw std::invalid_argument(
+                    "loader dependency overlaps an explicit extension "
+                    "overlay coordinate: "
+                    + root.name + ':' + dependency_relative);
+            }
+            std::filesystem::path directory =
+                dependency.parent_path();
+            while (directory != root.staged_directory) {
+                const std::string relative =
+                    directory
+                        .lexically_relative(root.staged_directory)
+                        .generic_string();
+                const std::pair<std::string, std::string> identity{
+                    root.name, relative};
+                const auto main_entry = entries.find(identity);
+                if (main_entry != entries.end()) {
+                    if (main_entry->second.kind != "dir") {
+                        throw std::invalid_argument(
+                            "loader dependency ancestor disagrees with a "
+                            "main runtime closure entry: "
+                            + root.name + ':' + relative);
+                    }
+                    break;
+                }
+                loader_dependency_directories.insert(directory);
+                directory = directory.parent_path();
+            }
+            break;
+        }
+    }
+
+    struct observed_entry {
+        std::string kind;
+        std::optional<std::uintmax_t> size;
+        std::optional<std::string> sha256;
+    };
+    std::map<
+        std::pair<std::string, std::string>,
+        observed_entry,
+        std::less<>>
+        observed_entries;
+    for (const runtime_root_metadata& root : roots) {
+        std::error_code error;
+        std::filesystem::recursive_directory_iterator iterator(
+            root.staged_directory,
+            std::filesystem::directory_options::none,
+            error);
+        if (error) {
+            throw std::invalid_argument(
+                "cannot walk staged PostgreSQL runtime root without "
+                "following links: " + root.staged_directory.string());
+        }
+        const std::filesystem::recursive_directory_iterator end;
+        while (iterator != end) {
+            const std::filesystem::path path = iterator->path();
+            const auto status =
+                std::filesystem::symlink_status(path, error);
+            if (error) {
+                throw std::invalid_argument(
+                    "cannot inspect staged PostgreSQL runtime entry: "
+                    + path.string());
+            }
+            const std::filesystem::path relative_path =
+                path.lexically_relative(root.staged_directory);
+            const std::string relative = relative_path.generic_string();
+            static_cast<void>(normalized_relative_metadata_path(
+                relative, "observed runtime closure entry path"));
+            if (std::filesystem::is_symlink(status)) {
+                throw std::invalid_argument(
+                    "staged PostgreSQL runtime closure contains a symlink: "
+                    + path.string());
+            }
+            const std::pair<std::string, std::string> identity{
+                root.name, relative};
+            if (excluded_overlay_coordinates.contains(identity)
+                || loader_dependency_files.contains(path)) {
+                if (!std::filesystem::is_regular_file(status)) {
+                    throw std::invalid_argument(
+                        "separately attested staged coordinate is not a "
+                        "regular file: " + path.string());
+                }
+            } else if (loader_dependency_directories.contains(path)) {
+                if (!std::filesystem::is_directory(status)) {
+                    throw std::invalid_argument(
+                        "loader dependency ancestor is not a directory: "
+                        + path.string());
+                }
+            } else if (std::filesystem::is_directory(status)) {
+                observed_entries.emplace(
+                    identity,
+                    observed_entry{
+                        .kind = "dir",
+                        .size = std::nullopt,
+                        .sha256 = std::nullopt});
+            } else if (std::filesystem::is_regular_file(status)) {
+                const no_follow_file_evidence evidence =
+                    inspect_regular_file_no_follow(
+                        path, "staged PostgreSQL runtime entry");
+                observed_entries.emplace(
+                    identity,
+                    observed_entry{
+                        .kind = "file",
+                        .size = evidence.size,
+                        .sha256 = evidence.sha256});
+            } else {
+                throw std::invalid_argument(
+                    "staged PostgreSQL runtime closure contains a special "
+                    "file: " + path.string());
+            }
+            iterator.increment(error);
+            if (error) {
+                throw std::invalid_argument(
+                    "cannot continue walking staged PostgreSQL runtime "
+                    "closure: " + root.staged_directory.string());
+            }
+        }
+    }
+    if (observed_entries.size() != entries.size()) {
+        throw std::invalid_argument(
+            "staged PostgreSQL runtime closure has additions or deletions");
+    }
+    for (const auto& [identity, expected] : entries) {
+        const auto observed = observed_entries.find(identity);
+        if (observed == observed_entries.end()) {
+            throw std::invalid_argument(
+                "staged PostgreSQL runtime closure is missing manifest "
+                "entry: " + identity.first + ':' + identity.second);
+        }
+        if (observed->second.kind != expected.kind
+            || observed->second.size != expected.size
+            || observed->second.sha256 != expected.sha256) {
+            throw std::invalid_argument(
+                "staged PostgreSQL runtime closure entry type, size, or "
+                "SHA-256 mismatch: "
+                + identity.first + ':' + identity.second);
+        }
+    }
+
+    std::set<std::filesystem::path> allowed_external_directories;
+    const auto allow_ancestors =
+        [&](std::filesystem::path directory) {
+            while (directory != canonical_root) {
+                if (!path_is_within(canonical_root, directory)
+                    || directory.empty()
+                    || directory == directory.root_path()) {
+                    throw std::invalid_argument(
+                        "attested PostgreSQL stage coordinate escapes its "
+                        "root: " + directory.string());
+                }
+                allowed_external_directories.insert(directory);
+                directory = directory.parent_path();
+            }
+        };
+    for (const runtime_root_metadata& root : roots) {
+        allow_ancestors(root.staged_directory);
+    }
+    for (const std::filesystem::path& dependency :
+         loader_dependency_files) {
+        allow_ancestors(dependency.parent_path());
+    }
+
+    std::error_code stage_error;
+    std::filesystem::recursive_directory_iterator stage_iterator(
+        canonical_root,
+        std::filesystem::directory_options::none,
+        stage_error);
+    if (stage_error) {
+        throw std::invalid_argument(
+            "cannot walk the closed preinstalled PostgreSQL stage");
+    }
+    const std::filesystem::recursive_directory_iterator stage_end;
+    while (stage_iterator != stage_end) {
+        const std::filesystem::path path = stage_iterator->path();
+        const auto status =
+            std::filesystem::symlink_status(path, stage_error);
+        if (stage_error || std::filesystem::is_symlink(status)) {
+            throw std::invalid_argument(
+                "closed preinstalled PostgreSQL stage contains an "
+                "unreadable or symlink entry: " + path.string());
+        }
+        const auto root = std::ranges::find_if(
+            roots,
+            [&](const runtime_root_metadata& candidate) {
+                return candidate.staged_directory == path;
+            });
+        if (root != roots.end()) {
+            if (!std::filesystem::is_directory(status)) {
+                throw std::invalid_argument(
+                    "materialized PostgreSQL root is not a directory: "
+                    + path.string());
+            }
+            stage_iterator.disable_recursion_pending();
+        } else if (loader_dependency_files.contains(path)) {
+            if (!std::filesystem::is_regular_file(status)) {
+                throw std::invalid_argument(
+                    "attested PostgreSQL loader dependency is not a "
+                    "regular file: " + path.string());
+            }
+        } else if (allowed_external_directories.contains(path)) {
+            if (!std::filesystem::is_directory(status)) {
+                throw std::invalid_argument(
+                    "preinstalled PostgreSQL stage ancestor is not a "
+                    "directory: " + path.string());
+            }
+        } else {
+            throw std::invalid_argument(
+                "closed preinstalled PostgreSQL stage contains an "
+                "unattested addition: " + path.string());
+        }
+        stage_iterator.increment(stage_error);
+        if (stage_error) {
+            throw std::invalid_argument(
+                "cannot continue walking the closed preinstalled "
+                "PostgreSQL stage");
+        }
+    }
+}
+
 }  // namespace bioseq::postgres_test::artifact_detail
 
 export namespace bioseq::postgres_test {
@@ -999,13 +1836,13 @@ export namespace bioseq::postgres_test {
         manifest,
         {"schema", "postgresql_version", "postgresql_configure",
          "source", "staged", "extension_artifacts",
-         "expected_tool_paths", "tool_signatures"},
+         "expected_tool_paths", "tool_signatures", "runtime_closure"},
         "stage manifest root");
     if (artifact_detail::string_member(manifest, "schema")
-        != "stage_manifest/v2") {
+        != "stage_manifest/v3") {
         throw std::invalid_argument(
             "preinstalled PostgreSQL stage manifest must use "
-            "stage_manifest/v2");
+            "stage_manifest/v3");
     }
     const std::string& postgresql_version =
         artifact_detail::string_member(manifest, "postgresql_version");
@@ -1144,12 +1981,45 @@ export namespace bioseq::postgres_test {
         artifact_detail::object_member(
             manifest, "tool_signatures"),
         canonical_root, manifest_bin_dir, staged_bin_relative);
+    std::set<std::pair<std::string, std::string>>
+        excluded_overlay_coordinates;
+    for (const auto& [name, artifact] : manifest_artifacts_by_name) {
+        static_cast<void>(name);
+        excluded_overlay_coordinates.emplace(
+            "sharedir",
+            artifact.staged_control
+                .lexically_relative(shared_directory)
+                .generic_string());
+        excluded_overlay_coordinates.emplace(
+            "sharedir",
+            artifact.staged_install_sql
+                .lexically_relative(shared_directory)
+                .generic_string());
+        excluded_overlay_coordinates.emplace(
+            "pkglibdir",
+            artifact.staged_dso
+                .lexically_relative(library_directory)
+                .generic_string());
+    }
+    artifact_detail::validate_runtime_closure(
+        artifact_detail::object_member(manifest, "runtime_closure"),
+        canonical_root,
+        std::array{
+            source_bindir, source_sharedir, source_pkglibdir},
+        std::array{
+            staged_bin_relative,
+            staged_share_relative,
+            staged_pkglib_relative},
+        std::array{
+            manifest_bin_dir, shared_directory, library_directory},
+        excluded_overlay_coordinates);
     std::set<std::string> selected_names;
     std::set<std::string> consumed_overrides;
     extension_stage result{
         .stage_root = canonical_root,
         .manifest_file = canonical_manifest,
         .manifest_digest = parsed_manifest_digest,
+        .shared_directory = shared_directory,
         .control_directory = control_directory,
         .library_directory = library_directory,
         .runtime_library_directory = std::nullopt,
@@ -1426,6 +2296,7 @@ export namespace bioseq::postgres_test {
         .stage_root = root,
         .manifest_file = std::nullopt,
         .manifest_digest = std::nullopt,
+        .shared_directory = root / "share" / "postgresql",
         .control_directory = root / "share" / "postgresql" / "extension",
         .library_directory = root / "lib" / "postgresql",
         .runtime_library_directory = std::nullopt,

@@ -123,6 +123,68 @@ namespace bioseq::postgres_test::cluster_detail {
     return options;
 }
 
+/// @brief True only when candidate is a proper descendant of root.
+[[nodiscard]] inline bool path_is_strictly_within(
+    const std::filesystem::path& root,
+    const std::filesystem::path& candidate) {
+    auto root_part = root.begin();
+    auto candidate_part = candidate.begin();
+    while (root_part != root.end()) {
+        if (candidate_part == candidate.end()
+            || *root_part != *candidate_part) {
+            return false;
+        }
+        ++root_part;
+        ++candidate_part;
+    }
+    return candidate_part != candidate.end();
+}
+
+/// @brief Revalidates the attested sharedir immediately before initdb.
+[[nodiscard]] inline std::filesystem::path
+require_initdb_shared_directory(const extension_stage& stage) {
+    const auto require_canonical_directory =
+        [](const std::filesystem::path& path,
+           std::string_view label) -> std::filesystem::path {
+        if (path.empty()) {
+            throw std::invalid_argument(
+                std::string(label) + " is empty");
+        }
+        std::error_code error;
+        const auto status =
+            std::filesystem::symlink_status(path, error);
+        if (error || !std::filesystem::is_directory(status)
+            || std::filesystem::is_symlink(status)) {
+            throw std::invalid_argument(
+                std::string(label)
+                + " is not a real non-symlink directory: "
+                + path.string());
+        }
+        error.clear();
+        const std::filesystem::path canonical =
+            std::filesystem::canonical(path, error);
+        if (error || canonical != path) {
+            throw std::invalid_argument(
+                std::string(label)
+                + " is not an exact canonical directory: "
+                + path.string());
+        }
+        return canonical;
+    };
+
+    const std::filesystem::path stage_root =
+        require_canonical_directory(
+            stage.stage_root, "attested PostgreSQL stage root");
+    const std::filesystem::path shared_directory =
+        require_canonical_directory(
+            stage.shared_directory, "attested PostgreSQL shared directory");
+    if (!path_is_strictly_within(stage_root, shared_directory)) {
+        throw std::invalid_argument(
+            "attested PostgreSQL shared directory is outside its stage root");
+    }
+    return shared_directory;
+}
+
 /// @brief Creates a unique short root suitable for Unix-domain socket paths.
 [[nodiscard]] inline std::filesystem::path make_private_root() {
     std::string pattern =
@@ -697,9 +759,12 @@ public:
                 .socket_directory = socket_directory_,
                 .log_directory = log_directory_});
         }
+        const std::filesystem::path initdb_shared_directory =
+            cluster_detail::require_initdb_shared_directory(*stage_);
         const auto init_exit = run_program(
             "initdb",
             {"--pgdata", data_directory_.string(),
+             "-L", initdb_shared_directory.string(),
              "--username", "postgres",
              "--auth-local=trust",
              "--auth-host=reject",
