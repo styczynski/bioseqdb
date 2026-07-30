@@ -693,6 +693,14 @@ endif()
 
 if(BIOSEQ_BUILD_CORE)
   add_subdirectory(bioseq)
+  if(TARGET bioseq_cache_bioseq_bench)
+    # The cache benchmark target is declared before Bioseq so cache-only builds
+    # remain valid. Complete the direct-target dependency once the sibling DSO
+    # exists; callers must never have to know this declaration order.
+    add_dependencies(
+      bioseq_cache_bioseq_bench
+      postgresql_bioseq)
+  endif()
   include(BioseqExternalPostgresAcceptance)
   add_subdirectory(vendor)
 endif()
@@ -716,6 +724,16 @@ if(BIOSEQ_PACKAGE_BUILD)
       BUILD_WITH_INSTALL_RPATH FALSE
       INTERPROCEDURAL_OPTIMIZATION FALSE)
   endforeach()
+
+  # Package scripts consume the exact production target files. A generated
+  # inventory avoids ambiguous recursive basename discovery when a persistent
+  # build tree also contains a noninstalled test-support DSO.
+  file(GENERATE
+    OUTPUT "${CMAKE_BINARY_DIR}/bioseq-package-target-artifacts.tsv"
+    CONTENT
+"postgresql_bioseq\t$<TARGET_FILE:postgresql_bioseq>
+postgresql_bioseq_cache\t$<TARGET_FILE:postgresql_bioseq_cache>
+")
 endif()
 
 # The website pipeline consumes postgresql_bioseq's target properties and BMIs,

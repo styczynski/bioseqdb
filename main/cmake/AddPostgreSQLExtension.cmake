@@ -24,6 +24,93 @@ if(DEFINED VCPKG_TARGET_TRIPLET)
 endif()
 find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 
+function(bioseq_attach_extension_dso_closure TARGET_NAME)
+  cmake_parse_arguments(
+    ARG
+    "REQUIRE_COMPLETE_CODEGEN"
+    "EXTENSION_NAME;SQL_MANIFEST;REPORT_PATH"
+    ""
+    ${ARGN})
+  if(ARG_UNPARSED_ARGUMENTS)
+    message(FATAL_ERROR
+      "${TARGET_NAME}: unknown DSO closure arguments: "
+      "${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+  if(NOT TARGET ${TARGET_NAME})
+    message(FATAL_ERROR
+      "cannot attach DSO closure validation to missing target ${TARGET_NAME}")
+  endif()
+  if(NOT ARG_EXTENSION_NAME OR NOT ARG_SQL_MANIFEST)
+    message(FATAL_ERROR
+      "${TARGET_NAME}: EXTENSION_NAME and SQL_MANIFEST are required")
+  endif()
+  if(NOT IS_ABSOLUTE "${ARG_SQL_MANIFEST}")
+    message(FATAL_ERROR
+      "${TARGET_NAME}: SQL_MANIFEST must be an absolute build-tree path")
+  endif()
+  set_source_files_properties(
+    "${ARG_SQL_MANIFEST}" PROPERTIES GENERATED TRUE)
+
+  set(_bioseq_dso_validator
+    "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../codegen/safety/validate_evidence.py")
+  if(NOT EXISTS "${_bioseq_dso_validator}")
+    message(FATAL_ERROR
+      "${TARGET_NAME}: missing DSO validator ${_bioseq_dso_validator}")
+  endif()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+  if(ARG_REPORT_PATH)
+    if(NOT IS_ABSOLUTE "${ARG_REPORT_PATH}")
+      message(FATAL_ERROR
+        "${TARGET_NAME}: REPORT_PATH must be an absolute build-tree path")
+    endif()
+    set(_bioseq_dso_report "${ARG_REPORT_PATH}")
+  else()
+    set(_bioseq_dso_report
+      "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/${ARG_EXTENSION_NAME}-dso-closure.json")
+  endif()
+  set(_bioseq_dso_completion_args)
+  if(ARG_REQUIRE_COMPLETE_CODEGEN)
+    list(APPEND _bioseq_dso_completion_args
+      --require-complete-codegen)
+  endif()
+
+  set_property(TARGET ${TARGET_NAME} APPEND PROPERTY LINK_DEPENDS
+    "${ARG_SQL_MANIFEST}"
+    "${_bioseq_dso_validator}")
+  add_custom_command(
+    TARGET ${TARGET_NAME}
+    POST_BUILD
+    BYPRODUCTS "${_bioseq_dso_report}"
+    COMMAND "${Python3_EXECUTABLE}"
+      "${_bioseq_dso_validator}"
+      --dso-only
+      --sql-manifest "${ARG_SQL_MANIFEST}"
+      --dso "$<TARGET_FILE:${TARGET_NAME}>"
+      ${_bioseq_dso_completion_args}
+      --report "${_bioseq_dso_report}"
+    COMMENT
+      "Validating ${ARG_EXTENSION_NAME} fmgr ownership against the linked DSO"
+    VERBATIM)
+  add_custom_target("${TARGET_NAME}_dso_closure"
+    COMMAND "${Python3_EXECUTABLE}"
+      "${_bioseq_dso_validator}"
+      --dso-only
+      --sql-manifest "${ARG_SQL_MANIFEST}"
+      --dso "$<TARGET_FILE:${TARGET_NAME}>"
+      ${_bioseq_dso_completion_args}
+      --report "${_bioseq_dso_report}"
+    DEPENDS
+      ${TARGET_NAME}
+      "${ARG_SQL_MANIFEST}"
+      "${_bioseq_dso_validator}"
+    COMMENT
+      "Revalidating ${ARG_EXTENSION_NAME} fmgr ownership report"
+    VERBATIM)
+  set_target_properties(${TARGET_NAME} PROPERTIES
+    BIOSEQ_EXTENSION_DSO_CLOSURE_REPORT "${_bioseq_dso_report}")
+endfunction()
+
 # Helper command to add extensions
 function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   message("%%%% PREPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}>")
@@ -387,60 +474,16 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
       # an explicit build of the extension relinks and runs POST_BUILD when
       # either input changes; a failed validation therefore fails the actual
       # extension target rather than an optional sibling target.
-      set(_extension_dso_validator
-        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../codegen/safety/validate_evidence.py")
-      if(NOT EXISTS "${_extension_dso_validator}")
-        message(FATAL_ERROR
-          "${LIBRARY_NAME}: missing DSO validator ${_extension_dso_validator}")
-      endif()
-      find_package(Python3 REQUIRED COMPONENTS Interpreter)
-      set(_extension_dso_report
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/${EXTENSION_NAME}-dso-closure.json")
-      set(_extension_dso_completion_args)
+      set(_extension_dso_closure_options)
       if(EXTENSION_REQUIRE_COMPLETE_CODEGEN)
-        list(APPEND _extension_dso_completion_args
-          --require-complete-codegen)
+        list(APPEND _extension_dso_closure_options
+          REQUIRE_COMPLETE_CODEGEN)
       endif()
-      set(_extension_safety_validator_args --dso-only)
-      set(_extension_safety_dependencies)
-      set(_extension_safety_validation_description "fmgr ownership")
-      set_property(TARGET ${LIBRARY_NAME} APPEND PROPERTY LINK_DEPENDS
-        "${EXTENSION_SQL_MANIFEST}"
-        "${_extension_dso_validator}"
-        ${_extension_safety_dependencies})
-      add_custom_command(
-        TARGET ${LIBRARY_NAME}
-        POST_BUILD
-        BYPRODUCTS "${_extension_dso_report}"
-        COMMAND "${Python3_EXECUTABLE}"
-          "${_extension_dso_validator}"
-          ${_extension_safety_validator_args}
-          --sql-manifest "${EXTENSION_SQL_MANIFEST}"
-          --dso "$<TARGET_FILE:${LIBRARY_NAME}>"
-          ${_extension_dso_completion_args}
-          --report "${_extension_dso_report}"
-        COMMENT
-          "Validating ${EXTENSION_NAME} ${_extension_safety_validation_description} against the linked DSO"
-        VERBATIM)
-      add_custom_target("${LIBRARY_NAME}_dso_closure"
-        COMMAND "${Python3_EXECUTABLE}"
-          "${_extension_dso_validator}"
-          ${_extension_safety_validator_args}
-          --sql-manifest "${EXTENSION_SQL_MANIFEST}"
-          --dso "$<TARGET_FILE:${LIBRARY_NAME}>"
-          ${_extension_dso_completion_args}
-          --report "${_extension_dso_report}"
-        DEPENDS
-          ${LIBRARY_NAME}
-          "${EXTENSION_SQL_MANIFEST}"
-          "${_extension_dso_validator}"
-          ${_extension_safety_dependencies}
-        COMMENT
-          "Revalidating ${EXTENSION_NAME} ${_extension_safety_validation_description} report"
-        VERBATIM)
-      set_target_properties(${LIBRARY_NAME} PROPERTIES
-        BIOSEQ_EXTENSION_DSO_CLOSURE_REPORT
-          "${_extension_dso_report}")
+      bioseq_attach_extension_dso_closure(
+        ${LIBRARY_NAME}
+        EXTENSION_NAME "${EXTENSION_NAME}"
+        SQL_MANIFEST "${EXTENSION_SQL_MANIFEST}"
+        ${_extension_dso_closure_options})
     endif()
 
     # Install everything else into share-dir

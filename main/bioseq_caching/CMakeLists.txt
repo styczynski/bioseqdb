@@ -199,11 +199,21 @@ if(BIOSEQ_CACHE_TESTING)
       "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_INSTALL}"
     BIOSEQ_EXTENSION_INSTALL_SQL
       "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_INSTALL}"
+    BIOSEQ_EXTENSION_TEST_SQL_MANIFEST
+      "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MANIFEST}"
     BIOSEQ_EXTENSION_SQL_MANIFEST
       "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MANIFEST}")
   add_dependencies(
     postgresql_bioseq_cache_test_support
     "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_TARGET}")
+  bioseq_attach_extension_dso_closure(
+    postgresql_bioseq_cache_test_support
+    EXTENSION_NAME "bioseq_cache/test_support"
+    SQL_MANIFEST
+      "${BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MANIFEST}"
+    REPORT_PATH
+      "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/bioseq_cache-test-support-dso-closure.json"
+    REQUIRE_COMPLETE_CODEGEN)
   if(APPLE)
     set_target_properties(postgresql_bioseq_cache_test_support PROPERTIES
       LINK_FLAGS "${PostgreSQL_LINK_FLAGS}")
