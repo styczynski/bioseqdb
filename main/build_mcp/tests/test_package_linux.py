@@ -50,6 +50,14 @@ class PackageLinuxPureContractTests(unittest.TestCase):
             [],
         )
 
+    def test_porcelain_capture_preserves_modified_worktree_column(self) -> None:
+        status = " M main/cmake/__pycache__/sanitizer_runtime.cpython-310.pyc\n"
+        with mock.patch.object(subject, "_run", return_value=status):
+            captured = subject._git_porcelain_status(
+                Path("/repository"), log=io.StringIO(), deadline=time.time() + 10)
+        self.assertEqual(captured, status.rstrip("\n"))
+        self.assertEqual(subject._material_dirty_rows(captured), [])
+
     def test_native_x86_is_rejected(self) -> None:
         with mock.patch.object(subject.platform, "machine", return_value="x86_64"):
             with self.assertRaisesRegex(subject.PackageLinuxError, "native ARM64"):
@@ -309,8 +317,6 @@ class ProvenanceAndStorageTests(unittest.TestCase):
             def git_result(
                 _repository: Path, arguments: list[str], **_kwargs: object,
             ) -> str:
-                if arguments[0] == "status":
-                    return ""
                 if arguments == ["rev-parse", "HEAD"]:
                     return revision
                 if arguments == ["rev-parse", f"{revision}:main"]:
@@ -335,6 +341,11 @@ class ProvenanceAndStorageTests(unittest.TestCase):
 
             with (
                 mock.patch.object(subject, "_git", side_effect=git_result) as git,
+                mock.patch.object(
+                    subject, "_git_porcelain_status",
+                    return_value=(
+                        " M main/cmake/__pycache__/"
+                        "sanitizer_runtime.cpython-310.pyc")),
                 mock.patch.object(subject, "_run", side_effect=archive_result),
                 mock.patch.object(subject, "_safe_extract", side_effect=extract_result),
             ):
@@ -343,6 +354,10 @@ class ProvenanceAndStorageTests(unittest.TestCase):
 
         self.assertEqual(snapshot["revision"], revision)
         self.assertEqual(snapshot["main_tree"], tree)
+        self.assertEqual(
+            snapshot["ignored_generated_status_rows"],
+            [" M main/cmake/__pycache__/sanitizer_runtime.cpython-310.pyc"],
+        )
         self.assertEqual(
             [call.args[1] for call in git.call_args_list if call.args[1][0] == "rev-parse"],
             [["rev-parse", "HEAD"], ["rev-parse", f"{revision}:main"]],

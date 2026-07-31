@@ -75,7 +75,7 @@ _INPUT_FILES = (
 )
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
-_TRACKED_BYTECODE = re.compile(
+_GENERATED_BYTECODE = re.compile(
     r"main/(?:[^/]+/)*__pycache__/[^/]+\.pyc\Z")
 _IGNORED_UNTRACKED_OUTPUT = re.compile(r"main/(?:build|reporting)(?:/|\Z)")
 
@@ -245,6 +245,17 @@ def _git(
     ).strip()
 
 
+def _git_porcelain_status(
+    repository: Path, *, log: TextIO, deadline: float,
+) -> str:
+    """Capture porcelain without stripping its significant leading columns."""
+    return _run(
+        ["git", "-C", str(repository), "status", "--porcelain=v1",
+         "--untracked-files=all", "--", "main"],
+        log=log, deadline=deadline, capture=True,
+    ).rstrip("\r\n")
+
+
 def _native_arm64() -> str:
     machine = platform.machine().strip().lower()
     if machine not in {"arm64", "aarch64"}:
@@ -393,17 +404,13 @@ def _safe_extract(archive: Path, destination: Path) -> Path:
 def _source_snapshot(
     repository: Path, state_root: Path, *, log: TextIO, deadline: float,
 ) -> dict[str, object]:
-    dirty = _git(
-        repository,
-        ["status", "--porcelain=v1", "--untracked-files=all", "--", "main"],
-        log=log, deadline=deadline,
-    )
+    dirty = _git_porcelain_status(repository, log=log, deadline=deadline)
     dirty_rows = [row for row in dirty.splitlines() if row]
     material_dirty = _material_dirty_rows(dirty)
     ignored_generated = [row for row in dirty_rows if row not in material_dirty]
     if material_dirty:
         raise PackageLinuxError(
-            "tracked main/ source is dirty; commit it before package qualification: "
+            "material main/ source is dirty; commit it before package qualification: "
             + "; ".join(material_dirty[:10]))
     revision = _git(repository, ["rev-parse", "HEAD"], log=log, deadline=deadline)
     committed_main = f"{revision}:main"
@@ -451,7 +458,7 @@ def _material_dirty_rows(status: str) -> list[str]:
         # the build: git archive supplies the committed byte-for-byte version.
         # Keep every other tracked change fail-closed.
         path = row[3:] if len(row) >= 4 and row[2] == " " else ""
-        if _TRACKED_BYTECODE.fullmatch(path):
+        if _GENERATED_BYTECODE.fullmatch(path):
             continue
         if row.startswith("?? ") and _IGNORED_UNTRACKED_OUTPUT.match(path):
             continue
