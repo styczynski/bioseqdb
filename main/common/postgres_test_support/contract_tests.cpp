@@ -25,6 +25,7 @@
 
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <poll.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -200,6 +201,249 @@ public:
 
 private:
     pid_t pid_{-1};
+};
+
+class multi_session_descendant_tree {
+public:
+    multi_session_descendant_tree() {
+        struct reported_tree {
+            pid_t descendant{-1};
+            pid_t grandchild{-1};
+            pid_t great_grandchild{-1};
+        };
+        int reported_pid[2]{-1, -1};
+        if (::pipe(reported_pid) != 0) {
+            throw std::runtime_error(
+                "cannot create multi-session descendant pipe");
+        }
+        root_pid_ = ::fork();
+        if (root_pid_ < 0) {
+            static_cast<void>(::close(reported_pid[0]));
+            static_cast<void>(::close(reported_pid[1]));
+            throw std::runtime_error(
+                "cannot fork multi-session tree root");
+        }
+        if (root_pid_ == 0) {
+            static_cast<void>(::close(reported_pid[0]));
+            const pid_t descendant = ::fork();
+            if (descendant < 0) {
+                ::_exit(125);
+            }
+            if (descendant == 0) {
+                if (::setsid() < 0) {
+                    ::_exit(125);
+                }
+                const pid_t grandchild = ::fork();
+                if (grandchild < 0) {
+                    ::_exit(125);
+                }
+                if (grandchild == 0) {
+                    const pid_t great_grandchild = ::fork();
+                    if (great_grandchild < 0) {
+                        ::_exit(125);
+                    }
+                    if (great_grandchild == 0) {
+                        static_cast<void>(
+                            ::close(reported_pid[1]));
+                        for (;;) {
+                            static_cast<void>(::pause());
+                        }
+                    }
+                    const reported_tree identity{
+                        .descendant = ::getppid(),
+                        .grandchild = ::getpid(),
+                        .great_grandchild = great_grandchild};
+                    ssize_t written{};
+                    do {
+                        written = ::write(
+                            reported_pid[1], &identity,
+                            sizeof(identity));
+                    } while (written < 0 && errno == EINTR);
+                    static_cast<void>(::close(reported_pid[1]));
+                    if (written
+                        != static_cast<ssize_t>(sizeof(identity))) {
+                        ::_exit(125);
+                    }
+                    int status{};
+                    pid_t waited{};
+                    do {
+                        waited = ::waitpid(
+                            great_grandchild, &status, 0);
+                    } while (waited < 0 && errno == EINTR);
+                    ::_exit(
+                        waited == great_grandchild ? 0 : 125);
+                }
+                static_cast<void>(::close(reported_pid[1]));
+                int status{};
+                pid_t waited{};
+                do {
+                    waited = ::waitpid(grandchild, &status, 0);
+                } while (waited < 0 && errno == EINTR);
+                ::_exit(waited == grandchild ? 0 : 125);
+            }
+            static_cast<void>(::close(reported_pid[1]));
+            int status{};
+            pid_t waited{};
+            do {
+                waited = ::waitpid(descendant, &status, 0);
+            } while (waited < 0 && errno == EINTR);
+            ::_exit(waited == descendant ? 0 : 125);
+        }
+
+        static_cast<void>(::close(reported_pid[1]));
+        pollfd readiness{
+            .fd = reported_pid[0],
+            .events = POLLIN,
+            .revents = 0};
+        int ready{};
+        do {
+            ready = ::poll(&readiness, 1, 2'000);
+        } while (ready < 0 && errno == EINTR);
+        ssize_t consumed = -1;
+        reported_tree identity;
+        if (ready == 1 && (readiness.revents & POLLIN) != 0) {
+            do {
+                consumed = ::read(
+                    reported_pid[0], &identity,
+                    sizeof(identity));
+            } while (consumed < 0 && errno == EINTR);
+        }
+        static_cast<void>(::close(reported_pid[0]));
+        if (consumed
+                != static_cast<ssize_t>(sizeof(identity))
+            || identity.descendant <= 1
+            || identity.grandchild <= 1
+            || identity.great_grandchild <= 1) {
+            terminate();
+            throw std::runtime_error(
+                "multi-session descendant did not report its PID");
+        }
+        descendant_pid_ = identity.descendant;
+        grandchild_pid_ = identity.grandchild;
+        great_grandchild_pid_ = identity.great_grandchild;
+    }
+
+    multi_session_descendant_tree(
+        const multi_session_descendant_tree&) = delete;
+    multi_session_descendant_tree& operator=(
+        const multi_session_descendant_tree&) = delete;
+
+    ~multi_session_descendant_tree() noexcept {
+        terminate();
+    }
+
+    [[nodiscard]] pid_t root_pid() const noexcept {
+        return root_pid_;
+    }
+
+    [[nodiscard]] pid_t descendant_pid() const noexcept {
+        return descendant_pid_;
+    }
+
+    [[nodiscard]] pid_t grandchild_pid() const noexcept {
+        return grandchild_pid_;
+    }
+
+    [[nodiscard]] pid_t great_grandchild_pid() const noexcept {
+        return great_grandchild_pid_;
+    }
+
+    void terminate() noexcept {
+        if (root_pid_ <= 1) {
+            return;
+        }
+        static_cast<void>(::kill(root_pid_, SIGSTOP));
+        const auto deadline =
+            std::chrono::steady_clock::now() + 1s;
+        std::optional<supervised_process_record> root;
+        do {
+            root = capture_supervised_process(
+                static_cast<std::uint64_t>(root_pid_));
+            if (root && supervised_process_stopped(*root)) {
+                break;
+            }
+            std::this_thread::sleep_for(5ms);
+        } while (std::chrono::steady_clock::now() < deadline);
+        if (root && supervised_process_stopped(*root)
+            && descendant_pid_ > 1) {
+            if (const auto descendant = capture_supervised_process(
+                    static_cast<std::uint64_t>(descendant_pid_))) {
+                const auto stopped =
+                    signal_supervised_child_while_parent_stopped(
+                        *root, *descendant, SIGSTOP);
+                const supervised_process_record pinned_descendant =
+                    stopped.identity_after.value_or(*descendant);
+                if (stopped.accepted() && grandchild_pid_ > 1) {
+                    if (const auto grandchild =
+                            capture_supervised_process(
+                                static_cast<std::uint64_t>(
+                                    grandchild_pid_))) {
+                        const auto stopped_grandchild =
+                            signal_supervised_child_while_parent_stopped(
+                                pinned_descendant,
+                                *grandchild,
+                                SIGSTOP);
+                        const supervised_process_record
+                            pinned_grandchild =
+                                stopped_grandchild.identity_after
+                                    .value_or(*grandchild);
+                        if (stopped_grandchild.accepted()
+                            && great_grandchild_pid_ > 1) {
+                            if (const auto great_grandchild =
+                                    capture_supervised_process(
+                                        static_cast<std::uint64_t>(
+                                            great_grandchild_pid_))) {
+                                static_cast<void>(
+                                    signal_supervised_child_while_parent_stopped(
+                                        pinned_grandchild,
+                                        *great_grandchild,
+                                        SIGKILL));
+                            }
+                        }
+                        static_cast<void>(
+                            signal_supervised_child_while_parent_stopped(
+                                pinned_descendant,
+                                pinned_grandchild,
+                                SIGKILL));
+                    }
+                }
+                static_cast<void>(
+                    signal_supervised_child_while_parent_stopped(
+                        *root, pinned_descendant, SIGKILL));
+            }
+        }
+        static_cast<void>(::kill(root_pid_, SIGCONT));
+        int status{};
+        pid_t waited = 0;
+        const auto reap_deadline =
+            std::chrono::steady_clock::now() + 2s;
+        while (waited == 0
+               && std::chrono::steady_clock::now()
+                   < reap_deadline) {
+            do {
+                waited = ::waitpid(root_pid_, &status, WNOHANG);
+            } while (waited < 0 && errno == EINTR);
+            if (waited == 0) {
+                std::this_thread::sleep_for(5ms);
+            }
+        }
+        if (waited == 0) {
+            static_cast<void>(::kill(root_pid_, SIGKILL));
+            do {
+                waited = ::waitpid(root_pid_, &status, 0);
+            } while (waited < 0 && errno == EINTR);
+        }
+        root_pid_ = -1;
+        descendant_pid_ = -1;
+        grandchild_pid_ = -1;
+        great_grandchild_pid_ = -1;
+    }
+
+private:
+    pid_t root_pid_{-1};
+    pid_t descendant_pid_{-1};
+    pid_t grandchild_pid_{-1};
+    pid_t great_grandchild_pid_{-1};
 };
 
 class temporary_preinstalled_stage_tree {
@@ -2565,6 +2809,230 @@ TEST_CASE("group signaling refuses a stale anchor while the PGID stays live",
     REQUIRE(signal_supervised_process_group(
         anchor_pid, replacement_anchors, SIGKILL));
     replacement.terminate_and_reap();
+}
+
+TEST_CASE("stopped parent pins exact cross-session descendant signaling",
+          "[postgres-test-support][unit][supervision][identity][session]") {
+    multi_session_descendant_tree tree;
+    const auto root = capture_supervised_process(
+        static_cast<std::uint64_t>(tree.root_pid()));
+    const auto descendant = capture_supervised_process(
+        static_cast<std::uint64_t>(tree.descendant_pid()));
+    REQUIRE(root.has_value());
+    REQUIRE(descendant.has_value());
+    REQUIRE(::getsid(static_cast<pid_t>(root->pid)) > 1);
+    REQUIRE(::getsid(static_cast<pid_t>(descendant->pid))
+            == static_cast<pid_t>(descendant->pid));
+    REQUIRE(::getsid(static_cast<pid_t>(descendant->pid))
+            != ::getsid(static_cast<pid_t>(root->pid)));
+    REQUIRE(descendant->process_group
+            == static_cast<std::int64_t>(descendant->pid));
+
+    REQUIRE(::kill(tree.root_pid(), SIGSTOP) == 0);
+    const auto root_stop_deadline =
+        std::chrono::steady_clock::now() + 1s;
+    while (!supervised_process_stopped(*root)
+           && std::chrono::steady_clock::now()
+               < root_stop_deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(supervised_process_stopped(*root));
+    REQUIRE(supervised_child_is_pinned(*root, *descendant));
+
+    const std::array descendant_anchor{*descendant};
+    REQUIRE_FALSE(signal_supervised_process_group(
+        descendant->process_group, descendant_anchor, SIGSTOP));
+    CHECK_FALSE(supervised_process_stopped(*descendant));
+
+    supervised_process_record stale = *descendant;
+    stale.start_token += "-reused";
+    CHECK(signal_supervised_child_while_parent_stopped(
+              *root, stale, SIGSTOP)
+              .outcome
+          == supervised_child_signal_outcome::rejected);
+    CHECK_FALSE(supervised_process_stopped(*descendant));
+    stale = *descendant;
+    stale.executable += ".reused";
+    CHECK(signal_supervised_child_while_parent_stopped(
+              *root, stale, SIGSTOP)
+              .outcome
+          == supervised_child_signal_outcome::rejected);
+    CHECK_FALSE(supervised_process_stopped(*descendant));
+    supervised_process_record stale_parent = *root;
+    stale_parent.start_token += "-reused";
+    CHECK(signal_supervised_child_while_parent_stopped(
+              stale_parent, *descendant, SIGSTOP)
+              .outcome
+          == supervised_child_signal_outcome::rejected);
+    CHECK_FALSE(supervised_process_stopped(*descendant));
+
+    const auto stopped =
+        signal_supervised_child_while_parent_stopped(
+            *root, *descendant, SIGSTOP);
+    REQUIRE(stopped.accepted());
+    REQUIRE(supervised_process_stopped(*descendant));
+    const auto continued =
+        signal_supervised_child_while_parent_stopped(
+            *root,
+            stopped.identity_after.value_or(*descendant),
+            SIGCONT);
+    REQUIRE(continued.accepted());
+    CHECK_FALSE(supervised_process_stopped(*descendant));
+    const auto restopped =
+        signal_supervised_child_while_parent_stopped(
+            *root,
+            continued.identity_after.value_or(*descendant),
+            SIGSTOP);
+    REQUIRE(restopped.accepted());
+    REQUIRE(supervised_process_stopped(*descendant));
+    const auto grandchild = capture_supervised_process(
+        static_cast<std::uint64_t>(tree.grandchild_pid()));
+    REQUIRE(grandchild.has_value());
+    REQUIRE(supervised_child_is_pinned(
+        restopped.identity_after.value_or(*descendant),
+        *grandchild));
+    const auto stopped_grandchild =
+        signal_supervised_child_while_parent_stopped(
+            restopped.identity_after.value_or(*descendant),
+            *grandchild,
+            SIGSTOP);
+    REQUIRE(stopped_grandchild.accepted());
+    const auto great_grandchild = capture_supervised_process(
+        static_cast<std::uint64_t>(
+            tree.great_grandchild_pid()));
+    REQUIRE(great_grandchild.has_value());
+    const auto killed =
+        signal_supervised_child_while_parent_stopped(
+            stopped_grandchild.identity_after.value_or(*grandchild),
+            *great_grandchild,
+            SIGKILL);
+    REQUIRE(killed.delivered());
+}
+
+TEST_CASE("controller fault traversal preserves topology and commit boundary",
+          "[postgres-test-support][unit][supervision][signal][topology]") {
+    multi_session_descendant_tree tree;
+    const auto topology = sample_postmaster_process_tree(
+        static_cast<std::uint64_t>(tree.root_pid()));
+    REQUIRE(topology.has_value());
+    REQUIRE(topology->size() == 4U);
+
+    const auto complete = evaluate_process_tree_controller_contract(
+        *topology,
+        static_cast<std::uint64_t>(tree.root_pid()),
+        process_tree_controller_fault::none);
+    REQUIRE(complete.freeze_succeeded);
+    CHECK(complete.stop_order
+          == (std::vector<std::uint64_t>{
+              static_cast<std::uint64_t>(tree.root_pid()),
+              static_cast<std::uint64_t>(tree.descendant_pid()),
+              static_cast<std::uint64_t>(tree.grandchild_pid()),
+              static_cast<std::uint64_t>(
+                  tree.great_grandchild_pid())}));
+    CHECK(complete.kill_order
+          == (std::vector<std::uint64_t>{
+              static_cast<std::uint64_t>(
+                  tree.great_grandchild_pid()),
+              static_cast<std::uint64_t>(tree.grandchild_pid()),
+              static_cast<std::uint64_t>(tree.descendant_pid()),
+              static_cast<std::uint64_t>(tree.root_pid())}));
+    CHECK(complete.termination.outcome
+          == process_tree_termination_outcome::
+              committed_complete);
+    CHECK_FALSE(complete.rollback_attempted_after_commit);
+
+    const auto stop_failure =
+        evaluate_process_tree_controller_contract(
+            *topology,
+            static_cast<std::uint64_t>(tree.root_pid()),
+            process_tree_controller_fault::
+                reject_second_descendant_stop);
+    CHECK_FALSE(stop_failure.freeze_succeeded);
+    REQUIRE(stop_failure.resume_attempted);
+    CHECK(stop_failure.resume_complete);
+    CHECK(stop_failure.resume_order
+          == (std::vector<std::uint64_t>{
+              static_cast<std::uint64_t>(tree.descendant_pid()),
+              static_cast<std::uint64_t>(tree.root_pid())}));
+    CHECK(stop_failure.termination.outcome
+          == process_tree_termination_outcome::
+              precommit_failure);
+
+    const auto identity_drift =
+        evaluate_process_tree_controller_contract(
+            *topology,
+            static_cast<std::uint64_t>(tree.root_pid()),
+            process_tree_controller_fault::
+                identity_drift_before_stop);
+    CHECK_FALSE(identity_drift.freeze_succeeded);
+    REQUIRE(identity_drift.resume_attempted);
+    CHECK(identity_drift.resume_order
+          == (std::vector<std::uint64_t>{
+              static_cast<std::uint64_t>(tree.root_pid())}));
+
+    const auto partial_kill =
+        evaluate_process_tree_controller_contract(
+            *topology,
+            static_cast<std::uint64_t>(tree.root_pid()),
+            process_tree_controller_fault::
+                reject_second_descendant_kill);
+    REQUIRE(partial_kill.freeze_succeeded);
+    CHECK(partial_kill.termination.outcome
+          == process_tree_termination_outcome::
+              committed_incomplete);
+    CHECK(partial_kill.termination.delivered_kills == 1U);
+    CHECK_FALSE(partial_kill.termination.root_group_signaled);
+    CHECK(partial_kill.kill_order
+          == (std::vector<std::uint64_t>{
+              static_cast<std::uint64_t>(
+                  tree.great_grandchild_pid())}));
+    CHECK(std::find(
+              partial_kill.kill_order.begin(),
+              partial_kill.kill_order.end(),
+              static_cast<std::uint64_t>(tree.descendant_pid()))
+          == partial_kill.kill_order.end());
+    CHECK_FALSE(partial_kill.resume_attempted);
+    CHECK_FALSE(partial_kill.rollback_attempted_after_commit);
+
+    const auto root_kill_failure =
+        evaluate_process_tree_controller_contract(
+            *topology,
+            static_cast<std::uint64_t>(tree.root_pid()),
+            process_tree_controller_fault::
+                reject_root_group_kill);
+    REQUIRE(root_kill_failure.freeze_succeeded);
+    CHECK(root_kill_failure.termination.outcome
+          == process_tree_termination_outcome::
+              committed_incomplete);
+    CHECK_FALSE(
+        root_kill_failure.termination.root_group_signaled);
+    REQUIRE_FALSE(root_kill_failure.kill_order.empty());
+    CHECK(root_kill_failure.kill_order.back()
+          == static_cast<std::uint64_t>(
+              tree.descendant_pid()));
+    CHECK_FALSE(root_kill_failure.resume_attempted);
+    CHECK_FALSE(
+        root_kill_failure.rollback_attempted_after_commit);
+}
+
+TEST_CASE("termination commit tracker rejects rollback after partial kill",
+          "[postgres-test-support][unit][supervision][signal][commit]") {
+    process_tree_termination_progress precommit;
+    precommit.record_failure();
+    CHECK(precommit.finish(false, false).outcome
+          == process_tree_termination_outcome::precommit_failure);
+
+    process_tree_termination_progress injected_partial_kill;
+    injected_partial_kill.record_kill_delivery();
+    injected_partial_kill.record_failure();
+    CHECK(injected_partial_kill.delivered_kills() == 1U);
+    const auto partial =
+        injected_partial_kill.finish(false, false);
+    CHECK(partial.delivered_kills == 1U);
+    CHECK_FALSE(partial.root_group_signaled);
+    CHECK(partial.outcome
+          == process_tree_termination_outcome::
+              committed_incomplete);
 }
 
 TEST_CASE("postmaster identity polling observes a delayed pidfile",

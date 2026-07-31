@@ -52,6 +52,16 @@ struct resource_sampling_report {
     std::vector<resource_phase_boundary> phase_boundaries;
 };
 
+/// @brief One parent-linked member of a complete postmaster tree snapshot.
+struct postmaster_process_tree_member {
+    std::uint64_t pid{};
+    std::uint64_t parent_pid{};
+
+    friend bool operator==(
+        const postmaster_process_tree_member&,
+        const postmaster_process_tree_member&) = default;
+};
+
 }  // namespace bioseq::postgres_test
 
 namespace bioseq::postgres_test::resource_detail {
@@ -350,17 +360,36 @@ sample_postmaster_process_tree_rss(std::uint64_t postmaster_pid) {
 }
 
 /// @brief Returns a complete postmaster process tree for watchdog cleanup.
-[[nodiscard]] inline std::optional<std::vector<std::uint64_t>>
-sample_postmaster_process_tree_pids(std::uint64_t postmaster_pid) {
+[[nodiscard]] inline std::optional<
+    std::vector<postmaster_process_tree_member>>
+sample_postmaster_process_tree(std::uint64_t postmaster_pid) {
     resource_detail::process_snapshot_result snapshot =
         resource_detail::process_snapshot(postmaster_pid);
     if (!snapshot.complete) {
         return std::nullopt;
     }
-    std::vector<std::uint64_t> pids;
-    pids.reserve(snapshot.processes.size());
+    std::vector<postmaster_process_tree_member> members;
+    members.reserve(snapshot.processes.size());
     for (const resource_detail::process_entry& process :
          snapshot.processes) {
+        members.push_back(postmaster_process_tree_member{
+            .pid = process.pid,
+            .parent_pid = process.parent_pid});
+    }
+    return members;
+}
+
+/// @brief Returns only the PIDs from a complete postmaster tree snapshot.
+[[nodiscard]] inline std::optional<std::vector<std::uint64_t>>
+sample_postmaster_process_tree_pids(std::uint64_t postmaster_pid) {
+    const auto snapshot =
+        sample_postmaster_process_tree(postmaster_pid);
+    if (!snapshot) {
+        return std::nullopt;
+    }
+    std::vector<std::uint64_t> pids;
+    pids.reserve(snapshot->size());
+    for (const postmaster_process_tree_member& process : *snapshot) {
         pids.push_back(process.pid);
     }
     return pids;

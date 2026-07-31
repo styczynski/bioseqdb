@@ -85,6 +85,27 @@ struct cluster_cleanup_result {
     std::string detail;
 };
 
+/// @brief Deterministic fault points for the topology-controller contract.
+enum class process_tree_controller_fault {
+    none,
+    reject_second_descendant_stop,
+    identity_drift_before_stop,
+    reject_second_descendant_kill,
+    reject_root_group_kill,
+};
+
+/// @brief Trace produced by the non-signalling controller contract model.
+struct process_tree_controller_contract_trace {
+    bool freeze_succeeded{};
+    bool resume_attempted{};
+    bool resume_complete{};
+    bool rollback_attempted_after_commit{};
+    std::vector<std::uint64_t> stop_order;
+    std::vector<std::uint64_t> resume_order;
+    std::vector<std::uint64_t> kill_order;
+    process_tree_termination_result termination;
+};
+
 }  // namespace bioseq::postgres_test
 
 namespace bioseq::postgres_test::cluster_detail {
@@ -358,10 +379,33 @@ inline void validate_library_name(std::string_view name) {
 }
 
 /// @brief PID-reuse-resistant snapshot of a stable postmaster process tree.
+struct supervised_process_tree_member {
+    supervised_process_record process;
+    std::uint64_t parent_pid{};
+    std::size_t depth{};
+};
+
 struct supervised_process_tree {
     supervised_process_record postmaster;
-    std::vector<supervised_process_record> members;
+    std::vector<supervised_process_tree_member> members;
     std::vector<std::int64_t> process_groups;
+};
+
+enum class process_tree_freeze_outcome {
+    frozen,
+    failed_resumed,
+    failed_resume_incomplete,
+};
+
+struct process_tree_freeze_result {
+    process_tree_freeze_outcome outcome{
+        process_tree_freeze_outcome::failed_resumed};
+    std::optional<supervised_process_tree> tree;
+
+    [[nodiscard]] bool frozen() const noexcept {
+        return outcome == process_tree_freeze_outcome::frozen
+            && tree.has_value();
+    }
 };
 
 /// @brief Matches the captured run even if that process changed groups.
@@ -372,42 +416,117 @@ struct supervised_process_tree {
     return current && current->start_token == process.start_token;
 }
 
-/// @brief Captures the complete tree twice so transient forks cannot be missed.
+[[nodiscard]] inline bool same_process_identity(
+    const supervised_process_record& left,
+    const supervised_process_record& right) noexcept {
+    return left.pid == right.pid
+        && left.start_token == right.start_token
+        && left.executable == right.executable;
+}
+
+inline void normalize_process_tree_snapshot(
+    std::vector<postmaster_process_tree_member>& snapshot) {
+    std::sort(
+        snapshot.begin(), snapshot.end(),
+        [](const postmaster_process_tree_member& left,
+           const postmaster_process_tree_member& right) {
+            return std::pair{left.pid, left.parent_pid}
+                < std::pair{right.pid, right.parent_pid};
+        });
+}
+
+[[nodiscard]] inline std::optional<std::vector<std::size_t>>
+process_tree_depths(
+    const std::vector<postmaster_process_tree_member>& snapshot,
+    std::uint64_t root_pid) {
+    std::vector<std::optional<std::size_t>> pending(snapshot.size());
+    const auto root = std::find_if(
+        snapshot.begin(), snapshot.end(),
+        [root_pid](const postmaster_process_tree_member& member) {
+            return member.pid == root_pid;
+        });
+    if (root == snapshot.end()) {
+        return std::nullopt;
+    }
+    pending[static_cast<std::size_t>(
+        std::distance(snapshot.begin(), root))] = 0U;
+    for (std::size_t pass = 0; pass < snapshot.size(); ++pass) {
+        bool progressed = false;
+        for (std::size_t index = 0; index < snapshot.size(); ++index) {
+            if (pending[index]) {
+                continue;
+            }
+            const auto parent = std::find_if(
+                snapshot.begin(), snapshot.end(),
+                [&snapshot, index](
+                    const postmaster_process_tree_member& member) {
+                    return member.pid == snapshot[index].parent_pid;
+                });
+            if (parent == snapshot.end()) {
+                return std::nullopt;
+            }
+            const std::size_t parent_index =
+                static_cast<std::size_t>(
+                    std::distance(snapshot.begin(), parent));
+            if (pending[parent_index]) {
+                pending[index] = *pending[parent_index] + 1U;
+                progressed = true;
+            }
+        }
+        if (!progressed) {
+            break;
+        }
+    }
+    std::vector<std::size_t> depths;
+    depths.reserve(pending.size());
+    for (const auto depth : pending) {
+        if (!depth) {
+            return std::nullopt;
+        }
+        depths.push_back(*depth);
+    }
+    return depths;
+}
+
+/// @brief Captures the complete parent-linked tree twice around identities.
 [[nodiscard]] inline std::optional<supervised_process_tree>
 capture_process_tree(
     const supervised_process_record& anchor) noexcept try {
     if (!process_identity_matches(anchor)) {
         return std::nullopt;
     }
-    for (int attempt = 0; attempt != 20; ++attempt) {
-        auto first_pids =
-            sample_postmaster_process_tree_pids(anchor.pid);
-        if (!first_pids
-            || std::find(
-                   first_pids->begin(), first_pids->end(), anchor.pid)
-                == first_pids->end()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    for (int attempt = 0; attempt != 10; ++attempt) {
+        auto first = sample_postmaster_process_tree(anchor.pid);
+        if (!first) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
-        std::sort(first_pids->begin(), first_pids->end());
-        first_pids->erase(
-            std::unique(first_pids->begin(), first_pids->end()),
-            first_pids->end());
-
+        normalize_process_tree_snapshot(*first);
+        const auto depths = process_tree_depths(*first, anchor.pid);
+        if (!depths) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
         supervised_process_tree tree;
-        tree.members.reserve(first_pids->size());
+        tree.members.reserve(first->size());
         bool complete = true;
-        for (const std::uint64_t pid : *first_pids) {
+        for (std::size_t index = 0; index < first->size(); ++index) {
+            const postmaster_process_tree_member topology =
+                (*first)[index];
             const auto member = capture_supervised_process(
-                pid,
-                pid == anchor.pid ? anchor.executable
-                                  : std::filesystem::path{},
+                topology.pid,
+                topology.pid == anchor.pid
+                    ? anchor.executable
+                    : std::filesystem::path{},
                 anchor.data_directory);
             if (!member) {
                 complete = false;
                 break;
             }
-            tree.members.push_back(*member);
+            tree.members.push_back(supervised_process_tree_member{
+                .process = *member,
+                .parent_pid = topology.parent_pid,
+                .depth = (*depths)[index]});
             if (std::find(
                     tree.process_groups.begin(),
                     tree.process_groups.end(),
@@ -415,164 +534,326 @@ capture_process_tree(
                 == tree.process_groups.end()) {
                 tree.process_groups.push_back(member->process_group);
             }
-            if (pid == anchor.pid) {
+            if (topology.pid == anchor.pid) {
                 tree.postmaster = *member;
             }
         }
         if (!complete || tree.postmaster.pid != anchor.pid
             || tree.postmaster.start_token != anchor.start_token
             || tree.postmaster.executable != anchor.executable) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
 
-        auto second_pids =
-            sample_postmaster_process_tree_pids(anchor.pid);
-        if (!second_pids) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        auto second = sample_postmaster_process_tree(anchor.pid);
+        if (!second) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
-        std::sort(second_pids->begin(), second_pids->end());
-        second_pids->erase(
-            std::unique(second_pids->begin(), second_pids->end()),
-            second_pids->end());
-        if (*first_pids == *second_pids) {
+        normalize_process_tree_snapshot(*second);
+        if (*first == *second) {
+            std::sort(
+                tree.members.begin(), tree.members.end(),
+                [](const supervised_process_tree_member& left,
+                   const supervised_process_tree_member& right) {
+                    return std::pair{
+                               left.depth, left.process.pid}
+                        < std::pair{
+                               right.depth, right.process.pid};
+                });
             return tree;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     return std::nullopt;
 } catch (...) {
     return std::nullopt;
 }
 
-/// @brief Signals groups while a verified sentinel pins each PGID against reuse.
-[[nodiscard]] inline bool signal_anchored_process_groups(
+/// @brief Signals the broker-owned postmaster group while its leader pins reuse.
+[[nodiscard]] inline bool signal_owned_postmaster_group(
     const supervised_process_tree& tree,
     int signal_number,
     spawned_process* owned_group_leader = nullptr) noexcept {
-    bool succeeded = true;
-    for (const std::int64_t group : tree.process_groups) {
-        const bool signaled =
-            owned_group_leader != nullptr
-                && owned_group_leader->process_group() == group
-            ? owned_group_leader
-                  ->signal_owned_group_while_unreaped(signal_number)
-            : signal_supervised_process_group(
-                  group, tree.members, signal_number);
-        succeeded = signaled && succeeded;
+    return owned_group_leader != nullptr
+        && owned_group_leader->process_group()
+            == tree.postmaster.process_group
+        && owned_group_leader
+            ->signal_owned_group_while_unreaped(signal_number);
+}
+
+[[nodiscard]] inline const supervised_process_tree_member*
+find_tree_member(
+    const supervised_process_tree& tree,
+    std::uint64_t pid) noexcept {
+    const auto member = std::find_if(
+        tree.members.begin(), tree.members.end(),
+        [pid](const supervised_process_tree_member& candidate) {
+            return candidate.process.pid == pid;
+        });
+    return member == tree.members.end() ? nullptr : &*member;
+}
+
+inline void merge_tree_member(
+    supervised_process_tree& tree,
+    const supervised_process_tree_member& member) {
+    const auto current = std::find_if(
+        tree.members.begin(), tree.members.end(),
+        [&member](const supervised_process_tree_member& candidate) {
+            return same_process_identity(
+                candidate.process, member.process);
+        });
+    if (current == tree.members.end()) {
+        tree.members.push_back(member);
+    } else {
+        *current = member;
     }
-    return succeeded;
+    if (std::find(
+            tree.process_groups.begin(), tree.process_groups.end(),
+            member.process.process_group)
+        == tree.process_groups.end()) {
+        tree.process_groups.push_back(member.process.process_group);
+    }
+    std::sort(
+        tree.members.begin(), tree.members.end(),
+        [](const supervised_process_tree_member& left,
+           const supervised_process_tree_member& right) {
+            return std::pair{left.depth, left.process.pid}
+                < std::pair{right.depth, right.process.pid};
+        });
+}
+
+[[nodiscard]] inline bool same_captured_tree(
+    const supervised_process_tree& left,
+    const supervised_process_tree& right) noexcept {
+    if (left.members.size() != right.members.size()) {
+        return false;
+    }
+    for (const supervised_process_tree_member& member : left.members) {
+        const auto other = std::find_if(
+            right.members.begin(), right.members.end(),
+            [&member](const supervised_process_tree_member& candidate) {
+                return same_process_identity(
+                           member.process, candidate.process)
+                    && member.parent_pid == candidate.parent_pid
+                    && member.depth == candidate.depth;
+            });
+        if (other == right.members.end()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename DescendantStop>
+[[nodiscard]] inline bool stop_process_tree_parent_first(
+    supervised_process_tree& tree,
+    DescendantStop&& stop_descendant) {
+    for (supervised_process_tree_member& member : tree.members) {
+        if (same_process_identity(
+                member.process, tree.postmaster)) {
+            continue;
+        }
+        const supervised_child_signal_result stopped =
+            stop_descendant(member);
+        if (stopped.outcome
+            != supervised_child_signal_outcome::delivered) {
+            return false;
+        }
+        if (stopped.identity_after) {
+            member.process = *stopped.identity_after;
+        }
+    }
+    return true;
+}
+
+template <typename DescendantResume, typename RootResume>
+[[nodiscard]] inline bool resume_process_tree_child_first(
+    const supervised_process_tree& tree,
+    DescendantResume&& resume_descendant,
+    RootResume&& resume_root) noexcept {
+    for (auto iterator = tree.members.rbegin();
+         iterator != tree.members.rend(); ++iterator) {
+        if (same_process_identity(
+                iterator->process, tree.postmaster)) {
+            continue;
+        }
+        if (!resume_descendant(*iterator)) {
+            return false;
+        }
+    }
+    return resume_root();
+}
+
+/// @brief Resumes children before parents and the broker-owned group last.
+[[nodiscard]] inline bool resume_process_tree(
+    const supervised_process_tree& tree,
+    spawned_process* owned_group_leader = nullptr) noexcept {
+    const bool root_resumed =
+        resume_process_tree_child_first(
+            tree,
+            [&tree](
+                const supervised_process_tree_member& member) noexcept {
+                const auto* parent =
+                    find_tree_member(tree, member.parent_pid);
+                if (parent == nullptr) {
+                    return false;
+                }
+                if (supervised_process_definitely_absent(
+                        member.process)
+                    || supervised_child_is_terminal(
+                        parent->process, member.process)) {
+                    return true;
+                }
+                return signal_supervised_child_while_parent_stopped(
+                           parent->process, member.process, SIGCONT)
+                    .accepted();
+            },
+            [&tree, owned_group_leader]() noexcept {
+                return signal_owned_postmaster_group(
+                    tree, SIGCONT, owned_group_leader);
+            });
+    if (!root_resumed) {
+        return false;
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(200);
+    while (process_identity_matches(tree.postmaster)
+           && supervised_process_stopped(tree.postmaster)
+           && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return !process_identity_matches(tree.postmaster)
+        || !supervised_process_stopped(tree.postmaster);
+}
+
+[[nodiscard]] inline process_tree_freeze_result failed_freeze(
+    supervised_process_tree tree,
+    spawned_process* owned_group_leader) noexcept {
+    const bool resumed =
+        resume_process_tree(tree, owned_group_leader);
+    return {
+        .outcome = resumed
+            ? process_tree_freeze_outcome::failed_resumed
+            : process_tree_freeze_outcome::failed_resume_incomplete,
+        .tree = std::move(tree)};
 }
 
 /// @brief Freezes a stable anchored tree before any force-cleanup decision.
-[[nodiscard]] inline std::optional<supervised_process_tree>
+[[nodiscard]] inline process_tree_freeze_result
 freeze_process_tree(
     const supervised_process_record& anchor,
     spawned_process* owned_group_leader = nullptr) noexcept {
-    std::vector<supervised_process_record> stopped;
     supervised_process_tree frozen;
     try {
         frozen.postmaster = anchor;
-        frozen.members.push_back(anchor);
+        frozen.members.push_back(supervised_process_tree_member{
+            .process = anchor, .parent_pid = 0U, .depth = 0U});
         frozen.process_groups.push_back(anchor.process_group);
-        stopped.push_back(anchor);
-        if (!signal_anchored_process_groups(
+        if (!signal_owned_postmaster_group(
                 frozen, SIGSTOP, owned_group_leader)) {
-            return std::nullopt;
+            return failed_freeze(
+                std::move(frozen), owned_group_leader);
         }
-        for (int attempt = 0; attempt != 50; ++attempt) {
-            const auto tree = capture_process_tree(anchor);
+        const auto root_stop_deadline =
+            std::chrono::steady_clock::now()
+            + std::chrono::milliseconds(200);
+        while (!supervised_process_stopped(anchor)
+               && std::chrono::steady_clock::now()
+                   < root_stop_deadline) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(5));
+        }
+        if (!supervised_process_stopped(anchor)) {
+            return failed_freeze(
+                std::move(frozen), owned_group_leader);
+        }
+
+        for (int attempt = 0; attempt != 20; ++attempt) {
+            auto tree = capture_process_tree(anchor);
             if (!tree) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(5));
                 continue;
             }
-            for (const supervised_process_record& member : tree->members) {
-                const auto known = std::find_if(
-                    stopped.begin(), stopped.end(),
-                    [&member](const supervised_process_record& candidate) {
-                        return candidate.pid == member.pid
-                            && candidate.start_token == member.start_token;
+            const bool stopped =
+                stop_process_tree_parent_first(
+                    *tree,
+                    [&tree, &frozen](
+                        const supervised_process_tree_member& member) {
+                        const auto* parent =
+                            find_tree_member(
+                                *tree, member.parent_pid);
+                        const auto result = parent == nullptr
+                            ? supervised_child_signal_result{}
+                            : signal_supervised_child_while_parent_stopped(
+                                  parent->process,
+                                  member.process,
+                                  SIGSTOP);
+                        if (result.outcome
+                            == supervised_child_signal_outcome::
+                                delivered) {
+                            supervised_process_tree_member
+                                stopped_member = member;
+                            if (result.identity_after) {
+                                stopped_member.process =
+                                    *result.identity_after;
+                            }
+                            merge_tree_member(
+                                frozen, stopped_member);
+                        }
+                        return result;
                     });
-                if (known == stopped.end()) {
-                    stopped.push_back(member);
-                    frozen.members.push_back(member);
-                }
-                if (std::find(
-                        frozen.process_groups.begin(),
-                        frozen.process_groups.end(),
-                        member.process_group)
-                    == frozen.process_groups.end()) {
-                    frozen.process_groups.push_back(member.process_group);
-                }
+            if (!stopped) {
+                return failed_freeze(
+                    std::move(frozen), owned_group_leader);
             }
-            if (!signal_anchored_process_groups(
-                    frozen, SIGSTOP, owned_group_leader)) {
-                static_cast<void>(
-                    signal_anchored_process_groups(
-                        frozen, SIGCONT, owned_group_leader));
-                return std::nullopt;
+            for (const supervised_process_tree_member& member :
+                 tree->members) {
+                merge_tree_member(frozen, member);
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(5));
             const auto confirmation = capture_process_tree(anchor);
             if (!confirmation
-                || confirmation->members.size() != tree->members.size()) {
+                || !same_captured_tree(*tree, *confirmation)) {
                 continue;
             }
-            bool identical_and_stopped = true;
-            for (std::size_t index = 0;
-                 index < tree->members.size(); ++index) {
-                const supervised_process_record& before =
-                    tree->members[index];
-                const supervised_process_record& after =
-                    confirmation->members[index];
-                if (before.pid != after.pid
-                    || before.start_token != after.start_token
-                    || before.process_group != after.process_group
-                    || !supervised_process_stopped(after)) {
-                    identical_and_stopped = false;
-                    break;
+            const bool all_stopped = std::all_of(
+                confirmation->members.begin(),
+                confirmation->members.end(),
+                [](const supervised_process_tree_member& member) {
+                    return supervised_process_stopped(
+                        member.process);
+                });
+            if (all_stopped) {
+                for (const auto& member : confirmation->members) {
+                    merge_tree_member(frozen, member);
                 }
-            }
-            if (identical_and_stopped) {
-                return frozen;
+                frozen.postmaster = confirmation->postmaster;
+                return {
+                    .outcome =
+                        process_tree_freeze_outcome::frozen,
+                    .tree = std::move(frozen)};
             }
         }
-        static_cast<void>(
-            signal_anchored_process_groups(
-                frozen, SIGCONT, owned_group_leader));
-        return std::nullopt;
+        return failed_freeze(
+            std::move(frozen), owned_group_leader);
     } catch (...) {
-        static_cast<void>(
-            signal_anchored_process_groups(
-                frozen, SIGCONT, owned_group_leader));
-        return std::nullopt;
+        return failed_freeze(
+            std::move(frozen), owned_group_leader);
     }
 }
 
-/// @brief Freezes a previously captured tree after its postmaster has exited.
-[[nodiscard]] inline std::optional<supervised_process_tree>
+/// @brief Refuses historical captures that cannot prove a live fixed point.
+[[nodiscard]] inline process_tree_freeze_result
 freeze_captured_process_tree(
-    const supervised_process_tree& captured,
-    spawned_process* owned_group_leader = nullptr) noexcept {
-    if (!signal_anchored_process_groups(
-            captured, SIGSTOP, owned_group_leader)) {
-        static_cast<void>(
-            signal_anchored_process_groups(
-                captured, SIGCONT, owned_group_leader));
-        return std::nullopt;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    for (const supervised_process_record& member : captured.members) {
-        if (process_identity_matches(member)
-            && !supervised_process_stopped(member)) {
-            static_cast<void>(
-                signal_anchored_process_groups(
-                    captured, SIGCONT, owned_group_leader));
-            return std::nullopt;
-        }
-    }
-    return captured;
+    const supervised_process_tree&,
+    spawned_process* = nullptr) noexcept {
+    return {
+        .outcome = process_tree_freeze_outcome::failed_resumed,
+        .tree = std::nullopt};
 }
 
 /// @brief True only after every exact captured identity is gone.
@@ -580,8 +861,8 @@ freeze_captured_process_tree(
     const supervised_process_tree& tree) noexcept {
     return std::all_of(
         tree.members.begin(), tree.members.end(),
-        [](const supervised_process_record& member) {
-            return !process_identity_matches(member);
+        [](const supervised_process_tree_member& member) {
+            return !process_identity_matches(member.process);
         });
 }
 
@@ -628,33 +909,270 @@ freeze_captured_process_tree(
     return process_tree_absent(tree);
 }
 
-/// @brief Force-kills only frozen groups pinned against PGID reuse.
-[[nodiscard]] inline bool force_kill_process_tree(
+template <typename DescendantKill, typename RootKill>
+[[nodiscard]] inline process_tree_termination_result
+terminate_process_tree_child_first(
     const supervised_process_tree& tree,
-    spawned_process* owned_group_leader = nullptr) noexcept {
-    for (const supervised_process_record& member : tree.members) {
-        if (process_identity_matches(member)
-            && !supervised_process_stopped(member)) {
-            return false;
+    DescendantKill&& kill_descendant,
+    RootKill&& kill_root) noexcept {
+    process_tree_termination_progress progress;
+    for (auto iterator = tree.members.rbegin();
+         iterator != tree.members.rend(); ++iterator) {
+        if (same_process_identity(
+                iterator->process, tree.postmaster)) {
+            continue;
+        }
+        const supervised_child_signal_result killed =
+            kill_descendant(*iterator);
+        if (killed.delivered()) {
+            progress.record_kill_delivery();
+        } else if (!killed.accepted()) {
+            progress.record_failure();
+            return progress.finish(false, false);
         }
     }
-    bool succeeded = true;
-    for (const std::int64_t group : tree.process_groups) {
-        const bool signaled =
-            owned_group_leader != nullptr
-                && owned_group_leader->process_group() == group
-            ? owned_group_leader
-                  ->signal_owned_group_while_unreaped(SIGKILL)
-            : signal_supervised_process_group(
-                  group, tree.members, SIGKILL);
-        succeeded = signaled && succeeded;
+    if (progress.failed()) {
+        return progress.finish(true, false);
     }
-    return succeeded;
+    const bool root_group_signaled = kill_root();
+    if (root_group_signaled) {
+        progress.record_kill_delivery();
+    } else {
+        progress.record_failure();
+    }
+    return progress.finish(true, root_group_signaled);
+}
+
+/// @brief Crosses the commit boundary at first SIGKILL, then never rolls back.
+[[nodiscard]] inline process_tree_termination_result
+force_kill_process_tree(
+    const supervised_process_tree& tree,
+    spawned_process* owned_group_leader = nullptr) noexcept {
+    process_tree_termination_progress progress;
+    if (owned_group_leader == nullptr
+        || owned_group_leader->process_group()
+            != tree.postmaster.process_group
+        || !process_identity_matches(tree.postmaster)
+        || !supervised_process_stopped(tree.postmaster)) {
+        progress.record_failure();
+        return progress.finish(false, false);
+    }
+    for (const supervised_process_tree_member& member : tree.members) {
+        if (same_process_identity(
+                member.process, tree.postmaster)) {
+            continue;
+        }
+        const auto* parent = find_tree_member(tree, member.parent_pid);
+        if (parent == nullptr) {
+            progress.record_failure();
+            return progress.finish(false, false);
+        }
+        if (supervised_process_definitely_absent(member.process)
+            || supervised_child_is_terminal(
+                parent->process, member.process)) {
+            continue;
+        }
+        if (!supervised_child_is_pinned(
+                parent->process, member.process)) {
+            progress.record_failure();
+            return progress.finish(false, false);
+        }
+    }
+
+    return terminate_process_tree_child_first(
+        tree,
+        [&tree](
+            const supervised_process_tree_member& member) noexcept {
+            const auto* parent =
+                find_tree_member(tree, member.parent_pid);
+            if (parent != nullptr
+                && (supervised_process_definitely_absent(
+                        member.process)
+                    || supervised_child_is_terminal(
+                        parent->process, member.process))) {
+                return supervised_child_signal_result{
+                    .outcome = supervised_child_signal_outcome::
+                        target_absent};
+            }
+            return parent == nullptr
+                ? supervised_child_signal_result{}
+                : signal_supervised_child_while_parent_stopped(
+                      parent->process, member.process, SIGKILL);
+        },
+        [&tree, owned_group_leader]() noexcept {
+            return signal_owned_postmaster_group(
+                tree, SIGKILL, owned_group_leader);
+        });
 }
 
 }  // namespace bioseq::postgres_test::cluster_detail
 
 export namespace bioseq::postgres_test {
+
+/// @brief Exercises controller ordering/commit policy without sending signals.
+///
+/// The caller supplies a real complete topology snapshot; injected outcomes
+/// then traverse the same `(depth, pid)` ordering and shared commit tracker as
+/// the signalling controller.
+[[nodiscard]] inline process_tree_controller_contract_trace
+evaluate_process_tree_controller_contract(
+    std::vector<postmaster_process_tree_member> topology,
+    std::uint64_t root_pid,
+    process_tree_controller_fault fault) {
+    process_tree_controller_contract_trace trace;
+    cluster_detail::normalize_process_tree_snapshot(topology);
+    const auto depths =
+        cluster_detail::process_tree_depths(topology, root_pid);
+    if (!depths) {
+        return trace;
+    }
+    struct ordered_member {
+        std::uint64_t pid{};
+        std::size_t depth{};
+    };
+    std::vector<ordered_member> ordered;
+    ordered.reserve(topology.size());
+    for (std::size_t index = 0; index < topology.size(); ++index) {
+        ordered.push_back({
+            .pid = topology[index].pid,
+            .depth = (*depths)[index]});
+    }
+    std::sort(
+        ordered.begin(), ordered.end(),
+        [](const ordered_member& left,
+           const ordered_member& right) {
+            return std::pair{left.depth, left.pid}
+                < std::pair{right.depth, right.pid};
+        });
+    if (ordered.empty() || ordered.front().pid != root_pid
+        || ordered.front().depth != 0U) {
+        return trace;
+    }
+
+    cluster_detail::supervised_process_tree contract_tree;
+    contract_tree.postmaster = supervised_process_record{
+        .pid = root_pid,
+        .start_token = "controller-contract",
+        .executable = "/controller-contract",
+        .process_group = static_cast<std::int64_t>(root_pid)};
+    for (std::size_t index = 0; index < topology.size(); ++index) {
+        contract_tree.members.push_back(
+            cluster_detail::supervised_process_tree_member{
+                .process = supervised_process_record{
+                    .pid = topology[index].pid,
+                    .start_token = "controller-contract",
+                    .executable = "/controller-contract",
+                    .process_group = static_cast<std::int64_t>(
+                        topology[index].pid)},
+                .parent_pid = topology[index].parent_pid,
+                .depth = (*depths)[index]});
+    }
+    std::sort(
+        contract_tree.members.begin(),
+        contract_tree.members.end(),
+        [](const cluster_detail::supervised_process_tree_member& left,
+           const cluster_detail::supervised_process_tree_member& right) {
+            return std::pair{left.depth, left.process.pid}
+                < std::pair{right.depth, right.process.pid};
+        });
+
+    trace.stop_order.push_back(root_pid);
+    std::vector<std::uint64_t> stopped_descendants;
+    std::size_t descendant_ordinal{};
+    trace.freeze_succeeded =
+        cluster_detail::stop_process_tree_parent_first(
+            contract_tree,
+            [&trace, &stopped_descendants,
+             &descendant_ordinal, fault](
+                const cluster_detail::supervised_process_tree_member&
+                    member) {
+                ++descendant_ordinal;
+                const bool rejected =
+                    (fault
+                         == process_tree_controller_fault::
+                             identity_drift_before_stop
+                     && descendant_ordinal == 1U)
+                    || (fault
+                            == process_tree_controller_fault::
+                                reject_second_descendant_stop
+                        && descendant_ordinal == 2U);
+                if (rejected) {
+                    return supervised_child_signal_result{};
+                }
+                trace.stop_order.push_back(member.process.pid);
+                stopped_descendants.push_back(member.process.pid);
+                return supervised_child_signal_result{
+                    .outcome =
+                        supervised_child_signal_outcome::delivered};
+            });
+    if (!trace.freeze_succeeded) {
+        trace.resume_attempted = true;
+        cluster_detail::supervised_process_tree rollback_tree;
+        rollback_tree.postmaster = contract_tree.postmaster;
+        for (const auto& member : contract_tree.members) {
+            if (member.process.pid == root_pid
+                || std::find(
+                       stopped_descendants.begin(),
+                       stopped_descendants.end(),
+                       member.process.pid)
+                    != stopped_descendants.end()) {
+                rollback_tree.members.push_back(member);
+            }
+        }
+        trace.resume_complete =
+            cluster_detail::resume_process_tree_child_first(
+                rollback_tree,
+                [&trace, &rollback_tree](
+                    const cluster_detail::supervised_process_tree_member&
+                        member) {
+                    if (cluster_detail::find_tree_member(
+                            rollback_tree, member.parent_pid)
+                        == nullptr) {
+                        return false;
+                    }
+                    trace.resume_order.push_back(
+                        member.process.pid);
+                    return true;
+                },
+                [&trace, root_pid] {
+                    trace.resume_order.push_back(root_pid);
+                    return true;
+                });
+        return trace;
+    }
+
+    std::size_t kill_ordinal{};
+    trace.termination =
+        cluster_detail::terminate_process_tree_child_first(
+            contract_tree,
+            [&trace, &kill_ordinal, fault](
+                const cluster_detail::supervised_process_tree_member&
+                    member) {
+                ++kill_ordinal;
+                if (fault
+                        == process_tree_controller_fault::
+                            reject_second_descendant_kill
+                    && kill_ordinal == 2U) {
+                    return supervised_child_signal_result{};
+                }
+                trace.kill_order.push_back(member.process.pid);
+                return supervised_child_signal_result{
+                    .outcome =
+                        supervised_child_signal_outcome::delivered};
+            },
+            [&trace, root_pid, fault] {
+                const bool signaled =
+                    fault
+                    != process_tree_controller_fault::
+                        reject_root_group_kill;
+                if (signaled) {
+                    trace.kill_order.push_back(root_pid);
+                }
+                return signaled;
+            });
+    trace.rollback_attempted_after_commit = false;
+    return trace;
+}
 
 /// @brief Renders version-portable settings for one staged private cluster.
 /// @param port Private postmaster port paired with its Unix socket directory.
@@ -986,23 +1504,56 @@ public:
             throw process_error(
                 "retained postmaster launch broker is unavailable for crash");
         }
-        const auto tree =
+        auto frozen =
             cluster_detail::freeze_process_tree(
                 *postmaster_identity_, owned_group_leader);
-        if (!tree) {
+        if (!frozen.frozen()) {
+            if (frozen.outcome
+                    == cluster_detail::process_tree_freeze_outcome::
+                        failed_resume_incomplete
+                && frozen.tree) {
+                postmaster_cleanup_tree_ =
+                    std::move(*frozen.tree);
+                postmaster_cleanup_requires_force_ = true;
+                postmaster_cleanup_requires_refreeze_ = true;
+            }
             throw process_error(
                 "cannot freeze a stable anchored postmaster tree for crash");
         }
-        if (!cluster_detail::force_kill_process_tree(
-                *tree, owned_group_leader)) {
-            static_cast<void>(
-                cluster_detail::signal_anchored_process_groups(
-                    *tree, SIGCONT, owned_group_leader));
+        postmaster_cleanup_tree_ =
+            std::move(*frozen.tree);
+        const auto termination =
+            cluster_detail::force_kill_process_tree(
+                *postmaster_cleanup_tree_, owned_group_leader);
+        if (termination.outcome
+            == process_tree_termination_outcome::precommit_failure) {
+            const bool resumed =
+                cluster_detail::resume_process_tree(
+                    *postmaster_cleanup_tree_, owned_group_leader);
+            if (resumed) {
+                postmaster_cleanup_tree_.reset();
+            } else {
+                postmaster_cleanup_requires_force_ = true;
+                postmaster_cleanup_requires_refreeze_ = true;
+            }
             throw process_error(
-                "cannot SIGKILL frozen identity-verified postmaster tree");
+                resumed
+                ? "cannot SIGKILL frozen identity-verified postmaster tree"
+                : "cannot SIGKILL or fully resume frozen "
+                  "identity-verified postmaster tree");
         }
+        if (!termination.root_group_signaled) {
+            postmaster_cleanup_requires_force_ = true;
+            postmaster_cleanup_requires_refreeze_ = false;
+            throw process_error(
+                "postmaster crash committed but frozen termination "
+                "requires retry; PGDATA retained at "
+                + data_directory_.string());
+        }
+        postmaster_cleanup_requires_force_ = false;
+        postmaster_cleanup_requires_refreeze_ = false;
         if (!finalize_postmaster_termination(
-                *tree, options_.stop_timeout)) {
+                *postmaster_cleanup_tree_, options_.stop_timeout)) {
             throw process_error(
                 "postmaster descendant or process group remains after "
                 "identity-verified force cleanup; PGDATA retained at "
@@ -1018,6 +1569,45 @@ public:
         }
         cleanup_error_.clear();
         if (postmaster_cleanup_tree_) {
+            if (postmaster_cleanup_requires_force_) {
+                spawned_process* const owned_group_leader =
+                    owned_postmaster_group_leader();
+                if (postmaster_cleanup_requires_refreeze_) {
+                    if (!postmaster_identity_) {
+                        cleanup_error_ =
+                            "cannot recapture partially resumed postmaster "
+                            "tree; PGDATA retained at "
+                            + data_directory_.string();
+                        return;
+                    }
+                    auto refrozen =
+                        cluster_detail::freeze_process_tree(
+                            *postmaster_identity_,
+                            owned_group_leader);
+                    if (!refrozen.frozen()) {
+                        cleanup_error_ =
+                            "cannot refreeze partially resumed postmaster "
+                            "tree; PGDATA retained at "
+                            + data_directory_.string();
+                        return;
+                    }
+                    postmaster_cleanup_tree_ =
+                        std::move(*refrozen.tree);
+                    postmaster_cleanup_requires_refreeze_ = false;
+                }
+                const auto termination =
+                    cluster_detail::force_kill_process_tree(
+                        *postmaster_cleanup_tree_,
+                        owned_group_leader);
+                if (!termination.root_group_signaled) {
+                    cleanup_error_ =
+                        "committed postmaster termination retry remains "
+                        "incomplete; PGDATA retained at "
+                        + data_directory_.string();
+                    return;
+                }
+                postmaster_cleanup_requires_force_ = false;
+            }
             if (!cluster_detail::wait_for_process_tree_members_absence(
                     *postmaster_cleanup_tree_,
                     options_.stop_timeout)) {
@@ -1125,33 +1715,6 @@ public:
         const auto initial_tree =
             cluster_detail::capture_process_tree(*postmaster_identity_);
         if (!initial_tree) {
-            if (owned_group_leader != nullptr
-                && owned_group_leader->process_group()
-                    == postmaster_identity_->process_group) {
-                cluster_detail::supervised_process_tree owned_tree{
-                    .postmaster = *postmaster_identity_,
-                    .members = {*postmaster_identity_},
-                    .process_groups = {
-                        postmaster_identity_->process_group}};
-                const auto frozen =
-                    cluster_detail::freeze_captured_process_tree(
-                        owned_tree, owned_group_leader);
-                if (frozen) {
-                    if (cluster_detail::force_kill_process_tree(
-                            *frozen, owned_group_leader)) {
-                        if (finalize_postmaster_termination(
-                                *frozen, options_.stop_timeout)) {
-                            publish_stopped_state();
-                            return;
-                        }
-                    } else {
-                        static_cast<void>(
-                            cluster_detail::signal_anchored_process_groups(
-                                *frozen, SIGCONT,
-                                owned_group_leader));
-                    }
-                }
-            }
             cleanup_error_ =
                 "cannot capture a stable identity-verified postmaster tree; "
                 "PGDATA retained at "
@@ -1197,7 +1760,7 @@ public:
             return;
         }
 
-        std::optional<cluster_detail::supervised_process_tree> force_tree;
+        cluster_detail::process_tree_freeze_result force_tree;
         if (cluster_detail::process_identity_matches(
                 *postmaster_identity_)) {
             force_tree = cluster_detail::freeze_process_tree(
@@ -1207,17 +1770,48 @@ public:
                 cluster_detail::freeze_captured_process_tree(
                     *initial_tree, owned_group_leader);
         }
-        if (force_tree) {
-            if (!cluster_detail::force_kill_process_tree(
-                    *force_tree, owned_group_leader)) {
-                static_cast<void>(
-                    cluster_detail::signal_anchored_process_groups(
-                        *force_tree, SIGCONT,
-                        owned_group_leader));
+        if (force_tree.outcome
+                == cluster_detail::process_tree_freeze_outcome::
+                    failed_resume_incomplete
+            && force_tree.tree) {
+            postmaster_cleanup_tree_ =
+                std::move(*force_tree.tree);
+            postmaster_cleanup_requires_force_ = true;
+            postmaster_cleanup_requires_refreeze_ = true;
+        }
+        if (force_tree.frozen()) {
+            postmaster_cleanup_tree_ =
+                std::move(*force_tree.tree);
+            const auto termination =
+                cluster_detail::force_kill_process_tree(
+                    *postmaster_cleanup_tree_,
+                    owned_group_leader);
+            if (termination.outcome
+                == process_tree_termination_outcome::
+                    precommit_failure) {
+                const bool resumed =
+                    cluster_detail::resume_process_tree(
+                        *postmaster_cleanup_tree_,
+                        owned_group_leader);
+                if (resumed) {
+                    postmaster_cleanup_tree_.reset();
+                } else {
+                    postmaster_cleanup_requires_force_ = true;
+                    postmaster_cleanup_requires_refreeze_ = true;
+                }
                 set_cleanup_error_noexcept(
-                    "cannot SIGKILL identity-verified postmaster tree");
+                    resumed
+                    ? "cannot SIGKILL identity-verified postmaster tree"
+                    : "cannot SIGKILL or fully resume "
+                      "identity-verified postmaster tree");
+            } else if (!termination.root_group_signaled) {
+                postmaster_cleanup_requires_force_ = true;
+                postmaster_cleanup_requires_refreeze_ = false;
+                set_cleanup_error_noexcept(
+                    "committed postmaster termination requires retry");
             } else if (finalize_postmaster_termination(
-                           *force_tree, options_.stop_timeout)) {
+                           *postmaster_cleanup_tree_,
+                           options_.stop_timeout)) {
                 publish_stopped_state();
                 return;
             }
@@ -1403,6 +1997,8 @@ private:
         postmaster_identity_.reset();
         postmaster_process_.reset();
         postmaster_cleanup_tree_.reset();
+        postmaster_cleanup_requires_force_ = false;
+        postmaster_cleanup_requires_refreeze_ = false;
         postmaster_termination_verified_ = false;
         postmaster_spawn_attempted_ = false;
         causally_trusted_unanchored_start_ = false;
@@ -1561,6 +2157,8 @@ private:
     bool causally_trusted_unanchored_start_{};
     bool postmaster_termination_verified_{};
     bool postmaster_spawn_attempted_{};
+    bool postmaster_cleanup_requires_force_{};
+    bool postmaster_cleanup_requires_refreeze_{};
     cluster_cleanup_result cleanup_result_;
 };
 

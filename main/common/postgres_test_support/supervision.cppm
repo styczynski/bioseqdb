@@ -52,6 +52,99 @@ struct supervised_process_record {
     std::filesystem::path data_directory;
 };
 
+/// @brief Result of signalling a child whose exact parent is kernel-stopped.
+enum class supervised_child_signal_outcome {
+    delivered,
+    target_absent,
+    rejected,
+    delivered_unverified,
+};
+
+/// @brief Identity evidence refreshed immediately after a pinned child signal.
+struct supervised_child_signal_result {
+    supervised_child_signal_outcome outcome{
+        supervised_child_signal_outcome::rejected};
+    std::optional<supervised_process_record> identity_after;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return outcome == supervised_child_signal_outcome::delivered
+            || outcome
+                == supervised_child_signal_outcome::target_absent;
+    }
+
+    [[nodiscard]] bool delivered() const noexcept {
+        return outcome == supervised_child_signal_outcome::delivered
+            || outcome
+                == supervised_child_signal_outcome::delivered_unverified;
+    }
+};
+
+/// @brief Commit-aware terminal state of a frozen process-tree kill.
+enum class process_tree_termination_outcome {
+    precommit_failure,
+    committed_complete,
+    committed_incomplete,
+};
+
+/// @brief Evidence returned after a frozen-tree termination attempt.
+struct process_tree_termination_result {
+    process_tree_termination_outcome outcome{
+        process_tree_termination_outcome::precommit_failure};
+    std::size_t delivered_kills{};
+    bool root_group_signaled{};
+
+    [[nodiscard]] bool committed() const noexcept {
+        return outcome
+            != process_tree_termination_outcome::precommit_failure;
+    }
+};
+
+/// @brief Tracks the irreversible boundary at the first delivered SIGKILL.
+class process_tree_termination_progress {
+public:
+    void record_kill_delivery() noexcept {
+        ++delivered_kills_;
+    }
+
+    void record_failure() noexcept {
+        failed_ = true;
+    }
+
+    [[nodiscard]] std::size_t delivered_kills() const noexcept {
+        return delivered_kills_;
+    }
+
+    [[nodiscard]] bool failed() const noexcept {
+        return failed_;
+    }
+
+    [[nodiscard]] process_tree_termination_result finish(
+        bool traversal_complete,
+        bool root_group_signaled) const noexcept {
+        process_tree_termination_outcome result =
+            process_tree_termination_outcome::precommit_failure;
+        if (delivered_kills_ == 0U) {
+            result =
+                process_tree_termination_outcome::precommit_failure;
+        } else if (!failed_ && traversal_complete
+                   && root_group_signaled) {
+            result = process_tree_termination_outcome::
+                committed_complete;
+        } else {
+            result = process_tree_termination_outcome::
+                committed_incomplete;
+        }
+        return {
+            .outcome = result,
+            .delivered_kills = delivered_kills_,
+            .root_group_signaled = root_group_signaled};
+    }
+
+private:
+    std::size_t delivered_kills_{};
+    bool failed_{};
+};
+
 /// @brief One cluster identity persisted for an out-of-process watchdog.
 struct supervised_cluster_record {
     std::filesystem::path root;
@@ -351,6 +444,74 @@ enum class directory_sync_checkpoint {
     }
     return std::to_string(information.pbi_start_tvsec) + ":"
         + std::to_string(information.pbi_start_tvusec);
+#else
+    static_cast<void>(pid);
+    return std::nullopt;
+#endif
+}
+
+[[nodiscard]] std::optional<std::uint64_t> process_parent_pid(
+    std::uint64_t pid) {
+#if defined(__linux__)
+    std::ifstream input(
+        std::filesystem::path("/proc") / std::to_string(pid) / "stat");
+    std::string line;
+    if (!input || !std::getline(input, line)) {
+        return std::nullopt;
+    }
+    const std::size_t command_end = line.rfind(')');
+    if (command_end == std::string::npos
+        || command_end + 2U >= line.size()) {
+        return std::nullopt;
+    }
+    std::istringstream fields(line.substr(command_end + 2U));
+    char state{};
+    std::uint64_t parent_pid{};
+    fields >> state >> parent_pid;
+    if (!fields || parent_pid <= 1U) {
+        return std::nullopt;
+    }
+    return parent_pid;
+#elif defined(__APPLE__)
+    proc_bsdinfo information{};
+    if (::proc_pidinfo(
+            static_cast<int>(pid), PROC_PIDTBSDINFO, 0,
+            &information, sizeof(information))
+        != static_cast<int>(sizeof(information))
+        || information.pbi_ppid <= 1) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint64_t>(information.pbi_ppid);
+#else
+    static_cast<void>(pid);
+    return std::nullopt;
+#endif
+}
+
+[[nodiscard]] std::optional<bool> process_is_zombie(
+    std::uint64_t pid) {
+#if defined(__linux__)
+    std::ifstream input(
+        std::filesystem::path("/proc") / std::to_string(pid) / "stat");
+    std::string line;
+    if (!input || !std::getline(input, line)) {
+        return std::nullopt;
+    }
+    const std::size_t command_end = line.rfind(')');
+    if (command_end == std::string::npos
+        || command_end + 2U >= line.size()) {
+        return std::nullopt;
+    }
+    return line[command_end + 2U] == 'Z';
+#elif defined(__APPLE__)
+    proc_bsdinfo information{};
+    if (::proc_pidinfo(
+            static_cast<int>(pid), PROC_PIDTBSDINFO, 0,
+            &information, sizeof(information))
+        != static_cast<int>(sizeof(information))) {
+        return std::nullopt;
+    }
+    return information.pbi_status == SZOMB;
 #else
     static_cast<void>(pid);
     return std::nullopt;
@@ -1067,6 +1228,170 @@ capture_supervised_process(
 #endif
     } catch (...) {
         return false;
+    }
+}
+
+/// @brief True only when the recorded PID currently has no process.
+[[nodiscard]] inline bool supervised_process_definitely_absent(
+    const supervised_process_record& process) noexcept {
+    if (process.pid <= 1
+        || process.pid
+            > static_cast<std::uint64_t>(
+                std::numeric_limits<pid_t>::max())) {
+        return true;
+    }
+    int presence{};
+    do {
+        presence = ::kill(static_cast<pid_t>(process.pid), 0);
+    } while (presence != 0 && errno == EINTR);
+    return presence != 0 && errno == ESRCH;
+}
+
+/// @brief True when the stopped exact parent pins this exact zombie child.
+[[nodiscard]] inline bool supervised_child_is_terminal(
+    const supervised_process_record& parent,
+    const supervised_process_record& child) noexcept {
+    try {
+        const auto current_parent = capture_supervised_process(
+            parent.pid, {}, parent.data_directory);
+        const auto start_token =
+            supervision_detail::process_start_token(child.pid);
+        const auto parent_pid =
+            supervision_detail::process_parent_pid(child.pid);
+        const auto zombie =
+            supervision_detail::process_is_zombie(child.pid);
+        return current_parent && start_token && parent_pid && zombie
+            && current_parent->start_token == parent.start_token
+            && current_parent->executable == parent.executable
+            && supervised_process_stopped(*current_parent)
+            && *start_token == child.start_token
+            && *parent_pid == parent.pid && *zombie;
+    } catch (...) {
+        return false;
+    }
+}
+
+/// @brief True only while a stopped exact parent pins this exact child PID.
+[[nodiscard]] inline bool supervised_child_is_pinned(
+    const supervised_process_record& parent,
+    const supervised_process_record& child) noexcept {
+    try {
+        const auto current_parent = capture_supervised_process(
+            parent.pid, {}, parent.data_directory);
+        const auto current_child = capture_supervised_process(
+            child.pid, {}, child.data_directory);
+        const auto current_parent_pid =
+            supervision_detail::process_parent_pid(child.pid);
+        return current_parent && current_child && current_parent_pid
+            && current_parent->start_token == parent.start_token
+            && current_parent->executable == parent.executable
+            && current_child->start_token == child.start_token
+            && current_child->executable == child.executable
+            && *current_parent_pid == parent.pid
+            && supervised_process_stopped(*current_parent);
+    } catch (...) {
+        return false;
+    }
+}
+
+/// @brief Signals an exact child only while its stopped parent pins PID reuse.
+///
+/// The parent identity, stopped state, and live PPID edge are checked directly
+/// before and after delivery.  A stale child is rejected.  Once SIGKILL was
+/// delivered, an inconclusive post-check is reported as committed rather than
+/// as a rollback-safe failure.
+[[nodiscard]] inline supervised_child_signal_result
+signal_supervised_child_while_parent_stopped(
+    const supervised_process_record& parent,
+    const supervised_process_record& child,
+    int signal_number) noexcept {
+    try {
+        if (!supervised_child_is_pinned(parent, child)) {
+            if (supervised_child_is_terminal(parent, child)
+                || supervised_process_definitely_absent(child)) {
+                return {
+                    .outcome =
+                        supervised_child_signal_outcome::target_absent};
+            }
+            return {};
+        }
+        int status{};
+        do {
+            status = ::kill(
+                static_cast<pid_t>(child.pid), signal_number);
+        } while (status != 0 && errno == EINTR);
+        if (status != 0) {
+            return {
+                .outcome = errno == ESRCH
+                    ? supervised_child_signal_outcome::target_absent
+                    : supervised_child_signal_outcome::rejected};
+        }
+
+        if (signal_number == SIGKILL) {
+            const auto parent_after = capture_supervised_process(
+                parent.pid, {}, parent.data_directory);
+            const bool parent_remains_stopped =
+                parent_after
+                && parent_after->start_token == parent.start_token
+                && parent_after->executable == parent.executable
+                && supervised_process_stopped(*parent_after);
+            return {
+                .outcome = parent_remains_stopped
+                    ? supervised_child_signal_outcome::delivered
+                    : supervised_child_signal_outcome::
+                          delivered_unverified};
+        }
+
+        const auto deadline =
+            std::chrono::steady_clock::now()
+            + std::chrono::milliseconds(200);
+        do {
+            const auto parent_after = capture_supervised_process(
+                parent.pid, {}, parent.data_directory);
+            if (!parent_after
+                || parent_after->start_token != parent.start_token
+                || parent_after->executable != parent.executable
+                || !supervised_process_stopped(*parent_after)) {
+                return {
+                    .outcome = supervised_child_signal_outcome::
+                        delivered_unverified};
+            }
+            const auto after = capture_supervised_process(
+                child.pid, {}, child.data_directory);
+            const auto parent_pid =
+                supervision_detail::process_parent_pid(child.pid);
+            if (after
+                && after->start_token == child.start_token
+                && after->executable == child.executable
+                && parent_pid && *parent_pid == parent.pid) {
+                const bool expected_stop_state =
+                    signal_number != SIGSTOP
+                        || supervised_process_stopped(*after);
+                const bool expected_continue_state =
+                    signal_number != SIGCONT
+                        || !supervised_process_stopped(*after);
+                if (expected_stop_state
+                    && expected_continue_state) {
+                    return {
+                        .outcome =
+                            supervised_child_signal_outcome::delivered,
+                        .identity_after = *after};
+                }
+            } else if (after
+                       || supervision_detail::process_start_token(
+                              child.pid)) {
+                return {
+                    .outcome = supervised_child_signal_outcome::
+                        delivered_unverified};
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(5));
+        } while (std::chrono::steady_clock::now() < deadline);
+        return {
+            .outcome = supervised_child_signal_outcome::
+                delivered_unverified};
+    } catch (...) {
+        return {};
     }
 }
 

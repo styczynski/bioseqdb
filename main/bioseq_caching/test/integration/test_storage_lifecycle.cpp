@@ -1,10 +1,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
+
+#include <unistd.h>
 
 import bioseq.cache.test_context;
 import bioseq.test.postgres;
@@ -37,6 +40,48 @@ namespace {
     return directory
         / ".stage-00000000-00000000-0000000000000000-"
           "0000000000000000-ffffffffffffffff.partial";
+}
+
+void require_cross_session_postmaster_descendant(
+    const bioseq::postgres_test::private_cluster& cluster) {
+    const std::uint64_t postmaster_pid =
+        bioseq::postgres_test::read_postmaster_pid_file(
+            cluster.data_directory());
+    const auto postmaster =
+        bioseq::postgres_test::capture_supervised_process(
+            postmaster_pid, {}, cluster.data_directory());
+    const auto process_tree =
+        bioseq::postgres_test::sample_postmaster_process_tree_pids(
+            postmaster_pid);
+    REQUIRE(postmaster.has_value());
+    REQUIRE(process_tree.has_value());
+    REQUIRE(process_tree->size() > 1U);
+    const pid_t postmaster_session =
+        ::getsid(static_cast<pid_t>(postmaster_pid));
+    REQUIRE(postmaster_session > 1);
+
+    bool observed_cross_session_descendant = false;
+    for (const std::uint64_t pid : *process_tree) {
+        if (pid == postmaster_pid) {
+            continue;
+        }
+        const auto descendant =
+            bioseq::postgres_test::capture_supervised_process(
+                pid, {}, cluster.data_directory());
+        if (!descendant) {
+            continue;
+        }
+        const pid_t session =
+            ::getsid(static_cast<pid_t>(pid));
+        if (session == static_cast<pid_t>(pid)
+            && descendant->process_group
+                == static_cast<std::int64_t>(pid)
+            && session != postmaster_session) {
+            observed_cross_session_descendant = true;
+            break;
+        }
+    }
+    REQUIRE(observed_cross_session_descendant);
 }
 
 }  // namespace
@@ -259,6 +304,8 @@ TEST_CASE("unclean postmaster death performs crash recovery",
     static_cast<void>(connection.exec(
         "SELECT id FROM cache_crash_recovery_rows ORDER BY id"));
 
+    require_cross_session_postmaster_descendant(
+        fixture.cluster());
     fixture.cluster().crash_postmaster();
     fixture.cluster().start();
     fixture.reconnect_admin();

@@ -4287,17 +4287,23 @@ void validate_owned_compile_database(
     return result;
 }
 
+struct relocation_context {
+    std::filesystem::path source_root;
+    std::filesystem::path build_root;
+    std::filesystem::path build_root_spelling;
+};
+
 [[nodiscard]] std::string relocatable_path_spelling(
     const std::filesystem::path& path,
-    const std::filesystem::path& relocation_root);
+    const relocation_context& relocation);
 
 [[nodiscard]] std::string relocatable_text(
     std::string_view text,
-    const std::filesystem::path& relocation_root);
+    const relocation_context& relocation);
 
 [[nodiscard]] std::string relocatable_document_hash(
     std::string_view document,
-    const std::filesystem::path& relocation_root);
+    const relocation_context& relocation);
 
 [[nodiscard]] std::string command_input_hash(
     std::vector<std::filesystem::path> inputs) {
@@ -4314,7 +4320,7 @@ void validate_owned_compile_database(
 
 [[nodiscard]] std::string relocatable_command_input_hash(
     std::vector<std::filesystem::path> inputs,
-    const std::filesystem::path& relocation_root) {
+    const relocation_context& relocation) {
     std::ranges::sort(inputs);
     inputs.erase(
         std::ranges::unique(inputs).begin(), inputs.end());
@@ -4322,10 +4328,10 @@ void validate_owned_compile_database(
     rows.reserve(inputs.size());
     for (const std::filesystem::path& input : inputs) {
         rows.push_back(
-            relocatable_path_spelling(input, relocation_root)
+            relocatable_path_spelling(input, relocation)
             + "\t"
             + relocatable_document_hash(
-                read_file(input), relocation_root));
+                read_file(input), relocation));
     }
     std::ranges::sort(rows);
     if (std::ranges::adjacent_find(rows) != rows.end()) {
@@ -4651,7 +4657,7 @@ parse_make_depfile(
 [[nodiscard]] std::string relocatable_dependency_content_hash(
     const std::vector<std::filesystem::path>& dependencies,
     const std::filesystem::path& pcm_root,
-    const std::filesystem::path& relocation_root,
+    const relocation_context& relocation,
     std::unordered_map<std::string, std::string>& hash_cache) {
     std::vector<std::string> rows;
     rows.reserve(dependencies.size());
@@ -4670,11 +4676,11 @@ parse_make_depfile(
             }
             position->second =
                 relocatable_document_hash(
-                    read_file(dependency), relocation_root);
+                    read_file(dependency), relocation);
         }
         rows.push_back(
             relocatable_path_spelling(
-                dependency, relocation_root)
+                dependency, relocation)
             + "\t" + position->second);
     }
     std::ranges::sort(rows);
@@ -5083,29 +5089,76 @@ struct compiler_module_inventory {
     return common.lexically_normal();
 }
 
+[[nodiscard]] relocation_context make_relocation_context(
+    const std::filesystem::path& source_root,
+    const std::filesystem::path& compilation_root) {
+    const std::filesystem::path normalized_source_root =
+        absolute_normalized_path(source_root);
+    const std::filesystem::path normalized_compilation_root =
+        absolute_normalized_path(compilation_root);
+    const std::filesystem::path compilation_root_spelling =
+        (compilation_root.is_absolute()
+             ? compilation_root
+             : std::filesystem::absolute(compilation_root))
+            .lexically_normal();
+    if (!path_within_root(
+            normalized_compilation_root,
+            normalized_source_root)) {
+        throw std::runtime_error(
+            "PREPARE compilation root is outside the bounded "
+            "relocation root");
+    }
+    return {
+        .source_root = normalized_source_root,
+        .build_root =
+            normalized_compilation_root == normalized_source_root
+            ? std::filesystem::path{}
+            : normalized_compilation_root,
+        .build_root_spelling =
+            normalized_compilation_root == normalized_source_root
+            ? std::filesystem::path{}
+            : compilation_root_spelling,
+    };
+}
+
 [[nodiscard]] std::string relocatable_path_spelling(
     const std::filesystem::path& path,
-    const std::filesystem::path& relocation_root) {
+    const relocation_context& relocation) {
     const std::filesystem::path normalized =
         absolute_normalized_path(path);
-    if (normalized == relocation_root) {
+    if (!relocation.build_root.empty()
+        && normalized == relocation.build_root) {
+        return "$BIOSEQ_BUILD_ROOT";
+    }
+    if (!relocation.build_root.empty()
+        && path_within_root(
+            normalized, relocation.build_root)) {
+        return (
+            std::filesystem::path{"$BIOSEQ_BUILD_ROOT"}
+            / normalized.lexically_relative(
+                relocation.build_root)
+        ).generic_string();
+    }
+    if (normalized == relocation.source_root) {
         return "$BIOSEQ_RELOCATION_ROOT";
     }
-    if (!path_within_root(normalized, relocation_root)) {
+    if (!path_within_root(
+            normalized, relocation.source_root)) {
         return normalized.generic_string();
     }
     return (
         std::filesystem::path{"$BIOSEQ_RELOCATION_ROOT"}
-        / normalized.lexically_relative(relocation_root)
+        / normalized.lexically_relative(
+            relocation.source_root)
     ).generic_string();
 }
 
-[[nodiscard]] std::string relocatable_text(
-    std::string_view text,
-    const std::filesystem::path& relocation_root) {
-    std::string result{text};
-    const std::string physical = relocation_root.generic_string();
-    constexpr std::string_view logical{"$BIOSEQ_RELOCATION_ROOT"};
+void replace_relocatable_root(
+    std::string& result,
+    const std::filesystem::path& root,
+    std::string_view logical) {
+    if (root.empty()) return;
+    const std::string physical = root.generic_string();
     std::size_t position = 0;
     while ((position = result.find(physical, position))
            != std::string::npos) {
@@ -5158,13 +5211,38 @@ struct compiler_module_inventory {
         result.replace(position, physical.size(), logical);
         position += logical.size();
     }
+}
+
+[[nodiscard]] std::string relocatable_text(
+    std::string_view text,
+    const relocation_context& relocation) {
+    std::string result{text};
+    // The configured build directory is a strict child of the source
+    // relocation root in ordinary CMake trees. Replace it first so preset
+    // names and lane-local package roots remain physical provenance without
+    // contaminating the canonical compilation signature.
+    replace_relocatable_root(
+        result,
+        relocation.build_root_spelling,
+        "$BIOSEQ_BUILD_ROOT");
+    if (relocation.build_root
+        != relocation.build_root_spelling) {
+        replace_relocatable_root(
+            result,
+            relocation.build_root,
+            "$BIOSEQ_BUILD_ROOT");
+    }
+    replace_relocatable_root(
+        result,
+        relocation.source_root,
+        "$BIOSEQ_RELOCATION_ROOT");
     return result;
 }
 
 [[nodiscard]] std::string relocatable_document_hash(
     std::string_view document,
-    const std::filesystem::path& relocation_root) {
-    return sha256_hex(relocatable_text(document, relocation_root));
+    const relocation_context& relocation) {
+    return sha256_hex(relocatable_text(document, relocation));
 }
 
 inline constexpr std::string_view
@@ -5184,21 +5262,21 @@ inline constexpr std::string_view
 
 [[nodiscard]] std::string relocatable_argument_material(
     const std::vector<std::string>& arguments,
-    const std::filesystem::path& relocation_root,
+    const relocation_context& relocation,
     std::string_view clang_binary_sha256) {
     if (arguments.empty()) {
         throw std::runtime_error(
             "relocatable Clang argument projection is empty");
     }
     std::string material =
-        "bioseq_clang_relocatable_arguments/v2\n"
+        "bioseq_clang_relocatable_arguments/v3\n"
         + relocatable_compiler_identity(clang_binary_sha256);
     // argv[0] is an invocation spelling, not compiler identity. PREPARE
     // authenticates the selected executable bytes separately and fixes the
     // C++ module driver mode. Keep every semantic argument in original order.
     for (std::size_t index = 1; index < arguments.size(); ++index) {
         material += relocatable_text(
-            arguments[index], relocation_root);
+            arguments[index], relocation);
         material.push_back('\0');
     }
     return material;
@@ -5206,23 +5284,23 @@ inline constexpr std::string_view
 
 [[nodiscard]] std::string relocatable_argument_hash(
     const std::vector<std::string>& arguments,
-    const std::filesystem::path& relocation_root,
+    const relocation_context& relocation,
     std::string_view clang_binary_sha256) {
     return sha256_hex(relocatable_argument_material(
-        arguments, relocation_root, clang_binary_sha256));
+        arguments, relocation, clang_binary_sha256));
 }
 
 [[nodiscard]] std::string
 relocatable_compiler_document_hash(
     std::string_view document,
-    const std::filesystem::path& relocation_root,
+    const relocation_context& relocation,
     const std::filesystem::path& clang_binary,
     std::string_view clang_binary_sha256) {
     std::string projection =
-        relocatable_text(document, relocation_root);
+        relocatable_text(document, relocation);
     const std::string compiler_spelling =
         relocatable_text(
-            clang_binary.generic_string(), relocation_root);
+            clang_binary.generic_string(), relocation);
     const std::string quoted_compiler =
         "\"" + json_escape(compiler_spelling) + "\"";
     const std::string quoted_identity =
@@ -5249,7 +5327,7 @@ relocatable_compiler_document_hash(
             "invocation");
     }
     return sha256_hex(
-        "bioseq_clang_relocatable_compiler_document/v2\n"
+        "bioseq_clang_relocatable_compiler_document/v3\n"
         + relocatable_compiler_identity(clang_binary_sha256)
         + projection);
 }
@@ -5440,15 +5518,15 @@ void scan_active_module_imports(
     const std::string& clang_binary_sha256,
     const std::string& clang_scan_deps_sha256,
     const std::filesystem::path& scan_root,
-    const std::filesystem::path& relocation_root) {
+    const relocation_context& relocation) {
     std::string key_material =
         record.module_name + "\n"
         + relocatable_path_spelling(
-            record.source_path, relocation_root)
+            record.source_path, relocation)
         + "\n" + clang_scan_deps_sha256 + "\n";
     key_material += relocatable_argument_material(
         record.base_arguments,
-        relocation_root,
+        relocation,
         clang_binary_sha256);
     const std::string scan_key = sha256_hex(key_material);
     const std::string basename =
@@ -5492,7 +5570,7 @@ void scan_active_module_imports(
     record.relocatable_dependency_scan_database_sha256 =
         relocatable_compiler_document_hash(
             database_document,
-            relocation_root,
+            relocation,
             record.base_arguments.front(),
             clang_binary_sha256);
     const std::vector<std::string> arguments{
@@ -5527,12 +5605,12 @@ void scan_active_module_imports(
         sha256_hex(diagnostics);
     record.relocatable_dependency_scan_diagnostics_sha256 =
         relocatable_document_hash(
-            diagnostics, relocation_root);
+            diagnostics, relocation);
     record.dependency_scan_result_sha256 =
         sha256_hex(read_file(result_path));
     record.relocatable_dependency_scan_result_sha256 =
         relocatable_document_hash(
-            read_file(result_path), relocation_root);
+            read_file(result_path), relocation);
     record.description.imports = parse_p1689_imports(
         result_path,
         record.module_name,
@@ -5554,6 +5632,36 @@ load_compile_database(const std::filesystem::path& path) {
             + ": " + error);
     }
     return result;
+}
+
+[[nodiscard]] std::filesystem::path compilation_root(
+    const clang::tooling::CompilationDatabase& database) {
+    const std::vector<clang::tooling::CompileCommand> commands =
+        database.getAllCompileCommands();
+    if (commands.empty()) {
+        throw std::runtime_error(
+            "compile database has no commands from which to derive "
+            "its configured build root");
+    }
+    const std::filesystem::path root =
+        (std::filesystem::path{commands.front().Directory}.is_absolute()
+             ? std::filesystem::path{commands.front().Directory}
+             : std::filesystem::absolute(
+                   std::filesystem::path{
+                       commands.front().Directory}))
+            .lexically_normal();
+    const std::filesystem::path identity =
+        absolute_normalized_path(root);
+    for (const clang::tooling::CompileCommand& command :
+         commands) {
+        if (absolute_normalized_path(command.Directory)
+            != identity) {
+            throw std::runtime_error(
+                "compile database spans multiple configured build "
+                "roots");
+        }
+    }
+    return root;
 }
 
 }  // namespace clang_backend
@@ -5749,6 +5857,18 @@ prepare_compilation_environment(
         compiler_module_inventory,
         expected_compiler_module_inventory_sha256,
         "selected compiler-module inventory");
+    for (const std::filesystem::path& requested : source_paths) {
+        const std::filesystem::path source =
+            requested.is_absolute()
+            ? requested.lexically_normal()
+            : std::filesystem::absolute(requested)
+                  .lexically_normal();
+        if (!std::filesystem::is_regular_file(source)) {
+            throw std::runtime_error(
+                "registered Clang preparation source does not exist: "
+                + source.string());
+        }
+    }
     std::filesystem::create_directories(
         configured_pcm_root);
     const std::filesystem::path pcm_root =
@@ -5757,6 +5877,13 @@ prepare_compilation_environment(
     const std::filesystem::path relocation_root =
         clang_backend::derive_relocation_root(
             source_paths, raw_compile_database, pcm_root);
+    std::unique_ptr<clang::tooling::CompilationDatabase> database =
+        clang_backend::load_compile_database(
+            raw_compile_database);
+    const clang_backend::relocation_context relocation =
+        clang_backend::make_relocation_context(
+            relocation_root,
+            clang_backend::compilation_root(*database));
     const clang_backend::selected_toolchain_identity
         toolchain = clang_backend::validate_selected_toolchain(
             clang_binary,
@@ -5773,8 +5900,6 @@ prepare_compilation_environment(
         pcm_root / ".module-dependency-scan";
     std::filesystem::create_directories(import_scan_root);
 
-    std::unique_ptr<clang::tooling::CompilationDatabase> database =
-        clang_backend::load_compile_database(raw_compile_database);
     const std::vector<clang::tooling::CompileCommand> all_commands =
         database->getAllCompileCommands();
     std::map<
@@ -6087,7 +6212,7 @@ prepare_compilation_environment(
                     sha256_hex(read_file(record.source_path));
                 record.relocatable_source_sha256 =
                     clang_backend::relocatable_document_hash(
-                        read_file(record.source_path), relocation_root);
+                        read_file(record.source_path), relocation);
                 const std::size_t dependency_begin =
                     dependencies.size();
                 record.base_arguments =
@@ -6115,14 +6240,14 @@ prepare_compilation_environment(
                 record.relocatable_command_input_sha256 =
                     clang_backend::relocatable_command_input_hash(
                         record.command_inputs,
-                        relocation_root);
+                        relocation);
                 clang_backend::scan_active_module_imports(
                     record,
                     clang_scan_deps,
                     clang_binary_sha256,
                     clang_scan_deps_sha256,
                     import_scan_root,
-                    relocation_root);
+                    relocation);
             }
             for (const std::string& imported :
                  record.description.imports) {
@@ -6173,7 +6298,7 @@ prepare_compilation_environment(
         record.relocatable_argument_sha256 =
             clang_backend::relocatable_argument_hash(
                 record.base_arguments,
-                relocation_root,
+                relocation,
                 clang_binary_sha256);
         std::string content_material =
             std::string{CLANG_VERSION_STRING}
@@ -6291,14 +6416,14 @@ prepare_compilation_environment(
             clang_backend::relocatable_dependency_content_hash(
                 record.discovered_dependencies,
                 pcm_root,
-                relocation_root,
+                relocation,
                 relocatable_dependency_hash_cache);
         record.depfile_sha256 =
             sha256_hex(read_file(record.depfile_path));
         record.relocatable_depfile_sha256 =
             clang_backend::relocatable_document_hash(
                 read_file(record.depfile_path),
-                relocation_root);
+                relocation);
         record.content_key = sha256_hex(
             content_material + "\ndependencies="
             + record.dependency_sha256);
@@ -6374,7 +6499,7 @@ prepare_compilation_environment(
                         relocatable_dependency_content_hash(
                             record.discovered_dependencies,
                             pcm_root,
-                            relocation_root,
+                            relocation,
                             relocatable_dependency_hash_cache);
             if (compiled_dependency_sha256
                     != record.dependency_sha256
@@ -6389,7 +6514,7 @@ prepare_compilation_environment(
             record.relocatable_depfile_sha256 =
                 clang_backend::relocatable_document_hash(
                     read_file(record.depfile_path),
-                    relocation_root);
+                    relocation);
             record.pcm_sha256 =
                 sha256_hex(read_file(record.pcm_path));
             const std::string provenance =
@@ -6467,7 +6592,7 @@ prepare_compilation_environment(
         relocatable_owned_compile_database_sha256 =
         clang_backend::relocatable_compiler_document_hash(
             owned_compile_database,
-            relocation_root,
+            relocation,
             clang_binary,
             clang_binary_sha256);
 
@@ -6544,7 +6669,7 @@ prepare_compilation_environment(
     }
     std::ranges::sort(relocatable_signature_rows);
     std::string relocatable_signature_material =
-        "bioseq_clang_relocatable_compilation/v1\n"
+        "bioseq_clang_relocatable_compilation/v2\n"
         "clang_version=" + std::string{CLANG_VERSION_STRING}
         + "\nclang_binary_sha256=" + clang_binary_sha256
         + "\nclang_scan_deps_version=" + clang_scan_deps_version
@@ -6694,7 +6819,7 @@ prepare_compilation_environment(
                 << sha256_hex(read_file(input))
                 << "\", \"relocatable_sha256\": \""
                 << clang_backend::relocatable_document_hash(
-                    read_file(input), relocation_root)
+                    read_file(input), relocation)
                 << "\"}";
         }
         manifest
@@ -6792,7 +6917,7 @@ prepare_compilation_environment(
             relocatable_owned_compile_database_sha256,
         .relocatable_pcm_manifest_sha256 =
             sha256_hex(
-                "bioseq_clang_relocatable_pcm_manifest_projection/v1\n"
+                "bioseq_clang_relocatable_pcm_manifest_projection/v2\n"
                 + relocatable_compilation_signature + "\n"
                 + relocatable_owned_compile_database_sha256 + "\n"),
         .dependencies = std::move(dependencies),
@@ -6826,6 +6951,12 @@ validate_prepared_compilation_environment(
     const std::filesystem::path relocation_root =
         clang_backend::derive_relocation_root(
             source_paths, compile_database, pcm_root);
+    std::unique_ptr<clang::tooling::CompilationDatabase> database =
+        clang_backend::load_compile_database(compile_database);
+    const clang_backend::relocation_context relocation =
+        clang_backend::make_relocation_context(
+            relocation_root,
+            clang_backend::compilation_root(*database));
     const std::string document = read_file(pcm_manifest);
     llvm::Expected<llvm::json::Value> parsed =
         llvm::json::parse(document);
@@ -7059,7 +7190,7 @@ validate_prepared_compilation_environment(
     const std::string relocatable_compile_database_sha256 =
         clang_backend::relocatable_compiler_document_hash(
             compile_database_document,
-            relocation_root,
+            relocation,
             required_string(*root, "clang_binary"),
             clang_binary_sha256);
     if (compile_database_sha256
@@ -7267,7 +7398,7 @@ validate_prepared_compilation_environment(
                 || sha256_hex(read_file(path))
                     != required_string(*input, "sha256")
                 || clang_backend::relocatable_document_hash(
-                       read_file(path), relocation_root)
+                       read_file(path), relocation)
                     != required_string(
                         *input, "relocatable_sha256")) {
                 throw std::runtime_error(
@@ -7284,7 +7415,7 @@ validate_prepared_compilation_environment(
                 != module.command_input_sha256
             || clang_backend::relocatable_command_input_hash(
                    module.command_inputs,
-                   relocation_root)
+                   relocation)
                 != module.relocatable_command_input_sha256) {
             throw std::runtime_error(
                 "PREPARE command-input closure is not canonical or "
@@ -7317,7 +7448,7 @@ validate_prepared_compilation_environment(
                 != module.arguments_sha256
             || clang_backend::relocatable_argument_hash(
                    module.base_arguments,
-                   relocation_root,
+                   relocation,
                    clang_binary_sha256)
                 != module.relocatable_arguments_sha256) {
             throw std::runtime_error(
@@ -7362,7 +7493,7 @@ validate_prepared_compilation_environment(
                 != module.source_sha256
             || clang_backend::relocatable_document_hash(
                    read_file(module.source),
-                   relocation_root)
+                   relocation)
                 != module.relocatable_source_sha256) {
             throw std::runtime_error(
                 "PREPARE source hash is stale for module '"
@@ -7380,12 +7511,12 @@ validate_prepared_compilation_environment(
         std::string scan_key_material =
             module.name + "\n"
             + clang_backend::relocatable_path_spelling(
-                module.source, relocation_root)
+                module.source, relocation)
             + "\n" + clang_scan_deps_sha256 + "\n";
         scan_key_material +=
             clang_backend::relocatable_argument_material(
                 module.base_arguments,
-                relocation_root,
+                relocation,
                 clang_binary_sha256);
         const std::string scan_basename =
             clang_backend::safe_module_filename(module.name)
@@ -7428,19 +7559,19 @@ validate_prepared_compilation_environment(
             || clang_backend::
                    relocatable_compiler_document_hash(
                        scan_database_document,
-                       relocation_root,
+                       relocation,
                        module.base_arguments.front(),
                        clang_binary_sha256)
                 != module.relocatable_scan_database_sha256
             || sha256_hex(scan_result_document)
                 != module.scan_result_sha256
             || clang_backend::relocatable_document_hash(
-                   scan_result_document, relocation_root)
+                   scan_result_document, relocation)
                 != module.relocatable_scan_result_sha256
             || sha256_hex(scan_diagnostics_document)
                 != module.scan_diagnostics_sha256
             || clang_backend::relocatable_document_hash(
-                   scan_diagnostics_document, relocation_root)
+                   scan_diagnostics_document, relocation)
                 != module.relocatable_scan_diagnostics_sha256) {
             throw std::runtime_error(
                 "PREPARE active-import scan artifact hash is stale for "
@@ -7532,7 +7663,7 @@ validate_prepared_compilation_environment(
                 != module.depfile_sha256
             || clang_backend::relocatable_document_hash(
                    read_file(module.depfile),
-                   relocation_root)
+                   relocation)
                 != module.relocatable_depfile_sha256) {
             throw std::runtime_error(
                 "PREPARE depfile is missing, foreign, or stale for "
@@ -7573,7 +7704,7 @@ validate_prepared_compilation_environment(
             || clang_backend::relocatable_dependency_content_hash(
                    dependencies,
                    pcm_root,
-                   relocation_root,
+                   relocation,
                    relocatable_dependency_hash_cache)
                 != module.relocatable_dependency_sha256) {
             throw std::runtime_error(
@@ -7653,8 +7784,6 @@ validate_prepared_compilation_environment(
             reached.insert(name);
         };
 
-    std::unique_ptr<clang::tooling::CompilationDatabase> database =
-        clang_backend::load_compile_database(compile_database);
     std::vector<std::filesystem::path> normalized_sources;
     normalized_sources.reserve(source_paths.size());
     for (const std::filesystem::path& source : source_paths) {
@@ -7919,7 +8048,7 @@ validate_prepared_compilation_environment(
     }
     std::ranges::sort(relocatable_signature_rows);
     std::string relocatable_signature_material =
-        "bioseq_clang_relocatable_compilation/v1\n"
+        "bioseq_clang_relocatable_compilation/v2\n"
         "clang_version=" + std::string{CLANG_VERSION_STRING}
         + "\nclang_binary_sha256=" + clang_binary_sha256
         + "\nclang_scan_deps_version=" + clang_scan_deps_version
