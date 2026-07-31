@@ -44,8 +44,6 @@ target_link_libraries(bioseq_cache_integration_tests
 
 set(_bioseq_cache_legacy_inventory
   "${CMAKE_CURRENT_LIST_DIR}/../legacy_asset_inventory.txt")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  "${_bioseq_cache_legacy_inventory}")
 add_test(
   NAME bioseq_cache_legacy_inventory_tracking
   COMMAND bioseq_cache_legacy_inventory_tracking

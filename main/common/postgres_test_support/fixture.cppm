@@ -35,6 +35,13 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+/// @brief Pins a still-existing private root to its canonical report path.
+[[nodiscard]] inline std::filesystem::path
+canonical_cleanup_observation_root(
+    const std::filesystem::path& root) {
+    return std::filesystem::canonical(root);
+}
+
 /// @brief Structured observation of one expected PostgreSQL error.
 struct sql_error_observation {
     std::string sqlstate;
@@ -256,7 +263,8 @@ private:
                 return;
             }
             const std::filesystem::path root =
-                cluster_.root_directory();
+                canonical_cleanup_observation_root(
+                    cluster_.root_directory());
             resource_report resources =
                 capture_resource_report(
                     std::span<const std::filesystem::path>(&root, 1));

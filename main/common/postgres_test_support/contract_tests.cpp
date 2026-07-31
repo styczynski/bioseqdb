@@ -140,6 +140,34 @@ private:
     std::filesystem::path root_;
 };
 
+[[nodiscard]] std::string read_contract_file(
+    const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        throw std::runtime_error(
+            "cannot read contract file " + path.string());
+    }
+    std::string payload{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{}};
+    if (input.bad()) {
+        throw std::runtime_error(
+            "cannot complete contract file read " + path.string());
+    }
+    return payload;
+}
+
+[[nodiscard]] std::string contract_hex_encode(std::string_view value) {
+    constexpr std::string_view digits{"0123456789abcdef"};
+    std::string encoded;
+    encoded.reserve(value.size() * 2U);
+    for (const unsigned char byte : value) {
+        encoded.push_back(digits[byte >> 4U]);
+        encoded.push_back(digits[byte & 0x0FU]);
+    }
+    return encoded;
+}
+
 class direct_child_guard {
 public:
     explicit direct_child_guard(pid_t pid = -1) noexcept : pid_(pid) {}
@@ -1734,6 +1762,81 @@ TEST_CASE("resource phase crash journal preserves exact boundary samples",
     CHECK(observed.owned_root_bytes == expected.owned_root_bytes);
 }
 
+TEST_CASE("supervision journal v1 wire format is byte exact",
+          "[postgres-test-support][unit][supervision][journal][format]") {
+    temporary_resource_journal_tree tree;
+    configure_supervision_state(tree.state_directory());
+
+    const std::string registry_v1_generation_1 =
+        "bioseq-supervision-registry-v1\t1\n";
+    CHECK(read_contract_file(
+              tree.state_directory() / ".bioseq-watchdog-state")
+          == std::to_string(::getpid()) + "\n");
+    CHECK(read_contract_file(
+              tree.state_directory() / "registries.clean")
+          == registry_v1_generation_1);
+    CHECK(read_contract_file(
+              tree.state_directory() / "clusters.tsv")
+          == registry_v1_generation_1);
+    CHECK(read_contract_file(
+              tree.state_directory() / "processes.tsv")
+          == registry_v1_generation_1);
+
+    const auto launch = begin_supervised_process_launch();
+    REQUIRE(launch.has_value());
+    REQUIRE(launch->supervision_required);
+    CHECK(read_contract_file(
+              tree.state_directory() / "registries.dirty")
+          == "2\n");
+    const auto process = capture_supervised_process(
+        static_cast<std::uint64_t>(::getpid()),
+        {},
+        tree.data_directory());
+    REQUIRE(process.has_value());
+    REQUIRE(commit_supervised_process_launch(
+        *launch,
+        process->pid,
+        process->executable,
+        process->data_directory));
+    const std::string process_row =
+        std::to_string(process->pid) + "\t"
+        + contract_hex_encode(process->start_token) + "\t"
+        + contract_hex_encode(process->executable.string()) + "\t"
+        + std::to_string(process->process_group) + "\t"
+        + contract_hex_encode(process->data_directory.string()) + "\n";
+    const std::string registry_v1_generation_2 =
+        "bioseq-supervision-registry-v1\t2\n";
+    CHECK(read_contract_file(
+              tree.state_directory() / "processes.tsv")
+          == registry_v1_generation_2 + process_row);
+
+    const supervised_cluster_record cluster{
+        .root = tree.owned_root(),
+        .data_directory = tree.data_directory()};
+    register_supervised_cluster(cluster);
+    const std::string registry_v1_generation_3 =
+        "bioseq-supervision-registry-v1\t3\n";
+    const std::string cluster_row =
+        contract_hex_encode(tree.owned_root().string()) + "\t"
+        + contract_hex_encode(tree.data_directory().string())
+        + "\t0\t0\t\t\t0\n";
+    CHECK(read_contract_file(
+              tree.state_directory() / "registries.clean")
+          == registry_v1_generation_3);
+    CHECK(read_contract_file(
+              tree.state_directory() / "clusters.tsv")
+          == registry_v1_generation_3 + cluster_row);
+    CHECK(read_contract_file(
+              tree.state_directory() / "processes.tsv")
+          == registry_v1_generation_3 + process_row);
+
+    REQUIRE(try_claim_supervision_decision(
+        tree.state_directory(), "disarmed"));
+    CHECK(read_contract_file(tree.state_directory() / "decision")
+          == "bioseq-supervision-decision-v1\t"
+             "64697361726d6564\n");
+}
+
 TEST_CASE("watchdog decision has one atomic winner",
           "[postgres-test-support][unit][supervision][journal]") {
     temporary_resource_journal_tree tree;
@@ -1749,9 +1852,17 @@ TEST_CASE("watchdog decision has one atomic winner",
 
     REQUIRE(try_claim_supervision_decision(
         tree.state_directory(), "disarmed"));
+    const std::string first_decision =
+        read_contract_file(tree.state_directory() / "decision");
     CHECK(supervision_decision_claimed(tree.state_directory()));
     CHECK_FALSE(try_claim_supervision_decision(
+        tree.state_directory(), "disarmed"));
+    CHECK(read_contract_file(tree.state_directory() / "decision")
+          == first_decision);
+    CHECK_FALSE(try_claim_supervision_decision(
         tree.state_directory(), "timeout"));
+    CHECK(read_contract_file(tree.state_directory() / "decision")
+          == first_decision);
 }
 
 TEST_CASE("watchdog decision requires durable complete publication",
@@ -1795,6 +1906,46 @@ TEST_CASE("watchdog decision requires durable complete publication",
     SECTION("directory sync") {
         exercise(supervision_journal_fault::directory_sync);
     }
+}
+
+TEST_CASE(
+    "watchdog decision accepts failed rollback only after reconciliation fsync",
+    "[postgres-test-support][unit][supervision][decision][reconcile]") {
+    temporary_resource_journal_tree tree;
+    configure_supervision_state(tree.state_directory());
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::decision_rollback_remove);
+
+    REQUIRE(try_claim_supervision_decision(
+        tree.state_directory(), "disarmed"));
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::none);
+    CHECK(supervision_decision_claimed(tree.state_directory()));
+    CHECK(read_contract_file(tree.state_directory() / "decision")
+          == "bioseq-supervision-decision-v1\t"
+             "64697361726d6564\n");
+}
+
+TEST_CASE(
+    "watchdog decision rollback fsync failure cannot issue success",
+    "[postgres-test-support][unit][supervision][decision][reconcile][retry]") {
+    temporary_resource_journal_tree tree;
+    configure_supervision_state(tree.state_directory());
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::
+            decision_reconciliation_directory_sync);
+
+    CHECK_FALSE(try_claim_supervision_decision(
+        tree.state_directory(), "disarmed"));
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::none);
+    CHECK_FALSE(std::filesystem::exists(
+        tree.state_directory() / "decision"));
+    CHECK_FALSE(supervision_decision_claimed(
+        tree.state_directory()));
+    REQUIRE(try_claim_supervision_decision(
+        tree.state_directory(), "timeout"));
+    CHECK(supervision_decision_claimed(tree.state_directory()));
 }
 
 TEST_CASE("failed watchdog decision publication is never observable",
@@ -1951,6 +2102,16 @@ TEST_CASE("live-resource registry publication failures stay dirty",
             tree.state_directory()));
         CHECK_FALSE(remove_supervision_state(
             tree.state_directory()));
+
+        REQUIRE_NOTHROW(register_supervised_cluster(
+            supervised_cluster_record{
+                .root = tree.owned_root(),
+                .data_directory = tree.data_directory()}));
+        const auto retried = load_supervision_registries(
+            tree.state_directory());
+        REQUIRE(retried.has_value());
+        REQUIRE(retried->clusters.size() == 1U);
+        CHECK(retried->clusters.front().root == tree.owned_root());
     };
 
     SECTION("open") {
@@ -1959,9 +2120,48 @@ TEST_CASE("live-resource registry publication failures stay dirty",
     SECTION("write") {
         exercise(supervision_journal_fault::write);
     }
+    SECTION("file fsync") {
+        exercise(supervision_journal_fault::fsync);
+    }
+    SECTION("file close") {
+        exercise(supervision_journal_fault::close);
+    }
     SECTION("rename") {
         exercise(supervision_journal_fault::rename);
     }
+    SECTION("directory fsync") {
+        exercise(supervision_journal_fault::directory_sync);
+    }
+}
+
+TEST_CASE(
+    "failed final registry clean transition restores a durable dirty marker",
+    "[postgres-test-support][unit][supervision][journal][commit][retry]") {
+    temporary_resource_journal_tree tree;
+    configure_supervision_state(tree.state_directory());
+    const supervised_cluster_record cluster{
+        .root = tree.owned_root(),
+        .data_directory = tree.data_directory()};
+    register_supervised_cluster(cluster);
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::
+            registry_clean_transition_directory_sync);
+
+    CHECK_FALSE(unregister_supervised_cluster(tree.owned_root()));
+    set_supervision_journal_fault_for_testing(
+        supervision_journal_fault::none);
+    REQUIRE(std::filesystem::is_regular_file(
+        tree.state_directory() / "registries.dirty"));
+    CHECK(read_contract_file(
+              tree.state_directory() / "registries.dirty")
+          == "3\n");
+    CHECK_FALSE(load_supervision_registries(
+        tree.state_directory()));
+    CHECK_FALSE(supervision_registries_empty(
+        tree.state_directory()));
+
+    REQUIRE(unregister_supervised_cluster(tree.owned_root()));
+    REQUIRE(supervision_registries_empty(tree.state_directory()));
 }
 
 TEST_CASE("live-resource registry loading rejects invalid evidence",
@@ -1996,6 +2196,26 @@ TEST_CASE("live-resource registry loading rejects invalid evidence",
         output << "incomplete";
         output.close();
         REQUIRE(static_cast<bool>(output));
+    }
+    SECTION("symlinked journal") {
+        const std::filesystem::path journal =
+            tree.state_directory() / "clusters.tsv";
+        const std::filesystem::path external =
+            tree.owned_root() / "external-clusters.tsv";
+        REQUIRE(std::filesystem::copy_file(journal, external));
+        REQUIRE(std::filesystem::remove(journal));
+        std::filesystem::create_symlink(external, journal);
+    }
+    SECTION("symlinked ownership marker") {
+        const std::filesystem::path marker =
+            tree.state_directory() / ".bioseq-watchdog-state";
+        const std::filesystem::path external =
+            tree.owned_root() / "external-watchdog-state";
+        REQUIRE(std::filesystem::copy_file(marker, external));
+        REQUIRE(std::filesystem::remove(marker));
+        std::filesystem::create_symlink(external, marker);
+        CHECK_FALSE(try_claim_supervision_decision(
+            tree.state_directory(), "timeout"));
     }
 
     CHECK_FALSE(load_supervision_registries(
@@ -2683,4 +2903,34 @@ TEST_CASE("fixture terminal resource sampling is idempotent and cleanup-safe",
             .postmaster_process_tree_rss_bytes.has_value());
     REQUIRE(
         first.phase_boundaries.front().owned_root_bytes.has_value());
+}
+
+TEST_CASE(
+    "fixture cleanup evidence canonicalizes its existing private root",
+    "[postgres-test-support][unit][fixture][cleanup]") {
+    const std::filesystem::path raw_root =
+        std::filesystem::temp_directory_path()
+        / ("bioseq-pg-test-canonical-contract-"
+           + std::to_string(::getpid()) + "-"
+           + std::to_string(
+               std::chrono::steady_clock::now()
+                   .time_since_epoch().count()));
+    struct cleanup_guard {
+        std::filesystem::path path;
+        ~cleanup_guard() {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } cleanup{raw_root};
+    REQUIRE(std::filesystem::create_directory(raw_root));
+
+    const std::filesystem::path observed =
+        canonical_cleanup_observation_root(raw_root);
+    REQUIRE(observed == std::filesystem::canonical(raw_root));
+    REQUIRE(
+        observed.parent_path()
+        == std::filesystem::canonical(
+            std::filesystem::temp_directory_path()));
+    REQUIRE(
+        observed.filename() == raw_root.filename());
 }

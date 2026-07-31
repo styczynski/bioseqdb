@@ -455,6 +455,7 @@ def _safe_parallel_jobs() -> int:
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
+CACHE_EXACT2G_FINALIZATION_RESERVE_SEC = 10 * 60.0
 
 
 def _safe_heavy_jobs() -> int:
@@ -938,6 +939,8 @@ class ModeDefinition:
     post_build_targets: tuple[str, ...] = ()
     """True when all PostgreSQL work occurs in a disposable private cluster."""
     uses_private_cluster: bool = False
+    """Optional mode-wide wall-clock ceiling, including build and cleanup."""
+    hard_timeout_min: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.preset_family not in {
@@ -948,6 +951,8 @@ class ModeDefinition:
             raise ValueError(
                 "private-cluster modes must not install/restart the shared "
                 "PostgreSQL extension")
+        if self.hard_timeout_min is not None and self.hard_timeout_min <= 0:
+            raise ValueError("mode hard_timeout_min must be positive")
 
     @property
     def verb_is(self) -> str:
@@ -1163,6 +1168,9 @@ MODES: Dict[str, ModeDefinition] = {
             "bioseq_cache_unit_tests",
             "bioseq_postgres_test_support_contract_tests",
             "bioseq_cache_benchmark_report_contract_tests",
+            "bioseq_durable_file_io_contract_tests",
+            "bioseq_cache_legacy_retirement_gate",
+            "bioseq_cache_legacy_inventory_tracking",
         ],
         commands=[
             ["bioseq_cache_unit_tests",
@@ -1171,6 +1179,15 @@ MODES: Dict[str, ModeDefinition] = {
              "--reporter", "console::out=-::colour-mode=ansi"],
             ["bioseq_cache_benchmark_report_contract_tests",
              "--reporter", "console::out=-::colour-mode=ansi"],
+            ["bioseq_durable_file_io_contract_tests",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            [
+                "bioseq_cache_legacy_inventory_tracking",
+                "--legacy-root", str(PROJECT_ROOT / "bioseq_caching"),
+                "--legacy-inventory", "{legacy_inventory}",
+                "--phase", "current",
+                "--inventory-only",
+            ],
         ],
     ),
     "cache-integration": ModeDefinition(
@@ -1200,6 +1217,8 @@ MODES: Dict[str, ModeDefinition] = {
                 "--cache-install-sql", "{cache_test_install_sql}",
                 "--cache-dso", "{cache_test_dso}",
                 "--migration-ledger", "{migration_ledger}",
+                "--migration-harness", "cache-integration",
+                "--migration-report-role", "cache-integration",
                 "--report", "{report}",
                 "--case-timeout-seconds", "480",
                 "--reporter", "console::out=-::colour-mode=ansi",
@@ -1230,6 +1249,7 @@ MODES: Dict[str, ModeDefinition] = {
                 "--cache-control", "{cache_control}",
                 "--cache-install-sql", "{cache_install_sql}",
                 "--cache-dso", "{cache_dso}",
+                "--migration-ledger", "{migration_ledger}",
                 "--scenario", "standalone",
                 "--samples", "7",
                 "--warmup-samples", "1",
@@ -1282,6 +1302,9 @@ MODES: Dict[str, ModeDefinition] = {
                 "--bioseq-dso", "{bioseq_dso}",
                 "--provider-peer-test-dso", "{provider_peer_test_dso}",
                 "--migration-ledger", "{migration_ledger}",
+                "--migration-harness", "cache-bioseq-integration",
+                "--migration-report-role",
+                "cache-bioseq-support-integration",
                 "--report", "{report}",
                 "--case-timeout-seconds", "480",
                 "--reporter", "console::out=-::colour-mode=ansi",
@@ -1301,6 +1324,9 @@ MODES: Dict[str, ModeDefinition] = {
                 "--bioseq-install-sql", "{bioseq_install_sql}",
                 "--bioseq-dso", "{bioseq_dso}",
                 "--migration-ledger", "{migration_ledger}",
+                "--migration-harness", "cache-bioseq-integration",
+                "--migration-report-role",
+                "cache-bioseq-production-integration",
                 "--report", "{report}",
                 "--case-timeout-seconds", "480",
                 "--large-case-timeout-seconds", "6300",
@@ -1309,6 +1335,7 @@ MODES: Dict[str, ModeDefinition] = {
         ],
         reporting_subdir_name="bioseq_cache_bioseq_integration",
         uses_private_cluster=True,
+        hard_timeout_min=120.0,
     ),
     "cache-bioseq-bench": ModeDefinition(
         lock_group="bench",
@@ -1323,6 +1350,7 @@ MODES: Dict[str, ModeDefinition] = {
             "postgresql_bioseq_cache",
             "postgresql_bioseq",
             "bioseq_cache_bioseq_bench",
+            "bioseq_cache_legacy_retirement_gate",
         ],
         commands=[
             [
@@ -1339,6 +1367,7 @@ MODES: Dict[str, ModeDefinition] = {
                 "--bioseq-control", "{bioseq_control}",
                 "--bioseq-install-sql", "{bioseq_install_sql}",
                 "--bioseq-dso", "{bioseq_dso}",
+                "--migration-ledger", "{migration_ledger}",
                 "--scenario", "bioseq-2gbp",
                 "--samples", "3",
                 "--warmup-samples", "1",
@@ -1618,9 +1647,15 @@ def _kill_pgroup(pid: int) -> None:
                 return
 
 
-def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
-                       cwd: Path | None = None,
-                       env: dict | None = None) -> int:
+def _stream_subprocess(
+        cmd: list[str],
+        log_handle,
+        deadline: float,
+        cwd: Path | None = None,
+        env: dict | None = None,
+        *,
+        verified_executable: Path | None = None,
+) -> int:
     """Run cmd, tee combined stdout/stderr to log_handle and stderr, enforce
     deadline. Returns the process return code on clean exit. Raises
     TimeoutError if the deadline is hit.
@@ -1637,6 +1672,10 @@ def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
 
     proc = subprocess.Popen(
         cmd,
+        executable=(
+            str(verified_executable)
+            if verified_executable is not None else None
+        ),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         cwd=str(cwd) if cwd else None,
@@ -1690,6 +1729,8 @@ def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        if proc.stdout is not None:
+            proc.stdout.close()
 
 
 def _is_aws_clang_preset(preset: str) -> bool:
@@ -2135,6 +2176,9 @@ _CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
     "bioseq_dso",
     "provider_peer_test_dso",
     "migration_ledger",
+    "legacy_inventory",
+    "migration_catch_cases",
+    "legacy_retirement_gate",
 })
 
 
@@ -2168,6 +2212,1554 @@ def _cache_native_artifacts(active_bin_dir: Path) -> dict[str, str]:
     return values
 
 
+_CACHE_MIGRATION_LEDGER = (
+    PROJECT_ROOT / "bioseq_caching" / "test"
+    / "legacy_migration_ledger.tsv"
+)
+_CACHE_LEGACY_INVENTORY = (
+    PROJECT_ROOT / "bioseq_caching" / "test"
+    / "legacy_asset_inventory.txt"
+)
+_CACHE_LEGACY_ROOT = PROJECT_ROOT / "bioseq_caching"
+_CACHE_RETIREMENT_PROOF = (
+    PROJECT_ROOT / "bioseq_caching" / "test"
+    / "legacy_retirement_receipt.json"
+)
+_CACHE_RETIREMENT_REPORTING_DIR = (
+    REPORTING_DIR / "bioseq_cache_retirement"
+)
+_CACHE_UNIT_REPORTING_DIR = REPORTING_DIR / "bioseq_cache_unit"
+_CACHE_SOURCE_SCOPES = (
+    "main/CMakeLists.txt",
+    "main/CMakePresets.json",
+    "main/vcpkg.json",
+    "main/vcpkg-configuration.json",
+    "main/bench",
+    "main/bench_framework",
+    "main/bioseq",
+    "main/bioseq_caching",
+    "main/codegen",
+    "main/common",
+    "main/config",
+    "main/overlays",
+    "main/vendor",
+    "main/cmake",
+    ":(top,exclude,glob)main/cmake/**/__pycache__/**",
+    "main/build_mcp",
+    ":(top,exclude,glob)main/build_mcp/**/__pycache__/**",
+)
+_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE = {
+    "bioseq_cache_integration_tests": "cache-integration",
+    "bioseq_cache_bioseq_support_integration_tests":
+        "cache-bioseq-support-integration",
+    "bioseq_cache_bioseq_production_integration_tests":
+        "cache-bioseq-production-integration",
+    "bioseq_cache_bench": "cache-bench",
+    "bioseq_cache_bioseq_bench": "cache-bioseq-bench",
+}
+_CACHE_EVIDENCE_EXECUTABLE_BY_ROLE = {
+    role: executable
+    for executable, role in _CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.items()
+}
+_CACHE_EVIDENCE_MODE_BY_ROLE = {
+    "cache-integration": "cache-integration",
+    "cache-bioseq-support-integration": "cache-bioseq-integration",
+    "cache-bioseq-production-integration": "cache-bioseq-integration",
+    "cache-bench": "cache-bench",
+    "cache-bioseq-bench": "cache-bioseq-bench",
+}
+_CACHE_EVIDENCE_SCENARIO_BY_ROLE = {
+    "cache-integration": "cache-integration",
+    "cache-bioseq-support-integration": "cache-bioseq-support",
+    "cache-bioseq-production-integration":
+        "cache-bioseq-production-exact-2gbp",
+    "cache-bench": "standalone",
+    "cache-bioseq-bench": "bioseq-2gbp",
+}
+_CACHE_INTEGRATION_HARNESS_BY_ROLE = {
+    "cache-integration": "cache-integration",
+    "cache-bioseq-support-integration": "cache-bioseq-integration",
+    "cache-bioseq-production-integration": "cache-bioseq-integration",
+}
+_CACHE_EVIDENCE_REPORTING_DIRS = (
+    REPORTING_DIR / "bioseq_cache_integration",
+    REPORTING_DIR / "bioseq_cache_bioseq_integration",
+    REPORTING_DIR / "bioseq_cache_bench",
+    REPORTING_DIR / "bioseq_cache_bioseq_bench",
+)
+_CACHE_RECEIPT_MODES = frozenset({
+    "cache-unit",
+    "cache-integration",
+    "cache-bench",
+    "cache-bioseq-integration",
+    "cache-bioseq-bench",
+})
+
+
+def _cache_git_bytes(arguments: list[str]) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(WORKSPACE_ROOT), *arguments],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect cache proof Git provenance: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            "cache proof Git provenance command failed: "
+            f"{detail or result.returncode}")
+    return result.stdout
+
+
+def _cache_length_prefix(value: bytes) -> bytes:
+    return str(len(value)).encode("ascii") + b":" + value
+
+
+def _cache_source_provenance() -> dict[str, object]:
+    revision = _cache_git_bytes(["rev-parse", "HEAD"]).strip().decode(
+        "ascii", errors="strict")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise RuntimeError(
+            "cache proof source revision is not a lowercase 40-hex commit")
+    status = _cache_git_bytes([
+        "status", "--porcelain=v1", "-z", "--untracked-files=all",
+        "--", *_CACHE_SOURCE_SCOPES,
+    ])
+    tree = _cache_git_bytes([
+        "ls-tree", "-r", "-z", "--full-tree", revision,
+        "--", *_CACHE_SOURCE_SCOPES,
+    ])
+    material = bytearray(b"bioseq-cache-source-scope/v1\0")
+    material += _cache_length_prefix(revision.encode("ascii"))
+    for scope in _CACHE_SOURCE_SCOPES:
+        material += _cache_length_prefix(scope.encode("utf-8"))
+    material += _cache_length_prefix(tree)
+    return {
+        "source_revision": revision,
+        "source_scope_sha256": hashlib.sha256(material).hexdigest(),
+        "source_scoped_clean": not status,
+    }
+
+
+def _cache_migration_contract(
+        path: Path = _CACHE_MIGRATION_LEDGER,
+) -> dict[str, str]:
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot seal cache migration ledger {path}: {exc}"
+        ) from exc
+    lines = text.splitlines()
+    expected_header = (
+        "legacy_path\tlegacy_line_or_assertion\tstable_id\t"
+        "evidence_harness\tevidence_role\tsource_kind\t"
+        "scenario_or_permutation\texpected_sqlstate_or_result\t"
+        "expected_state_invariant\tcatch2_case\tcatch2_section\t"
+        "catch2_tags\tmigration_status"
+    )
+    if not lines or lines[0] != expected_header or len(lines) == 1:
+        raise RuntimeError(
+            "cache migration ledger header/body is invalid")
+    material = bytearray(
+        b"bioseq-cache-migration-evidence-contract/v1\n")
+    phases: set[str] = set()
+    for line_number, line in enumerate(lines[1:], start=2):
+        fields = line.split("\t")
+        if len(fields) != 13:
+            raise RuntimeError(
+                f"cache migration ledger line {line_number} "
+                "does not contain 13 fields")
+        phases.add(fields[12])
+        for field in fields[:12]:
+            material += _cache_length_prefix(field.encode("utf-8"))
+        material += b"\n"
+    phase = next(iter(phases)) if len(phases) == 1 else "mixed"
+    if phase not in {"mapped", "passing", "retired_with_proof", "mixed"}:
+        raise RuntimeError(
+            f"cache migration ledger has invalid phase {phase!r}")
+    return {
+        "migration_ledger_sha256": hashlib.sha256(raw).hexdigest(),
+        "evidence_contract_sha256":
+            hashlib.sha256(material).hexdigest(),
+        "migration_phase": phase,
+    }
+
+
+def _cache_run_provenance() -> dict[str, object]:
+    source = _cache_source_provenance()
+    if not source["source_scoped_clean"]:
+        raise RuntimeError(
+            "cache qualification requires a clean relevant source scope")
+    return {**source, **_cache_migration_contract()}
+
+
+def _cache_qualification_provenance(
+        mode: str, build_only: bool) -> dict[str, object] | None:
+    """Start a release receipt only for executable lifecycle phases."""
+    if build_only or mode not in _CACHE_RECEIPT_MODES:
+        return None
+    phase = _cache_migration_contract()["migration_phase"]
+    if phase not in {"passing", "retired_with_proof"}:
+        return None
+    return _cache_run_provenance()
+
+
+def _require_same_cache_run_provenance(
+        before: Mapping[str, object],
+        after: Mapping[str, object],
+) -> None:
+    if before != after or not after.get("source_scoped_clean"):
+        raise RuntimeError(
+            "cache source/ledger provenance changed during qualification")
+
+
+_CACHE_NATIVE_ARTIFACT_FIELDS = frozenset({
+    "name",
+    "preinstalled_stage_root",
+    "stage_manifest",
+    "stage_manifest_sha256",
+    "control_file",
+    "install_sql",
+    "dso",
+    "staged_control_file",
+    "staged_install_sql",
+    "staged_dso",
+    "control_sha256",
+    "install_sql_sha256",
+    "dso_sha256",
+    "staged_control_sha256",
+})
+_CACHE_NATIVE_ARTIFACT_PATH_FIELDS = (
+    "preinstalled_stage_root",
+    "stage_manifest",
+    "control_file",
+    "install_sql",
+    "dso",
+    "staged_control_file",
+    "staged_install_sql",
+    "staged_dso",
+)
+_CACHE_NATIVE_ARTIFACT_DIGEST_FIELDS = (
+    "stage_manifest_sha256",
+    "control_sha256",
+    "install_sql_sha256",
+    "dso_sha256",
+    "staged_control_sha256",
+)
+
+
+def _cache_native_artifact_contracts(
+        artifacts: object,
+) -> list[dict[str, object]]:
+    if (
+        not isinstance(artifacts, list)
+        or not artifacts
+        or any(not isinstance(artifact, dict)
+               for artifact in artifacts)
+    ):
+        raise RuntimeError(
+            "native cache report artifact contract is incomplete")
+    result: list[dict[str, object]] = []
+    for ordinal, artifact in enumerate(artifacts):
+        if set(artifact) != _CACHE_NATIVE_ARTIFACT_FIELDS:
+            raise RuntimeError(
+                "native cache report artifact has an inexact field "
+                f"contract at ordinal {ordinal}")
+        if artifact.get("name") not in {"bioseq_cache", "bioseq"}:
+            raise RuntimeError(
+                "native cache report artifact names an unexpected "
+                f"extension at ordinal {ordinal}")
+        for field in _CACHE_NATIVE_ARTIFACT_PATH_FIELDS:
+            value = artifact.get(field)
+            if (
+                not isinstance(value, str)
+                or not Path(value).is_absolute()
+                or os.path.normpath(value) != value
+            ):
+                raise RuntimeError(
+                    "native cache report artifact path is not normalized "
+                    f"and absolute: artifacts[{ordinal}].{field}")
+        for field in _CACHE_NATIVE_ARTIFACT_DIGEST_FIELDS:
+            value = artifact.get(field)
+            if (
+                not isinstance(value, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", value)
+            ):
+                raise RuntimeError(
+                    "native cache report artifact digest is invalid: "
+                    f"artifacts[{ordinal}].{field}")
+        result.append(dict(artifact))
+    return result
+
+
+def _require_absent_nofollow_path(
+        path: Path,
+        context: str,
+) -> None:
+    if not path.is_absolute():
+        raise RuntimeError(f"{context} is not absolute: {path}")
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot inspect {context} component {current}: {exc}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError(
+                f"{context} traverses a symlink: {current}")
+        if current == path:
+            raise RuntimeError(f"{context} still exists: {path}")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(
+                f"{context} traverses a non-directory: {current}")
+    raise RuntimeError(f"{context} still exists: {path}")
+
+
+def _cache_cleanup_root_contracts(
+        cleanup_observations: list[object],
+) -> list[str]:
+    canonical_temporary_directory = Path(
+        tempfile.gettempdir()).resolve(strict=True)
+    roots = [
+        observation.get("root")
+        if isinstance(observation, dict) else None
+        for observation in cleanup_observations
+    ]
+    if any(
+        not isinstance(root, str)
+        or not Path(root).is_absolute()
+        or os.path.normpath(root) != root
+        or not Path(root).name.startswith("bioseq-pg-test-")
+        or Path(root).parent != canonical_temporary_directory
+        for root in roots
+    ):
+        raise RuntimeError(
+            "native cache integration cleanup roots are invalid or "
+            "not marker-owned direct children of the canonical temporary "
+            "directory")
+    return roots
+
+
+def _require_cache_cleanup_roots_absent(
+        cleanup_roots: list[Path],
+        context: str,
+) -> None:
+    for cleanup_root in cleanup_roots:
+        _require_absent_nofollow_path(cleanup_root, context)
+
+
+def _cache_native_report_contract(
+        report_path: Path,
+) -> dict[str, object]:
+    try:
+        value = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read native cache report {report_path}: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("native cache report is not a JSON object")
+    schema = value.get("schema_version")
+    if schema == "bioseq-cache-test-v2":
+        cases = value.get("cases")
+        arguments = value.get("arguments")
+        cleanup = value.get("cleanup")
+        cleanup_observations = value.get("cleanup_observations")
+        cluster = value.get("cluster_configuration")
+        if (
+            not isinstance(cases, list)
+            or not cases
+            or any(
+                not isinstance(case, dict)
+                or case.get("status") != "passed"
+                for case in cases
+            )
+            or not isinstance(cleanup, dict)
+            or cleanup.get("succeeded") is not True
+            or not isinstance(cleanup_observations, list)
+            or not cleanup_observations
+            or any(
+                not isinstance(observation, dict)
+                or observation.get("succeeded") is not True
+                for observation in cleanup_observations
+            )
+            or not isinstance(cluster, dict)
+            or cluster.get("retained-supervision-state") != "none"
+        ):
+            raise RuntimeError(
+                "native cache integration report did not pass with "
+                "complete cleanup evidence")
+        role = value.get("migration_report_role")
+        harness = value.get("migration_evidence_harness")
+        ledger_sha256 = value.get("migration_ledger_sha256")
+        evidence_sha256 = value.get("evidence_contract_sha256")
+        phase = value.get("migration_phase")
+        coverage = value.get("migration_coverage")
+        executable = value.get("executable")
+        executable_sha256 = value.get("build_identity")
+        artifacts = _cache_native_artifact_contracts(
+            value.get("artifacts"))
+        cleanup_roots = _cache_cleanup_root_contracts(
+            cleanup_observations)
+        scenario = (
+            _CACHE_EVIDENCE_SCENARIO_BY_ROLE.get(role)
+            if isinstance(role, str) else None
+        )
+        if not isinstance(arguments, list) or not arguments:
+            raise RuntimeError(
+                "native cache integration report has no executed argv")
+        reported_argv: list[str] = []
+        for index, argument in enumerate(arguments):
+            if (
+                not isinstance(argument, dict)
+                or set(argument) != {"name", "value", "redacted"}
+                or argument.get("name") != f"argv[{index}]"
+                or not isinstance(argument.get("value"), str)
+                or argument.get("redacted") is not False
+            ):
+                raise RuntimeError(
+                    "native cache integration report argv is not an "
+                    "exact unredacted sequence")
+            reported_argv.append(argument["value"])
+        allowed_options = {
+            "--postgres-bin-dir",
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            "--bioseq-only-postgres-bin-dir",
+            "--bioseq-only-postgres-stage-root",
+            "--bioseq-only-postgres-stage-manifest",
+            "--cache-control",
+            "--cache-install-sql",
+            "--cache-dso",
+            "--bioseq-control",
+            "--bioseq-install-sql",
+            "--bioseq-dso",
+            "--provider-peer-test-dso",
+            "--migration-ledger",
+            "--migration-harness",
+            "--migration-report-role",
+            "--report",
+            "--case-timeout-seconds",
+            "--large-case-timeout-seconds",
+            "--reporter",
+        }
+        if len(reported_argv) % 2 != 1:
+            raise RuntimeError(
+                "native cache integration report argv has a missing "
+                "option value")
+        reported_options: dict[str, str] = {}
+        for index in range(1, len(reported_argv), 2):
+            option = reported_argv[index]
+            if (
+                option not in allowed_options
+                or option in reported_options
+            ):
+                raise RuntimeError(
+                    "native cache integration report argv contains a "
+                    "Catch2 filter, unknown option, or duplicate option")
+            reported_options[option] = reported_argv[index + 1]
+        if (
+            reported_options.get("--migration-harness") != harness
+            or reported_options.get("--migration-report-role") != role
+            or (
+                "--reporter" in reported_options
+                and reported_options["--reporter"]
+                    != "console::out=-::colour-mode=ansi"
+            )
+        ):
+            raise RuntimeError(
+                "native cache integration report argv is not bound to "
+                "its fixed migration harness/role")
+    elif schema == "bioseq-cache-benchmark-v2":
+        metadata = value.get("metadata")
+        cleanup = value.get("cleanup")
+        migration = value.get("migration_evidence")
+        build_identity = (
+            metadata.get("build_identity")
+            if isinstance(metadata, dict) else None
+        )
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("status") != "passed"
+            or metadata.get("error") != ""
+            or not isinstance(cleanup, dict)
+            or cleanup.get("attempted") is not True
+            or cleanup.get("succeeded") is not True
+            or cleanup.get("private_root_removed") is not True
+            or not isinstance(migration, dict)
+            or not isinstance(build_identity, dict)
+        ):
+            raise RuntimeError(
+                "native cache benchmark did not pass with complete "
+                "cleanup and migration evidence")
+        role = migration.get("migration_report_role")
+        ledger_sha256 = migration.get("ledger_sha256")
+        evidence_sha256 = migration.get("evidence_contract_sha256")
+        phase = migration.get("migration_phase")
+        coverage = migration.get("coverage")
+        executable = build_identity.get("executable_path")
+        executable_sha256 = build_identity.get("executable_sha256")
+        scenario = value.get("scenario")
+        harness = migration.get("migration_evidence_harness")
+        configured_samples = metadata.get("configured_samples")
+        configured_warmup_samples = metadata.get(
+            "configured_warmup_samples")
+        artifacts = _cache_native_artifact_contracts(
+            metadata.get("artifacts"))
+        cleanup_roots = []
+        if (
+            not isinstance(configured_samples, int)
+            or isinstance(configured_samples, bool)
+            or configured_samples <= 0
+            or not isinstance(configured_warmup_samples, int)
+            or isinstance(configured_warmup_samples, bool)
+            or configured_warmup_samples < 0
+        ):
+            raise RuntimeError(
+                "native cache benchmark invocation/artifact contract "
+                "is incomplete")
+    else:
+        raise RuntimeError(
+            f"native cache report schema is not release-safe: {schema!r}")
+    if (
+        role not in set(_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
+        or coverage != "full-role"
+        or not isinstance(ledger_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", ledger_sha256)
+        or not isinstance(evidence_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256)
+        or not isinstance(executable, str)
+        or not Path(executable).is_absolute()
+        or not isinstance(executable_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", executable_sha256)
+        or harness != _CACHE_INTEGRATION_HARNESS_BY_ROLE.get(
+            role, role)
+        or scenario != _CACHE_EVIDENCE_SCENARIO_BY_ROLE.get(role)
+        or phase not in {
+            "mapped", "passing", "retired_with_proof", "mixed"}
+    ):
+        raise RuntimeError(
+            "native cache report migration contract is incomplete")
+    expected_executable = _CACHE_EVIDENCE_EXECUTABLE_BY_ROLE[role]
+    if (
+        Path(executable).name != expected_executable
+        or (
+            schema == "bioseq-cache-test-v2"
+            and Path(reported_argv[0]) != Path(executable)
+        )
+    ):
+        raise RuntimeError(
+            "native cache report executable is incompatible with its "
+            "fixed migration role")
+    return {
+        "report_role": role,
+        "migration_ledger_sha256": ledger_sha256,
+        "evidence_contract_sha256": evidence_sha256,
+        "migration_phase": phase,
+        "executable": executable,
+        "executable_sha256": executable_sha256,
+        "scenario": scenario,
+        "arguments": (
+            reported_argv
+            if schema == "bioseq-cache-test-v2" else []
+        ),
+        "configured_samples": (
+            configured_samples
+            if schema == "bioseq-cache-benchmark-v2" else None
+        ),
+        "configured_warmup_samples": (
+            configured_warmup_samples
+            if schema == "bioseq-cache-benchmark-v2" else None
+        ),
+        "artifacts": artifacts,
+        "cleanup_roots": cleanup_roots,
+    }
+
+
+def _write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise RuntimeError(f"refusing to replace evidence receipt {path}")
+    temporary = path.with_name(path.name + ".partial")
+    if temporary.exists() or temporary.is_symlink():
+        raise RuntimeError(
+            f"stale evidence receipt temporary path exists: {temporary}")
+    body = json.dumps(
+        value, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_flags = os.O_RDONLY
+        directory_flags |= getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(str(path.parent), directory_flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise RuntimeError(
+            f"cannot publish evidence receipt {path}: {exc}"
+        ) from exc
+
+
+def _cache_report_receipt_path(report_path: Path) -> Path:
+    ordinal = _report_index(report_path.name)
+    if ordinal < 0:
+        raise RuntimeError(
+            f"cache native report has no stable ordinal: {report_path}")
+    return report_path.with_name(f"receipt_{ordinal}.json")
+
+
+def _seal_cache_native_report(
+        mode: str,
+        active_bin_dir: Path,
+        invocation: list[str],
+        report_path: Path,
+        provenance: Mapping[str, object],
+) -> Path:
+    if not invocation:
+        raise RuntimeError("cache report invocation is empty")
+    executable_name = Path(invocation[0]).name
+    expected_role = _CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.get(executable_name)
+    if expected_role is None:
+        raise RuntimeError(
+            "cache report executable has no fixed role: "
+            f"{executable_name}")
+    native = _cache_native_report_contract(report_path)
+    if (
+        native["report_role"] != expected_role
+        or mode != _CACHE_EVIDENCE_MODE_BY_ROLE[expected_role]
+        or native["scenario"]
+            != _CACHE_EVIDENCE_SCENARIO_BY_ROLE[expected_role]
+    ):
+        raise RuntimeError(
+            "native cache report mode/role/scenario differs from its "
+            "fixed executable")
+    expected_argv = list(invocation)
+    expected_argv[0] = str(Path(expected_argv[0]).resolve(strict=True))
+    if len(expected_argv) % 2 != 1:
+        raise RuntimeError(
+            "fixed cache report command has an invalid option shape")
+    expected_options = {
+        expected_argv[index]: expected_argv[index + 1]
+        for index in range(1, len(expected_argv), 2)
+    }
+    if len(expected_options) != (len(expected_argv) - 1) // 2:
+        raise RuntimeError(
+            "fixed cache report command duplicates an option")
+    if expected_role in _CACHE_INTEGRATION_HARNESS_BY_ROLE:
+        reported_argv = list(native["arguments"])
+        reported_argv[0] = str(
+            Path(reported_argv[0]).resolve(strict=True))
+        if reported_argv != expected_argv:
+            raise RuntimeError(
+                "native cache integration report argv differs from the "
+                "exact MCP command")
+    else:
+        if (
+            native["scenario"] != expected_options.get("--scenario")
+            or native["configured_samples"]
+                != int(expected_options["--samples"])
+            or native["configured_warmup_samples"]
+                != int(expected_options["--warmup-samples"])
+        ):
+            raise RuntimeError(
+                "native cache benchmark invocation differs from the "
+                "fixed MCP command")
+    artifact_contracts = [
+        (
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            "bioseq_cache",
+            ("--cache-control", "--cache-install-sql", "--cache-dso"),
+        ),
+    ]
+    if "--bioseq-control" in expected_options:
+        artifact_contracts.append((
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            "bioseq",
+            ("--bioseq-control", "--bioseq-install-sql", "--bioseq-dso"),
+        ))
+    if "--bioseq-only-postgres-stage-root" in expected_options:
+        artifact_contracts.append((
+            "--bioseq-only-postgres-stage-root",
+            "--bioseq-only-postgres-stage-manifest",
+            "bioseq",
+            ("--bioseq-control", "--bioseq-install-sql", "--bioseq-dso"),
+        ))
+    if "--provider-peer-test-dso" in expected_options:
+        provider_contract = (
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            "bioseq_cache",
+            (
+                "--cache-control",
+                "--cache-install-sql",
+                "--provider-peer-test-dso",
+            ),
+        )
+        artifact_contracts.extend(
+            (provider_contract, provider_contract))
+    expected_artifacts: dict[tuple[object, ...], int] = {}
+    for (
+        stage_root_option,
+        stage_manifest_option,
+        name,
+        artifact_options,
+    ) in artifact_contracts:
+        paths = tuple(
+            Path(expected_options[option]).resolve(strict=True)
+            for option in artifact_options
+        )
+        key = (
+            name,
+            Path(expected_options[stage_root_option]).resolve(
+                strict=True),
+            Path(expected_options[stage_manifest_option]).resolve(
+                strict=True),
+            *paths,
+        )
+        expected_artifacts[key] = expected_artifacts.get(key, 0) + 1
+    reported_artifacts: dict[tuple[object, ...], int] = {}
+    reported_rows: list[
+        tuple[tuple[object, ...], Mapping[str, object]]
+    ] = []
+    for artifact in native["artifacts"]:
+        name = artifact.get("name")
+        if not isinstance(name, str):
+            raise RuntimeError(
+                "native cache report artifact name is invalid")
+        key = (
+            name,
+            Path(artifact.get(
+                "preinstalled_stage_root", "")).resolve(strict=True),
+            Path(artifact.get(
+                "stage_manifest", "")).resolve(strict=True),
+            Path(artifact.get(
+                "control_file", "")).resolve(strict=True),
+            Path(artifact.get(
+                "install_sql", "")).resolve(strict=True),
+            Path(artifact.get("dso", "")).resolve(strict=True),
+        )
+        reported_artifacts[key] = reported_artifacts.get(key, 0) + 1
+        reported_rows.append((key, artifact))
+    if reported_artifacts != expected_artifacts:
+        raise RuntimeError(
+            "native cache report artifact roster differs from the "
+            "fixed MCP command")
+    lexical_cleanup_roots = [
+        Path(root) for root in native["cleanup_roots"]
+    ]
+    _require_cache_cleanup_roots_absent(
+        lexical_cleanup_roots,
+        "native cache integration cleanup root",
+    )
+    cleanup_roots = {
+        root.resolve(strict=False)
+        for root in lexical_cleanup_roots
+    }
+    provider_staged_dsos: set[Path] = set()
+    canonical_cache_dso = Path(
+        expected_options["--cache-dso"]).resolve(strict=True)
+    canonical_rows = [
+        (key, artifact)
+        for key, artifact in reported_rows
+        if key[0] == "bioseq_cache"
+        and key[5] == canonical_cache_dso
+    ]
+    if len(canonical_rows) != 1:
+        raise RuntimeError(
+            "native cache report does not contain one canonical cache "
+            "artifact")
+    canonical_key, canonical_artifact = canonical_rows[0]
+    canonical_stage_root = canonical_key[1]
+    canonical_staged_control = Path(
+        canonical_artifact["staged_control_file"]).resolve(strict=True)
+    canonical_staged_install_sql = Path(
+        canonical_artifact["staged_install_sql"]).resolve(strict=True)
+    canonical_cache_staged_dso = Path(
+        canonical_artifact["staged_dso"]).resolve(strict=True)
+    canonical_shared_values = tuple(
+        canonical_artifact[field]
+        for field in (
+            "stage_manifest_sha256",
+            "control_sha256",
+            "install_sql_sha256",
+            "staged_control_sha256",
+        )
+    )
+    for key, artifact in reported_rows:
+        (
+            name,
+            stage_root,
+            stage_manifest,
+            control_file,
+            install_sql,
+            dso,
+        ) = key
+        expected_paths = (control_file, install_sql, dso)
+        expected_hashes = tuple(
+            _sha256_path(path) for path in expected_paths)
+        staged_control = Path(artifact.get(
+            "staged_control_file", "")).resolve(strict=True)
+        staged_install_sql = Path(artifact.get(
+            "staged_install_sql", "")).resolve(strict=True)
+        staged_dso_reported = Path(
+            artifact.get("staged_dso", ""))
+        if (
+            not staged_control.is_relative_to(stage_root)
+            or not staged_install_sql.is_relative_to(stage_root)
+        ):
+            raise RuntimeError(
+                "native cache report staged control/SQL escapes its "
+                f"preinstalled stage: {name}")
+        is_provider_override = (
+            name == "bioseq_cache"
+            and "--provider-peer-test-dso" in expected_options
+            and dso == Path(expected_options[
+                "--provider-peer-test-dso"]).resolve(strict=True)
+        )
+        if (
+            artifact.get("stage_manifest_sha256")
+                != _sha256_path(stage_manifest)
+            or (
+                artifact.get("control_sha256"),
+                artifact.get("install_sql_sha256"),
+                artifact.get("dso_sha256"),
+            ) != expected_hashes
+            or artifact.get("staged_control_sha256")
+                != _sha256_path(staged_control)
+            or _sha256_path(staged_install_sql) != expected_hashes[1]
+        ):
+            raise RuntimeError(
+                "native cache report artifact identity differs from "
+                f"its fixed MCP command: {name}")
+        if is_provider_override:
+            lexical_runtime_root = (
+                staged_dso_reported.parent.parent)
+            if not lexical_runtime_root.name.startswith(
+                    "bioseq-pg-test-"):
+                raise RuntimeError(
+                    "native provider-peer artifact runtime root is not "
+                    "marker-owned")
+            _require_absent_nofollow_path(
+                staged_dso_reported,
+                "native provider-peer staged DSO",
+            )
+            staged_dso = staged_dso_reported.resolve(strict=False)
+            runtime_root = (
+                lexical_runtime_root.resolve(strict=False))
+            if (
+                stage_root != canonical_stage_root
+                or staged_control != canonical_staged_control
+                or staged_install_sql
+                    != canonical_staged_install_sql
+                or tuple(
+                    artifact[field]
+                    for field in (
+                        "stage_manifest_sha256",
+                        "control_sha256",
+                        "install_sql_sha256",
+                        "staged_control_sha256",
+                    )
+                ) != canonical_shared_values
+                or staged_dso.exists()
+                or staged_dso.is_symlink()
+                or staged_dso.parent.name != "runtime-library"
+                or runtime_root not in cleanup_roots
+                or not runtime_root.name.startswith("bioseq-pg-test-")
+                or staged_dso in provider_staged_dsos
+            ):
+                raise RuntimeError(
+                    "native provider-peer artifact does not identify a "
+                    "distinct cleaned marker-owned runtime DSO")
+            provider_staged_dsos.add(staged_dso)
+        else:
+            staged_dso = staged_dso_reported.resolve(strict=True)
+            if (
+                not staged_dso.is_relative_to(stage_root)
+                or _sha256_path(staged_dso) != expected_hashes[2]
+            ):
+                raise RuntimeError(
+                    "native cache report staged DSO differs from its "
+                    f"fixed MCP command: {name}")
+    if (
+        "--provider-peer-test-dso" in expected_options
+        and (
+            len(provider_staged_dsos) != 2
+            or any(
+                path.name != canonical_cache_staged_dso.name
+                for path in provider_staged_dsos
+            )
+        )
+    ):
+        raise RuntimeError(
+            "native provider-peer artifact multiplicity or staged DSO "
+            "basename differs from the canonical cache artifact")
+    executable = (active_bin_dir / executable_name).resolve(strict=True)
+    native_executable = Path(native["executable"]).resolve(strict=True)
+    if (
+        native_executable != executable
+        or native["executable_sha256"] != _sha256_path(executable)
+    ):
+        raise RuntimeError(
+            "native cache report executable identity differs from its "
+            "fixed MCP command")
+    for field in (
+        "migration_ledger_sha256",
+        "evidence_contract_sha256",
+        "migration_phase",
+    ):
+        if native[field] != provenance[field]:
+            raise RuntimeError(
+                f"native cache report {field} differs from MCP provenance")
+    receipt = {
+        "schema_version": "bioseq-cache-mcp-evidence-receipt-v1",
+        "mode": mode,
+        "report_role": expected_role,
+        "native_report": str(report_path.resolve(strict=True)),
+        "native_report_sha256": _sha256_path(report_path),
+        "executable": str(executable),
+        "executable_sha256": native["executable_sha256"],
+        "scenario": native["scenario"],
+        "source_revision": provenance["source_revision"],
+        "source_scope_sha256": provenance["source_scope_sha256"],
+        "source_scoped_clean": provenance["source_scoped_clean"],
+        "migration_ledger_sha256":
+            provenance["migration_ledger_sha256"],
+        "evidence_contract_sha256":
+            provenance["evidence_contract_sha256"],
+        "migration_phase": provenance["migration_phase"],
+    }
+    output = _cache_report_receipt_path(report_path)
+    _require_cache_cleanup_roots_absent(
+        lexical_cleanup_roots,
+        "native cache integration cleanup root before receipt publication",
+    )
+    _write_json_atomic(output, receipt)
+    return output
+
+
+def _next_cache_unit_receipt_path() -> Path:
+    _CACHE_UNIT_REPORTING_DIR.mkdir(parents=True, exist_ok=True)
+    ordinals = []
+    for path in _CACHE_UNIT_REPORTING_DIR.glob("receipt_*.json"):
+        match = re.fullmatch(r"receipt_([0-9]+)\.json", path.name)
+        if match:
+            ordinals.append(int(match.group(1)))
+    return _CACHE_UNIT_REPORTING_DIR / (
+        f"receipt_{max(ordinals, default=-1) + 1}.json")
+
+
+def _seal_cache_unit_receipt(
+        active_bin_dir: Path,
+        provenance: Mapping[str, object],
+        command_records: list[dict[str, object]],
+) -> Path:
+    configured = MODES["cache-unit"].commands
+    if len(command_records) != len(configured):
+        raise RuntimeError(
+            "cache-unit receipt requires one frozen identity for each "
+            "fixed native command")
+    commands: list[dict[str, object]] = []
+    for command, record in zip(
+            configured, command_records, strict=True):
+        executable = record.get("executable")
+        executable_sha256 = record.get("executable_sha256")
+        arguments = record.get("arguments")
+        identity = record.get("_identity")
+        if (
+            not isinstance(executable, str)
+            or not Path(executable).is_absolute()
+            or not isinstance(executable_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", executable_sha256)
+            or not isinstance(arguments, list)
+            or any(not isinstance(argument, str)
+                   for argument in arguments)
+            or not isinstance(identity, tuple)
+        ):
+            raise RuntimeError(
+                "cache-unit frozen native command identity is invalid")
+        policy = _run_command_argv(
+            "cache-unit", active_bin_dir, command)
+        policy[0] = str(Path(policy[0]).resolve(strict=True))
+        invocation = [executable, *arguments]
+        if invocation != policy:
+            raise RuntimeError(
+                "cache-unit frozen invocation differs from its fixed "
+                "mode policy")
+        if _stable_native_command_identity(invocation) != record:
+            raise RuntimeError(
+                "cache-unit executable identity changed before receipt "
+                f"publication: {executable}")
+        commands.append({
+            "executable": executable,
+            "executable_sha256": executable_sha256,
+            "arguments": arguments,
+        })
+    receipt = {
+        "schema_version": "bioseq-cache-mcp-unit-receipt-v1",
+        "mode": "cache-unit",
+        "status": "passed",
+        "source_revision": provenance["source_revision"],
+        "source_scope_sha256": provenance["source_scope_sha256"],
+        "source_scoped_clean": provenance["source_scoped_clean"],
+        "migration_ledger_sha256":
+            provenance["migration_ledger_sha256"],
+        "evidence_contract_sha256":
+            provenance["evidence_contract_sha256"],
+        "migration_phase": provenance["migration_phase"],
+        "commands": commands,
+    }
+    output = _next_cache_unit_receipt_path()
+    _write_json_atomic(output, receipt)
+    return output
+
+
+def _load_json_object(path: Path, context: str) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read {context} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{context} is not a JSON object: {path}")
+    return value
+
+
+def _cache_receipt_candidates() -> list[Path]:
+    result: list[Path] = []
+    for directory in _CACHE_EVIDENCE_REPORTING_DIRS:
+        result.extend(directory.glob("receipt_*.json"))
+    return result
+
+
+def _cache_receipt_sort_key(path: Path) -> tuple[int, str]:
+    try:
+        return path.stat().st_mtime_ns, str(path)
+    except OSError:
+        return -1, str(path)
+
+
+def _find_current_cache_evidence_receipts(
+        provenance: Mapping[str, object]) -> list[Path]:
+    by_role: dict[str, Path] = {}
+    for path in sorted(
+            _cache_receipt_candidates(), key=_cache_receipt_sort_key):
+        value = _load_json_object(path, "cache evidence receipt")
+        if (
+            value.get("schema_version")
+                != "bioseq-cache-mcp-evidence-receipt-v1"
+            or value.get("source_revision")
+                != provenance["source_revision"]
+            or value.get("source_scope_sha256")
+                != provenance["source_scope_sha256"]
+            or value.get("source_scoped_clean") is not True
+            or value.get("migration_ledger_sha256")
+                != provenance["migration_ledger_sha256"]
+            or value.get("evidence_contract_sha256")
+                != provenance["evidence_contract_sha256"]
+            or value.get("migration_phase")
+                != provenance["migration_phase"]
+        ):
+            continue
+        role = value.get("report_role")
+        executable = value.get("executable")
+        executable_sha256 = value.get("executable_sha256")
+        if (
+            role in set(_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
+            and value.get("mode") == _CACHE_EVIDENCE_MODE_BY_ROLE[role]
+            and isinstance(executable, str)
+            and Path(executable).is_absolute()
+            and Path(executable).name
+                == _CACHE_EVIDENCE_EXECUTABLE_BY_ROLE[role]
+            and isinstance(executable_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", executable_sha256)
+            and value.get("scenario")
+                == _CACHE_EVIDENCE_SCENARIO_BY_ROLE[role]
+        ):
+            by_role[str(role)] = path
+    required = set(_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
+    if set(by_role) != required:
+        raise RuntimeError(
+            "current clean source has no exact five-role cache evidence "
+            f"roster; missing={sorted(required - set(by_role))}")
+    return [by_role[role] for role in (
+        "cache-integration",
+        "cache-bioseq-support-integration",
+        "cache-bioseq-production-integration",
+        "cache-bench",
+        "cache-bioseq-bench",
+    )]
+
+
+def _find_current_cache_unit_receipt(
+        provenance: Mapping[str, object]) -> Path:
+    matches: list[Path] = []
+    for path in _CACHE_UNIT_REPORTING_DIR.glob("receipt_*.json"):
+        value = _load_json_object(path, "cache-unit receipt")
+        if (
+            value.get("schema_version")
+                == "bioseq-cache-mcp-unit-receipt-v1"
+            and value.get("mode") == "cache-unit"
+            and value.get("status") == "passed"
+            and value.get("source_revision")
+                == provenance["source_revision"]
+            and value.get("source_scope_sha256")
+                == provenance["source_scope_sha256"]
+            and value.get("source_scoped_clean") is True
+            and value.get("migration_ledger_sha256")
+                == provenance["migration_ledger_sha256"]
+            and value.get("evidence_contract_sha256")
+                == provenance["evidence_contract_sha256"]
+            and value.get("migration_phase")
+                == provenance["migration_phase"]
+        ):
+            matches.append(path)
+    if not matches:
+        raise RuntimeError(
+            "current clean source has no passing cache-unit MCP receipt")
+    return max(matches, key=_cache_receipt_sort_key)
+
+
+def _load_cache_retirement_proof() -> dict[str, object]:
+    value = _load_json_object(
+        _CACHE_RETIREMENT_PROOF, "cache retirement proof")
+    if value.get("schema_version") != "bioseq-cache-retirement-proof-v1":
+        raise RuntimeError("cache retirement proof schema is invalid")
+    return value
+
+
+def _find_proof_cache_receipts(
+        proof: Mapping[str, object]) -> tuple[Path, list[Path]]:
+    unit_sha256 = proof.get("unit_receipt_sha256")
+    report_records = proof.get("reports")
+    if (
+        not isinstance(unit_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", unit_sha256)
+        or not isinstance(report_records, list)
+        or len(report_records) != 5
+    ):
+        raise RuntimeError(
+            "cache retirement proof receipt seals are invalid")
+    expected_reports: dict[str, str] = {}
+    for record in report_records:
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                "cache retirement proof report seal is invalid")
+        role = record.get("report_role")
+        receipt_sha256 = record.get("receipt_sha256")
+        if (
+            role in expected_reports
+            or role not in set(
+                _CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
+            or not isinstance(receipt_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt_sha256)
+        ):
+            raise RuntimeError(
+                "cache retirement proof report roster is invalid")
+        expected_reports[str(role)] = receipt_sha256
+    found_reports: dict[str, Path] = {}
+    for path in _cache_receipt_candidates():
+        digest = _sha256_path(path)
+        for role, expected in expected_reports.items():
+            if digest == expected:
+                if role in found_reports:
+                    raise RuntimeError(
+                        f"duplicate retained proof receipt for {role}")
+                found_reports[role] = path
+    if set(found_reports) != set(expected_reports):
+        raise RuntimeError(
+            "retained proof-ready native report receipts are incomplete")
+    unit_matches = [
+        path
+        for path in _CACHE_UNIT_REPORTING_DIR.glob("receipt_*.json")
+        if _sha256_path(path) == unit_sha256
+    ]
+    if len(unit_matches) != 1:
+        raise RuntimeError(
+            "retained proof-ready cache-unit receipt is unavailable "
+            "or ambiguous")
+    return unit_matches[0], [
+        found_reports[role] for role in (
+            "cache-integration",
+            "cache-bioseq-support-integration",
+            "cache-bioseq-production-integration",
+            "cache-bench",
+            "cache-bioseq-bench",
+        )
+    ]
+
+
+def _cache_legacy_inventory_paths() -> list[str]:
+    try:
+        lines = _CACHE_LEGACY_INVENTORY.read_text(
+            encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot read cache legacy inventory: {exc}") from exc
+    if not lines or lines[0] != "legacy_path\tsha256":
+        raise RuntimeError("cache legacy inventory header is invalid")
+    paths: list[str] = []
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if (
+            len(fields) != 2
+            or not fields[0]
+            or not re.fullmatch(r"[0-9a-f]{64}", fields[1])
+        ):
+            raise RuntimeError("cache legacy inventory row is invalid")
+        paths.append(fields[0])
+    if len(paths) != 85 or paths != sorted(set(paths)):
+        raise RuntimeError(
+            "cache legacy inventory must contain 85 sorted unique paths")
+    return paths
+
+
+def _cache_retirement_transition_sha256(
+        proof_revision: str, current_revision: str) -> str:
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", proof_revision)
+        or not re.fullmatch(r"[0-9a-f]{40}", current_revision)
+        or proof_revision == current_revision
+    ):
+        raise RuntimeError(
+            "cache retirement transition revisions are invalid")
+    ancestor = subprocess.run(
+        ["git", "-C", str(WORKSPACE_ROOT), "merge-base",
+         "--is-ancestor", proof_revision, current_revision],
+        capture_output=True,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise RuntimeError(
+            "cache proof revision is not an ancestor of retired source")
+    raw = _cache_git_bytes([
+        "diff", "--name-status", "-z", "--no-renames",
+        proof_revision, current_revision, "--", *_CACHE_SOURCE_SCOPES,
+    ])
+    tokens = raw.split(b"\0")
+    if tokens and tokens[-1] == b"":
+        tokens.pop()
+    if len(tokens) % 2 != 0:
+        raise RuntimeError(
+            "cache retirement Git transition is malformed")
+    actual: dict[str, str] = {}
+    for index in range(0, len(tokens), 2):
+        status = tokens[index].decode("ascii", errors="strict")
+        path = tokens[index + 1].decode("utf-8", errors="strict")
+        if status not in {"A", "M", "D"} or path in actual:
+            raise RuntimeError(
+                "cache retirement Git transition contains unsupported "
+                "or duplicate changes")
+        actual[path] = status
+    expected = {
+        f"main/bioseq_caching/{path}": "D"
+        for path in _cache_legacy_inventory_paths()
+    }
+    expected["main/bioseq_caching/test/legacy_migration_ledger.tsv"] = "M"
+    receipt_path = (
+        "main/bioseq_caching/test/legacy_retirement_receipt.json")
+    receipt_status = actual.get(receipt_path)
+    if receipt_status != "A":
+        raise RuntimeError(
+            "cache retirement transition must add the append-only proof "
+            "receipt")
+    expected[receipt_path] = "A"
+    if actual != expected:
+        missing = sorted(set(expected) - set(actual))
+        unexpected = sorted(set(actual) - set(expected))
+        wrong = sorted(
+            path for path in set(actual) & set(expected)
+            if actual[path] != expected[path])
+        raise RuntimeError(
+            "cache retirement transition is not exact: "
+            f"missing={missing} unexpected={unexpected} wrong={wrong}")
+    material = bytearray(b"bioseq-cache-retirement-transition/v1\n")
+    material += _cache_length_prefix(proof_revision.encode("ascii"))
+    material += _cache_length_prefix(current_revision.encode("ascii"))
+    for path, status in sorted(actual.items()):
+        material += _cache_length_prefix(status.encode("ascii"))
+        material += _cache_length_prefix(path.encode("utf-8"))
+    return hashlib.sha256(material).hexdigest()
+
+
+def _next_cache_retirement_bundle_path(operation: str) -> Path:
+    _CACHE_RETIREMENT_REPORTING_DIR.mkdir(parents=True, exist_ok=True)
+    return _CACHE_RETIREMENT_REPORTING_DIR / (
+        f"gate_{operation}_{time.time_ns()}.json")
+
+
+def _cache_transition_receipt_path(
+        provenance: Mapping[str, object]) -> Path:
+    revision = provenance["source_revision"]
+    if not isinstance(revision, str) or not re.fullmatch(
+            r"[0-9a-f]{40}", revision):
+        raise RuntimeError(
+            "cache transition receipt source revision is invalid")
+    return _CACHE_RETIREMENT_REPORTING_DIR / (
+        f"transition_{revision}.json")
+
+
+def _cache_combined_case_manifest(
+        active_bin_dir: Path) -> Path:
+    path = Path(
+        _cache_native_artifacts(
+            active_bin_dir)["migration_catch_cases"])
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(
+            f"combined cache Catch manifest is unavailable: {path}")
+    return path.resolve(strict=True)
+
+
+def _write_cache_retirement_bundle(
+        operation: str,
+        provenance: Mapping[str, object],
+        unit_receipt: Path,
+        evidence_receipts: list[Path],
+        active_bin_dir: Path,
+        transition_sha256: str = "",
+        proof_unit_receipt: Path | None = None,
+        proof_evidence_receipts: list[Path] | None = None,
+) -> Path:
+    if operation not in {
+            "proof-ready", "retired-transition", "retired-final"}:
+        raise RuntimeError(
+            f"invalid cache retirement operation {operation!r}")
+    bundle = {
+        "schema_version": "bioseq-cache-retirement-gate-input-v1",
+        "phase": operation,
+        "ledger": str(_CACHE_MIGRATION_LEDGER.resolve(strict=True)),
+        "catch_cases":
+            str(_cache_combined_case_manifest(active_bin_dir)),
+        "legacy_root": str(_CACHE_LEGACY_ROOT.resolve(strict=True)),
+        "legacy_inventory":
+            str(_CACHE_LEGACY_INVENTORY.resolve(strict=True)),
+        "proof_receipt": str(_CACHE_RETIREMENT_PROOF.absolute()),
+        "current_source_revision": provenance["source_revision"],
+        "current_source_scope_sha256":
+            provenance["source_scope_sha256"],
+        "current_source_scoped_clean":
+            provenance["source_scoped_clean"],
+        "retirement_transition_sha256": transition_sha256,
+        "unit_receipt": str(unit_receipt.resolve(strict=True)),
+        "evidence_receipts": [
+            str(path.resolve(strict=True)) for path in evidence_receipts],
+        "proof_unit_receipt": (
+            str(proof_unit_receipt.resolve(strict=True))
+            if proof_unit_receipt is not None else ""
+        ),
+        "proof_evidence_receipts": [
+            str(path.resolve(strict=True))
+            for path in (proof_evidence_receipts or [])
+        ],
+        "transition_receipt": (
+            str(
+                _cache_transition_receipt_path(provenance).resolve(
+                    strict=operation == "retired-final"))
+            if operation != "proof-ready"
+            else ""
+        ),
+    }
+    output = _next_cache_retirement_bundle_path(operation)
+    _write_json_atomic(output, bundle)
+    return output
+
+
+def _seal_cache_mode_receipts(
+        mode: str,
+        active_bin_dir: Path,
+        report_files: list[Path],
+        report_invocations: list[list[str]],
+        unit_command_records: list[dict[str, object]],
+        provenance: Mapping[str, object],
+) -> tuple[Path | None, list[Path]]:
+    """Seal the exact native evidence produced by one successful MCP mode."""
+    if mode == "cache-unit":
+        if report_files or report_invocations:
+            raise RuntimeError(
+                "cache-unit unexpectedly produced native report files")
+        return _seal_cache_unit_receipt(
+            active_bin_dir, provenance, unit_command_records), []
+    if unit_command_records:
+        raise RuntimeError(
+            f"{mode} unexpectedly captured cache-unit command identities")
+
+    report_commands = [
+        command for command in MODES[mode].commands
+        if "{report}" in command
+    ]
+    if (
+        len(report_commands) != len(report_files)
+        or len(report_commands) != len(report_invocations)
+    ):
+        raise RuntimeError(
+            f"{mode} cannot bind {len(report_files)} reports and "
+            f"{len(report_invocations)} invocations to its "
+            f"{len(report_commands)} fixed report commands")
+    receipts: list[Path] = []
+    for command, report_path, invocation in zip(
+            report_commands, report_files, report_invocations,
+            strict=True):
+        policy = _run_command_argv(
+            mode,
+            active_bin_dir,
+            command,
+            report_path=report_path,
+        )
+        policy[0] = str(Path(policy[0]).resolve(strict=True))
+        actual = list(invocation)
+        if not actual:
+            raise RuntimeError(
+                f"{mode} captured an empty native report invocation")
+        actual[0] = str(Path(actual[0]).resolve(strict=True))
+        role = _CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.get(
+            Path(actual[0]).name)
+        if role == "cache-bioseq-production-integration":
+            option = "--large-case-timeout-seconds"
+            try:
+                policy_index = policy.index(option)
+                actual_index = actual.index(option)
+                configured_timeout = int(policy[policy_index + 1])
+                actual_timeout = int(actual[actual_index + 1])
+            except (ValueError, IndexError) as exc:
+                raise RuntimeError(
+                    "captured exact-2G invocation has no valid bounded "
+                    "large-case watchdog") from exc
+            if (
+                policy_index != actual_index
+                or actual_timeout <= 0
+                or actual_timeout > configured_timeout
+            ):
+                raise RuntimeError(
+                    "captured exact-2G invocation violates the MCP "
+                    "runtime-budget policy")
+            policy[policy_index + 1] = str(actual_timeout)
+        if actual != policy:
+            raise RuntimeError(
+                f"{mode} captured invocation differs from its fixed "
+                "mode policy")
+        receipts.append(_seal_cache_native_report(
+            mode, active_bin_dir, actual, report_path, provenance))
+    return None, receipts
+
+
+def _run_cache_retirement_lifecycle_gate(
+        mode: str,
+        active_bin_dir: Path,
+        active_build_dir: Path,
+        run_env: dict[str, str],
+        provenance: Mapping[str, object],
+        log_handle,
+        deadline: float,
+) -> dict[str, object] | None:
+    """Run only the fixed lifecycle closure point for the current phase."""
+    phase = provenance["migration_phase"]
+    operation: str | None = None
+    transition_sha256 = ""
+    proof_unit_receipt: Path | None = None
+    proof_evidence_receipts: list[Path] = []
+
+    if mode == "cache-unit" and phase == "retired_with_proof":
+        operation = "retired-transition"
+        proof = _load_cache_retirement_proof()
+        unit_receipt, evidence_receipts = _find_proof_cache_receipts(
+            proof)
+        proof_revision = proof.get("proof_source_revision")
+        if not isinstance(proof_revision, str):
+            raise RuntimeError(
+                "cache retirement proof has no source revision")
+        transition_sha256 = _cache_retirement_transition_sha256(
+            proof_revision, str(provenance["source_revision"]))
+    elif mode == "cache-bioseq-bench" and phase in {
+            "passing", "retired_with_proof"}:
+        unit_receipt = _find_current_cache_unit_receipt(provenance)
+        evidence_receipts = _find_current_cache_evidence_receipts(
+            provenance)
+        if phase == "passing":
+            operation = "proof-ready"
+        else:
+            operation = "retired-final"
+            proof = _load_cache_retirement_proof()
+            (
+                proof_unit_receipt,
+                proof_evidence_receipts,
+            ) = _find_proof_cache_receipts(proof)
+            proof_revision = proof.get("proof_source_revision")
+            if not isinstance(proof_revision, str):
+                raise RuntimeError(
+                    "cache retirement proof has no source revision")
+            transition_sha256 = _cache_retirement_transition_sha256(
+                proof_revision, str(provenance["source_revision"]))
+    else:
+        return None
+
+    bundle = _write_cache_retirement_bundle(
+        operation,
+        provenance,
+        unit_receipt,
+        evidence_receipts,
+        active_bin_dir,
+        transition_sha256,
+        proof_unit_receipt,
+        proof_evidence_receipts,
+    )
+    gate = Path(_cache_native_artifacts(
+        active_bin_dir)["legacy_retirement_gate"])
+    gate_command = [str(gate), "--bundle", str(bundle)]
+    _update_entry(
+        mode,
+        step=f"running cache retirement gate {operation}",
+        cache_retirement_gate_operation=operation,
+        cache_retirement_gate_bundle=str(bundle),
+    )
+    with _verified_native_command_execution(gate_command) as (
+            gate_identity, verified_executable):
+        rc = _stream_subprocess(
+            gate_command,
+            log_handle,
+            deadline,
+            cwd=active_build_dir,
+            env=run_env,
+            verified_executable=verified_executable,
+        )
+    if _stable_native_command_identity(
+            gate_command) != gate_identity:
+        raise RuntimeError(
+            "cache retirement gate executable identity changed during "
+            f"{operation}")
+    if rc != 0:
+        raise RuntimeError(
+            f"cache retirement gate {operation} exited with code {rc}")
+    proof_path = _CACHE_RETIREMENT_PROOF.resolve(strict=True)
+    return {
+        "operation": operation,
+        "bundle": str(bundle.resolve(strict=True)),
+        "proof_receipt": str(proof_path),
+        "proof_receipt_sha256": _sha256_path(proof_path),
+        "retirement_transition_sha256": transition_sha256,
+        "gate_executable": gate_identity["executable"],
+        "gate_executable_sha256":
+            gate_identity["executable_sha256"],
+    }
+
+
 def _next_report_path(reporting_dir: Path) -> Path:
     """Reserve the next deterministic report name without creating the file."""
     reporting_dir.mkdir(parents=True, exist_ok=True)
@@ -2195,6 +3787,356 @@ def _require_allocated_command_report(
             f"path as a regular non-symlink JSON report: {report_path}")
 
 
+def _cache_apply_runtime_budget(
+        mode: str, argv: list[str], deadline: float,
+        *, now: float | None = None) -> list[str]:
+    """Reserve bounded in-run time for watchdog cleanup/report publication."""
+    if (
+        mode != "cache-bioseq-integration"
+        or not argv
+        or Path(argv[0]).name
+            != "bioseq_cache_bioseq_production_integration_tests"
+        or not math.isfinite(deadline)
+    ):
+        return argv
+    current_time = time.time() if now is None else now
+    usable_seconds = math.floor(
+        deadline - CACHE_EXACT2G_FINALIZATION_RESERVE_SEC - current_time)
+    if usable_seconds <= 0:
+        raise TimeoutError(
+            "cache-bioseq-integration has no remaining execution budget "
+            "before its cleanup/report reserve")
+    try:
+        option = argv.index("--large-case-timeout-seconds")
+        configured = int(argv[option + 1])
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError(
+            "exact-2G command has no valid large-case watchdog") from exc
+    bounded = min(configured, usable_seconds)
+    if bounded <= 0:
+        raise TimeoutError(
+            "exact-2G watchdog budget is exhausted")
+    result = list(argv)
+    result[option + 1] = str(bounded)
+    return result
+
+
+def _validate_failed_cache_terminal_report(report_path: Path) -> None:
+    """A timed/failed runner may fail, but never retain owned resources."""
+    value = _load_json_object(
+        report_path, "failed cache integration terminal report")
+    if value.get("schema_version") != "bioseq-cache-test-v2":
+        raise RuntimeError(
+            "failed cache integration has no v2 terminal report")
+    cleanup = value.get("cleanup")
+    observations = value.get("cleanup_observations")
+    cluster = value.get("cluster_configuration")
+    if (
+        not isinstance(cleanup, dict)
+        or cleanup.get("succeeded") is not True
+        or not isinstance(observations, list)
+        or not observations
+        or any(
+            not isinstance(observation, dict)
+            or observation.get("succeeded") is not True
+            for observation in observations
+        )
+        or not isinstance(cluster, dict)
+        or cluster.get("retained-supervision-state") != "none"
+    ):
+        raise RuntimeError(
+            "failed cache integration terminal report does not prove "
+            "successful cleanup and zero retained supervision state")
+    cleanup_roots = _cache_cleanup_root_contracts(observations)
+    lexical_cleanup_roots = [
+        Path(root) for root in cleanup_roots
+    ]
+    _require_cache_cleanup_roots_absent(
+        lexical_cleanup_roots,
+        "failed cache integration cleanup root",
+    )
+    _require_cache_cleanup_roots_absent(
+        lexical_cleanup_roots,
+        "failed cache integration cleanup root before acceptance",
+    )
+
+
+def _native_executable_identity(
+        metadata: os.stat_result,
+) -> tuple[int, ...]:
+    # Access time is intentionally omitted because hashing/execution may
+    # update it. The execution snapshot is a separate inode, so source link
+    # count and ctime remain authoritative retained-handle metadata.
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
+def _open_native_command_identity(
+        argv: list[str],
+) -> tuple[int, dict[str, object]]:
+    if not argv:
+        raise RuntimeError("native command invocation is empty")
+    requested = Path(argv[0])
+    try:
+        requested_status = requested.lstat()
+        resolved = requested.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"native command executable is unavailable: {requested}"
+        ) from exc
+    if requested.is_symlink() or not stat.S_ISREG(requested_status.st_mode):
+        raise RuntimeError(
+            "native command executable is not a regular non-symlink file: "
+            f"{requested}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(resolved), flags)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot open native command executable: {resolved}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError(
+                f"native command executable is not regular: {resolved}")
+        digest = _sha256_descriptor(descriptor)
+        after = os.fstat(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    identity = _native_executable_identity(before)
+    if identity != _native_executable_identity(after):
+        os.close(descriptor)
+        raise RuntimeError(
+            "native command executable changed while it was hashed: "
+            f"{resolved}")
+    return descriptor, {
+        "executable": str(resolved),
+        "executable_sha256": digest,
+        "arguments": list(argv[1:]),
+        "_identity": identity,
+    }
+
+
+def _stable_native_command_identity(
+        argv: list[str]) -> dict[str, object]:
+    descriptor, result = _open_native_command_identity(argv)
+    os.close(descriptor)
+    return result
+
+
+def _copy_descriptor_exact(
+        source_descriptor: int,
+        destination_descriptor: int,
+) -> None:
+    offset = 0
+    while True:
+        chunk = os.pread(
+            source_descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        written = 0
+        while written < len(chunk):
+            count = os.write(
+                destination_descriptor, chunk[written:])
+            if count <= 0:
+                raise RuntimeError(
+                    "short write while creating verified native "
+                    "execution snapshot")
+            written += count
+        offset += len(chunk)
+
+
+def _verified_native_execution_snapshot(
+        executable: Path,
+        source_descriptor: int,
+        expected_sha256: str,
+) -> tuple[Path, int, tuple[int, ...]]:
+    # Darwin intentionally has no fexecve/execveat and rejects execve on
+    # /dev/fd.  A private byte snapshot in the same directory preserves
+    # @executable_path/$ORIGIN semantics while binding the launched bytes to
+    # the retained source FD.  This closes concurrent build/output mutation of
+    # the source path; it is not a security boundary against a malicious
+    # same-UID process that actively hunts and replaces random snapshot names.
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    for _attempt in range(32):
+        candidate = executable.with_name(
+            ".bioseq-verified-exec-"
+            f"{os.getpid()}-{secrets.token_hex(12)}")
+        try:
+            creator_descriptor = os.open(
+                candidate, flags, 0o700)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise RuntimeError(
+                "cannot create verified native execution snapshot beside "
+                f"{executable}: {exc}") from exc
+        retained_descriptor: int | None = None
+        try:
+            _copy_descriptor_exact(
+                source_descriptor, creator_descriptor)
+            os.fchmod(creator_descriptor, 0o500)
+            os.fsync(creator_descriptor)
+            directory_flags = os.O_RDONLY
+            directory_flags |= getattr(os, "O_DIRECTORY", 0)
+            directory_descriptor = os.open(
+                str(candidate.parent), directory_flags)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+            snapshot_status = os.fstat(creator_descriptor)
+            path_status = candidate.lstat()
+            snapshot_identity = _native_executable_identity(
+                snapshot_status)
+            if (
+                candidate.is_symlink()
+                or not stat.S_ISREG(snapshot_status.st_mode)
+                or _native_executable_identity(path_status)
+                    != snapshot_identity
+                or _sha256_descriptor(source_descriptor)
+                    != expected_sha256
+                or _sha256_descriptor(creator_descriptor)
+                    != expected_sha256
+                or _sha256_path(candidate) != expected_sha256
+            ):
+                raise RuntimeError(
+                    "native executable changed while its verified byte "
+                    f"snapshot was created: {executable}")
+            os.close(creator_descriptor)
+            creator_descriptor = None
+            retained_flags = os.O_RDONLY
+            retained_flags |= getattr(os, "O_CLOEXEC", 0)
+            retained_flags |= getattr(os, "O_NOFOLLOW", 0)
+            retained_descriptor = os.open(
+                candidate, retained_flags)
+            retained_status = os.fstat(retained_descriptor)
+            if (
+                _native_executable_identity(retained_status)
+                    != snapshot_identity
+                or _sha256_descriptor(retained_descriptor)
+                    != expected_sha256
+                or (
+                    fcntl.fcntl(retained_descriptor, fcntl.F_GETFL)
+                    & os.O_ACCMODE
+                ) != os.O_RDONLY
+            ):
+                raise RuntimeError(
+                    "verified native execution snapshot could not be "
+                    "retained read-only")
+            result_descriptor = retained_descriptor
+            retained_descriptor = None
+            return candidate, result_descriptor, snapshot_identity
+        except BaseException:
+            if retained_descriptor is not None:
+                os.close(retained_descriptor)
+            if creator_descriptor is not None:
+                os.close(creator_descriptor)
+            with contextlib.suppress(OSError):
+                candidate.unlink()
+            raise
+    raise RuntimeError(
+        "cannot allocate a unique verified native execution snapshot "
+        f"beside {executable}")
+
+
+def _remove_verified_native_execution_snapshot(
+        snapshot: Path,
+) -> None:
+    try:
+        snapshot.unlink()
+    except FileNotFoundError:
+        # The desired terminal state is absence. Reconcile it below using
+        # component-wise no-follow inspection rather than suppressing an
+        # arbitrary unlink failure.
+        pass
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot remove verified native execution snapshot "
+            f"{snapshot}: {exc}") from exc
+    _require_absent_nofollow_path(
+        snapshot,
+        "verified native execution snapshot after cleanup",
+    )
+
+
+@contextlib.contextmanager
+def _verified_native_command_execution(
+        argv: list[str],
+):
+    descriptor, record = _open_native_command_identity(argv)
+    executable = Path(str(record["executable"]))
+    identity = record["_identity"]
+    executable_sha256 = record["executable_sha256"]
+    if (
+        not isinstance(identity, tuple)
+        or not isinstance(executable_sha256, str)
+    ):
+        os.close(descriptor)
+        raise RuntimeError(
+            "native executable retained identity is invalid")
+    snapshot: Path | None = None
+    snapshot_descriptor: int | None = None
+    snapshot_identity: tuple[int, ...] | None = None
+    try:
+        (
+            snapshot,
+            snapshot_descriptor,
+            snapshot_identity,
+        ) = _verified_native_execution_snapshot(
+            executable, descriptor, executable_sha256)
+        yield record, snapshot
+        if (
+            _native_executable_identity(os.fstat(descriptor))
+                != identity
+            or _sha256_descriptor(descriptor) != executable_sha256
+            or _native_executable_identity(
+                os.fstat(snapshot_descriptor))
+                != snapshot_identity
+            or _sha256_descriptor(snapshot_descriptor)
+                != executable_sha256
+            or _native_executable_identity(snapshot.lstat())
+                != snapshot_identity
+            or _sha256_path(snapshot) != executable_sha256
+        ):
+            raise RuntimeError(
+                "native executable changed while its verified handle "
+                f"was executing: {executable}")
+    finally:
+        try:
+            if snapshot_descriptor is not None:
+                os.close(snapshot_descriptor)
+            if snapshot is not None:
+                _remove_verified_native_execution_snapshot(
+                    snapshot)
+        finally:
+            os.close(descriptor)
+
+
 def _run_mode_commands(
         mode: str,
         active_bin_dir: Path,
@@ -2205,12 +4147,19 @@ def _run_mode_commands(
         pre_reports: set[Path],
         bench_flags=None,
         test_flags=None,
-) -> tuple[Path | None, list[Path]]:
+) -> tuple[
+    Path | None,
+    list[Path],
+    list[list[str]],
+    list[dict[str, object]],
+]:
     """Run configured commands and persist every ordered report receipt."""
     mode_details = MODES[mode]
     expected_report_count = sum(
         1 for command in mode_details.commands if "{report}" in command)
     command_report_files: list[Path] = []
+    command_report_invocations: list[list[str]] = []
+    unit_command_records: list[dict[str, object]] = []
 
     for command in mode_details.commands:
         # MODES.commands store binary BASENAMES; resolve against the active
@@ -2228,18 +4177,59 @@ def _run_mode_commands(
             test_flags=test_flags,
             report_path=command_report_path,
         )
-        rc = _stream_subprocess(
-            full_command,
-            log_handle,
-            deadline,
-            cwd=active_build_dir,
-            env=run_env,
-        )
+        full_command = _cache_apply_runtime_budget(
+            mode, full_command, deadline)
+        unit_command_before: dict[str, object] | None = None
+        if mode == "cache-unit":
+            with _verified_native_command_execution(
+                    full_command) as (
+                        unit_command_before,
+                        verified_executable,
+                    ):
+                rc = _stream_subprocess(
+                    full_command,
+                    log_handle,
+                    deadline,
+                    cwd=active_build_dir,
+                    env=run_env,
+                    verified_executable=verified_executable,
+                )
+        else:
+            try:
+                rc = _stream_subprocess(
+                    full_command,
+                    log_handle,
+                    deadline,
+                    cwd=active_build_dir,
+                    env=run_env,
+                )
+            except TimeoutError:
+                if (
+                    mode in {
+                        "cache-integration",
+                        "cache-bioseq-integration",
+                    }
+                    and command_report_path is not None
+                ):
+                    _require_allocated_command_report(
+                        mode, command, command_report_path)
+                    _validate_failed_cache_terminal_report(
+                        command_report_path)
+                raise
+        if unit_command_before is not None:
+            unit_command_after = _stable_native_command_identity(
+                full_command)
+            if unit_command_after != unit_command_before:
+                raise RuntimeError(
+                    "cache-unit executable identity changed during its "
+                    f"native command: {full_command[0]}")
+            unit_command_records.append(unit_command_before)
 
         if command_report_path is not None:
             _require_allocated_command_report(
                 mode, command, command_report_path)
             command_report_files.append(command_report_path)
+            command_report_invocations.append(list(full_command))
             ordered_receipts = [
                 str(path) for path in command_report_files
             ]
@@ -2250,11 +4240,21 @@ def _run_mode_commands(
             )
 
         if rc != 0:
+            if (
+                mode == "cache-bioseq-integration"
+                and command_report_path is not None
+            ):
+                _validate_failed_cache_terminal_report(
+                    command_report_path)
             # Bench exits non-zero when regression rules are violated
             # (exit code 2) — the report is still a valid receipt, so this is
             # a "completed with violations" outcome rather than a worker
             # failure. The console log already explains the violations.
-            if mode_details.is_bench_mode and rc == 2:
+            if (
+                mode_details.is_bench_mode
+                and rc == 2
+                and mode not in _CACHE_RECEIPT_MODES
+            ):
                 _log(
                     f"bench reported regression violations (exit {rc}); "
                     "treating as completed-with-violations")
@@ -2268,7 +4268,12 @@ def _run_mode_commands(
                 f"{mode} published {len(command_report_files)} ordered "
                 "command reports, but its command contract requires exactly "
                 f"{expected_report_count}")
-        return command_report_files[-1], command_report_files
+        return (
+            command_report_files[-1],
+            command_report_files,
+            command_report_invocations,
+            unit_command_records,
+        )
 
     report_path = (
         _newest_report(pre_reports, mode)
@@ -2278,7 +4283,12 @@ def _run_mode_commands(
         raise RuntimeError(
             f"{mode} completed without publishing its required native "
             "JSON report")
-    return report_path, ([report_path] if report_path is not None else [])
+    return (
+        report_path,
+        ([report_path] if report_path is not None else []),
+        [],
+        unit_command_records,
+    )
 
 
 def _sql_guardrail_workflow_manifest(
@@ -5024,9 +7034,18 @@ def _run_build_worker(mode: str, build_only: bool = False,
             "postgres-error-safety mode")
         return 1
 
+    mode_details = MODES[mode]
     started_at = float(entry["started_at"])
     log_path = Path(entry["log_file"])
-    deadline = started_at + HARD_TIMEOUT_SEC
+    mode_timeout_sec = (
+        HARD_TIMEOUT_SEC
+        if mode_details.hard_timeout_min is None
+        else min(
+            HARD_TIMEOUT_SEC,
+            mode_details.hard_timeout_min * 60.0,
+        )
+    )
+    deadline = started_at + mode_timeout_sec
 
     active_preset = preset_for(mode, debug)
     active_build_dir = build_dir_for(mode, debug)
@@ -5049,11 +7068,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# postgres_error_safety_review_waiver_snapshot="
         f"{_sha256_bytes((postgres_error_safety_review_waiver_json or '').encode())}\n"
         f"# clang_rt_priority={entry.get('rt_priority')}\n"
-        f"# hard_timeout_min={HARD_TIMEOUT_MIN}\n"
+        f"# hard_timeout_min={mode_timeout_sec / 60.0}\n"
     )
     log_handle.flush()
 
-    mode_details = MODES[mode]
     if mode_details.uses_private_cluster and mode_details.install_extension:
         raise AssertionError(
             "private-cluster mode reached shared extension install routing")
@@ -5064,6 +7082,11 @@ def _run_build_worker(mode: str, build_only: bool = False,
         pre_reports = _report_paths(mode_details.reporting_dir)
 
     try:
+        # Bind qualification to the source that enters configure/build, then
+        # compare again after every native command. Development runs in
+        # mapped/mixed phases remain usable from a dirty tree.
+        cache_provenance_before = _cache_qualification_provenance(
+            mode, build_only)
         sql_guardrail_workflow = None
         if sql_guardrail_request_json:
             try:
@@ -5562,7 +7585,12 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "# BIOSEQ_E2E_CONFIG_OVERRIDE="
                     f"{bench_e2e_config}\n")
                 log_handle.flush()
-            report_path, report_files = _run_mode_commands(
+            (
+                report_path,
+                report_files,
+                report_invocations,
+                unit_command_records,
+            ) = _run_mode_commands(
                 mode,
                 active_bin_dir,
                 active_build_dir,
@@ -5573,6 +7601,68 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 bench_flags=bench_flags,
                 test_flags=test_flags,
             )
+            cache_completion_fields: dict[str, object] = {}
+            if cache_provenance_before is not None:
+                cache_provenance_after = _cache_run_provenance()
+                _require_same_cache_run_provenance(
+                    cache_provenance_before,
+                    cache_provenance_after,
+                )
+                _update_entry(
+                    mode, step="sealing cache qualification receipts")
+                retirement_gate = None
+                if (
+                    mode == "cache-unit"
+                    and cache_provenance_after["migration_phase"]
+                        == "retired_with_proof"
+                ):
+                    # A failed historical-proof/deletion transition must not
+                    # leave a discoverable current cache-unit receipt that a
+                    # later retired-final run could mistake for authorization.
+                    retirement_gate = (
+                        _run_cache_retirement_lifecycle_gate(
+                            mode,
+                            active_bin_dir,
+                            active_build_dir,
+                            run_env,
+                            cache_provenance_after,
+                            log_handle,
+                            deadline,
+                        )
+                    )
+                unit_receipt, evidence_receipts = (
+                    _seal_cache_mode_receipts(
+                        mode,
+                        active_bin_dir,
+                        report_files,
+                        report_invocations,
+                        unit_command_records,
+                        cache_provenance_after,
+                    )
+                )
+                if retirement_gate is None:
+                    retirement_gate = (
+                        _run_cache_retirement_lifecycle_gate(
+                            mode,
+                            active_bin_dir,
+                            active_build_dir,
+                            run_env,
+                            cache_provenance_after,
+                            log_handle,
+                            deadline,
+                        )
+                    )
+                cache_completion_fields = {
+                    "cache_run_provenance": cache_provenance_after,
+                    "cache_unit_receipt": (
+                        str(unit_receipt)
+                        if unit_receipt is not None else None
+                    ),
+                    "cache_evidence_receipts": [
+                        str(path) for path in evidence_receipts
+                    ],
+                    "cache_retirement_gate": retirement_gate,
+                }
             completed_at = time.time()
             _update_entry(
                 mode,
@@ -5584,6 +7674,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 report_files=[str(path) for path in report_files],
                 build_only=False,
                 debug=debug,
+                **cache_completion_fields,
             )
         log_handle.write(
             f"\n# worker exiting cleanly at "
@@ -5603,7 +7694,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
             build_only=build_only,
             debug=debug,
         )
-        log_handle.write(f"\n# killed by {HARD_TIMEOUT_MIN}-min hard timeout: {e}\n")
+        log_handle.write(
+            f"\n# killed by {mode_timeout_sec / 60.0}-min "
+            f"mode hard timeout: {e}\n")
         return 124
 
     except Exception as e:

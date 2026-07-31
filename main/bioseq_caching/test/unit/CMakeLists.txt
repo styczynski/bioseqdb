@@ -1,4 +1,5 @@
 find_package(Catch2 3 REQUIRED)
+find_package(simdjson CONFIG REQUIRED)
 
 add_executable(bioseq_cache_unit_tests
   fake_provider_v2.cpp
@@ -13,6 +14,7 @@ add_executable(bioseq_cache_unit_tests
   test_write_observation.cpp
   test_object_definition_dependencies.cpp
   test_legacy_migration_ledger.cpp
+  test_legacy_retirement_report.cpp
   test_transition_ledger.cpp
   test_dependency_directory.cpp
   test_dependency_vector.cpp)
@@ -28,6 +30,7 @@ set_target_properties(bioseq_cache_unit_tests PROPERTIES
 target_link_libraries(bioseq_cache_unit_tests
   PRIVATE
     bioseq_cache_core
+    simdjson::simdjson
     Catch2::Catch2WithMain)
 target_include_directories(
   bioseq_cache_unit_tests
