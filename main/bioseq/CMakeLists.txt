@@ -3287,6 +3287,7 @@ add_dependencies(
   bioseq_sql_external_feature_contract
   bioseq_sql_production_determinism_self_test)
 
+find_package(Git REQUIRED)
 if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
     AND BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK)
   set(BIOSEQ_DOC0388_LEDGER_SCRIPT
@@ -3778,7 +3779,6 @@ endif()
 # The named target is available for an exact focused reproduction, while the
 # integration executable invokes the same command during a full test run.
 # Consequently build_only retains its compile-only contract.
-find_package(Git REQUIRED)
 get_target_property(
   BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE
   postgresql_bioseq
