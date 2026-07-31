@@ -90,6 +90,8 @@ from postgres_error_safety_promotion import (  # noqa: E402
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 CMAKE_PRESETS_FILE = PROJECT_ROOT / "CMakePresets.json"
+_CMAKE_CONFIGURE_STAMP_NAME = ".bioseq-build-mcp-configure.json"
+_CMAKE_CONFIGURE_STAMP_KIND = "bioseq-build-mcp-configure-v1"
 _CMAKE_HELPER_DIR = PROJECT_ROOT / "cmake"
 if str(_CMAKE_HELPER_DIR) not in sys.path:
     sys.path.insert(0, str(_CMAKE_HELPER_DIR))
@@ -534,42 +536,160 @@ def _cmake_cache_contains(build_dir: Path, needle: str) -> bool:
         return False
 
 
+def _expand_cmake_preset_include(
+        value: str,
+        *,
+        source_dir: Path,
+        file_dir: Path,
+        environment: Mapping[str, str]) -> Path:
+    """Resolve the bounded macro set accepted in project preset includes."""
+    expanded = value
+    replacements = {
+        "${sourceDir}": str(source_dir),
+        "${fileDir}": str(file_dir),
+        "${dollar}": "$",
+        "${pathListSep}": os.pathsep,
+    }
+    for macro, replacement in replacements.items():
+        expanded = expanded.replace(macro, replacement)
+
+    def replace_environment(match: re.Match[str]) -> str:
+        return environment.get(match.group(1), "")
+
+    expanded = re.sub(
+        r"\$(?:p?env)\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        replace_environment,
+        expanded,
+    )
+    if re.search(r"\$\{[^}]+\}|\$(?:p?env)\{[^}]+\}", expanded):
+        raise RuntimeError(
+            "unsupported dynamic macro in CMake preset include "
+            f"{value!r}")
+    path = Path(expanded)
+    return path if path.is_absolute() else file_dir / path
+
+
+def _cmake_preset_payload_graph(
+        presets_file: Path,
+        *,
+        environment: Mapping[str, str] | None = None,
+) -> tuple[tuple[Path, Path, dict[str, object], bytes], ...]:
+    """Load the project/user preset files and their transitive includes."""
+    effective_environment = (
+        os.environ if environment is None else environment)
+    source_dir = presets_file.parent.resolve(strict=False)
+    records: list[
+        tuple[Path, Path, dict[str, object], bytes]
+    ] = []
+    visited: set[Path] = set()
+    lexical_sources: dict[Path, Path] = {}
+    active: list[Path] = []
+
+    def visit(path: Path) -> None:
+        lexical = Path(os.path.abspath(path))
+        try:
+            lexical_metadata = lexical.lstat()
+            if (
+                stat.S_ISLNK(lexical_metadata.st_mode)
+                or not stat.S_ISREG(lexical_metadata.st_mode)
+            ):
+                raise RuntimeError(
+                    "CMake preset source must be a regular non-symlink "
+                    f"file: {lexical}")
+            canonical = path.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot resolve CMake preset include {path}: {exc}") from exc
+        previous_lexical = lexical_sources.get(canonical)
+        if previous_lexical is not None and previous_lexical != lexical:
+            raise RuntimeError(
+                "CMake preset graph aliases one file through multiple "
+                f"lexical paths: {previous_lexical} and {lexical}")
+        if canonical in active:
+            cycle = " -> ".join(str(item) for item in (*active, canonical))
+            raise RuntimeError(f"CMake preset include cycle: {cycle}")
+        if canonical in visited:
+            return
+        lexical_sources[canonical] = lexical
+        try:
+            metadata = canonical.stat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError(
+                    "CMake preset source must resolve to a regular file: "
+                    f"{canonical}")
+            body = canonical.read_bytes()
+            payload = json.loads(body)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"cannot read CMake configure presets from {canonical}: "
+                f"{exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"CMake preset source must be a regular JSON object: "
+                f"{canonical}")
+
+        active.append(canonical)
+        records.append((lexical, canonical, payload, body))
+        raw_includes = payload.get("include", [])
+        if isinstance(raw_includes, str):
+            includes = [raw_includes]
+        elif (
+            isinstance(raw_includes, list)
+            and all(isinstance(item, str) and item for item in raw_includes)
+        ):
+            includes = raw_includes
+        else:
+            raise RuntimeError(
+                f"{canonical} contains an invalid CMake preset include list")
+        for include in includes:
+            visit(_expand_cmake_preset_include(
+                include,
+                source_dir=source_dir,
+                file_dir=lexical.parent,
+                environment=effective_environment,
+            ))
+        active.pop()
+        visited.add(canonical)
+
+    visit(presets_file)
+    user_presets = presets_file.with_name("CMakeUserPresets.json")
+    if presets_file.name == "CMakePresets.json" and user_presets.exists():
+        visit(user_presets)
+    return tuple(records)
+
+
 def _resolved_cmake_preset_cache_variables(
         preset: str,
         *,
-        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, object]:
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> dict[str, object]:
     """Resolve configure-preset cache variables with CMake inheritance rules.
 
     Earlier entries in an ``inherits`` array have priority, the selected
     preset overrides every parent, and an explicit ``null`` remains a
     tombstone so a later parent cannot restore the value.
     """
-    try:
-        payload = json.loads(presets_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"cannot read CMake configure presets from {presets_file}: "
-            f"{exc}") from exc
-
-    raw_presets = payload.get("configurePresets")
-    if not isinstance(raw_presets, list):
-        raise RuntimeError(
-            f"{presets_file} does not contain a configurePresets array")
-
     presets: dict[str, dict] = {}
-    for raw_preset in raw_presets:
-        if not isinstance(raw_preset, dict):
+    for _, source, payload, _ in _cmake_preset_payload_graph(
+            presets_file,
+            environment=environment):
+        raw_presets = payload.get("configurePresets", [])
+        if not isinstance(raw_presets, list):
             raise RuntimeError(
-                f"{presets_file} contains a non-object configure preset")
-        name = raw_preset.get("name")
-        if not isinstance(name, str) or not name:
-            raise RuntimeError(
-                f"{presets_file} contains a configure preset without a name")
-        if name in presets:
-            raise RuntimeError(
-                f"{presets_file} contains duplicate configure preset "
-                f"{name!r}")
-        presets[name] = raw_preset
+                f"{source} does not contain a configurePresets array")
+        for raw_preset in raw_presets:
+            if not isinstance(raw_preset, dict):
+                raise RuntimeError(
+                    f"{source} contains a non-object configure preset")
+            name = raw_preset.get("name")
+            if not isinstance(name, str) or not name:
+                raise RuntimeError(
+                    f"{source} contains a configure preset without a name")
+            if name in presets:
+                raise RuntimeError(
+                    f"CMake preset graph contains duplicate configure "
+                    f"preset {name!r}")
+            presets[name] = raw_preset
 
     resolved: dict[str, dict[str, object]] = {}
 
@@ -624,14 +744,312 @@ def _resolved_cmake_preset_cache_variables(
     return dict(resolve(preset, ()))
 
 
+def _cmake_executable_identity(
+        environment: Mapping[str, str]) -> dict[str, object]:
+    """Seal the exact CMake executable and version used by the worker."""
+    executable = shutil.which(
+        "cmake",
+        path=environment.get("PATH"),
+    )
+    if executable is None:
+        raise RuntimeError(
+            "cannot resolve `cmake` from the MCP worker PATH")
+    lexical = Path(executable)
+    try:
+        resolved = lexical.resolve(strict=True)
+        metadata = resolved.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(
+                f"CMake executable is not a regular file: {resolved}")
+        body = resolved.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect CMake executable {lexical}: {exc}") from exc
+    try:
+        version = subprocess.run(
+            [str(resolved), "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=10.0,
+            env=dict(environment),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"cannot query CMake executable version {resolved}: {exc}") from exc
+    if version.returncode != 0 or not version.stdout:
+        raise RuntimeError(
+            "CMake executable version query failed: "
+            f"path={resolved} exit_code={version.returncode}")
+    version_line = version.stdout.splitlines()[0].decode(
+        "utf-8",
+        errors="replace",
+    )
+    return {
+        "lexical_path": str(lexical),
+        "resolved_path": str(resolved),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "byte_count": len(body),
+        "version_line": version_line,
+        "version_output_sha256":
+            hashlib.sha256(version.stdout).hexdigest(),
+    }
+
+
+def _cmake_configure_stamp_document(
+        preset: str,
+        *,
+        mode_cache_variables: Mapping[str, str],
+        managed_arguments: List[str],
+        environment: Mapping[str, str],
+        cmake_executable_identity: Mapping[str, object],
+        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, object]:
+    """Seal every MCP-owned input which can select a CMake configuration."""
+    preset_graph = _cmake_preset_payload_graph(
+        presets_file,
+        environment=environment,
+    )
+    resolved_cache = _resolved_cmake_preset_cache_variables(
+        preset,
+        presets_file=presets_file,
+        environment=environment,
+    )
+    referenced_environment_names = sorted(set(re.findall(
+        rb"\$(?:p?env)\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        b"\n".join(body for _, _, _, body in preset_graph),
+    )))
+
+    def sealed_environment_value(name: str) -> dict[str, object]:
+        present = name in environment
+        value = environment.get(name, "")
+        return {
+            "present": present,
+            "sha256": (
+                hashlib.sha256(value.encode("utf-8")).hexdigest()
+                if present else None
+            ),
+        }
+
+    referenced_environment = {
+        name.decode("ascii"):
+            sealed_environment_value(name.decode("ascii"))
+        for name in referenced_environment_names
+    }
+    managed_environment_names = (
+        "BIOSEQ_COMPILER_LAUNCHER",
+        "BIOSEQ_GCC16_ROOT",
+        "BIOSEQ_LIBCXX_MODULES_JSON",
+        "BIOSEQ_LIBSTDCXX_MODULES_JSON",
+        "BIOSEQ_LLVM_ROOT",
+        "BIOSEQ_OPTTIMIZATION_LEVEL",
+        "CC",
+        "CXX",
+        "CMAKE_EXPORT_COMPILE_COMMANDS",
+        "CMAKE_NAMED_ENV_TYPE",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "PATH",
+        "POSTGRESQL_VERSION",
+        "SDKROOT",
+        "VCPKG_ROOT",
+    )
+    inputs = {
+        "preset": preset,
+        "presets_file": str(presets_file.resolve(strict=False)),
+        "preset_files": [
+            {
+                "lexical_path": str(lexical),
+                "resolved_path": str(resolved),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "byte_count": len(body),
+                "ordered_include_targets": [
+                    str(_expand_cmake_preset_include(
+                        include,
+                        source_dir=presets_file.parent.resolve(
+                            strict=False),
+                        file_dir=lexical.parent,
+                        environment=environment,
+                    ).resolve(strict=False))
+                    for include in (
+                        [payload["include"]]
+                        if isinstance(payload.get("include", []), str)
+                        else payload.get("include", [])
+                    )
+                ],
+            }
+            for lexical, resolved, payload, body in sorted(
+                preset_graph,
+                key=lambda record: str(record[1]),
+            )
+        ],
+        "resolved_cache_variables": resolved_cache,
+        "mode_cache_variables": dict(sorted(mode_cache_variables.items())),
+        "managed_arguments": list(managed_arguments),
+        "cmake_executable_identity": dict(cmake_executable_identity),
+        "referenced_environment": referenced_environment,
+        "managed_environment": {
+            name: sealed_environment_value(name)
+            for name in managed_environment_names
+        },
+    }
+    canonical_inputs = json.dumps(
+        inputs,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "artifact_kind": _CMAKE_CONFIGURE_STAMP_KIND,
+        "schema_version": 1,
+        "inputs": inputs,
+        "inputs_sha256": hashlib.sha256(canonical_inputs).hexdigest(),
+    }
+
+
+def _cmake_configure_stamp_status(
+        build_dir: Path,
+        expected: Mapping[str, object]) -> tuple[bool, str]:
+    """Return whether an existing tree was configured from ``expected``."""
+    stamp = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    try:
+        metadata = stamp.lstat()
+    except FileNotFoundError:
+        return False, "configure stamp is missing"
+    except OSError as exc:
+        return False, f"configure stamp cannot be inspected: {exc}"
+    if stamp.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        return False, "configure stamp is not a regular non-symlink file"
+    try:
+        observed = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, f"configure stamp is unreadable: {exc}"
+    if observed != expected:
+        return False, "configure inputs changed"
+    return True, "configure inputs match"
+
+
+def _fsync_cmake_configure_stamp_directory(build_dir: Path) -> None:
+    directory_flags = os.O_RDONLY
+    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory_descriptor = os.open(str(build_dir), directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot durably update the CMake configure stamp directory "
+            f"{build_dir}: {exc}") from exc
+
+
+def _invalidate_cmake_configure_stamp(build_dir: Path) -> None:
+    """Remove the old configure claim before attempting any reconfigure."""
+    stamp = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    try:
+        metadata = stamp.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect stale CMake configure stamp {stamp}: "
+            f"{exc}") from exc
+    if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+        raise RuntimeError(
+            "refusing to remove non-file CMake configure stamp "
+            f"{stamp}")
+    try:
+        stamp.unlink()
+        _fsync_cmake_configure_stamp_directory(build_dir)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot invalidate CMake configure stamp {stamp}: {exc}") from exc
+
+
+def _publish_cmake_configure_stamp(
+        build_dir: Path,
+        document: Mapping[str, object]) -> None:
+    """Atomically publish a retry-safe configure stamp after validation."""
+    stamp = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    build_dir.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(
+        document,
+        ensure_ascii=True,
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=f".{stamp.name}.",
+                suffix=".tmp",
+                dir=build_dir,
+                delete=False) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, stamp)
+        temporary_path = None
+        try:
+            _fsync_cmake_configure_stamp_directory(build_dir)
+        except RuntimeError:
+            with contextlib.suppress(OSError):
+                stamp.unlink()
+            with contextlib.suppress(RuntimeError):
+                _fsync_cmake_configure_stamp_directory(build_dir)
+            raise
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot publish CMake configure stamp {stamp}: {exc}") from exc
+    finally:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+
+
+def _finalize_cmake_configure_stamp(
+        build_dir: Path,
+        before: Mapping[str, object],
+        after: Mapping[str, object],
+        *,
+        context: str) -> str:
+    """Reject configure-input mutation, then publish the validated seal."""
+    if after != before:
+        _invalidate_cmake_configure_stamp(build_dir)
+        raise RuntimeError(
+            "CMake configure inputs changed while the MCP worker was "
+            f"configuring {context}; refusing a mixed configuration")
+    final_matches, _ = _cmake_configure_stamp_status(
+        build_dir,
+        after,
+    )
+    if not final_matches:
+        _publish_cmake_configure_stamp(
+            build_dir,
+            after,
+        )
+    seal = after.get("inputs_sha256")
+    if not isinstance(seal, str) or not re.fullmatch(r"[0-9a-f]{64}", seal):
+        _invalidate_cmake_configure_stamp(build_dir)
+        raise RuntimeError(
+            f"CMake configure stamp for {context} has no valid input seal")
+    return seal
+
+
 def _cmake_preset_cache_contract(
         preset: str,
         keys: tuple[str, ...],
         *,
-        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, str]:
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return exact, non-null values selected by a configure preset."""
     variables = _resolved_cmake_preset_cache_variables(
-        preset, presets_file=presets_file)
+        preset,
+        presets_file=presets_file,
+        environment=environment,
+    )
     contract: dict[str, str] = {}
     for key in keys:
         raw_value = variables.get(key)
@@ -662,10 +1080,15 @@ def _cmake_preset_cache_repairs(
         preset: str,
         *,
         keys: tuple[str, ...] = ("PostgreSQL_CONFIG",),
-        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, str]:
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> dict[str, str]:
     """Plan exact repairs for preset-owned cache values in one build tree."""
     contract = _cmake_preset_cache_contract(
-        preset, keys, presets_file=presets_file)
+        preset,
+        keys,
+        presets_file=presets_file,
+        environment=environment,
+    )
     return {
         key: expected
         for key, expected in contract.items()
@@ -684,12 +1107,14 @@ def _postgresql_discovery_cache_reset_args(
         build_dir: Path,
         preset: str,
         *,
-        presets_file: Path = CMAKE_PRESETS_FILE) -> tuple[str, ...]:
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> tuple[str, ...]:
     """Invalidate derived PostgreSQL discovery when its toolchain is stale."""
     contract = _cmake_preset_cache_contract(
         preset,
         ("PostgreSQL_CONFIG",),
         presets_file=presets_file,
+        environment=environment,
     )
     expected_config = contract.get("PostgreSQL_CONFIG")
     if expected_config is None:
@@ -748,6 +1173,7 @@ def _ensure_local_toolchain_environment(
 
 
 def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> None:
+    _invalidate_cmake_configure_stamp(build_dir)
     log_handle.write(f"# CMake cache repair: clearing configure cache ({reason}).\n")
     log_handle.flush()
     for path in (build_dir / "CMakeCache.txt", build_dir / "CMakeFiles"):
@@ -758,6 +1184,86 @@ def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> No
                 path.unlink()
         except OSError as e:
             raise RuntimeError(f"failed to remove stale CMake cache path {path}: {e}") from e
+
+
+def _run_cmake_preset_configure(
+        arguments: List[str],
+        *,
+        build_dir: Path,
+        log_handle,
+        deadline: float,
+        environment: Mapping[str, str]) -> int:
+    """Run the sole MCP configure path after retiring any older seal."""
+    if len(arguments) < 3 or arguments[:2] != ["cmake", "--preset"]:
+        raise ValueError(
+            "CMake preset configure command must start with "
+            "`cmake --preset`")
+    _invalidate_cmake_configure_stamp(build_dir)
+    return _stream_subprocess(
+        arguments,
+        log_handle,
+        deadline,
+        cwd=PROJECT_ROOT,
+        env=dict(environment),
+    )
+
+
+def _ensure_cmake_preset_tree_fresh(
+        *,
+        build_dir: Path,
+        preset: str,
+        configure_stamp: Mapping[str, object],
+        configure_arguments: List[str],
+        log_handle,
+        deadline: float,
+        environment: Mapping[str, str],
+        failure_label: str = "cmake configure") -> bool:
+    """Fresh-configure a tree iff Ninja and the MCP input seal disagree."""
+    build_ninja = build_dir / "build.ninja"
+    stamp_matches, stamp_reason = _cmake_configure_stamp_status(
+        build_dir,
+        configure_stamp,
+    )
+    if build_ninja.is_file() and stamp_matches:
+        return False
+
+    _invalidate_cmake_configure_stamp(build_dir)
+    cache = build_dir / "CMakeCache.txt"
+    cmake_files = build_dir / "CMakeFiles"
+    if (
+        cache.exists()
+        or cache.is_symlink()
+        or cmake_files.exists()
+        or cmake_files.is_symlink()
+    ):
+        reason = (
+            stamp_reason
+            if build_ninja.exists()
+            else "previous configure did not produce build.ninja"
+        )
+        _clear_cmake_configure_cache(
+            build_dir,
+            log_handle,
+            reason,
+        )
+    log_handle.write(
+        "# CMake configure freshness mismatch: "
+        f"{stamp_reason}; reconfiguring with preset {preset}.\n")
+    log_handle.flush()
+    rc = _run_cmake_preset_configure(
+        configure_arguments,
+        build_dir=build_dir,
+        log_handle=log_handle,
+        deadline=deadline,
+        environment=environment,
+    )
+    if rc != 0:
+        raise RuntimeError(f"{failure_label} exited with code {rc}")
+    if not build_ninja.is_file():
+        raise RuntimeError(
+            f"preset {preset!r} did not produce {build_ninja}")
+    return True
+
 
 # Prompt template injected into every `subagent` call.
 # Placeholders replaced at call time via str.replace (not f-string so the JSON
@@ -1169,6 +1675,7 @@ MODES: Dict[str, ModeDefinition] = {
             "bioseq_postgres_test_support_contract_tests",
             "bioseq_cache_benchmark_report_contract_tests",
             "bioseq_durable_file_io_contract_tests",
+            "bioseq_build_mcp_configure_freshness_contract_tests",
             "bioseq_cache_legacy_retirement_gate",
             "bioseq_cache_legacy_inventory_tracking",
         ],
@@ -6403,7 +6910,9 @@ _POSTGRES_ERROR_SAFETY_PATH_CACHE_KEYS = frozenset({
 
 
 def _postgres_error_safety_cache_contract(
-        preset: str) -> dict[str, str]:
+        preset: str,
+        *,
+        environment: Mapping[str, str] | None = None) -> dict[str, str]:
     common = {
         "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE":
             str(POSTGRES_ERROR_SAFETY_CASE_TEMPLATE),
@@ -6412,7 +6921,10 @@ def _postgres_error_safety_cache_contract(
         "BIOSEQ_BUILD_WEBSITE": "OFF",
     }
     common.update(_cmake_preset_cache_contract(
-        preset, ("PostgreSQL_CONFIG",)))
+        preset,
+        ("PostgreSQL_CONFIG",),
+        environment=environment,
+    ))
     if preset == POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET:
         return {
             "BIOSEQ_BUILD_TESTS": "ON",
@@ -6497,15 +7009,40 @@ def _checked_postgres_error_safety_case_template() -> Path:
 def _configure_postgres_error_safety_tree(
         preset: str, build_dir: Path, log_handle, deadline: float,
         env: dict[str, str], rt_priority: int | None) -> None:
-    expected_cache = _postgres_error_safety_cache_contract(preset)
+    expected_cache = _postgres_error_safety_cache_contract(
+        preset,
+        environment=env,
+    )
+    initial_clang_rt_args = _initial_clang_rt_cmake_args(
+        preset,
+        rt_priority,
+    )
+    cmake_identity = _cmake_executable_identity(env)
+    configure_stamp = _cmake_configure_stamp_document(
+        preset,
+        mode_cache_variables=expected_cache,
+        managed_arguments=initial_clang_rt_args,
+        environment=env,
+        cmake_executable_identity=cmake_identity,
+    )
     build_ninja = build_dir / "build.ninja"
-    if not build_ninja.exists() and (build_dir / "CMakeCache.txt").exists():
-        _clear_cmake_configure_cache(
-            build_dir,
-            log_handle,
-            "previous PostgreSQL error-safety configure did not produce "
-            "build.ninja",
-        )
+    configured_fresh = _ensure_cmake_preset_tree_fresh(
+        build_dir=build_dir,
+        preset=preset,
+        configure_stamp=configure_stamp,
+        configure_arguments=[
+            "cmake",
+            "--preset",
+            preset,
+            *(f"-D{key}={value}"
+              for key, value in expected_cache.items()),
+            *initial_clang_rt_args,
+        ],
+        log_handle=log_handle,
+        deadline=deadline,
+        environment=env,
+        failure_label=f"configure of preset {preset!r}",
+    )
 
     repairs = {
         key: expected
@@ -6516,12 +7053,12 @@ def _configure_postgres_error_safety_tree(
     postgresql_reset_args = _postgresql_discovery_cache_reset_args(
         build_dir,
         preset,
+        environment=env,
     )
     clang_rt_repairs, clang_rt_reasons = _clang_rt_cmake_cache_repairs(
         build_dir, preset, rt_priority)
     if (
-        not build_ninja.exists()
-        or repairs
+        repairs
         or postgresql_reset_args
         or clang_rt_repairs
     ):
@@ -6537,16 +7074,12 @@ def _configure_postgres_error_safety_tree(
                 + "; ".join(clang_rt_reasons)
                 + ".\n")
         log_handle.flush()
-        configure_cache = (
-            dict(expected_cache)
-            if not build_ninja.exists()
-            else dict(repairs)
-        )
+        configure_cache = dict(repairs)
         if postgresql_reset_args:
             configure_cache["PostgreSQL_CONFIG"] = expected_cache[
                 "PostgreSQL_CONFIG"
             ]
-        rc = _stream_subprocess(
+        rc = _run_cmake_preset_configure(
             [
                 "cmake",
                 "--preset",
@@ -6554,18 +7087,18 @@ def _configure_postgres_error_safety_tree(
                 *postgresql_reset_args,
                 *(f"-D{key}={value}"
                   for key, value in configure_cache.items()),
-                *_initial_clang_rt_cmake_args(preset, rt_priority),
+                *initial_clang_rt_args,
                 *clang_rt_repairs,
             ],
-            log_handle,
-            deadline,
-            cwd=PROJECT_ROOT,
-            env=env,
+            build_dir=build_dir,
+            log_handle=log_handle,
+            deadline=deadline,
+            environment=env,
         )
         if rc != 0:
             raise RuntimeError(
                 f"configure of preset {preset!r} exited with code {rc}")
-    else:
+    elif not configured_fresh:
         log_handle.write(
             f"# build tree already configured ({build_ninja}); all "
             "PostgreSQL error-safety cache invariants are correct.\n")
@@ -6584,6 +7117,23 @@ def _configure_postgres_error_safety_tree(
         raise RuntimeError(
             "PostgreSQL error-safety cache invariant failed closed for "
             f"preset {preset!r}: {', '.join(failed_invariants)}")
+    final_configure_stamp = _cmake_configure_stamp_document(
+        preset,
+        mode_cache_variables=expected_cache,
+        managed_arguments=initial_clang_rt_args,
+        environment=env,
+        cmake_executable_identity=_cmake_executable_identity(env),
+    )
+    configure_seal = _finalize_cmake_configure_stamp(
+        build_dir,
+        configure_stamp,
+        final_configure_stamp,
+        context=f"PostgreSQL error-safety preset {preset!r}",
+    )
+    log_handle.write(
+        "# verified CMake configure input seal="
+        f"{configure_seal}.\n")
+    log_handle.flush()
 
 
 def _resolve_postgres_error_safety_dso(build_dir: Path) -> Path:
@@ -7169,17 +7719,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
                       preset_family=mode_details.preset_family,
                       binary_subdir=mode_details.binary_subdir,
                       uses_private_cluster=mode_details.uses_private_cluster)
-        # Only run the (expensive) configure when the tree isn't configured yet.
-        # Re-running `cmake --preset` on an already-configured C++-modules tree
-        # regenerates the Ninja dyndep/modmap graph and invalidates EVERY module
-        # TU across all targets (~219 edges here vs ~34 for a true incremental),
-        # turning every run into a full rebuild that cannot finish inside the
-        # hard timeout. Ninja still auto-reconfigures via its RERUN_CMAKE rule
-        # when CMakeLists / cache / vcpkg manifest actually change, so a later
-        # `cmake --build` still picks up genuine configuration changes.
+        # Configure an existing C++-modules tree only when its sealed effective
+        # preset inputs changed. CMakePresets.json is not part of Ninja's
+        # RERUN_CMAKE dependency graph, so relying on build.ninja alone can
+        # silently retain stale include/toolchain cache values. Conversely,
+        # configuring every run regenerates all module dyndep/modmap edges.
         required_cache = mode_details.required_cache_variables or {}
         preset_cache_contract = _cmake_preset_cache_contract(
-            active_preset, ("PostgreSQL_CONFIG",))
+            active_preset,
+            ("PostgreSQL_CONFIG",),
+            environment=env,
+        )
         configure_cache_contract = {
             **required_cache,
             **preset_cache_contract,
@@ -7190,52 +7740,64 @@ def _run_build_worker(mode: str, build_only: bool = False,
         ]
         initial_clang_rt_args = _initial_clang_rt_cmake_args(
             active_preset, machine_rt_priority)
+        cmake_identity = _cmake_executable_identity(env)
+        configure_stamp = _cmake_configure_stamp_document(
+            active_preset,
+            mode_cache_variables=configure_cache_contract,
+            managed_arguments=initial_clang_rt_args,
+            environment=env,
+            cmake_executable_identity=cmake_identity,
+        )
         build_ninja = active_build_dir / "build.ninja"
+        configured_fresh = _ensure_cmake_preset_tree_fresh(
+            build_dir=active_build_dir,
+            preset=active_preset,
+            configure_stamp=configure_stamp,
+            configure_arguments=[
+                "cmake",
+                "--preset",
+                active_preset,
+                *required_cache_args,
+                *initial_clang_rt_args,
+            ],
+            log_handle=log_handle,
+            deadline=deadline,
+            environment=env,
+        )
         expected_test_indexes = mode_details.preset_family == "test"
-        if not build_ninja.exists():
-            if (active_build_dir / "CMakeCache.txt").exists():
-                _clear_cmake_configure_cache(
-                    active_build_dir,
-                    log_handle,
-                    "previous configure did not produce build.ninja",
-                )
-            rc = _stream_subprocess(
-                ["cmake", "--preset", active_preset, *required_cache_args,
-                 *initial_clang_rt_args],
-                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+        cached_test_indexes = _cmake_cache_bool(
+            active_build_dir, "BIOSEQ_TEST_INDEXES")
+        if cached_test_indexes != expected_test_indexes:
+            expected_text = "ON" if expected_test_indexes else "OFF"
+            observed_text = (
+                "missing/invalid"
+                if cached_test_indexes is None
+                else ("ON" if cached_test_indexes else "OFF")
+            )
+            log_handle.write(
+                "# BIOSEQ_TEST_INDEXES cache invariant mismatch: "
+                f"expected={expected_text} observed={observed_text}; "
+                f"reconfiguring with preset {active_preset}.\n")
+            log_handle.flush()
+            rc = _run_cmake_preset_configure(
+                ["cmake", "--preset", active_preset,
+                 *required_cache_args, *initial_clang_rt_args],
+                build_dir=active_build_dir,
+                log_handle=log_handle,
+                deadline=deadline,
+                environment=env,
             )
             if rc != 0:
-                raise RuntimeError(f"cmake configure exited with code {rc}")
+                raise RuntimeError(
+                    "CMake hook-isolation repair exited with code "
+                    f"{rc}")
         else:
-            cached_test_indexes = _cmake_cache_bool(
-                active_build_dir, "BIOSEQ_TEST_INDEXES")
-            if cached_test_indexes != expected_test_indexes:
-                expected_text = "ON" if expected_test_indexes else "OFF"
-                observed_text = (
-                    "missing/invalid"
-                    if cached_test_indexes is None
-                    else ("ON" if cached_test_indexes else "OFF")
-                )
-                log_handle.write(
-                    "# BIOSEQ_TEST_INDEXES cache invariant mismatch: "
-                    f"expected={expected_text} observed={observed_text}; "
-                    f"reconfiguring with preset {active_preset}.\n")
-                log_handle.flush()
-                rc = _stream_subprocess(
-                    ["cmake", "--preset", active_preset,
-                     *required_cache_args, *initial_clang_rt_args],
-                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
-                )
-                if rc != 0:
-                    raise RuntimeError(
-                        "CMake hook-isolation repair exited with code "
-                        f"{rc}")
-            else:
+            if not configured_fresh:
                 log_handle.write(
                     f"# build tree already configured ({build_ninja}); "
-                    "BIOSEQ_TEST_INDEXES invariant is correct; skipping "
-                    "redundant `cmake --preset` to avoid a full C++-module "
-                    "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
+                    "sealed configure inputs and BIOSEQ_TEST_INDEXES "
+                    "invariant are correct; skipping redundant "
+                    "`cmake --preset`.\n")
                 log_handle.flush()
 
         cache_repairs = {
@@ -7244,10 +7806,14 @@ def _run_build_worker(mode: str, build_only: bool = False,
             if _cmake_cache_value(active_build_dir, name) != value
         }
         cache_repairs.update(_cmake_preset_cache_repairs(
-            active_build_dir, active_preset))
+            active_build_dir,
+            active_preset,
+            environment=env,
+        ))
         postgresql_reset_args = _postgresql_discovery_cache_reset_args(
             active_build_dir,
             active_preset,
+            environment=env,
         )
         if postgresql_reset_args:
             cache_repairs.update(preset_cache_contract)
@@ -7263,11 +7829,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 )
                 + f"setting {repair_description}.\n")
             log_handle.flush()
-            rc = _stream_subprocess(
+            _invalidate_cmake_configure_stamp(active_build_dir)
+            rc = _run_cmake_preset_configure(
                 ["cmake", "--preset", active_preset,
                  *postgresql_reset_args,
                  *(f"-D{name}={value}" for name, value in cache_repairs.items())],
-                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                build_dir=active_build_dir,
+                log_handle=log_handle,
+                deadline=deadline,
+                environment=env,
             )
             if rc != 0:
                 raise RuntimeError(
@@ -7386,10 +7956,14 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 log_handle.write("# AWS cache repair: setting "
                                  + "; ".join(repair_reasons) + ".\n")
                 log_handle.flush()
-                rc = _stream_subprocess(
+                _invalidate_cmake_configure_stamp(active_build_dir)
+                rc = _run_cmake_preset_configure(
                     ["cmake", "--preset", active_preset,
                      *dict.fromkeys(repair_unset_args), *repair_args],
-                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                    build_dir=active_build_dir,
+                    log_handle=log_handle,
+                    deadline=deadline,
+                    environment=env,
                 )
                 if rc != 0:
                     raise RuntimeError(
@@ -7407,9 +7981,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 "# clang RT cache repair: "
                 + "; ".join(clang_rt_reasons) + ".\n")
             log_handle.flush()
-            rc = _stream_subprocess(
+            _invalidate_cmake_configure_stamp(active_build_dir)
+            rc = _run_cmake_preset_configure(
                 ["cmake", "--preset", active_preset, *clang_rt_repairs],
-                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                build_dir=active_build_dir,
+                log_handle=log_handle,
+                deadline=deadline,
+                environment=env,
             )
             if rc != 0:
                 raise RuntimeError(
@@ -7417,7 +7995,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     f"code {rc}")
 
         postgresql_config_repairs = _cmake_preset_cache_repairs(
-            active_build_dir, active_preset)
+            active_build_dir,
+            active_preset,
+            environment=env,
+        )
         if postgresql_config_repairs:
             expected = postgresql_config_repairs["PostgreSQL_CONFIG"]
             observed = _cmake_cache_value(
@@ -7445,6 +8026,23 @@ def _run_build_worker(mode: str, build_only: bool = False,
         log_handle.write(
             "# verified BIOSEQ_TEST_INDEXES="
             f"{verified_test_indexes} preset={active_preset}.\n")
+        log_handle.flush()
+        final_configure_stamp = _cmake_configure_stamp_document(
+            active_preset,
+            mode_cache_variables=configure_cache_contract,
+            managed_arguments=initial_clang_rt_args,
+            environment=env,
+            cmake_executable_identity=_cmake_executable_identity(env),
+        )
+        configure_seal = _finalize_cmake_configure_stamp(
+            active_build_dir,
+            configure_stamp,
+            final_configure_stamp,
+            context=f"preset {active_preset!r}",
+        )
+        log_handle.write(
+            "# verified CMake configure input seal="
+            f"{configure_seal}.\n")
         log_handle.flush()
 
         _update_entry(mode, step="building", build_only=build_only,

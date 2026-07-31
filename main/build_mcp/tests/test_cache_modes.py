@@ -3075,6 +3075,24 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                     "_cmake_preset_cache_contract", return_value={})
                 patch(
                     "_initial_clang_rt_cmake_args", return_value=[])
+                patch(
+                    "_cmake_executable_identity",
+                    return_value={"sha256": "1" * 64})
+                configure_stamp = {
+                    "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
+                    "schema_version": 1,
+                    "inputs": {},
+                    "inputs_sha256": "a" * 64,
+                }
+                patch(
+                    "_cmake_configure_stamp_document",
+                    return_value=configure_stamp)
+                configure_freshness = patch(
+                    "_ensure_cmake_preset_tree_fresh",
+                    return_value=True)
+                finalize_configure = patch(
+                    "_finalize_cmake_configure_stamp",
+                    return_value="a" * 64)
                 patch("_cmake_cache_bool", return_value=False)
                 patch(
                     "_cmake_preset_cache_repairs", return_value={})
@@ -3099,6 +3117,13 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                 result = server._run_build_worker("cache-unit")
 
         self.assertEqual(result, 1)
+        configure_freshness.assert_called_once()
+        finalize_configure.assert_called_once_with(
+            build_dir,
+            configure_stamp,
+            configure_stamp,
+            context="preset 'cache-opt'",
+        )
         lifecycle_gate.assert_called_once()
         seal_mode.assert_not_called()
         seal_unit.assert_not_called()

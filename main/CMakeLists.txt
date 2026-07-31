@@ -693,6 +693,31 @@ if(BIOSEQ_BUILD_CACHE)
   add_subdirectory(bioseq_caching)
 endif()
 
+if(TARGET bioseq_cache_unit_tests)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_custom_target(
+    bioseq_build_mcp_configure_freshness_contract_tests
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_cmake_configure_freshness.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_postgresql_config_invariant.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_postgres_error_safety_mode.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_cache_modes.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Running bioseq-build configure freshness contract tests"
+    VERBATIM)
+endif()
+
 if(BIOSEQ_BUILD_CORE)
   add_subdirectory(bioseq)
   if(TARGET bioseq_cache_bioseq_bench)
