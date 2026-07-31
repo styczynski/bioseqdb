@@ -7510,6 +7510,14 @@ bool ExactCoverageSemanticCollectorV1::collect_plan(const Plan* plan) {
     return true;
 }
 
+/** Exact replay may elide only providers that explicitly opt into it. */
+[[nodiscard]] bool provider_allows_exact_source_elision(
+        const provider_registry::ProviderV2* provider) noexcept {
+    return provider != nullptr
+        && (provider->provider_flags
+                & BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE) != 0;
+}
+
 /** Revalidate every finalized provider recipe and frame its semantic bytes. */
 [[nodiscard]] bool append_exact_runtime_recipe_key(
         const CustomScan& scan,
@@ -7574,6 +7582,7 @@ bool ExactCoverageSemanticCollectorV1::collect_plan(const Plan* plan) {
         const auto* provider = provider_registry::find_provider_v2(
             static_cast<std::uint32_t>(provider_id_value));
         if (provider == nullptr
+            || !provider_allows_exact_source_elision(provider)
             || provider->abi_version
                 != static_cast<std::uint32_t>(provider_abi_value)
             || state.provider_lease_count
@@ -11103,7 +11112,8 @@ bool ExactProviderRecipeCollectorV1::collect_plan(const Plan* plan) {
         }
     }
     if (matched_provider != nullptr) {
-        if (recipe_count >= kMaxProviderRecipesPerExactPlan
+        if (!provider_allows_exact_source_elision(matched_provider)
+            || recipe_count >= kMaxProviderRecipesPerExactPlan
             || matched_provider->provider_id
                 > static_cast<std::uint32_t>(INT_MAX)
             || matched_provider->abi_version
@@ -17948,14 +17958,21 @@ struct ExactPlanVerification {
                 break;
             }
             const auto providers = provider_registry::snapshot_providers_v2();
-            std::uint32_t matches = 0;
+            const provider_registry::ProviderV2* matched_provider = nullptr;
             for (std::uint32_t index = 0;
                  index < providers.provider_count; ++index) {
-                matches += providers.providers[index] != nullptr
-                    && reuse::provider_plan_matches(
-                        plan, providers.providers[index]);
+                const provider_registry::ProviderV2* provider =
+                    providers.providers[index];
+                if (provider == nullptr
+                    || !reuse::provider_plan_matches(plan, provider)) {
+                    continue;
+                }
+                if (matched_provider != nullptr) {
+                    return false;
+                }
+                matched_provider = provider;
             }
-            if (matches != 1
+            if (!provider_allows_exact_source_elision(matched_provider)
                 || verification.provider_scan_count
                     == (std::numeric_limits<std::uint32_t>::max)()
                 || !exact_plan_list_safe(

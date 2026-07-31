@@ -1301,6 +1301,85 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "exact cache retains a provider that withholds source-elision safety",
+    "[cache][integration][provider][exact][capability]") {
+    constexpr std::string_view case_name{
+        "exact cache retains a provider that withholds source-elision safety"};
+    bioseq::postgres_test::migration_probe_scope probes{
+        std::string(case_name)};
+    bioseq::postgres_test::postgres_fixture fixture{
+        bioseq::cache_test::cluster_options(
+            false, bioseq::cache_test::preload_order::cache_only)};
+    auto& connection = fixture.admin();
+    create_standard_provider_fixture(connection);
+
+    bioseq::cache_test::exec(
+        connection,
+        R"SQL(
+            SELECT bioseq_cache_test.provider_shutdown();
+            SELECT bioseq_cache_test.provider_set_exact_source_elision_safe(
+                false);
+            SELECT bioseq_cache_test.provider_init();
+            SELECT bioseq_cache_test.provider_use_relation(
+                'cache_provider_rows');
+            SELECT bioseq_cache_test.provider_reset();
+            SELECT bioseq_cache.invalidate_all();
+            SELECT bioseq_cache_test.request_janitor_sweep();
+            SELECT bioseq_cache.reset_stats();
+            SET bioseq.query_cache_optimisation_mode = 'same';
+        )SQL");
+
+    const auto plan = bioseq::postgres_test::run_explain(
+        connection, provider_query, false, 30s);
+    const auto cache_nodes = plan.find_plan_nodes(
+        "Custom Plan Provider", "BioseqCacheScan");
+    const auto provider_nodes = plan.find_plan_nodes(
+        "Custom Plan Provider", "BioseqCacheGenericTestProvider");
+    REQUIRE(cache_nodes.size() == 1);
+    REQUIRE(provider_nodes.size() == 1);
+    CHECK(bioseq::postgres_test::explain_property_bool(
+              *cache_nodes.front(), "Cache Force Bypass")
+          == true);
+    CHECK(bioseq::postgres_test::explain_property_string(
+              *cache_nodes.front(), "Cache Bypass Reason")
+          == "provider runtime recipe unavailable");
+    CHECK(bioseq::postgres_test::explain_property_integer(
+              *cache_nodes.front(), "Provider Runtime Recipes")
+          == -1);
+
+    const auto cold = connection.exec(provider_query, 30s);
+    const auto warm = connection.exec(provider_query, 30s);
+    REQUIRE(cold.rows() == 4);
+    REQUIRE(warm.rows() == 4);
+    CHECK(
+        bioseq::postgres_test::exact_row_hash(cold)
+        == bioseq::postgres_test::exact_row_hash(warm));
+
+    const auto stats = bioseq::cache_test::read_cache_stats(connection);
+    CHECK(stats.produced == 0);
+    CHECK(stats.completed_hits == 0);
+    CHECK(stats.reuse_hits == 0);
+    CHECK(stats.fallbacks == 2);
+    CHECK(stats.logical_bytes == 0);
+    CHECK(stats.stored_bytes == 0);
+    CHECK(provider_stat(connection, "build_recipe") == 0);
+    CHECK(provider_stat(connection, "runtime_digest") == 0);
+    CHECK(provider_stat(connection, "executor_rows") == 8);
+    CHECK(bioseq::cache_test::integer(
+              connection,
+              "SELECT count(*) FROM bioseq_cache.entries() "
+              "WHERE kind = 'ExactFinalResult' "
+              "AND state = 'COMPLETE'")
+          == 0);
+    bioseq::postgres_test::record_migration_probe(
+        "provider.v2.exact_source_elision_capability_required");
+
+    bioseq::cache_test::exec(
+        connection,
+        "SELECT bioseq_cache_test.provider_shutdown()");
+}
+
+TEST_CASE(
     "legacy reusable provider security namespace and redaction remain exact",
     "[cache][integration][provider][security][migration]") {
     constexpr std::string_view case_name{

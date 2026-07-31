@@ -595,6 +595,18 @@ inline void provider_shutdown() {
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
+    .null_input = bioseq::sql::null_input_policy::strict,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::all,
+    .from = bioseq::sql::public_role,
+})]]
+inline void provider_set_exact_source_elision_safe(bool enabled) {
+    test_provider::provider_set_exact_source_elision_safe(enabled);
+}
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
     .null_input = bioseq::sql::null_input_policy::called,
 })]]
 [[bioseq_sql::revoke({

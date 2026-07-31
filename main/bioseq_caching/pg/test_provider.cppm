@@ -169,6 +169,7 @@ inline DigestFault g_digest_fault = DigestFault::None;
 inline ProjectionOrder g_projection_order = ProjectionOrder::Natural;
 inline bool g_force_domain_digest_collision = false;
 inline bool g_provider_registered = false;
+inline bool g_provider_exact_source_elision_safe = true;
 inline BioseqCacheProviderRegistrationV2 g_provider_registration{
     .struct_size = sizeof(BioseqCacheProviderRegistrationV2),
 };
@@ -1409,30 +1410,32 @@ void provider_set_rel_pathlist_hook(
 }
 
 /** Restore only the hook slot and provider registration owned by this module. */
-void shutdown_provider() noexcept {
+[[nodiscard]] bool shutdown_provider() noexcept {
+    if (g_provider_registered) {
+        void** slot = find_rendezvous_variable(
+            bioseq::cache::kCacheApiRendezvousName);
+        if (slot == nullptr || *slot == nullptr) {
+            return false;
+        }
+        auto* api = static_cast<BioseqCacheApiV2*>(*slot);
+        if (api->struct_size < sizeof(*api)
+            || api->unregister_provider == nullptr
+            || !api->unregister_provider(&g_provider_registration)) {
+            return false;
+        }
+    }
     if (g_hook_installed && set_rel_pathlist_hook
         == provider_set_rel_pathlist_hook) {
         set_rel_pathlist_hook = g_previous_set_rel_pathlist_hook;
     }
     g_hook_installed = false;
     g_previous_set_rel_pathlist_hook = nullptr;
-    if (g_provider_registered) {
-        void** slot = find_rendezvous_variable(
-            bioseq::cache::kCacheApiRendezvousName);
-        if (slot != nullptr && *slot != nullptr) {
-            auto* api = static_cast<BioseqCacheApiV2*>(*slot);
-            if (api->struct_size >= sizeof(*api)
-                && api->unregister_provider != nullptr) {
-                static_cast<void>(
-                    api->unregister_provider(&g_provider_registration));
-            }
-        }
-    }
     g_provider_registered = false;
     g_provider_registration = {
         .struct_size = sizeof(BioseqCacheProviderRegistrationV2),
     };
     g_persisted_mapping_fault_statement = nullptr;
+    return true;
 }
 
 /** Parse the normative mapping-fault control vocabulary. */
@@ -1513,7 +1516,24 @@ export void provider_init() {
 
 export void provider_shutdown() {
     bioseq::cache::pg::test_provider::require_test_superuser();
-    bioseq::cache::pg::test_provider::shutdown_provider();
+    if (!bioseq::cache::pg::test_provider::shutdown_provider()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_IN_USE),
+             errmsg("bioseq_cache test provider is still in use")));
+    }
+}
+
+export void provider_set_exact_source_elision_safe(bool enabled) {
+    using namespace bioseq::cache::pg::test_provider;
+    require_test_superuser();
+    if (g_provider_registered || g_hook_installed) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq_cache test provider must be shut down before "
+                    "changing exact source-elision capability")));
+    }
+    g_provider_exact_source_elision_safe = enabled;
+    ResetPlanCache();
 }
 
 export void provider_use_relation(std::uint32_t relation_oid) {
@@ -2651,15 +2671,14 @@ void apply_mapping_fault(
 
 namespace bioseq::cache::pg::test_provider {
 
-/** Complete ABI table registered only by an explicit test-only SQL call. */
-[[nodiscard]] const BioseqCacheProviderV2& provider_v2() noexcept {
-    static const BioseqCacheProviderV2 provider{
+[[nodiscard]] BioseqCacheProviderV2 make_provider_v2(
+        std::uint32_t provider_flags) noexcept {
+    return BioseqCacheProviderV2{
         .struct_size = sizeof(BioseqCacheProviderV2),
         .abi_version = bioseq::cache::kProviderAbiVersion,
         .postgres_major = static_cast<std::uint32_t>(PG_VERSION_NUM / 10000),
         .provider_id = kProviderId,
-        .provider_flags = BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE
-            | BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION,
+        .provider_flags = provider_flags,
         .reserved = 0,
         .provider_name = "generic_nullable_occurrence_test_provider",
         .provider_scan_methods = &provider_scan_methods(),
@@ -2676,7 +2695,22 @@ namespace bioseq::cache::pg::test_provider {
         .late_fetch_batch = provider_late_fetch_batch,
         .explain_domain = provider_explain_domain,
     };
-    return provider;
+}
+
+/** Complete ABI table registered only by an explicit test-only SQL call. */
+[[nodiscard]] const BioseqCacheProviderV2& provider_v2() noexcept {
+    constexpr std::uint32_t reusable_flags =
+        BIOSEQ_CACHE_PROVIDER_REUSABLE_COVERAGE
+        | BIOSEQ_CACHE_PROVIDER_COMPLETE_WRITE_OBSERVATION;
+    static const BioseqCacheProviderV2 exact_elision_safe =
+        make_provider_v2(
+            reusable_flags
+            | BIOSEQ_CACHE_PROVIDER_EXACT_SOURCE_ELISION_SAFE);
+    static const BioseqCacheProviderV2 retained_source_required =
+        make_provider_v2(reusable_flags);
+    return g_provider_exact_source_elision_safe
+        ? exact_elision_safe
+        : retained_source_required;
 }
 
 } // namespace bioseq::cache::pg::test_provider
