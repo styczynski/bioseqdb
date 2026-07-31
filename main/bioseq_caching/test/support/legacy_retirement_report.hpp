@@ -856,7 +856,16 @@ inline void validate_shared_artifact_path_hashes(
     return std::ranges::any_of(
         suffixes, [path](std::string_view suffix) {
             return path.ends_with(suffix);
-        });
+    });
+}
+
+[[nodiscard]] inline bool is_absent_path_error(
+    const std::error_code& error) noexcept {
+    return error
+            == std::make_error_code(
+                std::errc::no_such_file_or_directory)
+        || error
+            == std::make_error_code(std::errc::not_a_directory);
 }
 
 inline void reject_symlink_components(
@@ -876,6 +885,9 @@ inline void reject_symlink_components(
         const auto status =
             std::filesystem::symlink_status(current, error);
         if (error) {
+            if (is_absent_path_error(error)) {
+                return;
+            }
             throw std::runtime_error(
                 "cannot inspect legacy path component "
                 + current.string() + ": " + error.message());
@@ -902,7 +914,8 @@ discover_legacy_candidates(const std::filesystem::path& root) {
             if (!std::filesystem::exists(
                     std::filesystem::symlink_status(
                         directory, status_error))) {
-                if (status_error) {
+                if (status_error
+                    && !is_absent_path_error(status_error)) {
                     throw std::runtime_error(
                         "cannot inspect legacy candidate directory "
                         + directory.string() + ": "
@@ -1012,6 +1025,10 @@ inline void validate_legacy_inventory(
         const auto status =
             std::filesystem::symlink_status(absolute, error);
         if (error) {
+            if (is_absent_path_error(error)) {
+                ++absent;
+                continue;
+            }
             throw std::runtime_error(
                 "cannot inspect exact legacy asset "
                 + absolute.string() + ": " + error.message());
