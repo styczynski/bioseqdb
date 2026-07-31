@@ -70,9 +70,7 @@ storage_tier_stats();
 [[nodiscard]]
 bioseq::pg_utils::returns_table<sql_rows::entry_state_row>
 entry_states();
-[[nodiscard]]
-bioseq::pg_utils::returns_table<sql_rows::runtime_counters_row>
-runtime_counters();
+[[nodiscard]] std::int64_t exact_child_executions();
 [[nodiscard]] bool cache_infrastructure_ready();
 [[nodiscard]]
 bioseq::pg_utils::returns_table<sql_rows::transition_state_row>

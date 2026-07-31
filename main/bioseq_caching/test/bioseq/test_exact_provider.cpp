@@ -83,8 +83,7 @@ void create_small_fixture(bioseq::libpq::connection& connection) {
     bioseq::libpq::connection& admin) {
     return bioseq::cache_test::integer(
         admin,
-        "SELECT exact_child_executions "
-        "FROM bioseq_cache_test.runtime_counters()");
+        "SELECT bioseq_cache_test.exact_child_executions()");
 }
 
 void check_one_exact_producer(
@@ -602,14 +601,18 @@ TEST_CASE("disabling Bioseq custom scans bypasses sibling caching safely",
         "SET bioseq.query_cache_optimisation_mode = 'same'; "
         "SET bioseq.enable_custom_scan = off; "
         "SELECT bioseq_cache.reset_stats()");
-    const auto result = connection.exec(small_query, 5min);
-    REQUIRE(result.rows() > 0);
+    const auto before =
+        bioseq::cache_test::read_cache_stats(connection);
     const auto plan = bioseq::postgres_test::run_explain(
         connection, small_query, false, 5min);
     CHECK(plan
               .find_plan_nodes("Custom Plan Provider", "BioseqCacheScan")
               .empty());
-    CHECK(bioseq::cache_test::read_cache_stats(connection).produced == 0);
+    const auto error = bioseq::postgres_test::expect_sqlstate(
+        connection, small_query, "0A000", 5min);
+    CHECK(error.message.find("no Bioseq executor owner")
+          != std::string::npos);
+    CHECK(bioseq::cache_test::read_cache_stats(connection) == before);
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_provider.custom_scan_off_bypasses");
 }

@@ -19,7 +19,6 @@ function(_bioseq_cache_verify_sql_row_profile_guard)
   foreach(_row IN ITEMS
       storage_tier_stats_row
       entry_state_row
-      runtime_counters_row
       transition_state_row
       planner_reference_counts_row
       provider_callback_stats_row

@@ -122,11 +122,6 @@ struct entry_state_row final {
     std::int64_t claim_sequence;
 };
 
-/** Runtime child-execution counter exposed only by test support. */
-struct runtime_counters_row final {
-    std::int64_t exact_child_executions;
-};
-
 /** Transaction-transition state exposed only by test support. */
 struct transition_state_row final {
     std::int64_t database_transitions;
@@ -218,7 +213,6 @@ struct coverage_bucket_state_row final {
 
 static_assert(std::is_aggregate_v<storage_tier_stats_row>);
 static_assert(std::is_aggregate_v<entry_state_row>);
-static_assert(std::is_aggregate_v<runtime_counters_row>);
 static_assert(std::is_aggregate_v<transition_state_row>);
 static_assert(std::is_aggregate_v<relation_transition_state_row>);
 static_assert(std::is_aggregate_v<planner_reference_counts_row>);

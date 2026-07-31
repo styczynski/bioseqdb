@@ -230,10 +230,8 @@ entry_states() {
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-[[nodiscard]] inline
-bioseq::pg_utils::returns_table<sql_rows::runtime_counters_row>
-runtime_counters() {
-    return test_sql_backend::runtime_counters();
+[[nodiscard]] inline std::int64_t exact_child_executions() {
+    return test_sql_backend::exact_child_executions();
 }
 
 [[bioseq_sql::function({

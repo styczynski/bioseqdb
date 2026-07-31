@@ -21700,20 +21700,12 @@ entry_states() {
         sql_rows::entry_state_row>{std::move(rows)};
 }
 
-/** Return exact child-execution counters. */
-[[nodiscard]]
-bioseq::pg_utils::returns_table<sql_rows::runtime_counters_row>
-runtime_counters() {
+/** Return the exact child-execution counter. */
+[[nodiscard]] std::int64_t exact_child_executions() {
     require_cache_test_superuser_typed();
-    return bioseq::pg_utils::returns_table<
-        sql_rows::runtime_counters_row>{
-            std::vector<sql_rows::runtime_counters_row>{{
-                .exact_child_executions =
-                    static_cast<std::int64_t>(
-                        pg_atomic_read_u64(
-                            &g_shared->test_control
-                                 .exact_child_executions)),
-            }}};
+    return static_cast<std::int64_t>(
+        pg_atomic_read_u64(
+            &g_shared->test_control.exact_child_executions));
 }
 
 /** Return transaction-transition state. */
