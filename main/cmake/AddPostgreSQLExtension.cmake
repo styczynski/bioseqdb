@@ -24,6 +24,11 @@ if(DEFINED VCPKG_TARGET_TRIPLET)
 endif()
 find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 
+if(APPLE)
+  include(
+    "${CMAKE_CURRENT_LIST_DIR}/PostgreSQLExtensionVisibilityContract.cmake")
+endif()
+
 function(bioseq_attach_extension_dso_closure TARGET_NAME)
   cmake_parse_arguments(
     ARG
@@ -87,6 +92,37 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
     list(APPEND _bioseq_dso_abi_export_args
       --allowed-dso-export "${_bioseq_dso_abi_export}")
   endforeach()
+
+  if(APPLE)
+    # Clang emits C++ named-module initializers as externally visible Mach-O
+    # symbols even when the target uses hidden C++ visibility.  They are
+    # implementation details, not PostgreSQL ABI.  Hide only that mangled
+    # family at link time so the validator can continue enforcing the exact
+    # fmgr plus reviewed non-fmgr export surface.
+    set(_bioseq_dso_unexported_symbols
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.macho-unexported-symbols")
+    file(CONFIGURE
+      OUTPUT "${_bioseq_dso_unexported_symbols}"
+      CONTENT "__ZGIW*\n"
+      NEWLINE_STYLE UNIX)
+    set(_bioseq_dso_unexported_symbols_link_option
+      "LINKER:-unexported_symbols_list,${_bioseq_dso_unexported_symbols}")
+    target_link_options(
+      ${TARGET_NAME}
+      PRIVATE "${_bioseq_dso_unexported_symbols_link_option}")
+    set_property(
+      TARGET ${TARGET_NAME}
+      APPEND PROPERTY LINK_DEPENDS "${_bioseq_dso_unexported_symbols}")
+    set_target_properties(
+      ${TARGET_NAME}
+      PROPERTIES
+        BIOSEQ_EXTENSION_DSO_UNEXPORTED_SYMBOLS
+          "${_bioseq_dso_unexported_symbols}")
+    bioseq_assert_postgresql_extension_macho_visibility_contract(
+      "${TARGET_NAME}"
+      "${_bioseq_dso_unexported_symbols}"
+      "${_bioseq_dso_unexported_symbols_link_option}")
+  endif()
 
   set_property(TARGET ${TARGET_NAME} APPEND PROPERTY LINK_DEPENDS
     "${ARG_SQL_MANIFEST}"
