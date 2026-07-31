@@ -1542,6 +1542,7 @@ class CacheModeRoutingTest(unittest.TestCase):
     @classmethod
     def _production_dso_fixture(
             cls, root: Path) -> dict[str, object]:
+        root = root.resolve(strict=True)
         system = server.host_platform.system()
         if system not in {"Darwin", "Linux"}:
             raise unittest.SkipTest("DSO qualification supports Darwin/Linux")
@@ -2409,8 +2410,8 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         receipt = root / "qualification" / "production-dso.json"
         build = Path("/fixed/cache-bioseq-build")
         file_identity = {
-            "lexical_path": "/fixed/tool",
-            "resolved_path": "/fixed/tool",
+            "lexical_path": "/fixed/otool",
+            "resolved_path": "/fixed/otool",
             "size_bytes": 1,
             "sha256": "1" * 64,
         }
