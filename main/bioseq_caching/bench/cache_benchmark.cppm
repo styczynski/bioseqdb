@@ -138,7 +138,6 @@ struct benchmark_sample {
 struct fixture_evidence {
     std::string relation;
     std::uint64_t source_rows{};
-    std::uint64_t reference_base_count{};
     std::uint64_t query_base_count{};
     std::uint64_t target_base_count{};
     std::uint64_t aggregate_input_base_count{};
@@ -942,8 +941,6 @@ void create_standalone_fixture(libpq::connection& connection) {
         .relation = "cache_bioseq_2gbp",
         .source_rows =
             static_cast<std::uint64_t>(measured_source_rows),
-        .reference_base_count =
-            static_cast<std::uint64_t>(measured_target_bases),
         .query_base_count =
             static_cast<std::uint64_t>(measured_query_bases),
         .target_base_count =
@@ -1443,7 +1440,6 @@ void execute_benchmark(
         report.fixture = fixture_evidence{
             .relation = "cache_benchmark_rows",
             .source_rows = standalone_fixture_rows,
-            .reference_base_count = 0,
             .query_base_count = 0,
             .target_base_count = 0,
             .aggregate_input_base_count = 0,
@@ -2098,9 +2094,6 @@ void write(std::ostream& output, const benchmark_report& report) {
     key(output, "source_rows");
     output << report.fixture.source_rows;
     output.put(',');
-    key(output, "reference_bases");
-    output << report.fixture.reference_base_count;
-    output.put(',');
     key(output, "query_bases");
     output << report.fixture.query_base_count;
     output.put(',');
@@ -2295,8 +2288,6 @@ void write(std::ostream& output, const benchmark_report& report) {
                     combined ? "cache_bioseq_2gbp"
                              : "contract_fixture",
                 .source_rows = combined ? 1ULL : 4ULL,
-                .reference_base_count =
-                    combined ? target_bases : 0,
                 .query_base_count =
                     combined ? query_bases : 0,
                 .target_base_count =

@@ -286,7 +286,6 @@ class CacheModeRoutingTest(unittest.TestCase):
             "staged_control_sha256",
             "2'000'000'000ULL",
             "5'000'000ULL",
-            "reference_bases",
             "query_bases",
             "target_bases",
             "aggregate_input_bases",
@@ -347,10 +346,6 @@ class CacheModeRoutingTest(unittest.TestCase):
             production_fixture_contract[
                 "aggregate_input_bases"]["const"],
             2_000_000_000,
-        )
-        self.assertEqual(
-            production_fixture_contract["reference_bases"]["const"],
-            1_995_000_000,
         )
         self.assertEqual(
             production_fixture_contract["query_bases"]["const"],

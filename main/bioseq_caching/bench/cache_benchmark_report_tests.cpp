@@ -184,9 +184,6 @@ TEST_CASE(
         required_integer(required_property(fixture, "source_rows"))
         == 4);
     CHECK(
-        required_integer(required_property(fixture, "reference_bases"))
-        == 0);
-    CHECK(
         required_integer(required_property(fixture, "query_bases"))
         == 0);
     CHECK(
