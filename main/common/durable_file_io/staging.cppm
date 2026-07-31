@@ -33,6 +33,7 @@ import :open;
 import :sync;
 import :path;
 import :positional_io;
+import :cleanup;
 
 namespace bioseq::durable_file_io::detail {
 
