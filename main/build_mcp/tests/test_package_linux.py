@@ -25,6 +25,21 @@ import server  # noqa: E402
 
 
 class PackageLinuxPureContractTests(unittest.TestCase):
+    def test_sibling_final_codegen_binds_configured_main_source_root(self) -> None:
+        helper = (
+            Path(__file__).resolve().parents[2]
+            / "cmake"
+            / "BioseqSqlCodegen.cmake"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            '''      COMMAND "${CMAKE_COMMAND}" -E env
+        "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_SOURCE_DIR}"
+        "$<TARGET_FILE:bioseq_codegen>" sql generate
+        --stage final
+''',
+            helper,
+        )
+
     def test_mode_has_no_arbitrary_package_input(self) -> None:
         parameters = inspect.signature(subject.run_package_linux).parameters
         self.assertNotIn("package", parameters)

@@ -2,8 +2,10 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -31,6 +33,73 @@ import bioseq.codegen.support;
 export namespace bioseq::codegen::sql {
 
 inline void run_generator_contract_self_tests() {
+    struct scoped_reviewed_source_root final {
+        std::filesystem::path base;
+        std::filesystem::path root;
+        std::optional<std::string> original;
+
+        scoped_reviewed_source_root() {
+            constexpr const char* variable =
+                "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT";
+            if (const char* value = std::getenv(variable)) {
+                original = value;
+            }
+            const std::string nonce = std::to_string(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count());
+            for (unsigned attempt = 0; attempt < 64; ++attempt) {
+                std::error_code error;
+                const std::filesystem::path candidate =
+                    std::filesystem::temp_directory_path()
+                    / ("bioseq-sql-reviewed-root-contract-" + nonce + "-"
+                       + std::to_string(attempt));
+                if (std::filesystem::create_directory(candidate, error)) {
+                    base = candidate;
+                    break;
+                }
+            }
+            if (base.empty()) {
+                throw std::runtime_error(
+                    "cannot create reviewed-source-root contract directory");
+            }
+            root = base / "source";
+            std::error_code directory_error;
+            std::filesystem::create_directories(
+                root / "bioseq_caching/pg/sql", directory_error);
+            if (directory_error) {
+                std::error_code cleanup_error;
+                std::filesystem::remove_all(base, cleanup_error);
+                throw std::runtime_error(
+                    "cannot create reviewed-source-root contract closure");
+            }
+            if (::setenv(variable, root.c_str(), 1) != 0) {
+                std::error_code cleanup_error;
+                std::filesystem::remove_all(base, cleanup_error);
+                throw std::runtime_error(
+                    "cannot set reviewed-source-root contract environment");
+            }
+        }
+
+        scoped_reviewed_source_root(
+            const scoped_reviewed_source_root&) = delete;
+        scoped_reviewed_source_root& operator=(
+            const scoped_reviewed_source_root&) = delete;
+
+        ~scoped_reviewed_source_root() noexcept {
+            constexpr const char* variable =
+                "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT";
+            if (original) {
+                static_cast<void>(
+                    ::setenv(variable, original->c_str(), 1));
+            } else {
+                static_cast<void>(::unsetenv(variable));
+            }
+            std::error_code error;
+            std::filesystem::remove_all(base, error);
+        }
+    };
+
     const auto require = [](bool condition, std::string_view message) {
         if (!condition) {
             throw std::runtime_error(
@@ -103,6 +172,24 @@ inline void run_generator_contract_self_tests() {
                 "non-normalized fixture"));
         },
         "not an already-normalized relative path");
+    {
+        const scoped_reviewed_source_root reviewed;
+        require(
+            detail::manifest_repository_path(
+                reviewed.root
+                    / "bioseq_caching/pg/sql/diagnostics.cppm",
+                "persisted cache source")
+                == "main/bioseq_caching/pg/sql/diagnostics.cppm",
+            "reviewed source roots normalize persisted cache sources");
+        require_failure(
+            [&reviewed] {
+                static_cast<void>(detail::manifest_repository_path(
+                    reviewed.base
+                        / "outside/bioseq_caching/pg/sql/diagnostics.cppm",
+                    "escaped persisted cache source"));
+            },
+            "cannot be reduced to the reviewed main source tree");
+    }
 
     sql_graph external_handler_graph;
     external_handler_graph.entities.push_back(normalized_entity{

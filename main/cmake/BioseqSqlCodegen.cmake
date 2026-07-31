@@ -206,7 +206,8 @@ function(bioseq_add_sql_codegen_context)
       BYPRODUCTS ${_physical_ledger_outputs} ${_fmgr_outputs}
       COMMAND "${CMAKE_COMMAND}" -E make_directory
         "${_profile_sql_dir}" "${_profile_cpp_dir}"
-      COMMAND
+      COMMAND "${CMAKE_COMMAND}" -E env
+        "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_SOURCE_DIR}"
         "$<TARGET_FILE:bioseq_codegen>" sql generate
         --stage final
         --profile "${_profile}"
