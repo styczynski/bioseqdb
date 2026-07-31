@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -78,13 +79,23 @@ class PackageLinuxPureContractTests(unittest.TestCase):
             with self.assertRaisesRegex(subject.PackageLinuxError, "native ARM64"):
                 subject._native_arm64()
 
-    def test_free_space_gate_is_exactly_eighty_gib(self) -> None:
-        with mock.patch.object(
-            subject.shutil, "disk_usage",
-            return_value=SimpleNamespace(free=subject.MINIMUM_FREE_BYTES - 1),
+    def test_free_space_gate_accepts_exact_boundary_and_rejects_one_byte_below(
+            self) -> None:
+        for available, accepted in (
+            (subject.MINIMUM_FREE_BYTES, True),
+            (subject.MINIMUM_FREE_BYTES - 1, False),
         ):
-            with self.assertRaisesRegex(subject.PackageLinuxError, "80 GiB"):
-                subject._require_free_space(Path("/"))
+            with self.subTest(available=available), mock.patch.object(
+                subject.shutil, "disk_usage",
+                return_value=SimpleNamespace(free=available),
+            ):
+                if accepted:
+                    self.assertEqual(
+                        subject._require_free_space(Path("/")), available)
+                else:
+                    with self.assertRaisesRegex(
+                        subject.PackageLinuxError, "80 GiB"):
+                        subject._require_free_space(Path("/"))
 
     def test_non_unix_docker_endpoint_is_rejected(self) -> None:
         for value in ("tcp://127.0.0.1:2375", "ssh://builder", "unix://"):
@@ -403,7 +414,8 @@ class ProvenanceAndStorageTests(unittest.TestCase):
             def archive_result(argv: list[str], **_kwargs: object) -> str:
                 output = next(value for value in argv if value.startswith("--output="))
                 Path(output.removeprefix("--output=")).write_bytes(b"archive")
-                self.assertEqual(argv[-1], f"{revision}:main")
+                self.assertEqual(argv[-2:], [revision, "main"])
+                self.assertNotIn("--prefix=main/", argv)
                 return ""
 
             def extract_result(_archive: Path, destination: Path) -> Path:
@@ -439,6 +451,72 @@ class ProvenanceAndStorageTests(unittest.TestCase):
             [call.args[1] for call in git.call_args_list if call.args[1][0] == "rev-parse"],
             [["rev-parse", "HEAD"], ["rev-parse", f"{revision}:main"]],
         )
+
+    def test_commit_archive_is_stable_and_excludes_paths_outside_main(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            source = repository / "main"
+            source.mkdir()
+            (source / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 4.2)\n", encoding="utf-8")
+            for relative in subject._INPUT_FILES:
+                path = source / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(relative + "\n", encoding="utf-8")
+            (repository / "outside.txt").write_text(
+                "must not enter the source archive\n", encoding="utf-8")
+
+            def git(*arguments: str, environment: dict[str, str] | None = None) -> None:
+                subprocess.run(
+                    ["git", "-C", str(repository), *arguments],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+
+            git("init", "-q")
+            git("add", "--", "main", "outside.txt")
+            commit_environment = {
+                **os.environ,
+                "GIT_AUTHOR_DATE": "2001-02-03T04:05:06+00:00",
+                "GIT_COMMITTER_DATE": "2001-02-03T04:05:06+00:00",
+            }
+            git(
+                "-c", "user.name=BioSeq Test",
+                "-c", "user.email=bioseq-test@example.invalid",
+                "-c", "commit.gpgsign=false",
+                "commit", "-q", "-m", "fixture",
+                environment=commit_environment,
+            )
+            state = root / "state"
+            state.mkdir()
+            with (root / "snapshot.log").open(
+                "w+", encoding="utf-8"
+            ) as snapshot_log:
+                first = subject._source_snapshot(
+                    repository, state, log=snapshot_log,
+                    deadline=time.time() + 30)
+                time.sleep(1.1)
+                second = subject._source_snapshot(
+                    repository, state, log=snapshot_log,
+                    deadline=time.time() + 30)
+
+            identity_fields = (
+                "revision", "main_tree", "archive_sha256", "input_sha256")
+            self.assertEqual(
+                {field: first[field] for field in identity_fields},
+                {field: second[field] for field in identity_fields},
+            )
+            for snapshot in (first, second):
+                with tarfile.open(Path(snapshot["archive"]), "r:") as bundle:
+                    names = {member.name for member in bundle.getmembers()}
+                self.assertIn("main/CMakeLists.txt", names)
+                self.assertTrue(
+                    all(name == "main" or name.startswith("main/") for name in names))
+                self.assertNotIn("outside.txt", names)
 
     def test_existing_source_snapshot_root_accepts_only_its_archive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -511,7 +589,7 @@ class ProvenanceAndStorageTests(unittest.TestCase):
                 mock.patch.object(subject, "_native_arm64", return_value="arm64"),
                 mock.patch.object(
                     subject, "_require_free_space",
-                    return_value=subject.MINIMUM_FREE_BYTES),
+                    return_value=subject.MINIMUM_FREE_BYTES) as free_space,
                 mock.patch.object(subject, "_source_snapshot", return_value=snapshot),
                 mock.patch.object(
                     subject, "_require_healthy_docker",
@@ -524,7 +602,55 @@ class ProvenanceAndStorageTests(unittest.TestCase):
                         log_handle=io.StringIO(), deadline=time.time() + 30,
                         environment={},
                     )
+            self.assertEqual(free_space.call_count, 2)
             image.assert_not_called()
+
+    def test_post_snapshot_free_space_gate_fails_before_docker_and_cleans_source(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            project = repository / "main"
+            project.mkdir()
+            state = project / "build/package-linux"
+            state.mkdir(parents=True)
+            source_root = state / "source-test"
+            source = source_root / "main"
+            source.mkdir(parents=True)
+            snapshot = {
+                "ephemeral_root": source_root,
+                "source": source,
+                "archive": source_root / "main.tar",
+                "revision": "a" * 40,
+                "main_tree": "b" * 40,
+                "archive_sha256": "c" * 64,
+                "input_sha256": {},
+            }
+            initial = subject.MINIMUM_FREE_BYTES + 200 * 1024**2
+            after_snapshot = subject.MINIMUM_FREE_BYTES - 600 * 1024**2
+            with (
+                mock.patch.object(subject, "_native_arm64", return_value="arm64"),
+                mock.patch.object(
+                    subject.shutil,
+                    "disk_usage",
+                    side_effect=(
+                        SimpleNamespace(free=initial),
+                        SimpleNamespace(free=after_snapshot),
+                    ),
+                ) as disk_usage,
+                mock.patch.object(subject, "_source_snapshot", return_value=snapshot),
+                mock.patch.object(subject, "_require_healthy_docker") as docker,
+            ):
+                with self.assertRaisesRegex(subject.PackageLinuxError, "80 GiB"):
+                    subject.run_package_linux(
+                        project_root=project,
+                        workspace_root=repository,
+                        log_handle=io.StringIO(),
+                        deadline=time.time() + 30,
+                        environment={},
+                    )
+            self.assertEqual(disk_usage.call_count, 2)
+            docker.assert_not_called()
+            self.assertFalse(source_root.exists())
 
 
 if __name__ == "__main__":

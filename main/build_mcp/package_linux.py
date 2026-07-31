@@ -500,9 +500,11 @@ def _source_snapshot(
     ephemeral = Path(tempfile.mkdtemp(prefix="source-", dir=state_root))
     try:
         archive = ephemeral / "main.tar"
+        # Archive the commit with an exact pathspec: Git then uses the commit
+        # timestamp while retaining main/ as the sole archive root.
         _run(
             ["git", "-C", str(repository), "archive", "--format=tar",
-             "--prefix=main/", f"--output={archive}", committed_main],
+             f"--output={archive}", revision, "main"],
             log=log, deadline=deadline,
         )
         # Keeping main/ directly below source-*/ is intentional: the retained
@@ -890,6 +892,7 @@ def run_package_linux(
             repository, state_root, log=log_handle, deadline=deadline)
         source_root = Path(str(snapshot["ephemeral_root"]))
         source = Path(str(snapshot["source"]))
+        available_after_snapshot = _require_free_space(state_root)
 
         notify("checking pre-existing Docker daemon")
         endpoint, socket_path = _require_healthy_docker(base_environment)
@@ -997,6 +1000,7 @@ def run_package_linux(
             "host": {
                 "architecture": ARCHITECTURE,
                 "free_bytes_at_start": available,
+                "free_bytes_after_snapshot": available_after_snapshot,
                 "docker_socket": str(socket_path),
                 "docker_cli": docker_identity,
             },
