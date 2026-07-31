@@ -358,54 +358,6 @@ inline void set_coverage_descriptor_fault(std::string name) {
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
-inline void set_mapping_fault(std::string name) {
-    test_sql_backend::set_mapping_fault(name);
-}
-
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
-    .null_input = bioseq::sql::null_input_policy::strict,
-})]]
-[[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
-inline void clear_mapping_fault() {
-    test_sql_backend::clear_mapping_fault();
-}
-
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
-    .null_input = bioseq::sql::null_input_policy::strict,
-})]]
-[[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
-inline void set_runtime_digest_fault(std::string name) {
-    test_sql_backend::set_runtime_digest_fault(name);
-}
-
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
-    .null_input = bioseq::sql::null_input_policy::strict,
-})]]
-[[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
-inline void clear_runtime_digest_fault() {
-    test_sql_backend::clear_runtime_digest_fault();
-}
-
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_cache_test">,
-    .null_input = bioseq::sql::null_input_policy::strict,
-})]]
-[[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
 inline void set_forced_coverage_domain_digest(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::bytea,

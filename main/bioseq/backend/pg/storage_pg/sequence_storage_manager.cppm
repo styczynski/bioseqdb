@@ -88,6 +88,7 @@ export module bioseq.storage.manager:sequence_storage_manager;
 
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.pg_utils.safety_runtime_probe;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq::storage::settings::max_seq_sub_table_gbs GUC
 import bioseq.storage.metadata;
@@ -1858,7 +1859,7 @@ inline bioseq::pg_types::seq* alloc_locator_stub_in(
     sequence_size_t total_bp_size,
     const seq_locator& loc)
 {
-    MemoryContextScope ctx_guard{mctx};
+    bioseq::pg_support::MemoryContextScope ctx_guard{mctx};
     bioseq::pg_types::seq* dst = static_cast<bioseq::pg_types::seq*>(palloc0(kLocatorStubVarlenaBytes));
     encode_locator_into_stub(dst, logical_alphabet_code, logical_byte_width,
                              padding_letters, total_bp_size, loc);
@@ -1995,7 +1996,7 @@ struct seq_caches {
 // create a module cycle with bioseq_table). Out-of-line gives it external
 // linkage so the linker resolves the forward declaration.
 [[nodiscard]] inline seq_caches* alloc_seq_caches(MemoryContext mctx) {
-    MemoryContextScope ctx_guard{mctx};
+    bioseq::pg_support::MemoryContextScope ctx_guard{mctx};
     void* raw = palloc0(sizeof(seq_caches));
     return ::new (raw) seq_caches{};
 }
@@ -3347,7 +3348,8 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
                         return result;
                     });
             const bool is_last = (fragment_no + 1 == num_fragments);
-            MemoryContextScope frag_ctx{per_fragment_mctx};
+            bioseq::pg_support::MemoryContextScope frag_ctx{
+                per_fragment_mctx};
 
             SET_VARSIZE(frag, frag_varlena_bytes);
             frag->alphabet_code =
@@ -3867,7 +3869,7 @@ void sequence_stream_writer::abort() {
 begin_sequence_payload_read(Relation shard,
                             MemoryContext payload_mctx,
                             Snapshot snapshot) {
-    MemoryContextScope ctx{payload_mctx};
+    bioseq::pg_support::MemoryContextScope ctx{payload_mctx};
     TupleDesc td = RelationGetDescr(shard);
     PBitmapset attr_needed = PBitmapset::full_range(td->natts);
     PIntList projected;
@@ -3915,7 +3917,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
     // only on-disk artefact; there are no sub-table rows to fetch. Return a
     // minimal empty bioseq::pg_types::seq in `out_mctx`.
     if (loc.num_fragments == 0) {
-        MemoryContextScope ctx{out_mctx};
+        bioseq::pg_support::MemoryContextScope ctx{out_mctx};
         bioseq::pg_types::seq* out = static_cast<bioseq::pg_types::seq*>(palloc0(bioseq::pg_types::seq::header_bytes()));
         SET_VARSIZE(out, bioseq::pg_types::seq::header_bytes());
         // alphabet/width/bp_size/padding are all zero — caller-side stub
@@ -4076,7 +4078,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         first_expected_bp, first_expected_padding,
         loc.first_sub_row_no);
 
-    MemoryContextScope ctx{out_mctx};
+    bioseq::pg_support::MemoryContextScope ctx{out_mctx};
     bioseq::pg_types::seq* out = static_cast<bioseq::pg_types::seq*>(palloc0(assembled_varlena_bytes));
     SET_VARSIZE(out, assembled_varlena_bytes);
     out->alphabet_code           = static_cast<bioseq::pg_types::seq::alphabet_code_t>(logical_alphabet_code);

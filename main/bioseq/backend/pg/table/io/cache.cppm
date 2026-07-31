@@ -20,6 +20,7 @@ module;
 export module bioseq.table.io:cache;
 
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq::settings::enable_column_cache, bioseq::settings::column_cache_size GUCs
 import bioseq.storage.metadata;        // DOC0322 §9.2 — BioseqColumnReadState, BioseqColumnCacheStatistics (was types.h)
 
@@ -268,7 +269,8 @@ export void
 BioseqColumnMarkChunkGroupInUse(uint64_t relId, uint64_t stripeId, uint32_t chunkId)
 {
 	bool found = false;
-	MemoryContextScope ctx_guard{BioseqColumnCacheMemoryContext()};
+	bioseq::pg_support::MemoryContextScope ctx_guard{
+		BioseqColumnCacheMemoryContext()};
 
 	for (auto* chunkGroupInUse : PList<ColumarCacheChunkGroupInUse>(ChunkGroupsInUse))
 	{
@@ -306,7 +308,8 @@ BioseqColumnAddCacheEntry(uint64_t relId, uint64_t stripeId, uint64_t chunkId,
 		return;
 	}
 
-	MemoryContextScope ctx_guard{BioseqColumnCacheMemoryContext()};
+	bioseq::pg_support::MemoryContextScope ctx_guard{
+		BioseqColumnCacheMemoryContext()};
 
 	if (head == NULL)
 	{

@@ -101,10 +101,6 @@ export template<typename T>
     return static_cast<T*>(palloc0(element_count * sizeof(T)));
 }
 
-/** Preserve Bioseq's historical global name while common owns the guard. */
-export using MemoryContextScope =
-    bioseq::pg_support::MemoryContextScope;
-
 /*
  * safe_relation_open wraps relation_open. It exists so that all callers in
  * the extension funnel through a single entry point that can be temporarily

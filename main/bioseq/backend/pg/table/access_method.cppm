@@ -43,6 +43,7 @@ import bioseq.table.types;
 import bioseq.config;
 import bioseq.table.io;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.storage.indexing_pg.admin;   // DOC0279 §11.2 — index_build_on_insert
 import bioseq.storage.indexing_pg.chunked_storage;
@@ -76,7 +77,8 @@ struct PendingSpeculativeSources {
 using PendingSequenceSourceSlots =
     std::vector<std::optional<bioseq::storage::PendingSequenceSource>>;
 
-static_assert(!std::is_trivially_destructible_v<MemoryContextScope>);
+static_assert(!std::is_trivially_destructible_v<
+    bioseq::pg_support::MemoryContextScope>);
 static_assert(!std::is_trivially_destructible_v<PendingSequenceSourceSlots>);
 static_assert(std::is_nothrow_move_constructible_v<
     bioseq::storage::PendingSequenceSource>);
@@ -384,7 +386,7 @@ bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
 	MemoryContext scanContext = CreateBioseqColumnScanMemoryContext();
 	BioseqColumnScanDesc scan;
 	{
-		MemoryContextScope ctx_guard{scanContext};
+		bioseq::pg_support::MemoryContextScope ctx_guard{scanContext};
 
 		scan = ::new (palloc0(sizeof(BioseqColumnScanDescData))) BioseqColumnScanDescData{};
 		scan->cs_base.rs_rd = relation;
@@ -546,7 +548,7 @@ init_bioseq_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_nee
 						 bool randomAccess,
 						 ParallelBioseqColumnScan parallelBioseqColumnScan)
 {
-	MemoryContextScope ctx_guard{scanContext};
+	bioseq::pg_support::MemoryContextScope ctx_guard{scanContext};
 
 	List *neededColumnList = NeededColumnsList(tupdesc, attr_needed);
 	BioseqColumnReadState *readState = BioseqColumnBeginRead(relation, tupdesc, neededColumnList,
@@ -747,7 +749,7 @@ bioseq_index_fetch_begin(Relation rel)
 	MemoryContext scanContext = CreateBioseqColumnScanMemoryContext();
 	IndexFetchBioseqColumnData *scan;
 	{
-		MemoryContextScope ctx_guard{scanContext};
+		bioseq::pg_support::MemoryContextScope ctx_guard{scanContext};
 
 		scan = ::new (palloc0(sizeof(IndexFetchBioseqColumnData))) IndexFetchBioseqColumnData{};
 		scan->cs_base.rel = rel;
@@ -775,7 +777,7 @@ bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 	MemoryContext scanContext = CreateBioseqColumnScanMemoryContext();
 	IndexFetchBioseqColumnData *scan;
 	{
-		MemoryContextScope ctx_guard{scanContext};
+		bioseq::pg_support::MemoryContextScope ctx_guard{scanContext};
 
 		scan = ::new (palloc0(sizeof(IndexFetchBioseqColumnData))) IndexFetchBioseqColumnData{};
 		scan->cs_base.rel = rel;
@@ -1081,7 +1083,8 @@ bioseq_fetch_row_version(Relation relation,
 	}
 
 	{
-		MemoryContextScope ctx_guard{GetBioseqColumnReadStateCache()};
+		bioseq::pg_support::MemoryContextScope ctx_guard{
+			GetBioseqColumnReadStateCache()};
 		BioseqColumnReadRowByRowNumber(*readState, rowNumber,
 								   slot->tts_values, slot->tts_isnull);
 	}
@@ -1369,8 +1372,8 @@ decltype(auto) run_tableam_cpp_checked(const char* operation, Fn&& function) {
 		unknown_cpp_error = true;
 	}
 	// The callback scope (including every vector, pending-source authority and
-	// MemoryContextScope) has unwound.  Only fixed diagnostic state remains at
-	// this PostgreSQL C callback boundary.
+	// bioseq::pg_support::MemoryContextScope) has unwound.  Only fixed
+	// diagnostic state remains at this PostgreSQL C callback boundary.
 	if (exact_error != nullptr) {
 		ReThrowError(exact_error);
 	}
@@ -1529,7 +1532,7 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 		});
 
 		{
-			MemoryContextScope ctx_guard{
+			bioseq::pg_support::MemoryContextScope ctx_guard{
 				BioseqColumnWritePerTupleContext(writeState)};
 
 			bioseq::pg_utils::invoke_pg_as_cpp([slot] {
@@ -1628,7 +1631,7 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 			});
 
 			{
-				MemoryContextScope ctx_guard{
+				bioseq::pg_support::MemoryContextScope ctx_guard{
 					BioseqColumnWritePerTupleContext(writeState)};
 
 				bioseq::pg_utils::invoke_pg_as_cpp([slot] {
@@ -1801,7 +1804,7 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		});
 
 		{
-			MemoryContextScope ctx_guard{
+			bioseq::pg_support::MemoryContextScope ctx_guard{
 				BioseqColumnWritePerTupleContext(writeState)};
 
 			for (int i = 0; i < ntuples; i++)
@@ -1917,7 +1920,7 @@ invalidate_sequence_source_epochs_for_row(Relation relation,
 	Snapshot read_snapshot = snapshot != nullptr ? snapshot : GetTransactionSnapshot();
 	MemoryContext read_context = CreateBioseqColumnScanMemoryContext();
 	{
-		MemoryContextScope context_guard{read_context};
+		bioseq::pg_support::MemoryContextScope context_guard{read_context};
 		TupleDesc descriptor = RelationGetDescr(relation);
 		PBitmapset attributes = PBitmapset::full_range(descriptor->natts);
 		BioseqColumnReadState *read_state = init_bioseq_read_state(
@@ -2677,7 +2680,7 @@ LogRelationStats(Relation rel, int elevel)
 							  ALLOCSET_SMALL_SIZES);
 
 	{
-		MemoryContextScope ctx_guard{relation_stats_ctx};
+		bioseq::pg_support::MemoryContextScope ctx_guard{relation_stats_ctx};
 
 		for (auto stripe : PList<StripeMetadata>(stripeList))
 		{

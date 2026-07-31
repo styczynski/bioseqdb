@@ -1,13 +1,13 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_cache PostgreSQL runtime composition.
+ * bioseq_cache PostgreSQL runtime interface.
  *
  * The sibling extension deliberately contains no sequence or Bioseq table-AM
  * knowledge.  Product integrations arrive through bioseq.cache.provider_api.
- * This implementation unit retains the behavior-preserving shared runtime
- * while the public primary interface composes dedicated PostgreSQL owners.
- * Storage and registry behavior is enabled incrementally behind the same
- * fail-open node.
+ * This named module owns the behavior-preserving shared runtime and exports
+ * its typed SQL backend surfaces. The public primary interface only composes
+ * this owner with the PostgreSQL extension entry point. Storage and registry
+ * behavior is enabled incrementally behind the same fail-open node.
  *
  *-------------------------------------------------------------------------
  */
@@ -103,7 +103,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-module bioseq.cache.pg;
+export module bioseq.cache.pg.runtime;
 
 import bioseq.cache.core;
 import bioseq.cache.pg.dependency_runtime;
@@ -115,9 +115,9 @@ import bioseq.cache.pg.planner;
 import bioseq.cache.pg.provider;
 import bioseq.cache.pg.shared_registry;
 import bioseq.cache.pg.storage;
-import bioseq.cache.pg.sql.rows;
+export import bioseq.cache.pg.sql.rows;
 import bioseq.pg_support;
-import bioseq.pg_sql_boundary;
+export import bioseq.pg_sql_boundary;
 
 namespace bioseq::cache::pg {
 
@@ -20943,7 +20943,7 @@ void populate_reusable_diagnostic_text(
 
 }  // namespace bioseq::cache::pg
 
-namespace bioseq::cache::pg::sql_backend {
+export namespace bioseq::cache::pg::sql_backend {
 
 /** Return one owning snapshot of the public cache counters. */
 [[nodiscard]]
@@ -21298,7 +21298,7 @@ inline void copy_injected_bytes_typed(
 
 }  // namespace bioseq::cache::pg
 
-namespace bioseq::cache::pg::test_sql_backend {
+export namespace bioseq::cache::pg::test_sql_backend {
 
 /** Prove planner infrastructure health without prepared-xact policy gates. */
 [[nodiscard]] bool cache_infrastructure_ready() {
@@ -21874,28 +21874,6 @@ plan_build_stats() {
             }}};
 }
 
-/** Preserve the historical mapping-fault control as a typed no-op. */
-void set_mapping_fault(const std::string& name) {
-    require_cache_test_superuser_typed();
-    static_cast<void>(name);
-}
-
-/** Clear the historical mapping-fault control. */
-void clear_mapping_fault() {
-    require_cache_test_superuser_typed();
-}
-
-/** Preserve the historical runtime-digest control as a typed no-op. */
-void set_runtime_digest_fault(const std::string& name) {
-    require_cache_test_superuser_typed();
-    static_cast<void>(name);
-}
-
-/** Clear the historical runtime-digest control. */
-void clear_runtime_digest_fault() {
-    require_cache_test_superuser_typed();
-}
-
 /** Force one exact coverage-domain digest. */
 void set_forced_coverage_domain_digest(
         const bioseq::pg_utils::sql_bytea& value) {
@@ -22243,7 +22221,7 @@ void direct_heap_insert(
 }  // namespace bioseq::cache::pg::test_sql_backend
 #endif
 
-namespace bioseq::cache::pg::detail {
+export namespace bioseq::cache::pg::detail {
 
 void initialize_extension() {
     using namespace bioseq::cache::pg;

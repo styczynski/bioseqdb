@@ -42,6 +42,7 @@ import bioseq.storage.physical;
 import bioseq.common.mlogging;
 import bioseq.config;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.sql.generated.core.storage_metadata_core.entity_handles;
 import bioseq.storage.metadata.sql_row_codecs;
 import :types;
@@ -861,7 +862,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 	bytea *chunkRowMaskBytea = nullptr;
 	SysScanDesc scanDescriptor = nullptr;
 	{
-		MemoryContextScope ctx_guard{cxt};
+		bioseq::pg_support::MemoryContextScope ctx_guard{cxt};
 
 		Size chunkMaskSize =
 			(rowCount % BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE) ?

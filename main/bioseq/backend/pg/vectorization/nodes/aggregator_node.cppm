@@ -298,6 +298,7 @@ export module bioseq.vector.aggregator_node;
 
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.vector.types;
 import bioseq.pg_utils.nodes;            // DOC0333 — pg_node_try_as, expression walker adapter (find_cols)
 
@@ -596,7 +597,8 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 		pergroupstate->transValue = pertrans->initValue;
 	else
 	{
-		MemoryContextScope ctx_guard{aggstate->curaggcontext->ecxt_per_tuple_memory};
+		bioseq::pg_support::MemoryContextScope ctx_guard{
+			aggstate->curaggcontext->ecxt_per_tuple_memory};
 		pergroupstate->transValue = datumCopy(pertrans->initValue,
 											  pertrans->transtypeByVal,
 											  pertrans->transtypeLen);
@@ -701,7 +703,8 @@ advance_transition_function(AggState *aggstate,
 			 * do not need to pfree the old transValue, since it's NULL.
 			 */
 			{
-				MemoryContextScope ctx_guard{aggstate->curaggcontext->ecxt_per_tuple_memory};
+				bioseq::pg_support::MemoryContextScope ctx_guard{
+					aggstate->curaggcontext->ecxt_per_tuple_memory};
 				pergroupstate->transValue = datumCopy(fcinfo->args[1].value,
 													  pertrans->transtypeByVal,
 													  pertrans->transtypeLen);
@@ -723,7 +726,8 @@ advance_transition_function(AggState *aggstate,
 	}
 
 	/* We run the transition functions in per-input-tuple memory context */
-	MemoryContextScope ctx_guard{aggstate->tmpcontext->ecxt_per_tuple_memory};
+	bioseq::pg_support::MemoryContextScope ctx_guard{
+		aggstate->tmpcontext->ecxt_per_tuple_memory};
 
 	/* set up aggstate->curpertrans for AggGetAggref() */
 	aggstate->curpertrans = pertrans;
@@ -849,7 +853,7 @@ process_ordered_aggregate_single(AggState *aggstate,
 		 * function and transition function.
 		 */
 		MemoryContextReset(workcontext);
-		MemoryContextScope ctx_guard{workcontext};
+		bioseq::pg_support::MemoryContextScope ctx_guard{workcontext};
 
 		/*
 		 * If DISTINCT mode, and not distinct from prior, skip it.
@@ -1006,7 +1010,8 @@ finalize_aggregate(AggState *aggstate,
 	//ListCell   *lc;
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
 
-	MemoryContextScope ctx_guard{aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
+	bioseq::pg_support::MemoryContextScope ctx_guard{
+		aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
 
 	/*
 	 * Evaluate any direct arguments.  We do this even if there's no finalfn
@@ -1094,7 +1099,8 @@ finalize_partialaggregate(AggState *aggstate,
 {
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
 
-	MemoryContextScope ctx_guard{aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
+	bioseq::pg_support::MemoryContextScope ctx_guard{
+		aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
 
 	/*
 	 * serialfn_oid will be set if we must serialize the transvalue before

@@ -20,6 +20,7 @@ function(_bioseq_cache_verify_sql_row_profile_guard)
       storage_tier_stats_row
       entry_state_row
       transition_state_row
+      relation_transition_state_row
       planner_reference_counts_row
       provider_callback_stats_row
       plan_build_stats_row
@@ -72,6 +73,7 @@ set(BIOSEQ_CACHE_PRODUCTION_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/pg/planner/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/pg/runtime.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/index.cppm"
@@ -179,8 +181,6 @@ AddCommonTargetX(
   CXX_MOD_FILES
     ${BIOSEQ_CACHE_PRODUCTION_MODULES}
     ${BIOSEQ_CACHE_PRODUCTION_GENERATED_MODULES}
-  SOURCES
-    "${CMAKE_CURRENT_LIST_DIR}/pg/runtime.cppm"
   SHARED_MODULE_LIBS
     bioseq_cache_core
     bioseq_cache_provider_api
@@ -221,8 +221,6 @@ add_dependencies(
   "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_TARGET}")
 if(BIOSEQ_CACHE_TESTING)
   add_library(postgresql_bioseq_cache_test_support MODULE)
-  target_sources(postgresql_bioseq_cache_test_support PRIVATE
-    "${CMAKE_CURRENT_LIST_DIR}/pg/runtime.cppm")
   target_sources(postgresql_bioseq_cache_test_support
     PRIVATE FILE_SET CXX_MODULES
       BASE_DIRS

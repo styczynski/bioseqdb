@@ -18,6 +18,7 @@ import bioseq.storage.compression;
 import bioseq.storage.physical;
 import bioseq.storage.metadata;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.config;
 import :buffers;
 import :cache;
@@ -380,7 +381,7 @@ BeginChunkGroupRead(StripeBuffers *stripeBuffers, int chunkIndex, TupleDesc tupl
 	uint32_t chunkGroupDeletedRows =
 		stripeBuffers->selectedChunkGroupDeletedRows[chunkIndex];
 
-	MemoryContextScope ctx_guard{cxt};
+	bioseq::pg_support::MemoryContextScope ctx_guard{cxt};
 	ChunkGroupReadState *chunkGroupReadState = make0<ChunkGroupReadState>();
 
 	chunkGroupReadState->currentRow = 0;
