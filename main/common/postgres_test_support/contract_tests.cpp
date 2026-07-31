@@ -1865,6 +1865,27 @@ TEST_CASE("watchdog decision has one atomic winner",
           == first_decision);
 }
 
+TEST_CASE(
+    "no-follow supervision lookup distinguishes absence from errors",
+    "[postgres-test-support][unit][supervision][path][portability]") {
+    temporary_resource_journal_tree tree;
+
+    // libc++ on macOS reports an absent entry through the error-code channel.
+    // ENOENT is normal absence, not an indeterminate inspection failure.
+    const auto absent =
+        supervision_path_entry_exists_no_follow_for_testing(
+            tree.owned_root() / "absent");
+    REQUIRE(absent.has_value());
+    CHECK_FALSE(*absent);
+
+    // NAME_MAX overflow is a genuine lookup error and must stay fail-closed.
+    const std::string overlong_name(1024U, 'x');
+    const auto inspection_error =
+        supervision_path_entry_exists_no_follow_for_testing(
+            tree.owned_root() / overlong_name);
+    CHECK_FALSE(inspection_error.has_value());
+}
+
 TEST_CASE("watchdog decision requires durable complete publication",
           "[postgres-test-support][unit][supervision][decision][fault]") {
     const auto exercise =

@@ -39,6 +39,8 @@ module;
 
 export module bioseq.test.postgres:supervision;
 
+import bioseq.common.durable_file_io;
+
 export namespace bioseq::postgres_test {
 
 /// @brief Process identity stable across PID reuse and safe to signal.
@@ -69,7 +71,10 @@ enum class supervision_journal_fault {
     rename,
     fsync,
     close,
-    directory_sync
+    directory_sync,
+    registry_clean_transition_directory_sync,
+    decision_rollback_remove,
+    decision_reconciliation_directory_sync
 };
 
 /// @brief One generation-consistent live-resource registry snapshot.
@@ -88,6 +93,8 @@ struct supervised_process_launch_intent {
 }  // namespace bioseq::postgres_test
 
 namespace bioseq::postgres_test::supervision_detail {
+
+namespace durable_io = bioseq::durable_file_io;
 
 struct supervision_state {
     std::mutex mutex;
@@ -114,6 +121,159 @@ journal_fault() {
     static std::atomic<supervision_journal_fault> fault{
         supervision_journal_fault::none};
     return fault;
+}
+
+/// @brief One synchronous durable-publication fault-injection context.
+struct journal_fault_context {
+    supervision_journal_fault fault{supervision_journal_fault::none};
+    bool delay_directory_sync{};
+};
+
+enum class directory_sync_checkpoint {
+    ordinary,
+    registry_clean_transition,
+    decision_reconciliation,
+};
+
+/**
+ * @brief Maps the legacy supervision fault surface onto canonical file I/O.
+ *
+ * The callback injects before the matching durable-file operation. Decision
+ * directory-sync failures retain their observable publication window so the
+ * cross-process reader contract continues to exercise rollback under flock.
+ */
+[[nodiscard]] inline int inject_journal_fault(
+    void* opaque,
+    durable_io::file_io_operation operation) noexcept {
+    const auto& context =
+        *static_cast<const journal_fault_context*>(opaque);
+    bool matches = false;
+    switch (context.fault) {
+        case supervision_journal_fault::none:
+            break;
+        case supervision_journal_fault::open:
+            matches =
+                operation == durable_io::file_io_operation::create_temporary;
+            break;
+        case supervision_journal_fault::write:
+            matches =
+                operation == durable_io::file_io_operation::positional_write;
+            break;
+        case supervision_journal_fault::rename:
+            matches =
+                operation == durable_io::file_io_operation::publish_rename
+                || operation == durable_io::file_io_operation::publish_link;
+            break;
+        case supervision_journal_fault::fsync:
+            matches =
+                operation == durable_io::file_io_operation::sync_file;
+            break;
+        case supervision_journal_fault::close:
+            matches =
+                operation == durable_io::file_io_operation::close_file;
+            break;
+        case supervision_journal_fault::directory_sync:
+            matches =
+                operation == durable_io::file_io_operation::sync_directory;
+            if (matches && context.delay_directory_sync) {
+                try {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(200));
+                } catch (...) {
+                }
+            }
+            break;
+        case supervision_journal_fault::
+                registry_clean_transition_directory_sync:
+            break;
+        case supervision_journal_fault::decision_rollback_remove:
+        case supervision_journal_fault::
+                decision_reconciliation_directory_sync:
+            matches =
+                operation == durable_io::file_io_operation::sync_directory;
+            if (matches && context.delay_directory_sync) {
+                try {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(200));
+                } catch (...) {
+                }
+            }
+            break;
+    }
+    return matches ? EIO : 0;
+}
+
+/// @brief Returns the byte view consumed by canonical durable publications.
+[[nodiscard]] inline std::span<const std::byte> payload_bytes(
+    std::string_view payload) noexcept {
+    return std::as_bytes(
+        std::span<const char>{payload.data(), payload.size()});
+}
+
+/// @brief Reads one bounded regular file without following its final symlink.
+[[nodiscard]] inline std::optional<std::string> read_stable_text(
+    const std::filesystem::path& path,
+    std::uint64_t minimum_bytes,
+    std::uint64_t maximum_bytes) noexcept {
+    try {
+        const auto file = durable_io::read_stable_regular_file(
+            path,
+            durable_io::stable_read_options{
+                .minimum_bytes = minimum_bytes,
+                .maximum_bytes = maximum_bytes});
+        if (!file) {
+            return std::nullopt;
+        }
+        std::string payload(file->bytes.size(), '\0');
+        if (!file->bytes.empty()) {
+            std::memcpy(
+                payload.data(), file->bytes.data(), file->bytes.size());
+        }
+        return payload;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+/// @brief Validates the exact marker format through a stable no-follow read.
+[[nodiscard]] inline bool valid_watchdog_state_marker(
+    const std::filesystem::path& path) noexcept {
+    const auto payload = read_stable_text(path, 2U, 32U);
+    if (!payload || payload->back() != '\n'
+        || payload->find('\n') != payload->size() - 1U) {
+        return false;
+    }
+    const std::string_view digits{
+        payload->data(), payload->size() - 1U};
+    std::uint64_t owner_pid{};
+    const auto [end, error] = std::from_chars(
+        digits.data(), digits.data() + digits.size(), owner_pid);
+    return error == std::errc{}
+        && end == digits.data() + digits.size()
+        && owner_pid > 0U;
+}
+
+/// @brief Checks a directory entry without following its final symlink.
+[[nodiscard]] inline std::optional<bool> path_entry_exists_no_follow(
+    const std::filesystem::path& path) noexcept {
+    try {
+        std::error_code error;
+        const std::filesystem::file_status status =
+            std::filesystem::symlink_status(path, error);
+        if (error == std::errc::no_such_file_or_directory
+            || (!error
+                && status.type()
+                    == std::filesystem::file_type::not_found)) {
+            return false;
+        }
+        if (error
+            || status.type() == std::filesystem::file_type::none) {
+            return std::nullopt;
+        }
+        return true;
+    } catch (...) {
+        return std::nullopt;
+    }
 }
 
 [[nodiscard]] inline std::string hex_encode(std::string_view value) {
@@ -348,14 +508,38 @@ journal_fault() {
 }
 
 [[nodiscard]] inline bool sync_directory(
-    const std::filesystem::path& directory) noexcept {
-    const int descriptor = ::open(directory.c_str(), O_RDONLY);
-    if (descriptor < 0) {
+    const std::filesystem::path& directory,
+    directory_sync_checkpoint checkpoint =
+        directory_sync_checkpoint::ordinary) noexcept {
+    try {
+        const supervision_journal_fault configured_fault =
+            journal_fault().load(std::memory_order_relaxed);
+        const bool inject =
+            (checkpoint
+                    == directory_sync_checkpoint::
+                        registry_clean_transition
+                && configured_fault
+                    == supervision_journal_fault::
+                        registry_clean_transition_directory_sync)
+            || (checkpoint
+                    == directory_sync_checkpoint::
+                        decision_reconciliation
+                && configured_fault
+                    == supervision_journal_fault::
+                        decision_reconciliation_directory_sync);
+        journal_fault_context context{
+            .fault = inject
+                ? supervision_journal_fault::directory_sync
+                : supervision_journal_fault::none};
+        const durable_io::file_io_hooks hooks{
+            .context = &context,
+            .before_operation = inject_journal_fault};
+        const auto synced =
+            durable_io::fsync_directory(directory, hooks);
+        return synced.has_value();
+    } catch (...) {
         return false;
     }
-    const bool succeeded = ::fsync(descriptor) == 0;
-    const bool closed = ::close(descriptor) == 0;
-    return succeeded && closed;
 }
 
 class decision_lock_guard {
@@ -560,25 +744,17 @@ acquire_decision_lock(
 [[nodiscard]] inline bool valid_decision_file(
     const std::filesystem::path& path) noexcept {
     try {
-        std::error_code size_error;
-        const std::uintmax_t size =
-            std::filesystem::file_size(path, size_error);
-        if (size_error || size == 0 || size > 1024U) {
-            return false;
-        }
-        std::ifstream input(path, std::ios::binary);
-        const std::string payload{
-            std::istreambuf_iterator<char>(input),
-            std::istreambuf_iterator<char>()};
+        const auto payload = read_stable_text(path, 1U, 1024U);
         constexpr std::string_view prefix{
             "bioseq-supervision-decision-v1\t"};
-        if (!input || input.bad() || !payload.starts_with(prefix)
-            || payload.back() != '\n'
-            || payload.find('\n') != payload.size() - 1U) {
+        if (!payload || !payload->starts_with(prefix)
+            || payload->back() != '\n'
+            || payload->find('\n') != payload->size() - 1U) {
             return false;
         }
-        const std::string_view encoded(payload.data() + prefix.size(),
-                                       payload.size() - prefix.size() - 1U);
+        const std::string_view encoded(
+            payload->data() + prefix.size(),
+            payload->size() - prefix.size() - 1U);
         const auto owner = hex_decode(encoded);
         return owner && !owner->empty() && owner->size() <= 256U;
     } catch (...) {
@@ -591,41 +767,18 @@ acquire_decision_lock(
     std::string_view payload,
     bool inject_fault) noexcept {
     try {
-        const supervision_journal_fault fault = inject_fault
-            ? journal_fault().load(std::memory_order_relaxed)
-            : supervision_journal_fault::none;
-        if (fault == supervision_journal_fault::open) {
-            return false;
-        }
-        const std::filesystem::path partial =
-            path.parent_path()
-            / (path.filename().string() + ".partial");
-        const int descriptor = ::open(
-            partial.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (descriptor < 0) {
-            return false;
-        }
-        bool succeeded = fault != supervision_journal_fault::write;
-        std::size_t offset = 0;
-        while (succeeded && offset < payload.size()) {
-            const ssize_t written = ::write(
-                descriptor, payload.data() + offset,
-                payload.size() - offset);
-            if (written <= 0) {
-                succeeded = false;
-            } else {
-                offset += static_cast<std::size_t>(written);
-            }
-        }
-        succeeded = succeeded && ::fsync(descriptor) == 0;
-        succeeded = ::close(descriptor) == 0 && succeeded;
-        if (!succeeded
-            || fault == supervision_journal_fault::rename) {
-            return false;
-        }
-        std::error_code rename_error;
-        std::filesystem::rename(partial, path, rename_error);
-        return !rename_error && sync_directory(path.parent_path());
+        journal_fault_context context{
+            .fault = inject_fault
+                ? journal_fault().load(std::memory_order_relaxed)
+                : supervision_journal_fault::none};
+        const durable_io::file_io_hooks hooks{
+            .context = &context,
+            .before_operation = inject_journal_fault};
+        const auto published = durable_io::durable_replace_file(
+            path, payload_bytes(payload), {}, hooks);
+        return published
+            && published->publication
+                == durable_io::publication_state::durable;
     } catch (...) {
         return false;
     }
@@ -707,8 +860,23 @@ acquire_decision_lock(
         std::error_code remove_error;
         const bool removed = std::filesystem::remove(
             *state.directory / "registries.dirty", remove_error);
-        return removed && !remove_error
-            && sync_directory(*state.directory);
+        if (!removed || remove_error) {
+            return false;
+        }
+        if (sync_directory(
+                *state.directory,
+                directory_sync_checkpoint::
+                    registry_clean_transition)) {
+            return true;
+        }
+        // The clean transition was visible but not durable. Re-establish the
+        // same generation's dirty marker durably before reporting failure so
+        // an out-of-process watchdog cannot accept the clean registry pair.
+        static_cast<void>(write_durable_file(
+            *state.directory / "registries.dirty",
+            std::to_string(state.generation) + "\n",
+            false));
+        return false;
     } catch (...) {
         return false;
     }
@@ -717,6 +885,18 @@ acquire_decision_lock(
 }  // namespace bioseq::postgres_test::supervision_detail
 
 export namespace bioseq::postgres_test {
+
+/**
+ * @brief Exposes the no-follow classifier to native portability contracts.
+ *
+ * Normal absence is `false`; an entry is `true`; every lookup failure other
+ * than ENOENT remains indeterminate (`nullopt`) and therefore fail-closed.
+ */
+[[nodiscard]] inline std::optional<bool>
+supervision_path_entry_exists_no_follow_for_testing(
+    const std::filesystem::path& path) noexcept {
+    return supervision_detail::path_entry_exists_no_follow(path);
+}
 
 /// @brief Selects one deterministic registry I/O failure for contracts.
 inline void set_supervision_journal_fault_for_testing(
@@ -1021,7 +1201,7 @@ capture_supervised_process(
     std::string_view owner) noexcept {
     try {
         if (owner.empty() || owner.size() > 256U
-            || !std::filesystem::is_regular_file(
+            || !supervision_detail::valid_watchdog_state_marker(
                 directory / ".bioseq-watchdog-state")) {
             return false;
         }
@@ -1033,126 +1213,88 @@ capture_supervised_process(
         }
         const std::filesystem::path decision =
             directory / "decision";
-        std::error_code decision_error;
-        if (std::filesystem::exists(decision, decision_error)) {
-            if (decision_error
-                || supervision_detail::valid_decision_file(
-                    decision)) {
+        const auto decision_exists =
+            supervision_detail::path_entry_exists_no_follow(decision);
+        if (!decision_exists) {
+            return false;
+        }
+        if (*decision_exists) {
+            if (supervision_detail::valid_decision_file(decision)) {
                 return false;
             }
+            std::error_code decision_error;
             if (!std::filesystem::remove(
                     decision, decision_error)
                 || decision_error
                 || !supervision_detail::sync_directory(directory)) {
                 return false;
             }
-        } else if (decision_error) {
-            return false;
         }
-        const supervision_journal_fault fault =
-            supervision_detail::journal_fault().load(
-                std::memory_order_relaxed);
-        if (fault == supervision_journal_fault::open) {
-            return false;
-        }
-        std::string pattern =
-            (directory / ".decision-XXXXXX").string();
-        std::vector<char> writable(
-            pattern.begin(), pattern.end());
-        writable.push_back('\0');
-        const int descriptor = ::mkstemp(writable.data());
-        if (descriptor < 0) {
-            return false;
-        }
-        const std::filesystem::path staged{writable.data()};
-        if (::fcntl(descriptor, F_SETFD, FD_CLOEXEC) != 0) {
-            static_cast<void>(::close(descriptor));
-            std::error_code remove_error;
-            static_cast<void>(
-                std::filesystem::remove(staged, remove_error));
-            static_cast<void>(
-                supervision_detail::sync_directory(directory));
-            return false;
-        }
+        supervision_detail::journal_fault_context fault_context{
+            .fault = supervision_detail::journal_fault().load(
+                std::memory_order_relaxed),
+            .delay_directory_sync = true};
+        const durable_file_io::file_io_hooks hooks{
+            .context = &fault_context,
+            .before_operation =
+                supervision_detail::inject_journal_fault};
         const std::string payload =
             "bioseq-supervision-decision-v1\t"
             + supervision_detail::hex_encode(owner) + "\n";
-        bool succeeded =
-            fault != supervision_journal_fault::write;
-        std::size_t offset = 0;
-        while (succeeded && offset < payload.size()) {
-            const ssize_t written = ::write(
-                descriptor, payload.data() + offset,
-                payload.size() - offset);
-            if (written < 0 && errno == EINTR) {
-                continue;
-            }
-            if (written <= 0) {
-                succeeded = false;
-            } else {
-                offset += static_cast<std::size_t>(written);
-            }
+        const auto published = durable_file_io::durable_publish_file(
+            decision,
+            supervision_detail::payload_bytes(payload),
+            durable_file_io::publish_policy::exclusive_no_replace,
+            {},
+            hooks);
+        if (published) {
+            return published->publication
+                == durable_file_io::publication_state::durable;
         }
-        if (succeeded) {
-            if (fault == supervision_journal_fault::fsync) {
-                succeeded = false;
-            } else {
-                int sync_status{};
-                do {
-                    sync_status = ::fsync(descriptor);
-                } while (sync_status != 0 && errno == EINTR);
-                succeeded = sync_status == 0;
-            }
-        }
-        const int close_status = ::close(descriptor);
-        succeeded =
-            close_status == 0
-            && fault != supervision_journal_fault::close
-            && succeeded;
-        if (!succeeded) {
-            std::error_code remove_error;
-            static_cast<void>(
-                std::filesystem::remove(staged, remove_error));
-            static_cast<void>(
-                supervision_detail::sync_directory(directory));
+        if (published.error().publication
+            != durable_file_io::publication_state::visible_not_durable) {
             return false;
         }
-        if (fault == supervision_journal_fault::rename
-            || ::link(staged.c_str(), decision.c_str()) != 0) {
-            std::error_code remove_error;
-            static_cast<void>(
-                std::filesystem::remove(staged, remove_error));
-            static_cast<void>(
-                supervision_detail::sync_directory(directory));
-            return false;
-        }
-        std::error_code staged_remove_error;
-        const bool staged_removed = std::filesystem::remove(
-            staged, staged_remove_error);
-        if (fault == supervision_journal_fault::directory_sync) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(200));
-            succeeded = false;
+        const supervision_journal_fault configured_fault =
+            supervision_detail::journal_fault().load(
+                std::memory_order_relaxed);
+        std::error_code remove_error;
+        bool decision_removed = false;
+        if (configured_fault
+                == supervision_journal_fault::
+                    decision_rollback_remove
+            || configured_fault
+                == supervision_journal_fault::
+                    decision_reconciliation_directory_sync) {
+            remove_error = std::make_error_code(std::errc::io_error);
         } else {
-            succeeded =
-                staged_removed && !staged_remove_error
-                && supervision_detail::sync_directory(directory);
-        }
-        if (!succeeded) {
-            std::error_code remove_error;
-            const bool decision_removed =
+            decision_removed =
                 std::filesystem::remove(decision, remove_error);
-            const bool decision_absent =
-                decision_removed || !remove_error;
-            remove_error.clear();
-            static_cast<void>(
-                std::filesystem::remove(staged, remove_error));
-            static_cast<void>(
-                supervision_detail::sync_directory(directory));
-            return !decision_absent
-                && supervision_detail::valid_decision_file(decision);
         }
-        return true;
+        bool decision_absent =
+            decision_removed || !remove_error;
+        bool reconciliation_durable =
+            supervision_detail::sync_directory(
+                directory,
+                supervision_detail::directory_sync_checkpoint::
+                    decision_reconciliation);
+        if (!reconciliation_durable) {
+            // A visible decision may be accepted only after a successful
+            // directory sync. Retry rollback and then reconcile the namespace
+            // without the one-shot test fault before deciding the receipt.
+            if (!decision_absent) {
+                remove_error.clear();
+                decision_removed =
+                    std::filesystem::remove(decision, remove_error);
+                decision_absent =
+                    decision_removed || !remove_error;
+            }
+            reconciliation_durable =
+                supervision_detail::sync_directory(directory);
+        }
+        return !decision_absent
+            && reconciliation_durable
+            && supervision_detail::valid_decision_file(decision);
     } catch (...) {
         return false;
     }
@@ -1162,7 +1304,7 @@ capture_supervised_process(
 [[nodiscard]] inline bool supervision_decision_claimed(
     const std::filesystem::path& directory) noexcept {
     try {
-        if (!std::filesystem::is_regular_file(
+        if (!supervision_detail::valid_watchdog_state_marker(
                 directory / ".bioseq-watchdog-state")) {
             return false;
         }
@@ -1203,28 +1345,11 @@ capture_supervised_process(
         }
         const std::filesystem::path destination =
             *directory / std::string(basename);
-        const std::filesystem::path partial =
-            *directory / (std::string(basename) + ".partial");
-        std::ofstream output(partial, std::ios::binary | std::ios::trunc);
-        if (!output) {
-            return false;
-        }
-        output.write(
-            payload.data(), static_cast<std::streamsize>(payload.size()));
-        output.close();
-        if (!output) {
-            std::error_code remove_error;
-            std::filesystem::remove(partial, remove_error);
-            return false;
-        }
-        std::error_code rename_error;
-        std::filesystem::rename(partial, destination, rename_error);
-        if (rename_error) {
-            std::error_code remove_error;
-            std::filesystem::remove(partial, remove_error);
-            return false;
-        }
-        return true;
+        const auto published = durable_file_io::durable_replace_file(
+            destination, supervision_detail::payload_bytes(payload));
+        return published
+            && published->publication
+                == durable_file_io::publication_state::durable;
     } catch (...) {
         return false;
     }
@@ -1248,25 +1373,10 @@ load_supervision_snapshot(
                 return std::nullopt;
             }
         }
-        const std::filesystem::path path =
-            directory / std::string(basename);
-        std::error_code size_error;
-        const std::uintmax_t size =
-            std::filesystem::file_size(path, size_error);
-        if (size_error || size > 64U * 1024U * 1024U) {
-            return std::nullopt;
-        }
-        std::ifstream input(path, std::ios::binary);
-        if (!input) {
-            return std::nullopt;
-        }
-        std::string payload{
-            std::istreambuf_iterator<char>(input),
-            std::istreambuf_iterator<char>()};
-        if (input.bad()) {
-            return std::nullopt;
-        }
-        return payload;
+        return supervision_detail::read_stable_text(
+            directory / std::string(basename),
+            0U,
+            64U * 1024U * 1024U);
     } catch (...) {
         return std::nullopt;
     }
@@ -1505,17 +1615,14 @@ inline bool unregister_supervised_cluster(
 load_supervision_registries(
     const std::filesystem::path& directory) noexcept {
     try {
-        std::error_code marker_error;
-        if (!std::filesystem::is_regular_file(
-                directory / ".bioseq-watchdog-state",
-                marker_error)
-            || marker_error) {
+        if (!supervision_detail::valid_watchdog_state_marker(
+                directory / ".bioseq-watchdog-state")) {
             return std::nullopt;
         }
-        std::error_code dirty_error;
-        const bool dirty = std::filesystem::exists(
-            directory / "registries.dirty", dirty_error);
-        if (dirty_error || dirty) {
+        const auto dirty =
+            supervision_detail::path_entry_exists_no_follow(
+                directory / "registries.dirty");
+        if (!dirty || *dirty) {
             return std::nullopt;
         }
         for (const std::string_view partial :
@@ -1523,10 +1630,10 @@ load_supervision_registries(
               std::string_view{"registries.clean.partial"},
               std::string_view{"clusters.tsv.partial"},
               std::string_view{"processes.tsv.partial"}}) {
-            std::error_code partial_error;
-            const bool partial_exists = std::filesystem::exists(
-                directory / std::string(partial), partial_error);
-            if (partial_error || partial_exists) {
+            const auto partial_exists =
+                supervision_detail::path_entry_exists_no_follow(
+                    directory / std::string(partial));
+            if (!partial_exists || *partial_exists) {
                 return std::nullopt;
             }
         }

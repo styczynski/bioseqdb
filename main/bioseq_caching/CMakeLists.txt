@@ -185,6 +185,7 @@ AddCommonTargetX(
   SHARED_MODULE_LIBS
     bioseq_cache_core
     bioseq_cache_provider_api
+    bioseq_durable_file_io
     bioseq_pg_support
     bioseq_pg_sql_boundary
     bioseq_sql_annotation_model
@@ -235,6 +236,7 @@ if(BIOSEQ_CACHE_TESTING)
     PostgreSQL::ServerHeaders
     bioseq_cache_core
     bioseq_cache_provider_api
+    bioseq_durable_file_io
     bioseq_pg_support
     bioseq_pg_sql_boundary
     bioseq_sql_annotation_model
