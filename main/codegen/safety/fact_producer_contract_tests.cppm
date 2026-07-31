@@ -288,7 +288,7 @@ inline void run_bridge_proof_contracts() {
     bridge_fixture fixture = make_bridge_fixture();
     const std::filesystem::path context_path = module_path(
         fixture,
-        "main/common/pg_sql_boundary/call_context.cppm");
+        "main/common/pg_sql_boundary/call_context_implementation.cpp");
     const std::filesystem::path error_bridge_path = module_path(
         fixture,
         "main/common/pg_support/error_boundary.cppm");
@@ -310,7 +310,7 @@ inline void run_bridge_proof_contracts() {
     static constexpr std::string_view subtransaction_positive =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_sql_boundary:call_context;
+module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -340,7 +340,7 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_decoy =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_sql_boundary:call_context;
+module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -365,7 +365,7 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_multiple =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_sql_boundary:call_context;
+module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -407,7 +407,7 @@ void sql_subtransaction::commit() {
 #define PG_TRY() do { if (true) {
 #define PG_CATCH() } else {
 #define PG_END_TRY() } } while (false)
-export module bioseq.pg_sql_boundary:call_context;
+module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -437,7 +437,7 @@ void sql_subtransaction::commit() {
         R"cpp(module;
 #include <utils/elog.h>
 #define PROJECT_TRY() PG_TRY()
-export module bioseq.pg_sql_boundary:call_context;
+module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();
@@ -466,7 +466,7 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_catch =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_sql_boundary:call_context;
+module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct sql_subtransaction {
     void commit();

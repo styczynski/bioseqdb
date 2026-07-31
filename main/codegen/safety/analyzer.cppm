@@ -885,8 +885,7 @@ inline void validate_bridge_transition(
         }
         expected_implementation =
             evidence.implementation_qualified_name;
-        expected_module =
-            "bioseq.pg_sql_boundary:call_context";
+        expected_module = "bioseq.pg_sql_boundary";
         expected_region =
             "bioseq.pg_utils.sql_boundary.context/"
             + std::string{expected_implementation.substr(
@@ -1982,8 +1981,7 @@ converter_families(const safety_manifest_overload& overload) {
     }
     for (const function_flow* step : site.path) {
         const std::string_view name = step->qualified_name;
-        if (step->module_name
-                == "bioseq.pg_sql_boundary:call_context"
+        if (step->module_name == "bioseq.pg_sql_boundary"
             && (name
                     == "bioseq::pg_utils::scoped_spi_session::connect"
                 || name

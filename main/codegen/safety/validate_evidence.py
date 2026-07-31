@@ -2515,9 +2515,9 @@ def _validate_site(
                     "reviewed implementation",
                 )
             expected_implementation = implementation_name
-            expected_module = "bioseq.pg_sql_boundary:call_context"
+            expected_module = "bioseq.pg_sql_boundary"
             expected_source_suffix = (
-                "/main/common/pg_sql_boundary/call_context.cppm"
+                "/main/common/pg_sql_boundary/call_context_implementation.cpp"
             )
             expected_region = (
                 "bioseq.pg_utils.sql_boundary.context/" + region[1]

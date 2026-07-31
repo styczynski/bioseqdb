@@ -652,8 +652,7 @@ inline void run_safety_analyzer_contract_self_tests() {
     function_flow scoped_connect{};
     scoped_connect.qualified_name =
         "bioseq::pg_utils::scoped_spi_session::connect";
-    scoped_connect.module_name =
-        "bioseq.pg_sql_boundary:call_context";
+    scoped_connect.module_name = "bioseq.pg_sql_boundary";
     function_flow scoped_finish = scoped_connect;
     scoped_finish.qualified_name =
         "bioseq::pg_utils::scoped_spi_session::finish";
@@ -683,8 +682,7 @@ inline void run_safety_analyzer_contract_self_tests() {
     wrong_module.module_name = "fixture.context";
     function_flow spi_like{};
     spi_like.qualified_name = "fixture::SPI_connect";
-    spi_like.module_name =
-        "bioseq.pg_sql_boundary:call_context";
+    spi_like.module_name = "bioseq.pg_sql_boundary";
     require_cleanup_phases(
         bridge_kind::none,
         {&connect_extra, &wrong_module, &spi_like},

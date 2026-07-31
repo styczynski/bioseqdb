@@ -79,6 +79,8 @@ set(BIOSEQ_CACHE_PRODUCTION_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/index.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/diagnostics.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/pg/sql/admin.cppm")
+set(BIOSEQ_CACHE_PRODUCTION_IMPLEMENTATION_SOURCES
+  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/registry_implementation.cpp")
 set(BIOSEQ_CACHE_TEST_SUPPORT_MODULES
   ${BIOSEQ_CACHE_PRODUCTION_MODULES}
   "${CMAKE_CURRENT_LIST_DIR}/pg/test_provider.cppm"
@@ -181,6 +183,8 @@ AddCommonTargetX(
   CXX_MOD_FILES
     ${BIOSEQ_CACHE_PRODUCTION_MODULES}
     ${BIOSEQ_CACHE_PRODUCTION_GENERATED_MODULES}
+  SOURCES
+    ${BIOSEQ_CACHE_PRODUCTION_IMPLEMENTATION_SOURCES}
   SHARED_MODULE_LIBS
     bioseq_cache_core
     bioseq_cache_provider_api
@@ -221,6 +225,8 @@ add_dependencies(
   "${BIOSEQ_SQL_BIOSEQ_CACHE_PRODUCTION_TARGET}")
 if(BIOSEQ_CACHE_TESTING)
   add_library(postgresql_bioseq_cache_test_support MODULE)
+  target_sources(postgresql_bioseq_cache_test_support PRIVATE
+    ${BIOSEQ_CACHE_PRODUCTION_IMPLEMENTATION_SOURCES})
   target_sources(postgresql_bioseq_cache_test_support
     PRIVATE FILE_SET CXX_MODULES
       BASE_DIRS

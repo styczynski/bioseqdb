@@ -308,11 +308,10 @@ fixture_bridge_evidence(bridge_kind bridge) {
                 "F@begin";
             implementation_name =
                 "bioseq::pg_utils::sql_subtransaction::begin";
-            implementation_module =
-                "bioseq.pg_sql_boundary:call_context";
+            implementation_module = "bioseq.pg_sql_boundary";
             implementation_source =
                 "/fixture/main/common/pg_sql_boundary/"
-                "call_context.cppm";
+                "call_context_implementation.cpp";
             protected_region =
                 "bioseq.pg_utils.sql_boundary.context/begin";
             break;

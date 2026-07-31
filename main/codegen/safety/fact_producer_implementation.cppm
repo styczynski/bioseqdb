@@ -3806,10 +3806,9 @@ bridge_evidence_for(
                 "reviewed implementation");
         }
         expected_name = implementation_name;
-        expected_module =
-            "bioseq.pg_sql_boundary:call_context";
+        expected_module = "bioseq.pg_sql_boundary";
         expected_source_suffix =
-            "/main/common/pg_sql_boundary/call_context.cppm";
+            "/main/common/pg_sql_boundary/call_context_implementation.cpp";
         region_id =
             "bioseq.pg_utils.sql_boundary.context/"
             + implementation_name.substr(
