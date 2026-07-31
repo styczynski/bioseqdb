@@ -176,7 +176,7 @@ class DockerHealthTests(unittest.TestCase):
                 {"DOCKER_HOST": f"unix://{path}"})
             thread.join(timeout=2)
         self.assertEqual(endpoint, f"unix://{path}")
-        self.assertEqual(resolved, path)
+        self.assertEqual(resolved, path.resolve(strict=True))
 
     def test_direct_ping_rejects_unhealthy_daemon_without_cli(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
