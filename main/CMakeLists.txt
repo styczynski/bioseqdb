@@ -716,6 +716,10 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_package_linux.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
       "${CMAKE_SOURCE_DIR}/cmake/test_production_dso_qualification.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running bioseq-build configure freshness contract tests"

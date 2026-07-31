@@ -78,6 +78,7 @@ from inspect_tool import (
 # to define functions; ensure_doc_env() is called on first doc-tool use, never at import and
 # never by the detached --run-build worker (which is stdlib-only).
 import bootstrap  # noqa: E402
+import package_linux  # noqa: E402
 
 from postgres_error_safety_promotion import (  # noqa: E402
     PromotionError as PostgresErrorSafetyPromotionError,
@@ -219,6 +220,7 @@ WEBSITE_BUILD_PRESET = os.environ.get(
 WEBSITE_DEBUG_BUILD_PRESET = os.environ.get(
     "BIOSEQ_WEBSITE_DEBUG_BUILD_PRESET", "website-aws-x64-linux-debug")
 POSTGRES_ERROR_SAFETY_MODE = "postgres-error-safety"
+PACKAGE_LINUX_MODE = package_linux.MODE
 POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET = (
     "postgres-error-safety-production")
 POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET = (
@@ -1566,6 +1568,21 @@ MODES: Dict[str, ModeDefinition] = {
             "BIOSEQ_BUILD_WEBSITE": "OFF",
         },
     ),
+    PACKAGE_LINUX_MODE: ModeDefinition(
+        lock_group=PACKAGE_LINUX_MODE,
+        expected_duration_min=240.0,
+        build_only_expected_duration_min=240.0,
+        label="Local Debian package qualification",
+        docs=(
+            "Build and extract the fixed native ARM64 Debian 13/PostgreSQL 17 "
+            "DEB from clean committed source and seal its exact six-file payload"),
+        is_verb_plular=False,
+        targets=[],
+        commands=[],
+        preset_override=PACKAGE_LINUX_MODE,
+        reporting_subdir_name=package_linux.REPORTING_SUBDIR,
+        hard_timeout_min=240.0,
+    ),
     "unit+integration": ModeDefinition(
         lock_group="tests",
         expected_duration_min=120.0,
@@ -1896,6 +1913,7 @@ VALID_MODES: Set[str] = set(MODES.keys())
 REMOTE_RUN_REJECTED_MODES: Set[str] = {
     "website",
     POSTGRES_ERROR_SAFETY_MODE,
+    PACKAGE_LINUX_MODE,
 }
 REMOTE_RUN_BUILD_MODES: tuple[str, ...] = tuple(sorted(
     VALID_MODES - REMOTE_RUN_REJECTED_MODES))
@@ -8331,6 +8349,89 @@ def _run_postgres_error_safety_worker(
         log_handle.close()
 
 
+def _run_package_linux_worker(entry: Mapping[str, object]) -> int:
+    """Run the fixed local package qualifier outside the CMake mode path."""
+    mode = PACKAGE_LINUX_MODE
+    started_at = float(entry["started_at"])
+    deadline = started_at + min(
+        HARD_TIMEOUT_SEC,
+        float(MODES[mode].hard_timeout_min or HARD_TIMEOUT_MIN) * 60.0,
+    )
+    log_path = Path(str(entry["log_file"]))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("w", buffering=1)
+    log_handle.write(
+        f"# bioseq package worker — mode={mode} pid={os.getpid()} "
+        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
+        f"# project_root={PROJECT_ROOT}\n"
+        f"# package_state_root={PROJECT_ROOT / 'build' / mode}\n"
+        "# profile=debian:trixie postgresql=17 architecture=arm64\n"
+    )
+    log_handle.flush()
+
+    def progress(step: str) -> None:
+        _update_entry(mode, step=step)
+        log_handle.write(f"# step={step}\n")
+        log_handle.flush()
+
+    try:
+        result = package_linux.run_package_linux(
+            project_root=PROJECT_ROOT,
+            workspace_root=WORKSPACE_ROOT,
+            log_handle=log_handle,
+            deadline=deadline,
+            progress=progress,
+        )
+        completed_at = time.time()
+        receipt = str(result["receipt_path"])
+        _update_entry(
+            mode,
+            status="completed",
+            step="completed",
+            completed_at=completed_at,
+            exit_code=0,
+            report_file=receipt,
+            report_files=[receipt],
+            package_linux_qualification=dict(result),
+            build_only=False,
+            debug=False,
+        )
+        log_handle.write(
+            "# package qualification completed: "
+            + json.dumps(result, sort_keys=True) + "\n")
+        return 0
+    except TimeoutError as exc:
+        completed_at = time.time()
+        _update_entry(
+            mode,
+            status="killed_timeout",
+            step="killed_timeout",
+            completed_at=completed_at,
+            exit_code=None,
+            notes=str(exc),
+            build_only=False,
+            debug=False,
+        )
+        log_handle.write(f"# package qualification timed out: {exc}\n")
+        return 124
+    except Exception as exc:
+        completed_at = time.time()
+        _update_entry(
+            mode,
+            status="failed",
+            step="failed",
+            completed_at=completed_at,
+            exit_code=None,
+            notes=str(exc),
+            build_only=False,
+            debug=False,
+        )
+        log_handle.write(f"# package qualification failed: {exc}\n")
+        return 1
+    finally:
+        log_handle.close()
+
+
 def _run_build_worker(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
                       test_flags=None, bench_e2e_config=None,
@@ -8375,6 +8476,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
     if not entry:
         _log(f"worker for {mode}: no state entry, exiting")
         return 1
+    if mode == PACKAGE_LINUX_MODE:
+        if (
+            build_only or debug or bench_flags or test_flags
+            or bench_e2e_config or sql_guardrail_request_json
+            or postgres_error_safety_review_waiver_json
+        ):
+            _log("package-linux worker received forbidden variable inputs")
+            return 1
+        return _run_package_linux_worker(entry)
     if mode == POSTGRES_ERROR_SAFETY_MODE:
         return _run_postgres_error_safety_worker(
             entry,
@@ -10071,6 +10181,18 @@ def tool_start_build(mode: str, build_only: bool = False,
                 f"{', '.join(VALID_MODES)}.")
 
     mode_details = MODES[mode]
+    if mode == PACKAGE_LINUX_MODE and (
+        build_only
+        or debug_supplied or debug
+        or filter_supplied or bench_filter is not None
+        or debug_report_supplied or debug_report
+        or bench_e2e_config is not None
+        or postgres_error_safety_review_waiver is not None
+    ):
+        return (
+            "package-linux owns one fixed local Debian 13/PostgreSQL 17/ARM64 "
+            "qualification and accepts no build_only, debug, filter, "
+            "debug_report, bench_e2e_config, or review-waiver inputs.")
     resolved_e2e_config, config_error = _validate_bench_e2e_config_override(
         mode, bench_e2e_config)
     if config_error is not None:
@@ -10213,7 +10335,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             sql_guardrail_workflow is not None
             and sql_guardrail_workflow["phase"] == "baseline_promotion"
         )
-        if promotion_only:
+        if promotion_only or mode == PACKAGE_LINUX_MODE:
             configured_rt_priority = None
         else:
             try:
@@ -10388,6 +10510,12 @@ def _run_build_inline(mode: str, build_only: bool = False,
     if mode not in VALID_MODES:
         _log(f"--run-build-sync: invalid mode '{mode}'")
         return 2
+    if mode == PACKAGE_LINUX_MODE and (
+        build_only or debug or bench_flags or test_flags
+        or bench_e2e_config or postgres_error_safety_review_waiver_json
+    ):
+        _log("--run-build-sync: package-linux rejects variable inputs")
+        return 2
     resolved_e2e_config, config_error = _validate_bench_e2e_config_override(
         mode, bench_e2e_config)
     if config_error is not None:
@@ -10489,7 +10617,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
             sql_guardrail_workflow is not None
             and sql_guardrail_workflow["phase"] == "baseline_promotion"
         )
-        if promotion_only:
+        if promotion_only or mode == PACKAGE_LINUX_MODE:
             configured_rt_priority = None
         else:
             try:
