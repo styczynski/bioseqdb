@@ -3636,6 +3636,12 @@ AddCommonTargetX(
     "${BIOSEQ_SQL_GENERATED_INSTALL}"
   SQL_MANIFEST
     "${BIOSEQ_SQL_GENERATED_MANIFEST}"
+  DSO_CLOSURE_CONTRACT manifest
+  DSO_ABI_EXPORTS
+    Pg_magic_func
+    _PG_init
+    bioseq_scheduler_supervisor_main
+    bioseq_format6_parallel_scan_probe_worker_main
   ${_bioseq_sql_completion_target_option}
   PG_ENTRYPOINT_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod.cppm"

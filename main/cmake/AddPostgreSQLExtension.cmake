@@ -122,6 +122,41 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
       "${TARGET_NAME}"
       "${_bioseq_dso_unexported_symbols}"
       "${_bioseq_dso_unexported_symbols_link_option}")
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # ELF does not honour Mach-O's unexported-symbols mechanism.  Clang's C++
+    # named-module initializers otherwise remain dynamic exports despite hidden
+    # C++ visibility. Generate the linker version script from the generated SQL
+    # ownership manifest so each extension publishes only its reviewed fmgr /
+    # pg_finfo surface and explicit ABI symbols.
+    set(_bioseq_dso_elf_version_script
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.elf-version-script")
+    set(_bioseq_dso_elf_version_script_generator
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/GeneratePostgreSQLExtensionElfVersionScript.cmake")
+    string(JOIN "|" _bioseq_dso_abi_exports_pipe ${ARG_ABI_EXPORTS})
+    add_custom_command(
+      OUTPUT "${_bioseq_dso_elf_version_script}"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DINPUT_MANIFEST=${ARG_SQL_MANIFEST}"
+        "-DOUTPUT=${_bioseq_dso_elf_version_script}"
+        "-DABI_EXPORTS_PIPE=${_bioseq_dso_abi_exports_pipe}"
+        -P "${_bioseq_dso_elf_version_script_generator}"
+      DEPENDS
+        "${ARG_SQL_MANIFEST}"
+        "${_bioseq_dso_elf_version_script_generator}"
+      VERBATIM)
+    set(_bioseq_dso_elf_version_script_link_option
+      "LINKER:--version-script=${_bioseq_dso_elf_version_script}")
+    target_link_options(
+      ${TARGET_NAME}
+      PRIVATE "${_bioseq_dso_elf_version_script_link_option}")
+    set_property(
+      TARGET ${TARGET_NAME}
+      APPEND PROPERTY LINK_DEPENDS "${_bioseq_dso_elf_version_script}")
+    set_target_properties(
+      ${TARGET_NAME}
+      PROPERTIES
+        BIOSEQ_EXTENSION_DSO_ELF_VERSION_SCRIPT
+          "${_bioseq_dso_elf_version_script}")
   endif()
 
   set_property(TARGET ${TARGET_NAME} APPEND PROPERTY LINK_DEPENDS
