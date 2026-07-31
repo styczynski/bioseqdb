@@ -1803,7 +1803,7 @@ class CacheModeRoutingTest(unittest.TestCase):
 
     def test_report_binding_snapshots_mutable_cmake_dso_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve(strict=True)
             fixture = self._production_dso_fixture(root)
             report = root / "report_17.json"
             report.write_text("{}", encoding="utf-8")
@@ -2495,7 +2495,8 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         })
         cls._write_json(receipt, document)
         return {
-            "production_dso_qualification_receipt": str(receipt),
+            "production_dso_qualification_receipt":
+                str(receipt.resolve(strict=True)),
             "production_dso_qualification_receipt_sha256":
                 server._sha256_path(receipt),
             "production_dso_qualification_content_sha256":
