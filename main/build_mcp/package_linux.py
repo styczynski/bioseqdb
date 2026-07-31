@@ -329,11 +329,90 @@ def _docker_environment(base: Mapping[str, str], endpoint: str) -> dict[str, str
     return result
 
 
+def _docker_cli_identity(entry_path: Path) -> dict[str, object]:
+    """Seal the absolute ``docker`` entry separately from its multicall target."""
+    entry = Path(os.path.abspath(entry_path))
+    if not entry.is_absolute() or entry.name != "docker":
+        raise PackageLinuxError(
+            f"Docker CLI entry must be an absolute path named docker: {entry}")
+    try:
+        entry_metadata = entry.lstat()
+    except OSError as error:
+        raise PackageLinuxError(f"cannot inspect Docker CLI entry {entry}: {error}") from error
+    if not (stat.S_ISREG(entry_metadata.st_mode) or stat.S_ISLNK(entry_metadata.st_mode)):
+        raise PackageLinuxError(f"Docker CLI entry is not a file or symlink: {entry}")
+
+    links: list[dict[str, object]] = []
+    current = entry
+    seen: set[Path] = set()
+    while True:
+        if current in seen:
+            raise PackageLinuxError(f"Docker CLI symlink cycle at {current}")
+        seen.add(current)
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise PackageLinuxError(
+                f"cannot inspect Docker CLI chain entry {current}: {error}") from error
+        if not stat.S_ISLNK(metadata.st_mode):
+            break
+        target_text = os.readlink(current)
+        links.append({
+            "path": str(current),
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "size_bytes": metadata.st_size,
+            "link_target": target_text,
+            "link_target_sha256": _sha256_bytes(os.fsencode(target_text)),
+        })
+        target = Path(target_text)
+        current = Path(os.path.abspath(
+            target if target.is_absolute() else current.parent / target))
+
+    resolved = current.resolve(strict=True)
+    target_metadata = resolved.stat()
+    if not stat.S_ISREG(target_metadata.st_mode) or not os.access(entry, os.X_OK):
+        raise PackageLinuxError(
+            f"Docker CLI entry does not resolve to an executable regular file: {entry}")
+    entry_identity: dict[str, object] = {
+        "schema_version": 1,
+        "artifact_kind": "bioseq-docker-cli-identity",
+        "entry_path": str(entry),
+        "entry_basename": entry.name,
+        "entry_kind": "symlink" if links else "regular",
+        "entry_mode": stat.S_IMODE(entry_metadata.st_mode),
+        "entry_size_bytes": entry_metadata.st_size,
+        "symlink_chain": links,
+    }
+    return _sealed({
+        **entry_identity,
+        "entry_identity_sha256": _canonical_sha256(entry_identity),
+        "target_lexical_path": str(current),
+        "target_resolved_path": str(resolved),
+        "target_mode": stat.S_IMODE(target_metadata.st_mode),
+        "target_size_bytes": target_metadata.st_size,
+        "target_sha256": _sha256_file(resolved),
+    })
+
+
+def _validated_docker_entry(identity: object) -> Path:
+    expected = _validate_seal(identity, "Docker CLI identity")
+    entry_raw = expected.get("entry_path")
+    if not isinstance(entry_raw, str) or not Path(entry_raw).is_absolute():
+        raise PackageLinuxError("Docker CLI identity has an invalid entry path")
+    observed = _docker_cli_identity(Path(entry_raw))
+    if observed != expected:
+        raise PackageLinuxError("Docker CLI entry or resolved target identity changed")
+    return Path(entry_raw)
+
+
 def _docker_image(
-    docker: Path, environment: Mapping[str, str], *, log: TextIO, deadline: float,
+    docker_identity: Mapping[str, object], environment: Mapping[str, str], *,
+    log: TextIO, deadline: float,
 ) -> dict[str, object]:
+    docker = _validated_docker_entry(docker_identity)
     _run([str(docker), "pull", IMAGE_TAG], log=log, deadline=deadline,
          environment=environment)
+    docker = _validated_docker_entry(docker_identity)
     raw = _run(
         [str(docker), "image", "inspect", IMAGE_TAG], log=log,
         deadline=deadline, environment=environment, capture=True,
@@ -723,8 +802,9 @@ def _promote_artifact(
 
 
 def _validate_package(
-    *, docker: Path, docker_environment: Mapping[str, str], image_id: str,
-    source: Path, package: Path, state_root: Path, log: TextIO, deadline: float,
+    *, docker_identity: Mapping[str, object],
+    docker_environment: Mapping[str, str], image_id: str, source: Path,
+    package: Path, state_root: Path, log: TextIO, deadline: float,
 ) -> tuple[dict[str, object], Path, Path]:
     validation_root = Path(tempfile.mkdtemp(prefix="validation-", dir=state_root))
     validator = validation_root / "validator.json"
@@ -747,6 +827,7 @@ python3 /source/build_mcp/package_linux.py --internal-inspect \
   --output /output/payload.json
 """
     try:
+        docker = _validated_docker_entry(docker_identity)
         argv = [
             str(docker), "run", "--rm", "--init",
             "--mount", f"type=bind,src={source},dst=/source,readonly",
@@ -816,9 +897,9 @@ def run_package_linux(
         docker_raw = shutil.which("docker", path=docker_environment.get("PATH"))
         if docker_raw is None:
             raise PackageLinuxError("Docker CLI is missing after daemon health proof")
-        docker = _require_regular(Path(docker_raw).resolve(strict=True), "Docker CLI")
+        docker_identity = _docker_cli_identity(Path(docker_raw))
         image = _docker_image(
-            docker, docker_environment, log=log_handle, deadline=deadline)
+            docker_identity, docker_environment, log=log_handle, deadline=deadline)
 
         notify("preparing lock-keyed packaging environment")
         python_identity = _python_identity(
@@ -835,6 +916,7 @@ def run_package_linux(
             "archive_sha256": snapshot["archive_sha256"],
             "input_sha256": snapshot["input_sha256"],
             "image": image,
+            "docker_cli": docker_identity,
             "architecture": ARCHITECTURE,
             "postgres_major": POSTGRES_MAJOR,
             "profile_version": PACKAGE_PROFILE_VERSION,
@@ -859,7 +941,8 @@ def run_package_linux(
             internal_environment = dict(docker_environment)
             internal_environment.update({
                 "BIOSEQ_OPTTIMIZATION_LEVEL": "0",
-                "BIOSEQ_PACKAGE_DOCKER_BIN": str(docker),
+                "BIOSEQ_PACKAGE_DOCKER_IDENTITY": json.dumps(
+                    docker_identity, sort_keys=True, separators=(",", ":")),
                 "SOURCE_DATE_EPOCH": _git(
                     repository, ["show", "-s", "--format=%ct", str(snapshot["revision"])],
                     log=log_handle, deadline=deadline),
@@ -884,7 +967,8 @@ def run_package_linux(
 
         notify("extracting and qualifying actual DEB payload")
         payload, validator_path, payload_path = _validate_package(
-            docker=docker, docker_environment=docker_environment,
+            docker_identity=docker_identity,
+            docker_environment=docker_environment,
             image_id=str(image["id"]), source=source, package=package,
             state_root=state_root, log=log_handle, deadline=deadline,
         )
@@ -914,10 +998,7 @@ def run_package_linux(
                 "architecture": ARCHITECTURE,
                 "free_bytes_at_start": available,
                 "docker_socket": str(socket_path),
-                "docker_cli": {
-                    "path": str(docker), "size_bytes": docker.stat().st_size,
-                    "sha256": _sha256_file(docker),
-                },
+                "docker_cli": docker_identity,
             },
             "image": image,
             "package_environment": python_environment,
@@ -1016,11 +1097,12 @@ def _internal_build(arguments: argparse.Namespace) -> int:
     )
     environment = dict(os.environ)
     environment.update({key: str(value) for key, value in deb.build_environment(cell).items()})
-    docker_raw = os.environ.get("BIOSEQ_PACKAGE_DOCKER_BIN", "")
-    if not docker_raw or not Path(docker_raw).is_absolute():
-        raise PackageLinuxError("sealed Docker CLI path is missing or not absolute")
-    docker = _require_regular(
-        Path(docker_raw).resolve(strict=True), "sealed Docker CLI")
+    docker_raw = os.environ.get("BIOSEQ_PACKAGE_DOCKER_IDENTITY", "")
+    try:
+        docker_identity = json.loads(docker_raw)
+    except json.JSONDecodeError as error:
+        raise PackageLinuxError("sealed Docker CLI identity is missing or invalid") from error
+    docker = _validated_docker_entry(docker_identity)
     ContainerRunner(docker_bin=str(docker)).run(plan, environment=environment)
     package = deb.find_artifact(cell)
     package_files = cell.paths.root / "source/_bioseq-package-build/package-files.list"

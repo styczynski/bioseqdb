@@ -202,6 +202,68 @@ class DockerHealthTests(unittest.TestCase):
         spawn.assert_not_called()
 
 
+class DockerCliIdentityTests(unittest.TestCase):
+    @staticmethod
+    def _entry(root: Path, target_name: str = "docker-tools") -> tuple[Path, Path]:
+        target = root / target_name
+        target.write_bytes(b"multicall docker executable\n")
+        target.chmod(0o755)
+        entry = root / "docker"
+        entry.symlink_to(target)
+        return entry, target
+
+    def test_symlink_multicall_invocation_preserves_docker_argv0(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry, target = self._entry(Path(temporary))
+            identity = subject._docker_cli_identity(entry)
+            resolved_target = str(target.resolve(strict=True))
+            inspect_result = json.dumps([{
+                "Id": "sha256:" + "a" * 64,
+                "Architecture": "arm64",
+                "Os": "linux",
+                "RepoDigests": ["debian@sha256:" + "b" * 64],
+            }])
+            with mock.patch.object(
+                subject, "_run", side_effect=["", inspect_result]
+            ) as run:
+                subject._docker_image(
+                    identity, {}, log=io.StringIO(), deadline=time.time() + 10)
+            invocations = [call.args[0][0] for call in run.call_args_list]
+        self.assertEqual(invocations, [str(entry), str(entry)])
+        self.assertTrue(all(Path(value).name == "docker" for value in invocations))
+        self.assertNotIn(str(target), invocations)
+        self.assertEqual(
+            identity["target_resolved_path"], resolved_target)
+        self.assertRegex(identity["entry_identity_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(identity["target_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_symlink_entry_substitution_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entry, _target = self._entry(root)
+            identity = subject._docker_cli_identity(entry)
+            replacement = root / "replacement-tools"
+            replacement.write_bytes(b"replacement\n")
+            replacement.chmod(0o755)
+            entry.unlink()
+            entry.symlink_to(replacement)
+            with self.assertRaisesRegex(subject.PackageLinuxError, "identity changed"):
+                subject._validated_docker_entry(identity)
+
+    def test_resolved_multicall_target_tampering_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            entry, target = self._entry(Path(temporary))
+            identity = subject._docker_cli_identity(entry)
+            original_size = target.stat().st_size
+            target.write_bytes(b"X" * original_size)
+            target.chmod(0o755)
+            self.assertEqual(target.stat().st_size, identity["target_size_bytes"])
+            self.assertNotEqual(
+                subject._sha256_file(target), identity["target_sha256"])
+            with self.assertRaisesRegex(subject.PackageLinuxError, "identity changed"):
+                subject._validated_docker_entry(identity)
+
+
 class PackagePayloadTests(unittest.TestCase):
     def test_staging_manifest_requires_exact_six_unique_basenames(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
