@@ -29,6 +29,7 @@ export module bioseq.common.durable_file_io:stable_read_at;
 import :types;
 import :error;
 import :identity;
+import :path;
 import :open;
 import :positional_io;
 
