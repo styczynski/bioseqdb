@@ -28,6 +28,7 @@ module;
 
 export module bioseq.test.postgres:report;
 
+import bioseq.common.durable_file_io;
 import bioseq.libpq.client;
 import :artifact;
 import :migration_probe;
@@ -1374,7 +1375,7 @@ inline void write_resource_sampling(
 
 export namespace bioseq::postgres_test {
 
-/// @brief Atomically publishes a complete native integration JSON report.
+/// @brief Atomically and durably publishes a native integration JSON report.
 inline void write_integration_test_report(
     const std::filesystem::path& path,
     const integration_test_report& report) {
@@ -1419,15 +1420,23 @@ inline void write_integration_test_report(
     }
     const std::filesystem::path absolute_path =
         std::filesystem::absolute(path);
-    std::filesystem::create_directories(absolute_path.parent_path());
-    const std::filesystem::path temporary =
-        absolute_path.parent_path()
-        / (absolute_path.filename().string() + ".partial");
-    std::ofstream output(temporary, std::ios::trunc);
-    if (!output) {
-        throw std::runtime_error("cannot create integration report: "
-                                 + temporary.string());
+    const auto directories_created =
+        bioseq::durable_file_io::durable_create_directories(
+            absolute_path.parent_path());
+    if (!directories_created.has_value()) {
+        const bioseq::durable_file_io::file_io_error& error =
+            directories_created.error();
+        throw std::runtime_error(
+            "cannot durably create integration report directory: operation "
+            + std::to_string(static_cast<unsigned>(error.operation))
+            + ", code "
+            + std::to_string(static_cast<unsigned>(error.code))
+            + ", system error "
+            + std::to_string(error.system_error)
+            + ", publication "
+            + std::to_string(static_cast<unsigned>(error.publication)));
     }
+    std::ostringstream output;
     output.imbue(std::locale::classic());
     output << std::setprecision(
         std::numeric_limits<double>::max_digits10);
@@ -1875,21 +1884,35 @@ inline void write_integration_test_report(
     output.put('}');
     output.put('}');
     output.put('\n');
-    output.close();
     if (!output) {
         throw std::runtime_error("failed writing integration report: "
-                                 + temporary.string());
+                                 + absolute_path.string());
     }
-    std::error_code error;
-    std::filesystem::rename(temporary, absolute_path, error);
-    if (error) {
-        std::filesystem::remove(absolute_path, error);
-        error.clear();
-        std::filesystem::rename(temporary, absolute_path, error);
+    const std::string serialized = std::move(output).str();
+    const auto published =
+        bioseq::durable_file_io::durable_replace_file(
+            absolute_path,
+            std::as_bytes(std::span{
+                serialized.data(), serialized.size()}),
+            bioseq::durable_file_io::durable_publish_options{
+                .mode = 0666});  // Preserve ofstream mode before umask.
+    if (!published.has_value()) {
+        const bioseq::durable_file_io::file_io_error& error =
+            published.error();
+        throw std::runtime_error(
+            "cannot durably publish integration report: operation "
+            + std::to_string(static_cast<unsigned>(error.operation))
+            + ", code "
+            + std::to_string(static_cast<unsigned>(error.code))
+            + ", system error "
+            + std::to_string(error.system_error)
+            + ", publication "
+            + std::to_string(static_cast<unsigned>(error.publication)));
     }
-    if (error) {
-        throw std::runtime_error("cannot publish integration report: "
-                                 + error.message());
+    if (published->publication
+        != bioseq::durable_file_io::publication_state::durable) {
+        throw std::runtime_error(
+            "integration report publication did not become durable");
     }
 }
 

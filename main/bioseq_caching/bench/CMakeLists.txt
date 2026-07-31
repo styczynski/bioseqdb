@@ -15,7 +15,9 @@ set_target_properties(bioseq_cache_benchmark_support PROPERTIES
 target_link_libraries(bioseq_cache_benchmark_support
   PUBLIC
     bioseq_postgres_test_support
-    Threads::Threads)
+    Threads::Threads
+  PRIVATE
+    bioseq::durable_file_io)
 
 add_executable(
   bioseq_cache_bench
@@ -145,6 +147,16 @@ if(BIOSEQ_BUILD_CORE)
   endif()
 endif()
 
+set(_bioseq_cache_migration_ledger
+  "${CMAKE_CURRENT_LIST_DIR}/../test/legacy_migration_ledger.tsv")
+set(_bioseq_cache_legacy_inventory
+  "${CMAKE_CURRENT_LIST_DIR}/../test/legacy_asset_inventory.txt")
+set(_bioseq_cache_migration_catch_cases
+  "${CMAKE_BINARY_DIR}/bioseq_caching/legacy_migration_catch_cases.txt")
+cmake_path(NORMAL_PATH _bioseq_cache_migration_ledger)
+cmake_path(NORMAL_PATH _bioseq_cache_legacy_inventory)
+cmake_path(NORMAL_PATH _bioseq_cache_migration_catch_cases)
+
 set(_bioseq_cache_native_artifacts
 "{
   \"cache_test_support_postgres_bin_dir\": \"${_bioseq_cache_test_support_postgres_bin_dir}\",
@@ -172,7 +184,10 @@ set(_bioseq_cache_native_artifacts
   \"bioseq_install_sql\": \"${_bioseq_install_sql}\",
   \"bioseq_dso\": \"${_bioseq_dso}\",
   \"provider_peer_test_dso\": \"${_bioseq_cache_provider_peer_test_dso}\",
-  \"migration_ledger\": \"$<SHELL_PATH:${CMAKE_CURRENT_LIST_DIR}/../test/legacy_migration_ledger.tsv>\"
+  \"migration_ledger\": \"$<SHELL_PATH:${_bioseq_cache_migration_ledger}>\",
+  \"legacy_inventory\": \"$<SHELL_PATH:${_bioseq_cache_legacy_inventory}>\",
+  \"migration_catch_cases\": \"$<SHELL_PATH:${_bioseq_cache_migration_catch_cases}>\",
+  \"legacy_retirement_gate\": \"$<SHELL_PATH:$<TARGET_FILE:bioseq_cache_legacy_retirement_gate>>\"
 }
 ")
 file(GENERATE

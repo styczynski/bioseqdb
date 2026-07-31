@@ -11,6 +11,7 @@ module;
 #include <optional>
 #include <ostream>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,6 +31,7 @@ module;
 
 export module bioseq.cache.benchmark;
 
+import bioseq.common.durable_file_io;
 import bioseq.test.postgres;
 
 export namespace bioseq::cache_benchmark {
@@ -2407,31 +2409,54 @@ void write_report(
     const benchmark_report& report) {
     const std::filesystem::path absolute =
         std::filesystem::absolute(path);
-    std::filesystem::create_directories(absolute.parent_path());
-    const std::filesystem::path temporary =
-        absolute.parent_path()
-        / (absolute.filename().string() + ".partial");
-    std::ofstream output(temporary, std::ios::trunc);
-    if (!output) {
+    const auto directories_created =
+        bioseq::durable_file_io::durable_create_directories(
+            absolute.parent_path());
+    if (!directories_created.has_value()) {
+        const bioseq::durable_file_io::file_io_error& error =
+            directories_created.error();
         throw std::runtime_error(
-            "cannot create benchmark report");
+            "cannot durably create benchmark report directory: operation "
+            + std::to_string(static_cast<unsigned>(error.operation))
+            + ", code "
+            + std::to_string(static_cast<unsigned>(error.code))
+            + ", system error "
+            + std::to_string(error.system_error)
+            + ", publication "
+            + std::to_string(static_cast<unsigned>(error.publication)));
     }
+    std::ostringstream output;
     json::write(output, report);
     output.put('\n');
-    output.close();
     if (!output) {
-        std::error_code cleanup_error;
-        std::filesystem::remove(temporary, cleanup_error);
         throw std::runtime_error(
             "cannot finish benchmark report");
     }
-    std::error_code error;
-    std::filesystem::rename(temporary, absolute, error);
-    if (error) {
-        std::error_code cleanup_error;
-        std::filesystem::remove(temporary, cleanup_error);
+    const std::string serialized = std::move(output).str();
+    const auto published =
+        bioseq::durable_file_io::durable_replace_file(
+            absolute,
+            std::as_bytes(std::span{
+                serialized.data(), serialized.size()}),
+            bioseq::durable_file_io::durable_publish_options{
+                .mode = 0666});  // Preserve ofstream mode before umask.
+    if (!published.has_value()) {
+        const bioseq::durable_file_io::file_io_error& error =
+            published.error();
         throw std::runtime_error(
-            "cannot publish benchmark report: " + error.message());
+            "cannot durably publish benchmark report: operation "
+            + std::to_string(static_cast<unsigned>(error.operation))
+            + ", code "
+            + std::to_string(static_cast<unsigned>(error.code))
+            + ", system error "
+            + std::to_string(error.system_error)
+            + ", publication "
+            + std::to_string(static_cast<unsigned>(error.publication)));
+    }
+    if (published->publication
+        != bioseq::durable_file_io::publication_state::durable) {
+        throw std::runtime_error(
+            "benchmark report publication did not become durable");
     }
 }
 
