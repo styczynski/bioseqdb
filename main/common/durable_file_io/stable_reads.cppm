@@ -27,8 +27,13 @@ module;
 
 export module bioseq.common.durable_file_io:stable_reads;
 export import :types;
-import :detail;
+import :error;
+import :identity;
+import :path;
+import :open;
+import :sync;
 import :positional_io;
+import :stable_read_at;
 
 export namespace bioseq::durable_file_io {
 /**

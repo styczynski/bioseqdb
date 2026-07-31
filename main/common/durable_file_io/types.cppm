@@ -1,6 +1,6 @@
 /**
  * @file common/durable_file_io/types.cppm
- * @brief Public durable-file types, descriptor ownership, and declarations.
+ * @brief Public durable-file types and descriptor ownership.
  */
 module;
 
@@ -278,15 +278,4 @@ private:
     int descriptor_{-1};
 };
 
-}  // namespace bioseq::durable_file_io
-
-export namespace bioseq::durable_file_io {
-[[nodiscard]] inline std::expected<void, file_io_error>
-positional_read_exact(int descriptor, std::uint64_t offset,
-                      std::span<std::byte> destination,
-                      const positional_io_operations& operations = {}) noexcept;
-[[nodiscard]] inline std::expected<void, file_io_error>
-positional_write_all(int descriptor, std::span<const std::byte> bytes,
-                     std::uint64_t offset = 0,
-                     const positional_io_operations& operations = {}) noexcept;
 }  // namespace bioseq::durable_file_io

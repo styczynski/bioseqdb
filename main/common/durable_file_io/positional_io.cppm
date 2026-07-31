@@ -27,7 +27,26 @@ module;
 
 export module bioseq.common.durable_file_io:positional_io;
 export import :types;
-import :detail;
+
+import :error;
+import :identity;
+
+namespace bioseq::durable_file_io::detail {
+
+[[nodiscard]] inline ssize_t system_read_at(
+    void*, int descriptor, void* destination, std::size_t bytes,
+    off_t offset) noexcept {
+    return ::pread(descriptor, destination, bytes, offset);
+}
+
+[[nodiscard]] inline ssize_t system_write_at(
+    void*, int descriptor, const void* source, std::size_t bytes,
+    off_t offset) noexcept {
+    return ::pwrite(descriptor, source, bytes, offset);
+}
+
+}  // namespace bioseq::durable_file_io::detail
+
 export namespace bioseq::durable_file_io {
 
 /** Capture a regular descriptor's complete stable identity. */

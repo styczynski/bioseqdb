@@ -27,10 +27,14 @@ module;
 
 export module bioseq.common.durable_file_io:publication;
 export import :types;
-import :detail;
-import :positional_io;
-import :stable_reads;
-import :directory_operations;
+import :error;
+import :path;
+import :open;
+import :sync;
+import :staging;
+import :stable_read_at;
+import :cleanup;
+import :namespace_publish;
 export namespace bioseq::durable_file_io {
 
 /**
@@ -179,8 +183,9 @@ durable_create_file(
             !removed.has_value()) {
             return std::unexpected(removed.error());
         }
-        if (auto directory_synced = fsync_directory_descriptor(
+        if (auto directory_synced = detail::sync_descriptor(
                 directory.get(),
+                file_io_operation::sync_directory,
                 hooks,
                 publication_state::visible_not_durable);
             !directory_synced.has_value()) {
@@ -200,8 +205,9 @@ durable_create_file(
         !removed.has_value()) {
         return std::unexpected(removed.error());
     }
-    if (auto directory_synced = fsync_directory_descriptor(
+    if (auto directory_synced = detail::sync_descriptor(
             directory.get(),
+            file_io_operation::sync_directory,
             hooks,
             publication_state::visible_not_durable);
         !directory_synced.has_value()) {
@@ -275,8 +281,9 @@ durable_replace_file(
             renamed.error(),
             hooks));
     }
-    if (auto directory_synced = fsync_directory_descriptor(
+    if (auto directory_synced = detail::sync_descriptor(
             directory.get(),
+            file_io_operation::sync_directory,
             hooks,
             publication_state::visible_not_durable);
         !directory_synced.has_value()) {
@@ -369,8 +376,9 @@ durable_publish_file(
         !removed.has_value()) {
         return std::unexpected(removed.error());
     }
-    if (auto directory_synced = fsync_directory_descriptor(
+    if (auto directory_synced = detail::sync_descriptor(
             directory.get(),
+            file_io_operation::sync_directory,
             hooks,
             publication_state::visible_not_durable);
         !directory_synced.has_value()) {
@@ -439,8 +447,9 @@ durable_rename_file(
         !renamed.has_value()) {
         return std::unexpected(renamed.error());
     }
-    if (auto synced = fsync_directory_descriptor(
+    if (auto synced = detail::sync_descriptor(
             destination_descriptor,
+            file_io_operation::sync_directory,
             hooks,
             publication_state::visible_not_durable);
         !synced.has_value()) {
@@ -448,8 +457,9 @@ durable_rename_file(
     }
     if (source_parent.lexically_normal()
             != destination_parent.lexically_normal()) {
-        if (auto synced = fsync_directory_descriptor(
+        if (auto synced = detail::sync_descriptor(
                 source_directory.get(),
+                file_io_operation::sync_directory,
                 hooks,
                 publication_state::visible_not_durable);
             !synced.has_value()) {

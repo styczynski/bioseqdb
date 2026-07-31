@@ -27,7 +27,13 @@ module;
 
 export module bioseq.common.durable_file_io:directory_operations;
 export import :types;
-import :detail;
+import :error;
+import :identity;
+import :path;
+import :open;
+import :sync;
+import :cleanup;
+import :namespace_publish;
 
 export namespace bioseq::durable_file_io {
 /**
