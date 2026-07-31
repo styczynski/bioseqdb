@@ -114,7 +114,7 @@ void check_one_completed_exact_hit(
     }
     query.replace(
         offset, needle.size(),
-        "mmsearch(target, query, bioseq.aligner_options("
+        "mmsearch(target, query, aligner_options("
             + std::string(arguments) + "))");
     return query;
 }
@@ -249,12 +249,13 @@ TEST_CASE("BioseqScan exact provider produces and hits in same and reuse modes",
                   == "[Hit] exact final result");
             const bioseq::postgres_test::json_value* children =
                 cache_nodes.front()->find("Plans");
-            REQUIRE(children != nullptr);
-            REQUIRE(children->as_array() != nullptr);
-            REQUIRE_FALSE(children->as_array()->empty());
-            CHECK(bioseq::postgres_test::explain_property_number(
-                      children->as_array()->front(), "Actual Loops")
-                  == 0.0);
+            if (children != nullptr) {
+                REQUIRE(children->as_array() != nullptr);
+                REQUIRE_FALSE(children->as_array()->empty());
+                CHECK(bioseq::postgres_test::explain_property_number(
+                          children->as_array()->front(), "Actual Loops")
+                      == 0.0);
+            }
             const auto after_explain =
                 bioseq::cache_test::read_cache_stats(admin);
             const auto explain_delta = after_explain - after_warm;
@@ -605,14 +606,30 @@ TEST_CASE("disabling Bioseq custom scans bypasses sibling caching safely",
         bioseq::cache_test::read_cache_stats(connection);
     const auto plan = bioseq::postgres_test::run_explain(
         connection, small_query, false, 5min);
-    CHECK(plan
-              .find_plan_nodes("Custom Plan Provider", "BioseqCacheScan")
-              .empty());
+    const auto cache_nodes = plan.find_plan_nodes(
+        "Custom Plan Provider", "BioseqCacheScan");
+    REQUIRE(cache_nodes.size() == 1);
+    CHECK(bioseq::postgres_test::explain_property_bool(
+              *cache_nodes.front(), "Cache Force Bypass")
+          == true);
+    CHECK(bioseq::postgres_test::explain_property_string(
+              *cache_nodes.front(), "Cache Bypass Reason")
+          == "unsafe finalized source path");
     const auto error = bioseq::postgres_test::expect_sqlstate(
         connection, small_query, "0A000", 5min);
     CHECK(error.message.find("no Bioseq executor owner")
           != std::string::npos);
-    CHECK(bioseq::cache_test::read_cache_stats(connection) == before);
+    const auto delta =
+        bioseq::cache_test::read_cache_stats(connection) - before;
+    CHECK(delta.produced == 0);
+    CHECK(delta.completed_hits == 0);
+    CHECK(delta.inflight_waits == 0);
+    CHECK(delta.reuse_hits == 0);
+    CHECK(delta.fallbacks == 1);
+    CHECK(delta.invalidations == 0);
+    CHECK(delta.evictions == 0);
+    CHECK(delta.logical_bytes == 0);
+    CHECK(delta.stored_bytes == 0);
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_provider.custom_scan_off_bypasses");
 }

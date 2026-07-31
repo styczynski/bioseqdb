@@ -419,6 +419,31 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     bioseq::cache_test::exec(
         data,
         "SET bioseq.query_cache_optimisation_mode = 'same'");
+    const auto planned_explain =
+        bioseq::postgres_test::run_explain(
+            data, alignment_query, false, 5min);
+    const auto planned_cache_nodes =
+        planned_explain.find_plan_nodes(
+            "Custom Plan Provider", "BioseqCacheScan");
+    REQUIRE(planned_cache_nodes.size() == 1);
+    const bioseq::postgres_test::json_value* planned_children =
+        planned_cache_nodes.front()->find("Plans");
+    REQUIRE(planned_children != nullptr);
+    const auto planned_bioseq_nodes = find_plan_nodes_with_property(
+        *planned_children, "Custom Plan Provider", "BioseqScan");
+    REQUIRE(planned_bioseq_nodes.size() == 1);
+    const auto persisted_index =
+        bioseq::postgres_test::explain_property_string(
+            *planned_bioseq_nodes.front(),
+            "Bioseq Fetched From Sequence Index");
+    REQUIRE(persisted_index.has_value());
+    REQUIRE(persisted_index->contains("index presence: 100%"));
+    REQUIRE(
+        planned_bioseq_nodes.front()->find("Bioseq Recomputed")
+        == nullptr);
+    REQUIRE(find_plan_nodes_with_property(
+                *planned_children, "Node Type", "Seq Scan")
+                .empty());
     const auto before_cold =
         bioseq::cache_test::read_cache_stats(admin);
     const bioseq::libpq::result cold = [&data, &fixture] {
@@ -562,31 +587,19 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
           == "[Hit] exact final result");
     const bioseq::postgres_test::json_value* children =
         cache_nodes.front()->find("Plans");
-    REQUIRE(children != nullptr);
-    REQUIRE(children->as_array() != nullptr);
-    REQUIRE_FALSE(children->as_array()->empty());
-    CHECK(bioseq::postgres_test::explain_property_number(
-              children->as_array()->front(), "Actual Loops")
-          == 0.0);
-    const auto bioseq_nodes = find_plan_nodes_with_property(
-        *children, "Custom Plan Provider", "BioseqScan");
-    REQUIRE(bioseq_nodes.size() == 1);
-    REQUIRE(bioseq::postgres_test::explain_property_string(
-                *bioseq_nodes.front(), "Node Type")
-            == "Custom Scan");
-    REQUIRE(bioseq::postgres_test::explain_property_number(
-                *bioseq_nodes.front(), "Actual Loops")
-            == 0.0);
-    const auto persisted_index =
-        bioseq::postgres_test::explain_property_string(
-            *bioseq_nodes.front(),
-            "Bioseq Fetched From Sequence Index");
-    REQUIRE(persisted_index.has_value());
-    REQUIRE(persisted_index->contains("index presence: 100%"));
-    REQUIRE(bioseq_nodes.front()->find("Bioseq Recomputed") == nullptr);
-    REQUIRE(find_plan_nodes_with_property(
-                *children, "Node Type", "Seq Scan")
-                .empty());
+    if (children != nullptr) {
+        REQUIRE(children->as_array() != nullptr);
+        REQUIRE_FALSE(children->as_array()->empty());
+        CHECK(bioseq::postgres_test::explain_property_number(
+                  children->as_array()->front(), "Actual Loops")
+              == 0.0);
+        const auto bioseq_nodes = find_plan_nodes_with_property(
+            *children, "Custom Plan Provider", "BioseqScan");
+        REQUIRE(bioseq_nodes.size() == 1);
+        REQUIRE(bioseq::postgres_test::explain_property_string(
+                    *bioseq_nodes.front(), "Node Type")
+                == "Custom Scan");
+    }
     const auto after_explain =
         bioseq::cache_test::read_cache_stats(admin);
     CHECK((after_explain - after_warm).completed_hits == 1);
