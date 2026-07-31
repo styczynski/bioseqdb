@@ -161,6 +161,15 @@ struct probe_observation {
 
 namespace detail {
 
+[[nodiscard]] inline bool is_absent_path_error(
+    const std::error_code& error) noexcept {
+    return error
+            == std::make_error_code(
+                std::errc::no_such_file_or_directory)
+        || error
+            == std::make_error_code(std::errc::not_a_directory);
+}
+
 [[nodiscard]] inline std::vector<std::string> split_tsv(
     const std::string& line) {
     std::vector<std::string> fields;
@@ -937,6 +946,10 @@ load_catch_case_manifest(const std::filesystem::path& path) {
             const auto inspected_status =
                 std::filesystem::symlink_status(inspected, error);
             if (error) {
+                if (detail::is_absent_path_error(error)) {
+                    missing = true;
+                    break;
+                }
                 throw std::runtime_error(
                     "cannot inspect legacy asset component "
                     + inspected.string() + ": " + error.message());

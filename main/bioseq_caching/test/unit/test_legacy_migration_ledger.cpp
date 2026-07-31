@@ -177,7 +177,8 @@ TEST_CASE("per-harness validation ignores cross-harness missing evidence but rej
     CHECK_THROWS_WITH(
         validate_combined_evidence(ledger, integration_evidence),
         ContainsSubstring(
-            "benchmark.id owned by cache-bench: expected 1, observed 0"));
+            "benchmark.id owned by cache-bench/cache-bench: "
+            "expected 1, observed 0"));
 }
 
 TEST_CASE("per-report validation ignores sibling roles but rejects in-role missing evidence",
@@ -251,7 +252,8 @@ TEST_CASE("proof-ready migration requires complete evidence while exact legacy a
             ledger, cases, source_root(), {present_asset()}, {},
             retirement_phase::proof_ready),
         ContainsSubstring(
-            "passing.id owned by cache-integration: expected 1, observed 0"));
+            "passing.id owned by cache-integration/cache-integration: "
+            "expected 1, observed 0"));
 
     const auto validation = validate_global_ledger(
         ledger, cases, source_root(), {present_asset()}, evidence,
