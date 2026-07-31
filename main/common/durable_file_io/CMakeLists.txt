@@ -11,7 +11,14 @@ set_target_properties(bioseq_durable_file_io PROPERTIES
 target_sources(bioseq_durable_file_io
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-    FILES "${CMAKE_CURRENT_LIST_DIR}/index.cppm")
+    FILES
+      "${CMAKE_CURRENT_LIST_DIR}/types.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/detail.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/positional_io.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/stable_reads.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/directory_operations.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/publication.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/index.cppm")
 add_library(
   bioseq::durable_file_io
   ALIAS bioseq_durable_file_io)
