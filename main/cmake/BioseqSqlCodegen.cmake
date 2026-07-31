@@ -343,6 +343,16 @@ function(_bioseq_sql_annotation_authorized
   set(${output_variable} "${_authorized}" PARENT_SCOPE)
 endfunction()
 
+function(_bioseq_sql_dependency_only_support_source
+    output_variable normalized_source)
+  set(_authorized FALSE)
+  if(normalized_source MATCHES
+      "(^|/)([^/]*_sql_rows|sql_rows|rows|[^/]*_sql_guc_settings|sql_guc_settings)(\\.cppm|/index\\.cppm)$")
+    set(_authorized TRUE)
+  endif()
+  set(${output_variable} "${_authorized}" PARENT_SCOPE)
+endfunction()
+
 function(_bioseq_sql_legacy_fmgr_contract_authorized output_variable)
   cmake_parse_arguments(
     PARSE_ARGV 1 ARG
@@ -363,6 +373,41 @@ function(_bioseq_sql_legacy_fmgr_contract_authorized output_variable)
     endif()
   endif()
   set(${output_variable} "${_authorized}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_sql_run_dependency_only_support_contracts)
+  foreach(_source IN ITEMS
+      "/fixture/cache_sql_rows.cppm"
+      "/fixture/sql_rows.cppm"
+      "/fixture/rows.cppm"
+      "/fixture/cache_sql_guc_settings.cppm"
+      "/fixture/sql_guc_settings.cppm"
+      "/fixture/cache_sql_rows/index.cppm"
+      "/fixture/sql_rows/index.cppm"
+      "/fixture/rows/index.cppm"
+      "/fixture/cache_sql_guc_settings/index.cppm"
+      "/fixture/sql_guc_settings/index.cppm")
+    _bioseq_sql_dependency_only_support_source(
+      _authorized_support_source "${_source}")
+    if(NOT _authorized_support_source)
+      _bioseq_sql_registry_fail(
+        "dependency-only SUPPORT contract rejected: ${_source}")
+    endif()
+  endforeach()
+
+  foreach(_source IN ITEMS
+      "/fixture/index.cppm"
+      "/fixture/cache_rows/index.cppm"
+      "/fixture/row/index.cppm"
+      "/fixture/rows/not_index.cppm"
+      "/fixture/sql_rows/nested/index.cppm")
+    _bioseq_sql_dependency_only_support_source(
+      _authorized_support_source "${_source}")
+    if(_authorized_support_source)
+      _bioseq_sql_registry_fail(
+        "dependency-only SUPPORT contract accepted: ${_source}")
+    endif()
+  endforeach()
 endfunction()
 
 function(_bioseq_sql_run_annotation_authority_contracts)
@@ -446,6 +491,7 @@ function(_bioseq_sql_run_annotation_authority_contracts)
   endif()
 endfunction()
 
+_bioseq_sql_run_dependency_only_support_contracts()
 _bioseq_sql_run_annotation_authority_contracts()
 
 function(_bioseq_sql_write_registry_file output_path)
@@ -874,8 +920,9 @@ function(bioseq_register_sql_owner)
         "owner closure '${ARG_MODULE}': ${_source_real}")
     endif()
     if(NOT _support_index EQUAL -1)
-      if(NOT _normalized_source MATCHES
-          "(^|/)([^/]*_sql_rows|sql_rows|rows|[^/]*_sql_guc_settings|sql_guc_settings)\\.cppm$")
+      _bioseq_sql_dependency_only_support_source(
+        _authorized_support_source "${_normalized_source}")
+      if(NOT _authorized_support_source)
         _bioseq_sql_registry_fail(
           "SUPPORT source is not a dependency-only sql_rows/GUC module: "
           "${_normalized_source}")
