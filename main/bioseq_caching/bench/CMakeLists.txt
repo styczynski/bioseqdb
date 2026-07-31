@@ -114,6 +114,7 @@ set(_bioseq_cache_bioseq_support_postgres_stage_manifest "")
 set(_bioseq_cache_bioseq_production_postgres_bin_dir "")
 set(_bioseq_cache_bioseq_production_postgres_stage_root "")
 set(_bioseq_cache_bioseq_production_postgres_stage_manifest "")
+set(_bioseq_cache_production_dso_qualification_receipt "")
 if(BIOSEQ_BUILD_CORE)
   # postgresql_bioseq is declared after bioseq_caching at the top level. These
   # generator expressions resolve after the complete target graph exists.
@@ -129,6 +130,10 @@ if(BIOSEQ_BUILD_CORE)
     "$<SHELL_PATH:$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_production_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_production_postgres_stage,BIOSEQ_POSTGRES_STAGE_ROOT>>>")
   set(_bioseq_cache_bioseq_production_postgres_stage_manifest
     "$<SHELL_PATH:$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_production_postgres_stage,$<TARGET_PROPERTY:bioseq_cache_bioseq_production_postgres_stage,BIOSEQ_POSTGRES_STAGE_MANIFEST>>>")
+  if(BIOSEQ_CACHE_BUILD_TESTS)
+    set(_bioseq_cache_production_dso_qualification_receipt
+      "$<SHELL_PATH:$<TARGET_GENEX_EVAL:bioseq_cache_bioseq_production_dso_qualification,$<TARGET_PROPERTY:bioseq_cache_bioseq_production_dso_qualification,BIOSEQ_PRODUCTION_DSO_QUALIFICATION_RECEIPT>>>")
+  endif()
   if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
     set(_bioseq_cache_provider_peer_test_dso
       "$<SHELL_PATH:$<TARGET_FILE:bioseq_cache_provider_peer_test>>")
@@ -174,6 +179,7 @@ set(_bioseq_cache_native_artifacts
   \"cache_bioseq_production_postgres_bin_dir\": \"${_bioseq_cache_bioseq_production_postgres_bin_dir}\",
   \"cache_bioseq_production_postgres_stage_root\": \"${_bioseq_cache_bioseq_production_postgres_stage_root}\",
   \"cache_bioseq_production_postgres_stage_manifest\": \"${_bioseq_cache_bioseq_production_postgres_stage_manifest}\",
+  \"production_dso_qualification_receipt\": \"${_bioseq_cache_production_dso_qualification_receipt}\",
   \"cache_control\": \"$<SHELL_PATH:$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_CONTROL_FILE>>\",
   \"cache_install_sql\": \"$<SHELL_PATH:$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_INSTALL_SQL>>\",
   \"cache_dso\": \"$<SHELL_PATH:$<TARGET_GENEX_EVAL:postgresql_bioseq_cache,$<TARGET_PROPERTY:postgresql_bioseq_cache,BIOSEQ_EXTENSION_DSO>>>\",

@@ -713,6 +713,10 @@ if(TARGET bioseq_cache_unit_tests)
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
       "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_cache_modes.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/cmake/test_production_dso_qualification.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Running bioseq-build configure freshness contract tests"
     VERBATIM)
@@ -746,6 +750,12 @@ if(BIOSEQ_BUILD_CORE)
       INSTALL_SQL_PROPERTIES
         BIOSEQ_EXTENSION_INSTALL_SQL
         BIOSEQ_EXTENSION_INSTALL_SQL)
+    include(
+      "${CMAKE_SOURCE_DIR}/cmake/BioseqProductionDsoQualification.cmake")
+    bioseq_add_production_dso_qualification(
+      TARGET bioseq_cache_bioseq_production_dso_qualification
+      BIOSEQ_TARGET postgresql_bioseq
+      CACHE_TARGET postgresql_bioseq_cache)
     add_dependencies(
       bioseq_cache_bioseq_bench
       bioseq_cache_bioseq_production_postgres_stage)

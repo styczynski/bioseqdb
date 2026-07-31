@@ -42,6 +42,7 @@ EXPECTED_CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
     "cache_bioseq_production_postgres_bin_dir",
     "cache_bioseq_production_postgres_stage_root",
     "cache_bioseq_production_postgres_stage_manifest",
+    "production_dso_qualification_receipt",
     "cache_control",
     "cache_install_sql",
     "cache_dso",
@@ -565,6 +566,53 @@ class CacheModeRoutingTest(unittest.TestCase):
             ],
             cache_unit.commands,
         )
+
+    def test_combined_mode_owns_host_native_dso_qualification(self) -> None:
+        root_cmake = (MAIN_DIR / "CMakeLists.txt").read_text(encoding="utf-8")
+        helper = (
+            MAIN_DIR / "cmake" / "BioseqProductionDsoQualification.cmake"
+        ).read_text(encoding="utf-8")
+        qualifier = (
+            MAIN_DIR / "cmake" / "qualify_production_extension_dsos.py"
+        ).read_text(encoding="utf-8")
+        bench_cmake = (
+            MAIN_DIR / "bioseq_caching" / "bench" / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+
+        target = "bioseq_cache_bioseq_production_dso_qualification"
+        self.assertIn(
+            "bioseq_add_production_dso_qualification(", root_cmake)
+        self.assertIn("BIOSEQ_TARGET postgresql_bioseq", root_cmake)
+        self.assertIn("CACHE_TARGET postgresql_bioseq_cache", root_cmake)
+        self.assertIn(
+            "test_production_dso_qualification.py", root_cmake)
+        for mode in ("cache-bioseq-integration", "cache-bioseq-bench"):
+            with self.subTest(mode=mode):
+                self.assertIn(target, server.MODES[mode].targets)
+        for expression in (
+            "$<TARGET_FILE:${BIOSEQ_DSO_QUALIFY_BIOSEQ_TARGET}>",
+            "$<TARGET_FILE:${BIOSEQ_DSO_QUALIFY_CACHE_TARGET}>",
+            ".bioseq-build-mcp-configure.json",
+            "CMakeCache.txt",
+        ):
+            self.assertIn(expression, helper)
+        self.assertNotIn("test_support", helper)
+        self.assertNotIn(".sql.in", helper)
+        self.assertIn('CMAKE_SYSTEM_NAME STREQUAL "Darwin"', helper)
+        self.assertIn("NAMES otool", helper)
+        self.assertIn('CMAKE_SYSTEM_NAME STREQUAL "Linux"', helper)
+        self.assertIn("NAMES readelf", helper)
+        self.assertIn("BIOSEQ_PRODUCTION_DSO_QUALIFICATION_RECEIPT", helper)
+        self.assertIn("_macho_dependencies", qualifier)
+        self.assertIn("_macho_uuids", qualifier)
+        self.assertIn("_elf_dependencies", qualifier)
+        self.assertIn("_elf_build_ids", qualifier)
+        self.assertIn("sibling_dependency_absent", qualifier)
+        self.assertIn("content_sha256", qualifier)
+        self.assertIn("host_platform.machine", qualifier)
+        self.assertIn("identity_kind", qualifier)
+        self.assertIn(
+            '\\"production_dso_qualification_receipt\\"', bench_cmake)
 
     def test_cache_runtime_targets_use_profile_exact_postgres_stages(
             self) -> None:
@@ -1483,6 +1531,373 @@ class CacheModeRoutingTest(unittest.TestCase):
                     report_path=binary_dir / "report_0.json",
                 )
 
+    @staticmethod
+    def _seal_dso_document(
+            document: dict[str, object]) -> dict[str, object]:
+        result = dict(document)
+        result.pop("content_sha256", None)
+        result["content_sha256"] = server._canonical_json_sha256(result)
+        return result
+
+    @classmethod
+    def _production_dso_fixture(
+            cls, root: Path) -> dict[str, object]:
+        system = server.host_platform.system()
+        if system not in {"Darwin", "Linux"}:
+            raise unittest.SkipTest("DSO qualification supports Darwin/Linux")
+        machine = server._qualification_architecture(
+            server.host_platform.machine(), "fixture host architecture")
+        suffix = ".dylib" if system == "Darwin" else ".so"
+        binary_format = "Mach-O" if system == "Darwin" else "ELF"
+        build_dir = root / "cache-bioseq-fixture"
+        binary_dir = build_dir / "bioseq_caching"
+        binary_dir.mkdir(parents=True)
+        tool = root / ("otool" if system == "Darwin" else "readelf")
+        c_compiler = root / "cc"
+        cxx_compiler = root / "c++"
+        for executable in (c_compiler, cxx_compiler):
+            executable.write_bytes((executable.name + "\n").encode())
+            executable.chmod(0o755)
+        dsos = {
+            "bioseq_dso": build_dir / f"bioseq{suffix}",
+            "cache_dso": build_dir / f"bioseq_cache{suffix}",
+        }
+        for key, path in dsos.items():
+            path.write_bytes((key + "\n").encode())
+        if system == "Darwin":
+            tool.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  -hv) printf '%s\\n' 'Mach header' "
+                f"'MH_MAGIC_64 {machine.upper()} ALL 0x6 0 0 0 0' ;;\n"
+                "  -L) printf '%s\\n' \"$2:\" "
+                "'\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, "
+                "current version 1.0.0)' ;;\n"
+                "  -l) case \"$2\" in *bioseq_cache*) "
+                "uuid=22222222-2222-2222-2222-222222222222 ;; "
+                "*) uuid=11111111-1111-1111-1111-111111111111 ;; esac; "
+                "printf '%s\\n' 'Load command 1' '      cmd LC_UUID' "
+                "\"     uuid $uuid\" ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+        else:
+            elf_machine = (
+                "AArch64" if machine == "arm64"
+                else "Advanced Micro Devices X86-64")
+            tool.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  -h) printf '%s\\n' 'ELF Header:' "
+                "'  Class:                             ELF64' "
+                "\"  Data:                              2's complement, "
+                "little endian\" "
+                f"'  Machine:                           {elf_machine}' ;;\n"
+                "  -d) printf '%s\\n' 'Dynamic section:' "
+                "' 0x0000000000000001 (NEEDED) Shared library: "
+                "[libc.so.6]' ;;\n"
+                "  -n) case \"$2\" in *bioseq_cache*) id=5678efab ;; "
+                "*) id=1234abcd ;; esac; "
+                "printf '    Build ID: %s\\n' \"$id\" ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+        tool.chmod(0o755)
+        cmake_cache = build_dir / "CMakeCache.txt"
+        cmake_cache.write_text(
+            "CMAKE_BUILD_TYPE:STRING=Release\n"
+            "CMAKE_GENERATOR:INTERNAL=Ninja\n"
+            f"CMAKE_C_COMPILER:FILEPATH={c_compiler}\n"
+            f"CMAKE_CXX_COMPILER:FILEPATH={cxx_compiler}\n",
+            encoding="utf-8",
+        )
+        configure_inputs = {"preset": "cache-bioseq-fixture"}
+        configure_stamp = build_dir / server._CMAKE_CONFIGURE_STAMP_NAME
+        configure_stamp.write_text(json.dumps({
+            "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
+            "schema_version": 1,
+            "inputs": configure_inputs,
+            "inputs_sha256":
+                server._canonical_json_sha256(configure_inputs),
+        }), encoding="utf-8")
+
+        def identity(path: Path) -> dict[str, object]:
+            return {
+                "lexical_path": str(path),
+                "resolved_path": str(path.resolve(strict=True)),
+                "size_bytes": path.stat().st_size,
+                "sha256": server._sha256_path(path),
+            }
+
+        compiler_context = {
+            "c": {
+                **identity(c_compiler),
+                "compiler_id": "FixtureC",
+                "compiler_version": "1.2.3",
+            },
+            "cxx": {
+                **identity(cxx_compiler),
+                "compiler_id": "FixtureCXX",
+                "compiler_version": "4.5.6",
+            },
+        }
+        binary = (
+            {"format": "Mach-O", "architectures": [machine]}
+            if system == "Darwin" else {
+                "format": "ELF",
+                "architectures": [machine],
+                "class": "ELF64",
+                "data": "2's complement, little endian",
+                "machine": (
+                    "AArch64" if machine == "arm64"
+                    else "Advanced Micro Devices X86-64"),
+                "architecture": machine,
+            }
+        )
+        dso_rows = []
+        for extension, key, identity_value in (
+            (
+                "bioseq", "bioseq_dso",
+                "11111111-1111-1111-1111-111111111111"
+                if system == "Darwin" else "1234abcd"),
+            (
+                "bioseq_cache", "cache_dso",
+                "22222222-2222-2222-2222-222222222222"
+                if system == "Darwin" else "5678efab"),
+        ):
+            sibling = "bioseq_cache" if extension == "bioseq" else "bioseq"
+            if system == "Darwin":
+                header_listing = (
+                    "Mach header\n"
+                    f"MH_MAGIC_64 {machine.upper()} ALL 0x6 0 0 0 0\n")
+                dependency_listing = (
+                    f"{dsos[key]}:\n"
+                    "\t/usr/lib/libSystem.B.dylib (compatibility version "
+                    "1.0.0, current version 1.0.0)\n")
+                identity_listing = (
+                    "Load command 1\n"
+                    "      cmd LC_UUID\n"
+                    f"     uuid {identity_value}\n")
+            else:
+                header_listing = (
+                    "ELF Header:\n"
+                    "  Class:                             ELF64\n"
+                    "  Data:                              2's complement, "
+                    "little endian\n"
+                    f"  Machine:                           {binary['machine']}\n")
+                dependency_listing = (
+                    "Dynamic section:\n"
+                    " 0x0000000000000001 (NEEDED) Shared library: "
+                    "[libc.so.6]\n")
+                identity_listing = f"    Build ID: {identity_value}\n"
+            dso_rows.append({
+                "extension": extension,
+                "path": str(dsos[key]),
+                "basename": dsos[key].name,
+                "size_bytes": dsos[key].stat().st_size,
+                "sha256": server._sha256_path(dsos[key]),
+                "binary": dict(binary),
+                "header_listing_sha256": server._sha256_bytes(
+                    header_listing.encode("utf-8")),
+                "build_identity": {
+                    "kind": (
+                        "mach-o-lc-uuid" if system == "Darwin"
+                        else "elf-gnu-build-id"),
+                    "values": [identity_value],
+                },
+                "direct_load_dependencies": [
+                    "/usr/lib/libSystem.B.dylib"
+                    if system == "Darwin" else "libc.so.6"],
+                "dependency_listing_sha256": server._sha256_bytes(
+                    dependency_listing.encode("utf-8")),
+                "build_identity_listing_sha256": server._sha256_bytes(
+                    identity_listing.encode("utf-8")),
+                "sibling_extension": sibling,
+                "sibling_basename": f"{sibling}{suffix}",
+                "sibling_dependency_absent": True,
+            })
+        document = cls._seal_dso_document({
+            "schema_version": 1,
+            "artifact_kind": "bioseq-production-dso-load-qualification",
+            "platform": {
+                "system_name": system,
+                "system_release": server.host_platform.release(),
+                "machine": machine,
+                "binary_format": binary_format,
+                "dso_suffix": suffix,
+            },
+            "inspection_tool": {
+                **identity(tool),
+                "identity_kind": "executable-sha256",
+                "header_arguments": ["-hv"] if system == "Darwin" else ["-h"],
+                "dependency_arguments": ["-L"] if system == "Darwin" else ["-d"],
+                "build_identity_arguments": ["-l"] if system == "Darwin" else ["-n"],
+            },
+            "build_context": {
+                "preset": "cache-bioseq-fixture",
+                "configuration": "Release",
+                "build_type": "Release",
+                "generator": "Ninja",
+                "build_directory": str(build_dir),
+                "cmake_system": {"name": system, "processor": machine},
+                "cmake_cache": {
+                    "path": str(cmake_cache),
+                    "size_bytes": cmake_cache.stat().st_size,
+                    "sha256": server._sha256_path(cmake_cache),
+                },
+                "configure_input": {
+                    "path": str(configure_stamp),
+                    "size_bytes": configure_stamp.stat().st_size,
+                    "sha256": server._sha256_path(configure_stamp),
+                    "inputs_sha256":
+                        server._canonical_json_sha256(configure_inputs),
+                },
+                "compilers": compiler_context,
+            },
+            "dsos": dso_rows,
+        })
+        receipt = binary_dir / "production-dso-qualification.json"
+        receipt.write_text(json.dumps(document), encoding="utf-8")
+        manifest = {
+            key: str(binary_dir / key)
+            for key in server._CACHE_NATIVE_ARTIFACT_KEYS
+        }
+        manifest.update({key: str(path) for key, path in dsos.items()})
+        manifest["production_dso_qualification_receipt"] = str(receipt)
+        (binary_dir / "cache_native_artifacts.json").write_text(
+            json.dumps(manifest), encoding="utf-8")
+        return {
+            "binary_dir": binary_dir,
+            "build_dir": build_dir,
+            "receipt": receipt,
+            "document": document,
+            "tool": tool,
+            "cmake_cache": cmake_cache,
+            "configure_stamp": configure_stamp,
+            "dsos": dsos,
+        }
+
+    def test_builder_validates_and_binds_production_dso_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._production_dso_fixture(Path(tmp))
+            evidence = server._cache_bioseq_dso_qualification_evidence(
+                fixture["binary_dir"],
+                expected_build_dir=fixture["build_dir"],
+                expected_preset="cache-bioseq-fixture",
+            )
+            self.assertEqual(
+                evidence["production_dso_qualification_receipt"],
+                str(fixture["receipt"]),
+            )
+            self.assertEqual(
+                evidence["production_dso_qualification_content_sha256"],
+                fixture["document"]["content_sha256"],
+            )
+            self.assertEqual(
+                set(evidence),
+                set(server._CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS),
+            )
+
+    def test_report_binding_snapshots_mutable_cmake_dso_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self._production_dso_fixture(root)
+            report = root / "report_17.json"
+            report.write_text("{}", encoding="utf-8")
+            evidence = server._cache_bioseq_dso_qualification_evidence(
+                fixture["binary_dir"],
+                expected_build_dir=fixture["build_dir"],
+                expected_preset="cache-bioseq-fixture",
+                snapshot_for_report=report,
+            )
+            snapshot = Path(
+                evidence["production_dso_qualification_receipt"])
+            self.assertEqual(
+                snapshot, root / "production_dso_qualification_17.json")
+            self.assertNotEqual(snapshot, fixture["receipt"])
+            fixture["receipt"].write_text("{}", encoding="utf-8")
+            server._validate_cache_evidence_dso_binding({
+                "report_role": "cache-bioseq-bench",
+                **evidence,
+            })
+
+    def test_builder_rejects_dso_receipt_and_live_context_tampering(
+            self) -> None:
+        mutations = {
+            "receipt seal": lambda fixture: fixture["receipt"].write_text(
+                json.dumps({**fixture["document"], "content_sha256": "0" * 64}),
+                encoding="utf-8"),
+            "inspection tool": lambda fixture: fixture["tool"].write_bytes(
+                b"tampered tool\n"),
+            "CMake cache": lambda fixture: fixture["cmake_cache"].write_text(
+                "tampered cache\n", encoding="utf-8"),
+            "configure input": lambda fixture: fixture[
+                "configure_stamp"].write_text("{}", encoding="utf-8"),
+            "production DSO": lambda fixture: fixture["dsos"][
+                "bioseq_dso"].write_bytes(b"tampered DSO\n"),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                fixture = self._production_dso_fixture(Path(tmp))
+                mutate(fixture)
+                with self.assertRaises(RuntimeError):
+                    server._cache_bioseq_dso_qualification_evidence(
+                        fixture["binary_dir"],
+                        expected_build_dir=fixture["build_dir"],
+                        expected_preset="cache-bioseq-fixture",
+                    )
+
+    def test_builder_rejects_platform_and_binary_architecture_tampering(
+            self) -> None:
+        for field in ("platform", "binary"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                fixture = self._production_dso_fixture(Path(tmp))
+                document = fixture["document"]
+                assert isinstance(document, dict)
+                if field == "platform":
+                    document["platform"]["machine"] = (
+                        "x86_64"
+                        if document["platform"]["machine"] == "arm64"
+                        else "arm64")
+                else:
+                    document["dsos"][0]["binary"]["architectures"] = [
+                        "x86_64"
+                        if document["platform"]["machine"] == "arm64"
+                        else "arm64"]
+                sealed = self._seal_dso_document(document)
+                fixture["receipt"].write_text(
+                    json.dumps(sealed), encoding="utf-8")
+                with self.assertRaises(RuntimeError):
+                    server._cache_bioseq_dso_qualification_evidence(
+                        fixture["binary_dir"],
+                        expected_build_dir=fixture["build_dir"],
+                        expected_preset="cache-bioseq-fixture",
+                    )
+
+    def test_builder_reruns_tool_and_rejects_resealed_dependency_lie(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._production_dso_fixture(Path(tmp))
+            document = fixture["document"]
+            assert isinstance(document, dict)
+            document["dsos"][0]["direct_load_dependencies"] = [
+                "/usr/lib/libz.1.dylib"
+                if server.host_platform.system() == "Darwin"
+                else "libm.so.6"
+            ]
+            sealed = self._seal_dso_document(document)
+            fixture["receipt"].write_text(
+                json.dumps(sealed), encoding="utf-8")
+            with self.assertRaisesRegex(
+                    RuntimeError, "direct_load_dependencies differs"):
+                server._cache_bioseq_dso_qualification_evidence(
+                    fixture["binary_dir"],
+                    expected_build_dir=fixture["build_dir"],
+                    expected_preset="cache-bioseq-fixture",
+                )
+
     def test_report_path_allocator_preserves_prior_native_reports(
             self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1990,6 +2405,103 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         )
 
     @classmethod
+    def _dso_binding(cls, root: Path) -> dict[str, str]:
+        receipt = root / "qualification" / "production-dso.json"
+        build = Path("/fixed/cache-bioseq-build")
+        file_identity = {
+            "lexical_path": "/fixed/tool",
+            "resolved_path": "/fixed/tool",
+            "size_bytes": 1,
+            "sha256": "1" * 64,
+        }
+        document = CacheModeRoutingTest._seal_dso_document({
+            "schema_version": 1,
+            "artifact_kind": "bioseq-production-dso-load-qualification",
+            "platform": {
+                "system_name": "Darwin",
+                "system_release": "historical-release",
+                "machine": "arm64",
+                "binary_format": "Mach-O",
+                "dso_suffix": ".dylib",
+            },
+            "inspection_tool": {
+                **file_identity,
+                "identity_kind": "executable-sha256",
+                "header_arguments": ["-hv"],
+                "dependency_arguments": ["-L"],
+                "build_identity_arguments": ["-l"],
+            },
+            "build_context": {
+                "preset": "historical-cache-bioseq",
+                "configuration": "Release",
+                "build_type": "Release",
+                "generator": "Ninja",
+                "build_directory": str(build),
+                "cmake_system": {"name": "Darwin", "processor": "arm64"},
+                "cmake_cache": {
+                    "path": str(build / "CMakeCache.txt"),
+                    "size_bytes": 1,
+                    "sha256": "2" * 64,
+                },
+                "configure_input": {
+                    "path": str(build / server._CMAKE_CONFIGURE_STAMP_NAME),
+                    "size_bytes": 1,
+                    "sha256": "3" * 64,
+                    "inputs_sha256": "4" * 64,
+                },
+                "compilers": {
+                    language: {
+                        **file_identity,
+                        "compiler_id": "HistoricalCompiler",
+                        "compiler_version": "1.0",
+                    }
+                    for language in ("c", "cxx")
+                },
+            },
+            "dsos": [
+                {
+                    "extension": extension,
+                    "path": str(build / f"{extension}.dylib"),
+                    "basename": f"{extension}.dylib",
+                    "size_bytes": 1,
+                    "sha256": dso_sha,
+                    "binary": {
+                        "format": "Mach-O",
+                        "architectures": ["arm64"],
+                    },
+                    "header_listing_sha256": "5" * 64,
+                    "build_identity": {
+                        "kind": "mach-o-lc-uuid",
+                        "values": [uuid],
+                    },
+                    "direct_load_dependencies": [
+                        "/usr/lib/libSystem.B.dylib"],
+                    "dependency_listing_sha256": "6" * 64,
+                    "build_identity_listing_sha256": "7" * 64,
+                    "sibling_extension": sibling,
+                    "sibling_basename": f"{sibling}.dylib",
+                    "sibling_dependency_absent": True,
+                }
+                for extension, sibling, dso_sha, uuid in (
+                    (
+                        "bioseq", "bioseq_cache", "8" * 64,
+                        "11111111-1111-1111-1111-111111111111"),
+                    (
+                        "bioseq_cache", "bioseq", "9" * 64,
+                        "22222222-2222-2222-2222-222222222222"),
+                )
+            ],
+        })
+        cls._write_json(receipt, document)
+        return {
+            "production_dso_qualification_receipt": str(receipt),
+            "production_dso_qualification_receipt_sha256":
+                server._sha256_path(receipt),
+            "production_dso_qualification_content_sha256":
+                str(document["content_sha256"]),
+        }
+
+    @classmethod
     def _historical_chain(
             cls, root: Path) -> dict[str, object]:
         unit_dir = root / "unit"
@@ -1999,6 +2511,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         historical["source_revision"] = "1" * 40
         historical["source_scope_sha256"] = "2" * 64
         historical["migration_ledger_sha256"] = "3" * 64
+        dso_binding = cls._dso_binding(root)
 
         unit_receipt = unit_dir / "receipt_historical.json"
         cls._write_json(unit_receipt, {
@@ -2020,7 +2533,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                 "status": "passed",
             })
             receipt = evidence_dir / f"receipt_historical_{ordinal}.json"
-            cls._write_json(receipt, {
+            receipt_value = {
                 "schema_version":
                     "bioseq-cache-mcp-evidence-receipt-v1",
                 "mode": server._CACHE_EVIDENCE_MODE_BY_ROLE[role],
@@ -2035,7 +2548,10 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                 "scenario":
                     server._CACHE_EVIDENCE_SCENARIO_BY_ROLE[role],
                 **historical,
-            })
+            }
+            if role in server._CACHE_COMBINED_EVIDENCE_ROLES:
+                receipt_value.update(dso_binding)
+            cls._write_json(receipt, receipt_value)
             evidence_receipts[role] = receipt
             native_reports[role] = native_report
             report_seals.append({
@@ -2061,6 +2577,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
             "evidence_receipts": evidence_receipts,
             "native_reports": native_reports,
             "proof": proof,
+            "dso_binding": dso_binding,
         }
 
     @classmethod
@@ -2071,6 +2588,8 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         evidence_dir = fixture["evidence_dir"]
         assert isinstance(unit_dir, Path)
         assert isinstance(evidence_dir, Path)
+        dso_binding = fixture["dso_binding"]
+        assert isinstance(dso_binding, dict)
         unit_receipt = unit_dir / "receipt_current.json"
         cls._write_json(unit_receipt, {
             "schema_version": "bioseq-cache-mcp-unit-receipt-v1",
@@ -2082,7 +2601,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         receipts = []
         for ordinal, role in enumerate(cls._ROLES):
             path = evidence_dir / f"receipt_current_{ordinal}.json"
-            cls._write_json(path, {
+            receipt_value = {
                 "schema_version":
                     "bioseq-cache-mcp-evidence-receipt-v1",
                 "mode": server._CACHE_EVIDENCE_MODE_BY_ROLE[role],
@@ -2094,7 +2613,10 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                 "scenario":
                     server._CACHE_EVIDENCE_SCENARIO_BY_ROLE[role],
                 **provenance,
-            })
+            }
+            if role in server._CACHE_COMBINED_EVIDENCE_ROLES:
+                receipt_value.update(dso_binding)
+            cls._write_json(path, receipt_value)
             receipts.append(path)
         return unit_receipt, receipts
 
@@ -2256,6 +2778,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             reporting = Path(tmp) / "receipts"
             reporting.mkdir()
+            dso_binding = self._dso_binding(Path(tmp))
             for ordinal, role in enumerate(reversed(roles)):
                 receipt = {
                     "schema_version":
@@ -2271,6 +2794,8 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                         server._CACHE_EVIDENCE_SCENARIO_BY_ROLE[role],
                     **provenance,
                 }
+                if role in server._CACHE_COMBINED_EVIDENCE_ROLES:
+                    receipt.update(dso_binding)
                 (reporting / f"receipt_{ordinal}.json").write_text(
                     json.dumps(receipt), encoding="utf-8")
             with mock.patch.object(
@@ -2297,6 +2822,60 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                         RuntimeError, "missing=.*cache-integration"):
                     server._find_current_cache_evidence_receipts(
                         provenance)
+
+    def test_current_roster_rejects_missing_or_tampered_dso_binding(
+            self) -> None:
+        provenance = self._provenance()
+        for mutation in ("missing", "tampered"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                fixture = self._historical_chain(Path(tmp))
+                _, receipts = self._add_current_chain(fixture, provenance)
+                combined = next(
+                    path for path in receipts
+                    if json.loads(path.read_text(encoding="utf-8"))[
+                        "report_role"] in server._CACHE_COMBINED_EVIDENCE_ROLES)
+                value = json.loads(combined.read_text(encoding="utf-8"))
+                if mutation == "missing":
+                    del value["production_dso_qualification_receipt_sha256"]
+                    combined.write_text(json.dumps(value), encoding="utf-8")
+                else:
+                    dso_receipt = Path(
+                        value["production_dso_qualification_receipt"])
+                    dso_receipt.write_text("{}", encoding="utf-8")
+                with mock.patch.object(
+                        server,
+                        "_CACHE_EVIDENCE_REPORTING_DIRS",
+                        (fixture["evidence_dir"],)):
+                    with self.assertRaisesRegex(
+                            RuntimeError, "DSO|qualification"):
+                        server._find_current_cache_evidence_receipts(provenance)
+
+    def test_retained_proof_rejects_missing_dso_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._historical_chain(Path(tmp))
+            receipts = fixture["evidence_receipts"]
+            proof = fixture["proof"]
+            assert isinstance(receipts, dict)
+            assert isinstance(proof, dict)
+            role = "cache-bioseq-bench"
+            receipt = receipts[role]
+            value = json.loads(receipt.read_text(encoding="utf-8"))
+            del value["production_dso_qualification_content_sha256"]
+            receipt.write_text(json.dumps(value), encoding="utf-8")
+            for record in proof["reports"]:
+                if record["report_role"] == role:
+                    record["receipt_sha256"] = server._sha256_path(receipt)
+            with (
+                mock.patch.object(
+                    server, "_CACHE_EVIDENCE_REPORTING_DIRS",
+                    (fixture["evidence_dir"],)),
+                mock.patch.object(
+                    server, "_CACHE_UNIT_REPORTING_DIR",
+                    fixture["unit_dir"]),
+            ):
+                with self.assertRaisesRegex(
+                        RuntimeError, "incomplete production DSO"):
+                    server._find_proof_cache_receipts(proof)
 
     def test_current_only_roster_cannot_satisfy_historical_proof(
             self) -> None:
@@ -3495,6 +4074,11 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                             "_cache_native_report_contract",
                             return_value=native,
                         ))
+                        stack.enter_context(mock.patch.object(
+                            server,
+                            "_cache_bioseq_dso_qualification_evidence",
+                            return_value=self._dso_binding(root),
+                        ))
                         if (
                             mutation
                             == "recreate-cleanup-before-publication"
@@ -3523,6 +4107,11 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
         self.assertEqual(
             receipt["report_role"],
             "cache-bioseq-support-integration",
+        )
+        self.assertEqual(
+            set(server._CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS)
+            & set(receipt),
+            set(server._CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS),
         )
         for mutation in (
                 "missing-provider",

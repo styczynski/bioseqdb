@@ -47,6 +47,7 @@ import hashlib
 import json
 import math
 import os
+import platform as host_platform
 import re
 import select
 import secrets
@@ -1783,6 +1784,7 @@ MODES: Dict[str, ModeDefinition] = {
             "postgresql_bioseq_cache",
             "postgresql_bioseq_cache_test_support",
             "postgresql_bioseq",
+            "bioseq_cache_bioseq_production_dso_qualification",
             "bioseq_cache_bioseq_support_integration_tests",
             "bioseq_cache_bioseq_production_integration_tests",
         ],
@@ -1856,6 +1858,7 @@ MODES: Dict[str, ModeDefinition] = {
         targets=[
             "postgresql_bioseq_cache",
             "postgresql_bioseq",
+            "bioseq_cache_bioseq_production_dso_qualification",
             "bioseq_cache_bioseq_bench",
             "bioseq_cache_legacy_retirement_gate",
         ],
@@ -2672,6 +2675,7 @@ _CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
     "cache_bioseq_production_postgres_bin_dir",
     "cache_bioseq_production_postgres_stage_root",
     "cache_bioseq_production_postgres_stage_manifest",
+    "production_dso_qualification_receipt",
     "cache_control",
     "cache_install_sql",
     "cache_dso",
@@ -2717,6 +2721,791 @@ def _cache_native_artifacts(active_bin_dir: Path) -> dict[str, str]:
                 f"native cache artifact {key!r} is not absolute: {value}")
         values[key] = value
     return values
+
+
+_CACHE_BIOSEQ_DSO_QUALIFICATION_MODES = frozenset({
+    "cache-bioseq-integration",
+    "cache-bioseq-bench",
+})
+_CACHE_BIOSEQ_DSO_QUALIFICATION_RECEIPT_KEY = (
+    "production_dso_qualification_receipt"
+)
+_CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS = (
+    "production_dso_qualification_receipt",
+    "production_dso_qualification_receipt_sha256",
+    "production_dso_qualification_content_sha256",
+)
+_CACHE_COMBINED_EVIDENCE_ROLES = frozenset({
+    "cache-bioseq-support-integration",
+    "cache-bioseq-production-integration",
+    "cache-bioseq-bench",
+})
+
+
+def _qualification_exact_keys(
+        value: Mapping[str, object], expected: set[str], context: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise RuntimeError(
+            f"{context} keys differ from the contract: "
+            f"missing={sorted(expected - actual)} "
+            f"unknown={sorted(actual - expected)}")
+
+
+def _qualification_digest(value: object, context: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise RuntimeError(f"{context} is not a lowercase SHA-256 digest")
+    return value
+
+
+def _qualification_architecture(value: object, context: str) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError(f"{context} is not a string")
+    normalized = value.strip().lower().replace("-", "_")
+    aliases = {
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "arm64e": "arm64",
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+    }
+    if normalized not in aliases:
+        raise RuntimeError(f"{context} is unsupported: {value!r}")
+    return aliases[normalized]
+
+
+def _qualification_file_identity(
+        value: object,
+        context: str,
+        *,
+        validate_live: bool,
+        executable: bool,
+) -> Path:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{context} identity is not an object")
+    _qualification_exact_keys(
+        value,
+        {"lexical_path", "resolved_path", "size_bytes", "sha256"},
+        f"{context} identity",
+    )
+    lexical_raw = value["lexical_path"]
+    resolved_raw = value["resolved_path"]
+    size = value["size_bytes"]
+    digest = _qualification_digest(value["sha256"], f"{context} SHA-256")
+    if (
+        not isinstance(lexical_raw, str)
+        or not Path(lexical_raw).is_absolute()
+        or not isinstance(resolved_raw, str)
+        or not Path(resolved_raw).is_absolute()
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+    ):
+        raise RuntimeError(f"{context} identity fields are invalid")
+    resolved = Path(resolved_raw)
+    if not validate_live:
+        return resolved
+    lexical = Path(lexical_raw)
+    try:
+        lexical_metadata = lexical.lstat()
+        current = lexical.resolve(strict=True)
+        current_metadata = current.stat()
+    except OSError as exc:
+        raise RuntimeError(f"cannot inspect current {context}: {exc}") from exc
+    if (
+        not (stat.S_ISREG(lexical_metadata.st_mode)
+             or stat.S_ISLNK(lexical_metadata.st_mode))
+        or not stat.S_ISREG(current_metadata.st_mode)
+        or current != resolved
+        or current_metadata.st_size != size
+        or _sha256_path(current) != digest
+        or (executable and not os.access(current, os.X_OK))
+    ):
+        raise RuntimeError(f"current {context} differs from its sealed identity")
+    return current
+
+
+def _run_qualification_inspection(
+        tool: Path, arguments: list[str], context: str) -> str:
+    environment = os.environ.copy()
+    environment.update({"LC_ALL": "C", "LANG": "C"})
+    try:
+        completed = subprocess.run(
+            [str(tool), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"production DSO {context} exceeded 30 seconds") from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot rerun production DSO {context}: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(
+            f"production DSO {context} failed: "
+            f"{detail or completed.returncode}")
+    output = completed.stdout
+    if not output.strip() and completed.stderr.strip():
+        output = completed.stderr
+    lines = output.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    return "\n".join(line.rstrip() for line in lines).strip() + "\n"
+
+
+def _live_dso_inspection(
+        tool: Path, path: Path, system_name: str) -> dict[str, object]:
+    commands = (
+        (("-hv",), ("-L",), ("-l",))
+        if system_name == "Darwin"
+        else (("-h",), ("-d",), ("-n",))
+    )
+    header = _run_qualification_inspection(
+        tool, [*commands[0], str(path)], f"header inspection for {path}")
+    dependency = _run_qualification_inspection(
+        tool, [*commands[1], str(path)], f"dependency inspection for {path}")
+    identity = _run_qualification_inspection(
+        tool, [*commands[2], str(path)], f"build-identity inspection for {path}")
+    if system_name == "Darwin":
+        architectures = sorted({
+            _qualification_architecture(match.group(1), "Mach-O architecture")
+            for match in re.finditer(
+                r"^\s*MH_[A-Z0-9_]+\s+([A-Za-z0-9_-]+)\s+",
+                header,
+                re.MULTILINE,
+            )
+        })
+        dependencies = sorted(
+            match.group(1)
+            for line in dependency.splitlines()[1:]
+            if (match := re.match(
+                r"^\s+(.+?)\s+\(compatibility version ", line))
+        )
+        identities = sorted({
+            match.group(1).lower()
+            for match in re.finditer(
+                r"^\s*uuid\s+([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-"
+                r"[0-9A-Fa-f]{12})\b",
+                identity,
+                re.MULTILINE,
+            )
+        })
+        binary: dict[str, object] = {
+            "format": "Mach-O",
+            "architectures": architectures,
+        }
+        identity_kind = "mach-o-lc-uuid"
+    else:
+        fields: dict[str, str] = {}
+        for field, key in (("Class", "class"), ("Data", "data"),
+                           ("Machine", "machine")):
+            match = re.search(
+                rf"^\s*{field}:\s*(.+?)\s*$", header, re.MULTILINE)
+            if match is None:
+                raise RuntimeError(
+                    f"live ELF header for {path} omits {field}")
+            fields[key] = match.group(1)
+        if re.search(
+                r"(?:X86-64|Advanced Micro Devices X86-64)",
+                fields["machine"]):
+            architecture = "x86_64"
+        elif fields["machine"] == "AArch64":
+            architecture = "arm64"
+        else:
+            raise RuntimeError(
+                f"live ELF machine for {path} is unsupported: "
+                f"{fields['machine']}")
+        architectures = [architecture]
+        dependencies = sorted(
+            re.findall(r"\(NEEDED\).*?\[([^]\r\n]+)\]", dependency))
+        identities = sorted({
+            match.group(1).lower()
+            for match in re.finditer(
+                r"^\s*Build ID:\s*([0-9A-Fa-f]+)\s*$",
+                identity,
+                re.MULTILINE,
+            )
+        })
+        binary = {
+            "format": "ELF",
+            "architectures": architectures,
+            **fields,
+            "architecture": architecture,
+        }
+        identity_kind = "elf-gnu-build-id"
+    if not architectures or not dependencies or not identities:
+        raise RuntimeError(
+            f"live production DSO inspection is incomplete for {path}")
+    if len(dependencies) != len(set(dependencies)):
+        raise RuntimeError(
+            f"live production DSO dependencies are duplicated for {path}")
+    return {
+        "binary": binary,
+        "direct_load_dependencies": dependencies,
+        "build_identity": {"kind": identity_kind, "values": identities},
+        "header_listing_sha256": _sha256_bytes(header.encode("utf-8")),
+        "dependency_listing_sha256":
+            _sha256_bytes(dependency.encode("utf-8")),
+        "build_identity_listing_sha256":
+            _sha256_bytes(identity.encode("utf-8")),
+    }
+
+
+def _load_production_dso_qualification_receipt(
+        receipt_path: Path,
+        *,
+        artifacts: Mapping[str, str] | None = None,
+        expected_build_dir: Path | None = None,
+        expected_preset: str | None = None,
+        validate_live: bool,
+) -> tuple[Path, dict[str, object]]:
+    if not receipt_path.is_absolute():
+        raise RuntimeError(
+            f"production DSO qualification receipt is not absolute: {receipt_path}")
+    try:
+        metadata = receipt_path.lstat()
+        resolved_receipt = receipt_path.resolve(strict=True)
+        document = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read production DSO qualification receipt "
+            f"{receipt_path}: {exc}") from exc
+    if receipt_path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(
+            "production DSO qualification receipt is not a regular "
+            f"non-symlink file: {receipt_path}")
+    if not isinstance(document, dict):
+        raise RuntimeError(
+            "production DSO qualification receipt is not an object")
+    _qualification_exact_keys(
+        document,
+        {
+            "schema_version", "artifact_kind", "platform",
+            "inspection_tool", "build_context", "dsos", "content_sha256",
+        },
+        "production DSO qualification receipt",
+    )
+    if (
+        document["schema_version"] != 1
+        or document["artifact_kind"]
+            != "bioseq-production-dso-load-qualification"
+    ):
+        raise RuntimeError("production DSO qualification receipt schema is invalid")
+    try:
+        _validate_json_content_seal(
+            document, "production DSO qualification receipt")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    platform_value = document["platform"]
+    if not isinstance(platform_value, dict):
+        raise RuntimeError("production DSO platform is not an object")
+    _qualification_exact_keys(
+        platform_value,
+        {
+            "system_name", "system_release", "machine", "binary_format",
+            "dso_suffix",
+        },
+        "production DSO platform",
+    )
+    system_name = platform_value["system_name"]
+    if not isinstance(system_name, str) or system_name not in {"Darwin", "Linux"}:
+        raise RuntimeError("production DSO platform system is unsupported")
+    machine = _qualification_architecture(
+        platform_value["machine"], "production DSO platform architecture")
+    binary_format = "Mach-O" if system_name == "Darwin" else "ELF"
+    suffix = ".dylib" if system_name == "Darwin" else ".so"
+    if (
+        not isinstance(platform_value["system_release"], str)
+        or not platform_value["system_release"]
+        or platform_value["machine"] != machine
+        or platform_value["binary_format"] != binary_format
+        or platform_value["dso_suffix"] != suffix
+    ):
+        raise RuntimeError("production DSO platform fields are inconsistent")
+    if validate_live and (
+        host_platform.system() != system_name
+        or host_platform.release() != platform_value["system_release"]
+        or _qualification_architecture(
+            host_platform.machine(), "current host architecture") != machine
+    ):
+        raise RuntimeError("production DSO qualification platform is not current")
+
+    tool_value = document["inspection_tool"]
+    if not isinstance(tool_value, dict):
+        raise RuntimeError("production DSO inspection tool is not an object")
+    _qualification_exact_keys(
+        tool_value,
+        {
+            "lexical_path", "resolved_path", "size_bytes", "sha256",
+            "identity_kind", "header_arguments", "dependency_arguments",
+            "build_identity_arguments",
+        },
+        "production DSO inspection tool",
+    )
+    if tool_value["identity_kind"] != "executable-sha256":
+        raise RuntimeError("production DSO inspection tool identity kind is invalid")
+    expected_tool_name = "otool" if system_name == "Darwin" else "readelf"
+    if Path(str(tool_value["lexical_path"])).name != expected_tool_name:
+        raise RuntimeError(
+            "production DSO inspection tool is not platform exact")
+    expected_arguments = (
+        (["-hv"], ["-L"], ["-l"])
+        if system_name == "Darwin" else (["-h"], ["-d"], ["-n"])
+    )
+    if (
+        tool_value["header_arguments"],
+        tool_value["dependency_arguments"],
+        tool_value["build_identity_arguments"],
+    ) != expected_arguments:
+        raise RuntimeError("production DSO inspection tool arguments are invalid")
+    inspection_tool = _qualification_file_identity(
+        {
+            key: tool_value[key]
+            for key in ("lexical_path", "resolved_path", "size_bytes", "sha256")
+        },
+        "production DSO inspection tool",
+        validate_live=validate_live,
+        executable=True,
+    )
+
+    context = document["build_context"]
+    if not isinstance(context, dict):
+        raise RuntimeError("production DSO build context is not an object")
+    _qualification_exact_keys(
+        context,
+        {
+            "preset", "configuration", "build_type", "generator",
+            "build_directory", "cmake_system", "cmake_cache",
+            "configure_input", "compilers",
+        },
+        "production DSO build context",
+    )
+    for field in ("preset", "configuration", "build_type", "generator"):
+        if not isinstance(context[field], str) or not context[field]:
+            raise RuntimeError(f"production DSO build context {field} is invalid")
+    if context["configuration"] != context["build_type"]:
+        raise RuntimeError("production DSO configuration and build type differ")
+    build_directory_raw = context["build_directory"]
+    if not isinstance(build_directory_raw, str) or not Path(
+            build_directory_raw).is_absolute():
+        raise RuntimeError("production DSO build directory is invalid")
+    build_directory = Path(build_directory_raw)
+    if expected_build_dir is not None and (
+        build_directory != expected_build_dir.resolve(strict=validate_live)
+    ):
+        raise RuntimeError("production DSO receipt names the wrong build directory")
+    if expected_preset is not None and context["preset"] != expected_preset:
+        raise RuntimeError("production DSO receipt names the wrong CMake preset")
+    cmake_system = context["cmake_system"]
+    if not isinstance(cmake_system, dict):
+        raise RuntimeError("production DSO CMake system is not an object")
+    _qualification_exact_keys(
+        cmake_system, {"name", "processor"}, "production DSO CMake system")
+    if (
+        cmake_system["name"] != system_name
+        or _qualification_architecture(
+            cmake_system["processor"], "production DSO CMake processor") != machine
+    ):
+        raise RuntimeError("production DSO CMake system differs from the binary")
+
+    def context_file(
+            raw: object, label: str, expected_name: str) -> tuple[Path, str]:
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"production DSO {label} is not an object")
+        _qualification_exact_keys(
+            raw, {"path", "size_bytes", "sha256"},
+            f"production DSO {label}")
+        path_raw = raw["path"]
+        size = raw["size_bytes"]
+        digest = _qualification_digest(
+            raw["sha256"], f"production DSO {label} SHA-256")
+        if (
+            not isinstance(path_raw, str)
+            or not Path(path_raw).is_absolute()
+            or Path(path_raw).name != expected_name
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            raise RuntimeError(f"production DSO {label} fields are invalid")
+        path = Path(path_raw)
+        if path.parent != build_directory:
+            raise RuntimeError(f"production DSO {label} escapes the build directory")
+        if validate_live:
+            try:
+                file_metadata = path.lstat()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot inspect current production DSO {label}: {exc}") from exc
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(file_metadata.st_mode)
+                or file_metadata.st_size != size
+                or _sha256_path(path) != digest
+            ):
+                raise RuntimeError(
+                    f"current production DSO {label} differs from its seal")
+        return path, digest
+
+    cmake_cache_path, _ = context_file(
+        context["cmake_cache"], "CMake cache", "CMakeCache.txt")
+    configure_input = context["configure_input"]
+    if not isinstance(configure_input, dict):
+        raise RuntimeError("production DSO configure input is not an object")
+    _qualification_exact_keys(
+        configure_input,
+        {"path", "size_bytes", "sha256", "inputs_sha256"},
+        "production DSO configure input",
+    )
+    configure_inputs_sha256 = _qualification_digest(
+        configure_input["inputs_sha256"],
+        "production DSO configure-input seal",
+    )
+    configure_path, _ = context_file(
+        {
+            key: configure_input[key]
+            for key in ("path", "size_bytes", "sha256")
+        },
+        "configure input",
+        _CMAKE_CONFIGURE_STAMP_NAME,
+    )
+
+    compilers = context["compilers"]
+    if not isinstance(compilers, dict):
+        raise RuntimeError("production DSO compilers are not an object")
+    _qualification_exact_keys(
+        compilers, {"c", "cxx"}, "production DSO compilers")
+    for language in ("c", "cxx"):
+        compiler = compilers[language]
+        if not isinstance(compiler, dict):
+            raise RuntimeError(f"production DSO {language} compiler is invalid")
+        _qualification_exact_keys(
+            compiler,
+            {
+                "lexical_path", "resolved_path", "size_bytes", "sha256",
+                "compiler_id", "compiler_version",
+            },
+            f"production DSO {language} compiler",
+        )
+        if (
+            not isinstance(compiler["compiler_id"], str)
+            or not compiler["compiler_id"]
+            or not isinstance(compiler["compiler_version"], str)
+            or not compiler["compiler_version"]
+        ):
+            raise RuntimeError(
+                f"production DSO {language} compiler metadata is invalid")
+        _qualification_file_identity(
+            {
+                key: compiler[key]
+                for key in ("lexical_path", "resolved_path", "size_bytes", "sha256")
+            },
+            f"production DSO {language} compiler",
+            validate_live=validate_live,
+            executable=True,
+        )
+
+    if validate_live:
+        try:
+            configure_stamp = json.loads(configure_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"cannot parse current CMake configure stamp: {exc}") from exc
+        if (
+            not isinstance(configure_stamp, dict)
+            or configure_stamp.get("artifact_kind") != _CMAKE_CONFIGURE_STAMP_KIND
+            or configure_stamp.get("schema_version") != 1
+            or not isinstance(configure_stamp.get("inputs"), dict)
+            or configure_stamp.get("inputs_sha256") != configure_inputs_sha256
+            or _canonical_json_sha256(configure_stamp["inputs"])
+                != configure_inputs_sha256
+            or configure_stamp["inputs"].get("preset") != context["preset"]
+        ):
+            raise RuntimeError("current CMake configure-input seal is invalid")
+        if (
+            _cmake_cache_value(build_directory, "CMAKE_BUILD_TYPE")
+                != context["build_type"]
+            or _cmake_cache_value(build_directory, "CMAKE_GENERATOR")
+                != context["generator"]
+            or _cmake_cache_value(build_directory, "CMAKE_C_COMPILER")
+                != compilers["c"]["lexical_path"]
+            or _cmake_cache_value(build_directory, "CMAKE_CXX_COMPILER")
+                != compilers["cxx"]["lexical_path"]
+        ):
+            raise RuntimeError("current CMake cache context differs from the receipt")
+        if cmake_cache_path != build_directory / "CMakeCache.txt":
+            raise RuntimeError("production DSO CMake cache path is not canonical")
+
+    dso_records = document["dsos"]
+    if not isinstance(dso_records, list) or len(dso_records) != 2:
+        raise RuntimeError("production DSO qualification must contain two DSOs")
+    expected_dsos: dict[str, Path] | None = None
+    if artifacts is not None:
+        try:
+            expected_dsos = {
+                "bioseq": Path(artifacts["bioseq_dso"]).resolve(
+                    strict=validate_live),
+                "bioseq_cache": Path(artifacts["cache_dso"]).resolve(
+                    strict=validate_live),
+            }
+        except (KeyError, OSError) as exc:
+            raise RuntimeError("canonical production DSO paths are unavailable") from exc
+    observed: dict[str, Path] = {}
+    for record in dso_records:
+        if not isinstance(record, dict):
+            raise RuntimeError("production DSO qualification row is not an object")
+        _qualification_exact_keys(
+            record,
+            {
+                "extension", "path", "basename", "size_bytes", "sha256",
+                "binary", "header_listing_sha256", "build_identity",
+                "direct_load_dependencies", "dependency_listing_sha256",
+                "build_identity_listing_sha256", "sibling_extension",
+                "sibling_basename", "sibling_dependency_absent",
+            },
+            "production DSO qualification row",
+        )
+        extension = record["extension"]
+        if (
+            not isinstance(extension, str)
+            or extension not in {"bioseq", "bioseq_cache"}
+            or extension in observed
+        ):
+            raise RuntimeError("production DSO qualification roster is invalid")
+        path_raw = record["path"]
+        expected_basename = f"{extension}{suffix}"
+        size = record["size_bytes"]
+        digest = _qualification_digest(
+            record["sha256"], f"production {extension} DSO SHA-256")
+        if (
+            not isinstance(path_raw, str)
+            or not Path(path_raw).is_absolute()
+            or record["basename"] != expected_basename
+            or Path(path_raw).name != expected_basename
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            raise RuntimeError(f"production {extension} DSO identity is invalid")
+        path = Path(path_raw)
+        binary = record["binary"]
+        if not isinstance(binary, dict):
+            raise RuntimeError(f"production {extension} binary metadata is invalid")
+        expected_binary_keys = (
+            {"format", "architectures"}
+            if system_name == "Darwin"
+            else {"format", "architectures", "class", "data", "machine", "architecture"}
+        )
+        _qualification_exact_keys(
+            binary, expected_binary_keys, f"production {extension} binary metadata")
+        if (
+            binary["format"] != binary_format
+            or binary["architectures"] != [machine]
+            or (system_name == "Linux" and binary["architecture"] != machine)
+        ):
+            raise RuntimeError(
+                f"production {extension} binary architecture is invalid")
+        if system_name == "Linux" and any(
+            not isinstance(binary[field], str) or not binary[field]
+            for field in ("class", "data", "machine")
+        ):
+            raise RuntimeError(f"production {extension} ELF header is incomplete")
+        for field in (
+            "header_listing_sha256", "dependency_listing_sha256",
+            "build_identity_listing_sha256",
+        ):
+            _qualification_digest(
+                record[field], f"production {extension} {field}")
+        build_identity = record["build_identity"]
+        if not isinstance(build_identity, dict):
+            raise RuntimeError(f"production {extension} build identity is invalid")
+        _qualification_exact_keys(
+            build_identity, {"kind", "values"},
+            f"production {extension} build identity")
+        identities = build_identity["values"]
+        identity_pattern = (
+            r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+            if system_name == "Darwin" else r"(?:[0-9a-f]{2})+"
+        )
+        expected_identity_kind = (
+            "mach-o-lc-uuid" if system_name == "Darwin" else "elf-gnu-build-id")
+        if (
+            build_identity["kind"] != expected_identity_kind
+            or not isinstance(identities, list)
+            or not identities
+            or any(not isinstance(identity, str)
+                   or re.fullmatch(identity_pattern, identity) is None
+                   for identity in identities)
+            or identities != sorted(set(identities))
+        ):
+            raise RuntimeError(f"production {extension} build identity is invalid")
+        dependencies = record["direct_load_dependencies"]
+        sibling = "bioseq_cache" if extension == "bioseq" else "bioseq"
+        sibling_basename = f"{sibling}{suffix}"
+        sibling_stem = sibling_basename.removesuffix(suffix)
+        if (
+            not isinstance(dependencies, list)
+            or not dependencies
+            or any(not isinstance(dependency, str) or not dependency
+                   for dependency in dependencies)
+            or dependencies != sorted(set(dependencies))
+            or record["sibling_extension"] != sibling
+            or record["sibling_basename"] != sibling_basename
+            or record["sibling_dependency_absent"] is not True
+            or any(
+                Path(dependency).name == sibling_basename
+                or Path(dependency).name.startswith(sibling_basename + ".")
+                or (
+                    suffix == ".dylib"
+                    and Path(dependency).name.startswith(sibling_stem + ".")
+                    and Path(dependency).name.endswith(suffix)
+                )
+                for dependency in dependencies
+            )
+        ):
+            raise RuntimeError(
+                f"production {extension} DSO sibling-dependency proof is invalid")
+        if expected_dsos is not None and path.resolve(
+                strict=validate_live) != expected_dsos[extension]:
+            raise RuntimeError(
+                f"production {extension} DSO path is not the canonical target")
+        if validate_live:
+            try:
+                dso_metadata = path.lstat()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot inspect current production {extension} DSO: {exc}") from exc
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(dso_metadata.st_mode)
+                or dso_metadata.st_size != size
+                or _sha256_path(path) != digest
+            ):
+                raise RuntimeError(
+                    f"current production {extension} DSO differs from its receipt")
+            live = _live_dso_inspection(
+                inspection_tool, path, system_name)
+            for field in (
+                "binary",
+                "direct_load_dependencies",
+                "build_identity",
+                "header_listing_sha256",
+                "dependency_listing_sha256",
+                "build_identity_listing_sha256",
+            ):
+                if live[field] != record[field]:
+                    raise RuntimeError(
+                        f"current production {extension} DSO {field} differs "
+                        "from its qualification receipt")
+        observed[str(extension)] = path.resolve(strict=validate_live)
+    if set(observed) != {"bioseq", "bioseq_cache"}:
+        raise RuntimeError("production DSO qualification roster is incomplete")
+    return resolved_receipt, document
+
+
+def _cache_bioseq_dso_qualification_evidence(
+        active_bin_dir: Path,
+        *,
+        expected_build_dir: Path | None = None,
+        expected_preset: str | None = None,
+        snapshot_for_report: Path | None = None,
+) -> dict[str, str]:
+    """Validate and bind the CMake-owned production DSO receipt."""
+    artifacts = _cache_native_artifacts(active_bin_dir)
+    raw = artifacts.get(_CACHE_BIOSEQ_DSO_QUALIFICATION_RECEIPT_KEY, "")
+    if not raw:
+        raise RuntimeError("combined cache qualification has no production DSO receipt")
+    path, document = _load_production_dso_qualification_receipt(
+        Path(raw),
+        artifacts=artifacts,
+        expected_build_dir=expected_build_dir,
+        expected_preset=expected_preset,
+        validate_live=True,
+    )
+    evidence_path = path
+    if snapshot_for_report is not None:
+        ordinal = _report_index(snapshot_for_report.name)
+        if ordinal < 0:
+            raise RuntimeError(
+                "cache native report has no stable ordinal for its production "
+                f"DSO qualification snapshot: {snapshot_for_report}")
+        evidence_path = snapshot_for_report.resolve(strict=True).with_name(
+            f"production_dso_qualification_{ordinal}.json")
+        if evidence_path.exists() or evidence_path.is_symlink():
+            try:
+                existing = _load_json_object(
+                    evidence_path,
+                    "immutable production DSO qualification snapshot",
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "cannot reuse immutable production DSO qualification "
+                    f"snapshot {evidence_path}: {exc}") from exc
+            if existing != document:
+                raise RuntimeError(
+                    "immutable production DSO qualification snapshot already "
+                    f"exists with different content: {evidence_path}")
+        else:
+            _write_json_atomic(evidence_path, document)
+        _, snapshot_document = _load_production_dso_qualification_receipt(
+            evidence_path, validate_live=False)
+        if snapshot_document != document:
+            raise RuntimeError(
+                "immutable production DSO qualification snapshot differs "
+                "from the live CMake receipt")
+    return {
+        "production_dso_qualification_receipt": str(evidence_path),
+        "production_dso_qualification_receipt_sha256":
+            _sha256_path(evidence_path),
+        "production_dso_qualification_content_sha256":
+            str(document["content_sha256"]),
+    }
+
+
+def _validate_cache_evidence_dso_binding(
+        value: Mapping[str, object]) -> None:
+    """Require combined evidence to transitively seal its DSO qualification."""
+    role = value.get("report_role")
+    present = {
+        field for field in _CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS
+        if field in value
+    }
+    if role not in _CACHE_COMBINED_EVIDENCE_ROLES:
+        if present:
+            raise RuntimeError(
+                "standalone cache evidence unexpectedly carries a production "
+                "DSO qualification binding")
+        return
+    required = set(_CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS)
+    if present != required:
+        raise RuntimeError(
+            "combined cache evidence has an incomplete production DSO "
+            f"qualification binding: missing={sorted(required - present)}")
+    raw_path = value["production_dso_qualification_receipt"]
+    if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+        raise RuntimeError(
+            "combined cache evidence DSO qualification path is invalid")
+    receipt_sha256 = _qualification_digest(
+        value["production_dso_qualification_receipt_sha256"],
+        "combined cache evidence DSO receipt SHA-256",
+    )
+    content_sha256 = _qualification_digest(
+        value["production_dso_qualification_content_sha256"],
+        "combined cache evidence DSO content SHA-256",
+    )
+    path, document = _load_production_dso_qualification_receipt(
+        Path(raw_path), validate_live=False)
+    if (
+        str(path) != raw_path
+        or _sha256_path(path) != receipt_sha256
+        or document["content_sha256"] != content_sha256
+    ):
+        raise RuntimeError(
+            "combined cache evidence production DSO qualification seal changed")
 
 
 _CACHE_MIGRATION_LEDGER = (
@@ -3655,6 +4444,13 @@ def _seal_cache_native_report(
             provenance["evidence_contract_sha256"],
         "migration_phase": provenance["migration_phase"],
     }
+    if expected_role in _CACHE_COMBINED_EVIDENCE_ROLES:
+        receipt.update(_cache_bioseq_dso_qualification_evidence(
+            active_bin_dir,
+            expected_build_dir=active_bin_dir.parent,
+            expected_preset=active_bin_dir.parent.name,
+            snapshot_for_report=report_path,
+        ))
     output = _cache_report_receipt_path(report_path)
     _require_cache_cleanup_roots_absent(
         lexical_cleanup_roots,
@@ -3801,6 +4597,7 @@ def _find_current_cache_evidence_receipts(
             and value.get("scenario")
                 == _CACHE_EVIDENCE_SCENARIO_BY_ROLE[role]
         ):
+            _validate_cache_evidence_dso_binding(value)
             by_role[str(role)] = path
     required = set(_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
     if set(by_role) != required:
@@ -3894,6 +4691,16 @@ def _find_proof_cache_receipts(
     if set(found_reports) != set(expected_reports):
         raise RuntimeError(
             "retained proof-ready native report receipts are incomplete")
+    for role, path in found_reports.items():
+        value = _load_json_object(path, "retained cache evidence receipt")
+        if (
+            value.get("schema_version")
+                != "bioseq-cache-mcp-evidence-receipt-v1"
+            or value.get("report_role") != role
+        ):
+            raise RuntimeError(
+                f"retained proof-ready receipt schema/role is invalid: {role}")
+        _validate_cache_evidence_dso_binding(value)
     unit_matches = [
         path
         for path in _CACHE_UNIT_REPORTING_DIR.glob("receipt_*.json")
@@ -8057,6 +8864,23 @@ def _run_build_worker(mode: str, build_only: bool = False,
             if rc != 0:
                 raise RuntimeError(f"build of target '{tgt}' exited with code {rc}")
 
+        if mode in _CACHE_BIOSEQ_DSO_QUALIFICATION_MODES:
+            _update_entry(
+                mode,
+                step="validating production DSO qualification receipt",
+            )
+            qualification_evidence = (
+                _cache_bioseq_dso_qualification_evidence(
+                    active_bin_dir,
+                    expected_build_dir=active_build_dir,
+                    expected_preset=active_preset,
+                )
+            )
+            _update_entry(
+                mode,
+                production_dso_qualification=qualification_evidence,
+            )
+
         # Maintain the build/compile_commands.json symlink — clangd / IDEs
         # probe build/ by default. Only matters for human operators, but
         # cheap to keep working. Symlink follows the active preset so the
@@ -9889,6 +10713,13 @@ def tool_status(mode: str) -> str:
         report_suffix = f". Report: {entry['report_file']}"
     else:
         report_suffix = ""
+    qualification = entry.get("production_dso_qualification")
+    qualification_suffix = (
+        ". Production DSO qualification: "
+        + json.dumps(qualification, sort_keys=True)
+        if isinstance(qualification, dict) and qualification
+        else ""
+    )
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
@@ -9899,7 +10730,7 @@ def tool_status(mode: str) -> str:
                 f"Current step: {step}. "
                 f"Predicted finish in {_format_minutes(eta_min)}. "
                 f"{focus_suffix} "
-                f"Log: {log_path}{report_suffix}")
+                f"Log: {log_path}{report_suffix}{qualification_suffix}")
 
     completed_at = entry.get("completed_at") or time.time()
     duration_min = (completed_at - entry["started_at"]) / 60.0
@@ -9937,13 +10768,14 @@ def tool_status(mode: str) -> str:
                     "DWARF + per-TU .s/.bc artefacts are available under "
                     f"{entry.get('build_dir', str(build_dir_for(mode, True)))} for the "
                     "`inspect` tool.")
+        msg += qualification_suffix
         return msg
 
     if status == "killed_timeout":
         return ("Last run was forcefully killed due to timeout. "
                 f"{focus_suffix} "
                 f"Logs for inspection are available here: "
-                f"{log_path}{report_suffix}")
+                f"{log_path}{report_suffix}{qualification_suffix}")
 
     if status == "failed":
         notes = entry.get("notes") or "(no notes)"
@@ -9955,16 +10787,18 @@ def tool_status(mode: str) -> str:
         return (f"{mode_details.label} run failed after "
                 f"{_format_minutes(duration_min)}: {notes}. "
                 f"{focus_suffix} "
-                f"Log: {log_path}{report_suffix}.{private_note}")
+                f"Log: {log_path}{report_suffix}{qualification_suffix}."
+                f"{private_note}")
 
     if status == "aborted":
         return (f"{mode_details.label} run was aborted (worker process died "
                 f"unexpectedly after {_format_minutes(duration_min)}). "
                 f"{focus_suffix} "
-                f"Log: {log_path}{report_suffix}")
+                f"Log: {log_path}{report_suffix}{qualification_suffix}")
 
     return (f"{mode_details.label} status: {status}."
-            f"{focus_suffix} Log: {log_path}{report_suffix}")
+            f"{focus_suffix} Log: {log_path}{report_suffix}"
+            f"{qualification_suffix}")
 
 
 def _sha256_file(path: Path) -> str:
