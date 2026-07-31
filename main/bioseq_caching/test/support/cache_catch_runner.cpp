@@ -1295,7 +1295,7 @@ capture_stable_supervised_tree(
     return std::nullopt;
 }
 
-[[nodiscard]] bool supervised_process_stopped(
+[[nodiscard]] bool locally_supervised_process_stopped(
     const bioseq::postgres_test::supervised_process_record&
         process) noexcept {
     try {
@@ -1429,7 +1429,7 @@ freeze_stable_supervised_tree(
                         != (*confirmation)[index].pid
                     || (*tree)[index].start_token
                         != (*confirmation)[index].start_token
-                    || !supervised_process_stopped(
+                    || !locally_supervised_process_stopped(
                         (*confirmation)[index])) {
                     fixed_point = false;
                     break;
@@ -1441,7 +1441,7 @@ freeze_stable_supervised_tree(
                     [](const auto& member) {
                         return !bioseq::postgres_test::
                                    supervised_process_matches(member)
-                            || supervised_process_stopped(member);
+                            || locally_supervised_process_stopped(member);
                     });
             }
             if (fixed_point) {
