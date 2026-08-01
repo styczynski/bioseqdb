@@ -623,19 +623,46 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     }();
     const auto after_column_cache_off =
         bioseq::cache_test::read_cache_stats(admin);
+    REQUIRE(column_cache_off.rows() > 0);
+    REQUIRE(byte_identical(column_cache_off, cold));
     CHECK(bioseq::postgres_test::exact_row_hash(column_cache_off)
           == oracle_digest);
-    CHECK((after_column_cache_off - after_explain).completed_hits == 1);
-    CHECK((after_column_cache_off - after_explain).fallbacks == 0);
-    bioseq::postgres_test::record_migration_probe(
-        "combined.bioseq_2gbp.column_cache_off_hit");
+    const auto column_cache_off_delta =
+        after_column_cache_off - after_explain;
+    CHECK(column_cache_off_delta.produced == 0);
+    CHECK(column_cache_off_delta.completed_hits == 1);
+    CHECK(column_cache_off_delta.fallbacks == 0);
 
     const auto terminal_explain = bioseq::postgres_test::run_explain(
-        data, alignment_query, false, 5min);
+        data, alignment_query, true, 5min);
     const auto terminal_cache_nodes =
         terminal_explain.find_plan_nodes(
             "Custom Plan Provider", "BioseqCacheScan");
     REQUIRE(terminal_cache_nodes.size() == 1);
+    CHECK(bioseq::postgres_test::explain_property_string(
+              *terminal_cache_nodes.front(), "Actual Cache Action")
+          == "[Hit] exact final result");
+    const bioseq::postgres_test::json_value* terminal_children =
+        terminal_cache_nodes.front()->find("Plans");
+    if (terminal_children != nullptr) {
+        REQUIRE(terminal_children->as_array() != nullptr);
+        REQUIRE_FALSE(terminal_children->as_array()->empty());
+        CHECK(bioseq::postgres_test::explain_property_number(
+                  terminal_children->as_array()->front(), "Actual Loops")
+              == 0.0);
+        const auto terminal_bioseq_nodes = find_plan_nodes_with_property(
+            *terminal_children, "Custom Plan Provider", "BioseqScan");
+        REQUIRE(terminal_bioseq_nodes.size() == 1);
+    }
+    const auto after_terminal_explain =
+        bioseq::cache_test::read_cache_stats(admin);
+    const auto terminal_explain_delta =
+        after_terminal_explain - after_column_cache_off;
+    CHECK(terminal_explain_delta.produced == 0);
+    CHECK(terminal_explain_delta.completed_hits == 1);
+    CHECK(terminal_explain_delta.fallbacks == 0);
+    bioseq::postgres_test::record_migration_probe(
+        "combined.bioseq_2gbp.column_cache_off_hit");
     CHECK(bioseq::cache_test::integer(
               admin,
               "SELECT count(*) FROM bioseq_cache.entries() "
