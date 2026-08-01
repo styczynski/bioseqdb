@@ -442,36 +442,36 @@ class SanitizerPresetContractTest(unittest.TestCase):
         preflight.assert_not_called()
         popen.assert_not_called()
 
-    def test_cache_adapter_loads_generic_runner_in_isolated_process(self) -> None:
-        adapter = (
-            MAIN_DIR / "bioseq_caching" / "test" /
-            "run_private_provider_tests.py")
+    def test_private_postgres_loads_sibling_sanitizer_runtime_in_isolated_process(
+            self) -> None:
+        runner = MAIN_DIR / "cmake" / "private_postgres.py"
         probe = """
 import importlib.util
 from pathlib import Path
 import sys
 
-adapter = Path(sys.argv[1]).resolve(strict=True)
+runner = Path(sys.argv[1]).resolve(strict=True)
 spec = importlib.util.spec_from_file_location(
-    "standalone_cache_adapter_probe", adapter)
+    "standalone_private_postgres_probe", runner)
 if spec is None or spec.loader is None:
-    raise RuntimeError(f"cannot load adapter: {adapter}")
+    raise RuntimeError(f"cannot load runner: {runner}")
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
-expected_runner = adapter.parents[2] / "cmake" / "private_postgres.py"
-expected_helper = adapter.parents[2] / "cmake" / "sanitizer_runtime.py"
-if Path(module._generic.__file__).resolve() != expected_runner.resolve():
-    raise RuntimeError("cache adapter loaded the wrong generic runner")
+if Path(module.__file__).resolve() != runner:
+    raise RuntimeError("file-spec import loaded the wrong generic runner")
 runtime = sys.modules.get("sanitizer_runtime")
 if runtime is None:
     raise RuntimeError("generic runner did not load sanitizer_runtime")
+if module._sanitizer_runtime is not runtime:
+    raise RuntimeError("generic runner did not retain the loaded helper")
+expected_helper = runner.with_name("sanitizer_runtime.py")
 if Path(runtime.__file__).resolve() != expected_helper.resolve():
     raise RuntimeError("generic runner loaded a non-sibling sanitizer helper")
 """
         with tempfile.TemporaryDirectory() as temporary:
             completed = subprocess.run(
-                [sys.executable, "-I", "-c", probe, str(adapter)],
+                [sys.executable, "-I", "-c", probe, str(runner)],
                 cwd=temporary,
                 capture_output=True,
                 text=True,
