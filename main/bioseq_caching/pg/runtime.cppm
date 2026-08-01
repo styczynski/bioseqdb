@@ -4494,22 +4494,34 @@ void destroy_decoded_source_mapping_plan(
     return true;
 }
 
+/** PG-owned opaque-tail copy produced before any C++ byte owner exists. */
+struct CanonicalSourceMappingPrivateV1 {
+    char* bytes = nullptr;
+    std::size_t size = 0;
+    std::uint32_t presence = 0;
+    std::uint32_t version = 0;
+    std::uint32_t node_count = 0;
+    bool valid = false;
+};
+
+static_assert(std::is_trivially_destructible_v<
+    CanonicalSourceMappingPrivateV1>);
+
 /** Canonicalize the opaque tail under the same generic Node byte budget. */
-[[nodiscard]] bool append_source_mapping_private_bytes(
-        std::vector<std::byte>& destination,
-        const List* nodes) {
+[[nodiscard]] CanonicalSourceMappingPrivateV1
+canonicalize_source_mapping_private_bytes(const List* nodes) {
+    CanonicalSourceMappingPrivateV1 result{};
     std::uint32_t version = 0;
     if (!source_mapping_private_version(nodes, &version)) {
-        return false;
+        return result;
     }
-    append_little_endian(destination, nodes == nullptr
-        ? std::uint32_t{0} : std::uint32_t{1});
-    append_little_endian(destination, version);
-    append_little_endian(destination, static_cast<std::uint32_t>(
-        nodes == nullptr ? 0 : list_length(nodes)));
+    result.presence = nodes == nullptr ? 0U : 1U;
+    result.version = version;
+    result.node_count = static_cast<std::uint32_t>(
+        nodes == nullptr ? 0 : list_length(nodes));
     if (nodes == nullptr) {
-        append_little_endian(destination, std::uint64_t{0});
-        return true;
+        result.valid = true;
+        return result;
     }
 
     MemoryContext caller_context = CurrentMemoryContext;
@@ -4545,27 +4557,27 @@ void destroy_decoded_source_mapping_plan(
             MemoryContextDelete(const_cast<MemoryContext>(disposable));
             disposable = nullptr;
         }
+        if (copied != nullptr) {
+            pfree(const_cast<char*>(copied));
+            copied = nullptr;
+            copied_size = 0;
+        }
         if (cache_interrupt_error(sqlstate)) {
             PG_RE_THROW();
         }
         FlushErrorState();
-        copied = nullptr;
-        copied_size = 0;
     }
     PG_END_TRY();
     if (disposable != nullptr) {
         MemoryContextDelete(const_cast<MemoryContext>(disposable));
     }
     if (copied == nullptr) {
-        return false;
+        return result;
     }
-    append_little_endian(
-        destination, static_cast<std::uint64_t>(copied_size));
-    const auto* first = reinterpret_cast<const std::byte*>(
-        const_cast<const char*>(copied));
-    destination.insert(destination.end(), first, first + copied_size);
-    pfree(const_cast<char*>(copied));
-    return destination.size() <= kMaxProviderRecipeBytes;
+    result.bytes = const_cast<char*>(copied);
+    result.size = copied_size;
+    result.valid = true;
+    return result;
 }
 
 void append_source_mapping_schema_columns(
@@ -4764,6 +4776,12 @@ void append_source_mapping_entry_bytes(
             && mapping.lineage_map == nullptr)) {
         return std::nullopt;
     }
+    CanonicalSourceMappingPrivateV1 private_bytes =
+        canonicalize_source_mapping_private_bytes(
+            mapping.provider_private_nodes);
+    if (!private_bytes.valid) {
+        return std::nullopt;
+    }
     try {
         std::vector<std::byte> bytes;
         append_little_endian(bytes, kSourceMapFingerprintTagV1);
@@ -4782,12 +4800,27 @@ void append_source_mapping_entry_bytes(
              ++index) {
             append_source_mapping_entry_bytes(bytes, mapping.lineage_map[index]);
         }
-        if (!append_source_mapping_private_bytes(
-                bytes, mapping.provider_private_nodes)) {
-            return std::nullopt;
+        append_little_endian(bytes, private_bytes.presence);
+        append_little_endian(bytes, private_bytes.version);
+        append_little_endian(bytes, private_bytes.node_count);
+        append_little_endian(
+            bytes, static_cast<std::uint64_t>(private_bytes.size));
+        if (private_bytes.size != 0) {
+            const auto* first = reinterpret_cast<const std::byte*>(
+                private_bytes.bytes);
+            bytes.insert(bytes.end(), first, first + private_bytes.size);
         }
-        return source_mapping_digest(bytes);
+        if (private_bytes.bytes != nullptr) {
+            pfree(private_bytes.bytes);
+            private_bytes.bytes = nullptr;
+        }
+        return bytes.size() <= kMaxProviderRecipeBytes
+            ? source_mapping_digest(bytes)
+            : std::nullopt;
     } catch (...) {
+        if (private_bytes.bytes != nullptr) {
+            pfree(private_bytes.bytes);
+        }
         return std::nullopt;
     }
 }
@@ -4817,10 +4850,15 @@ void append_source_mapping_entry_bytes(
 
 [[nodiscard]] List* make_source_mapping_entry_node(
         const BioseqCacheColumnMapEntryV2& entry) {
-    std::vector<std::byte> semantic;
-    semantic.reserve(16);
-    append_little_endian(semantic, entry.semantic_id_high);
-    append_little_endian(semantic, entry.semantic_id_low);
+    std::array<std::byte, 2U * sizeof(std::uint64_t)> semantic{};
+    const auto encode = [&semantic](std::size_t offset, std::uint64_t value) {
+        for (std::size_t index = 0; index < sizeof(value); ++index) {
+            semantic[offset + index] = static_cast<std::byte>(
+                (value >> (index * 8U)) & std::uint64_t{0xffU});
+        }
+    };
+    encode(0, entry.semantic_id_high);
+    encode(sizeof(std::uint64_t), entry.semantic_id_low);
     Const* semantic_node = make_binary_node(semantic);
     if (semantic_node == nullptr) {
         return nullptr;
@@ -6913,21 +6951,46 @@ void validate_binary_schema(const TupleDesc descriptor) {
 /** Freeze PostgreSQL tuple metadata into the portable column-store schema. */
 [[nodiscard]] std::vector<ColumnSchema> build_column_schema(
         TupleDesc descriptor, Oid* send_functions) {
+    if (descriptor == nullptr || descriptor->natts < 0
+        || static_cast<std::uint32_t>(descriptor->natts)
+            > kMaxProviderBoundaryColumns) {
+        ereport(ERROR,
+            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+             errmsg("cache result has too many columns")));
+    }
+    struct ResolvedColumnIoV1 {
+        Oid send_function = InvalidOid;
+        Oid receive_function = InvalidOid;
+        Oid io_parameter = InvalidOid;
+        std::uint8_t type_alignment = 0;
+    };
+    static_assert(std::is_trivially_destructible_v<ResolvedColumnIoV1>);
+    std::array<ResolvedColumnIoV1, kMaxProviderBoundaryColumns> resolved{};
+    for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
+        const Form_pg_attribute metadata = TupleDescAttr(descriptor, attribute);
+        bool variable_length = false;
+        getTypeBinaryOutputInfo(
+            metadata->atttypid,
+            &resolved[static_cast<std::size_t>(attribute)].send_function,
+            &variable_length);
+        getTypeBinaryInputInfo(
+            metadata->atttypid,
+            &resolved[static_cast<std::size_t>(attribute)].receive_function,
+            &resolved[static_cast<std::size_t>(attribute)].io_parameter);
+        resolved[static_cast<std::size_t>(attribute)].type_alignment =
+            type_alignment_bytes(metadata->attalign);
+        if (send_functions != nullptr) {
+            send_functions[attribute] =
+                resolved[static_cast<std::size_t>(attribute)].send_function;
+        }
+    }
+
     std::vector<ColumnSchema> schema;
     schema.reserve(static_cast<std::size_t>(descriptor->natts));
     for (int attribute = 0; attribute < descriptor->natts; ++attribute) {
         const Form_pg_attribute metadata = TupleDescAttr(descriptor, attribute);
-        Oid send_function = InvalidOid;
-        Oid receive_function = InvalidOid;
-        Oid io_parameter = InvalidOid;
-        bool variable_length = false;
-        getTypeBinaryOutputInfo(
-            metadata->atttypid, &send_function, &variable_length);
-        getTypeBinaryInputInfo(
-            metadata->atttypid, &receive_function, &io_parameter);
-        if (send_functions != nullptr) {
-            send_functions[attribute] = send_function;
-        }
+        const ResolvedColumnIoV1& io =
+            resolved[static_cast<std::size_t>(attribute)];
         const std::uint64_t semantic_high =
             (static_cast<std::uint64_t>(metadata->atttypid) << 32U)
             | static_cast<std::uint32_t>(attribute + 1);
@@ -6942,12 +7005,12 @@ void validate_binary_schema(const TupleDesc descriptor) {
                 .collation_oid = metadata->attcollation,
                 .type_length = metadata->attlen,
                 .by_value = static_cast<std::uint8_t>(metadata->attbyval),
-                .type_alignment = type_alignment_bytes(metadata->attalign),
+                .type_alignment = io.type_alignment,
                 .encoding = ColumnEncoding::BinarySend,
                 .flags = kColumnFlagNullable,
-                .send_function_oid = send_function,
-                .receive_function_oid = receive_function,
-                .receive_type_io_param = io_parameter,
+                .send_function_oid = io.send_function,
+                .receive_function_oid = io.receive_function,
+                .receive_type_io_param = io.io_parameter,
                 .reserved = 0,
                 .name_offset = 0,
             },
@@ -9640,7 +9703,7 @@ void cache_state_cleanup(void* argument) noexcept {
 }
 
 /** Seal storage first and make unified-registry COMPLETE visible last. */
-[[nodiscard]] bool complete_registry_producer(
+[[nodiscard]] bool complete_registry_producer_with_cpp_owners(
         BioseqCacheState& state, TupleDesc descriptor) {
     if (descriptor == nullptr || !state.registry_reference
         || state.column_builder == nullptr
@@ -9673,11 +9736,17 @@ void cache_state_cleanup(void* argument) noexcept {
         || blocks->row_count() != state.row_count) {
         return false;
     }
-    maybe_pause(TestPausePoint::BeforeTerminalPublish);
+    bioseq::pg_utils::invoke_pg_as_cpp([] {
+        maybe_pause(TestPausePoint::BeforeTerminalPublish);
+    });
 
     ReusableGenerationSnapshotV1 storage_snapshot{};
-    if (!snapshot_current_reusable_generation(
-            state.registry_reference, &storage_snapshot)
+    if (!bioseq::pg_utils::invoke_pg_as_cpp(
+            [reference = state.registry_reference,
+             snapshot = &storage_snapshot] {
+                return snapshot_current_reusable_generation(
+                    reference, snapshot);
+            })
         || storage_snapshot.reference != state.registry_reference
         || storage_snapshot.entry_kind != CacheEntryKind::ExactFinalResult
         || storage_snapshot.state != CacheEntryState::Building
@@ -9701,6 +9770,7 @@ void cache_state_cleanup(void* argument) noexcept {
     if (!publication) {
         return false;
     }
+    blocks.reset();
     destroy_column_builder(state);
     const VisibilityTicket refreshed = mint_visibility_ticket(
         storage_snapshot.metadata.observability,
@@ -9773,6 +9843,34 @@ void cache_state_cleanup(void* argument) noexcept {
     return true;
 }
 
+/** Restore PostgreSQL ERROR only after producer-owned C++ blocks unwind. */
+[[nodiscard]] bool complete_registry_producer(
+        BioseqCacheState& state, TupleDesc descriptor) {
+    ErrorData* postgres_error = nullptr;
+    bool completed = false;
+    bool capture_failed = false;
+    try {
+        completed = complete_registry_producer_with_cpp_owners(
+            state, descriptor);
+    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        postgres_error = error.release_error_data();
+    } catch (const bioseq::pg_utils::PostgresErrorCaptureFailure&) {
+        capture_failed = true;
+    } catch (...) {
+        return false;
+    }
+    if (postgres_error != nullptr) {
+        bioseq::pg_utils::rethrow_postgres_error_after_cleanup(
+            postgres_error);
+    }
+    if (capture_failed) {
+        bioseq::pg_utils::emit_postgres_error_after_cleanup(
+            ERRCODE_INTERNAL_ERROR,
+            "could not preserve PostgreSQL cache publish error");
+    }
+    return completed;
+}
+
 enum class CompleteResultLoadFailureV1 : std::uint8_t {
     None = 0,
     Schema,
@@ -9801,7 +9899,7 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
 }
 
 /** Materialize and validate an entire shared result before exposing row one. */
-[[nodiscard]] Tuplestorestate* load_complete_result(
+[[nodiscard]] Tuplestorestate* load_complete_result_with_cpp_owners(
         const storage::ManifestPin& pin, TupleDesc expected_descriptor,
         CacheEntryKind expected_kind = CacheEntryKind::ExactFinalResult,
         CompleteResultLoadFailureV1* failure = nullptr) {
@@ -9816,7 +9914,17 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
     }
     std::vector<ColumnSchema> expected_schema;
     try {
-        expected_schema = build_column_schema(expected_descriptor, nullptr);
+        expected_schema = bioseq::pg_utils::invoke_pg_as_cpp(
+            [expected_descriptor] {
+                return build_column_schema(expected_descriptor, nullptr);
+            });
+    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        if (cache_interrupt_error(error.sqlerrcode())) {
+            throw;
+        }
+        return reject(CompleteResultLoadFailureV1::Schema);
+    } catch (const bioseq::pg_utils::PostgresErrorCaptureFailure&) {
+        throw;
     } catch (...) {
         return reject(CompleteResultLoadFailureV1::Schema);
     }
@@ -9837,14 +9945,20 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
         return reject(CompleteResultLoadFailureV1::InvalidSize);
     }
     const std::size_t store_size = static_cast<std::size_t>(total_bytes);
-    auto* store = static_cast<std::byte*>(palloc(store_size));
+    auto* store = bioseq::pg_utils::invoke_pg_as_cpp([store_size] {
+        return static_cast<std::byte*>(palloc(store_size));
+    });
     std::size_t offset = 0;
     for (std::uint32_t index = 0; index < pin.block_count; ++index) {
         const std::size_t length = static_cast<std::size_t>(
             pin.blocks[index].length);
-        if (storage::read_pinned_block(
-                pin, index,
-                std::span<std::byte>{store + offset, length})
+        if (bioseq::pg_utils::invoke_pg_as_cpp(
+                [pin_pointer = &pin, index, destination = store + offset,
+                 length] {
+                    return storage::read_pinned_block(
+                        *pin_pointer, index,
+                        std::span<std::byte>{destination, length});
+                })
                 != storage::StorageError::None) {
             pfree(store);
             return reject(CompleteResultLoadFailureV1::BlockRead);
@@ -9881,23 +9995,66 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
         pfree(store);
         return reject(CompleteResultLoadFailureV1::DescriptorMismatch);
     }
-    Tuplestorestate* result = tuplestore_begin_heap(true, false, work_mem);
-    MemoryContext row_context = AllocSetContextCreate(
-        CurrentMemoryContext, "bioseq_cache replay row",
-        ALLOCSET_DEFAULT_SIZES);
-    Datum* values = static_cast<Datum*>(
-        palloc0(sizeof(Datum)
-            * static_cast<std::size_t>(expected_descriptor->natts)));
-    bool* nulls = static_cast<bool*>(
-        palloc0(sizeof(bool)
-            * static_cast<std::size_t>(expected_descriptor->natts)));
+    Tuplestorestate* result = nullptr;
+    MemoryContext row_context = nullptr;
+    Datum* values = nullptr;
+    bool* nulls = nullptr;
     bool valid = true;
+    bool decode_started = false;
     MemoryContext caller_context = CurrentMemoryContext;
-    PG_TRY();
-    {
+    /* PostgreSQL context deletion, pfree, and tuplestore_end below are
+     * no-ERROR cleanup primitives; ERROR-capable work stays in leaf bridges. */
+    const auto cleanup = [caller_context, &row_context, &values, &nulls,
+                          &view, &store] {
+        MemoryContextSwitchTo(caller_context);
+        if (row_context != nullptr) {
+            MemoryContextDelete(row_context);
+            row_context = nullptr;
+        }
+        if (values != nullptr) {
+            pfree(values);
+            values = nullptr;
+        }
+        if (nulls != nullptr) {
+            pfree(nulls);
+            nulls = nullptr;
+        }
+        executor::destroy_context_owned(view);
+        view = nullptr;
+        if (store != nullptr) {
+            pfree(store);
+            store = nullptr;
+        }
+    };
+    try {
+        result = bioseq::pg_utils::invoke_pg_as_cpp([] {
+            return tuplestore_begin_heap(true, false, work_mem);
+        });
+        row_context = bioseq::pg_utils::invoke_pg_as_cpp(
+            [caller_context] {
+                return AllocSetContextCreate(
+                    caller_context, "bioseq_cache replay row",
+                    ALLOCSET_DEFAULT_SIZES);
+            });
+        const std::size_t attribute_count =
+            static_cast<std::size_t>(expected_descriptor->natts);
+        values = bioseq::pg_utils::invoke_pg_as_cpp([attribute_count] {
+            return static_cast<Datum*>(
+                palloc0(sizeof(Datum) * attribute_count));
+        });
+        nulls = bioseq::pg_utils::invoke_pg_as_cpp([attribute_count] {
+            return static_cast<bool*>(
+                palloc0(sizeof(bool) * attribute_count));
+        });
+        decode_started = true;
         for (std::uint64_t row = 0; row < view->row_count() && valid; ++row) {
-            MemoryContextReset(row_context);
-            MemoryContext old_context = MemoryContextSwitchTo(row_context);
+            bioseq::pg_utils::invoke_pg_as_cpp([row_context] {
+                MemoryContextReset(row_context);
+            });
+            MemoryContext old_context =
+                bioseq::pg_utils::invoke_pg_as_cpp([row_context] {
+                    return MemoryContextSwitchTo(row_context);
+                });
             for (int attribute = 0;
                  attribute < expected_descriptor->natts; ++attribute) {
                 auto cell = view->value(
@@ -9927,51 +10084,100 @@ enum class CompleteResultLoadFailureV1 : std::uint8_t {
                     .maxlen = static_cast<int>(cell->bytes.size()),
                     .cursor = 0,
                 };
-                values[attribute] = OidReceiveFunctionCall(
-                    codec.receive_function_oid,
-                    &input,
-                    codec.receive_type_io_param,
-                    codec.typmod);
+                values[attribute] =
+                    bioseq::pg_utils::invoke_pg_as_cpp(
+                        [receive_function = codec.receive_function_oid,
+                         input_pointer = &input,
+                         io_parameter = codec.receive_type_io_param,
+                         typmod = codec.typmod] {
+                            return OidReceiveFunctionCall(
+                                receive_function,
+                                input_pointer,
+                                io_parameter,
+                                typmod);
+                        });
                 nulls[attribute] = false;
                 if (input.cursor != input.len) {
                     valid = false;
                     break;
                 }
             }
-            MemoryContextSwitchTo(old_context);
+            bioseq::pg_utils::invoke_pg_as_cpp([old_context] {
+                MemoryContextSwitchTo(old_context);
+            });
             if (valid) {
-                tuplestore_putvalues(
-                    result, expected_descriptor, values, nulls);
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [result, expected_descriptor, values, nulls] {
+                        tuplestore_putvalues(
+                            result, expected_descriptor, values, nulls);
+                    });
             }
         }
-    }
-    PG_CATCH();
-    {
-        const int sqlstate = geterrcode();
-        MemoryContextSwitchTo(caller_context);
-        if (cache_interrupt_error(sqlstate)) {
-            MemoryContextDelete(row_context);
-            pfree(values);
-            pfree(nulls);
-            executor::destroy_context_owned(view);
-            pfree(store);
+        cleanup();
+        if (!valid) {
             tuplestore_end(result);
-            PG_RE_THROW();
+            return reject(CompleteResultLoadFailureV1::Decode);
         }
-        FlushErrorState();
-        valid = false;
+        bioseq::pg_utils::invoke_pg_as_cpp([result] {
+            tuplestore_rescan(result);
+        });
+        return result;
+    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        cleanup();
+        if (result != nullptr) {
+            tuplestore_end(result);
+        }
+        if (decode_started && !cache_interrupt_error(error.sqlerrcode())) {
+            return reject(CompleteResultLoadFailureV1::Decode);
+        }
+        throw;
+    } catch (const bioseq::pg_utils::PostgresErrorCaptureFailure&) {
+        cleanup();
+        if (result != nullptr) {
+            tuplestore_end(result);
+        }
+        throw;
+    } catch (...) {
+        cleanup();
+        if (result != nullptr) {
+            tuplestore_end(result);
+        }
+        return reject(decode_started
+            ? CompleteResultLoadFailureV1::Decode
+            : CompleteResultLoadFailureV1::Validation);
     }
-    PG_END_TRY();
-    MemoryContextDelete(row_context);
-    pfree(values);
-    pfree(nulls);
-    executor::destroy_context_owned(view);
-    pfree(store);
-    if (!valid) {
-        tuplestore_end(result);
-        return reject(CompleteResultLoadFailureV1::Decode);
+}
+
+/** Restore exact PostgreSQL errors only after replay-owned C++ state unwinds. */
+[[nodiscard]] Tuplestorestate* load_complete_result(
+        const storage::ManifestPin& pin, TupleDesc expected_descriptor,
+        CacheEntryKind expected_kind = CacheEntryKind::ExactFinalResult,
+        CompleteResultLoadFailureV1* failure = nullptr) {
+    ErrorData* postgres_error = nullptr;
+    Tuplestorestate* result = nullptr;
+    bool capture_failed = false;
+    try {
+        result = load_complete_result_with_cpp_owners(
+            pin, expected_descriptor, expected_kind, failure);
+    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        postgres_error = error.release_error_data();
+    } catch (const bioseq::pg_utils::PostgresErrorCaptureFailure&) {
+        capture_failed = true;
+    } catch (...) {
+        if (failure != nullptr) {
+            *failure = CompleteResultLoadFailureV1::Decode;
+        }
+        return nullptr;
     }
-    tuplestore_rescan(result);
+    if (postgres_error != nullptr) {
+        bioseq::pg_utils::rethrow_postgres_error_after_cleanup(
+            postgres_error);
+    }
+    if (capture_failed) {
+        bioseq::pg_utils::emit_postgres_error_after_cleanup(
+            ERRCODE_INTERNAL_ERROR,
+            "could not preserve PostgreSQL cache replay error");
+    }
     return result;
 }
 
@@ -12250,15 +12456,29 @@ coverage_semantic_fingerprints(
             contract.provider_id, &contract).has_value()) {
         return false;
     }
-    std::vector<std::uint32_t> attnos;
-    attnos.reserve(
-        contract.boundary_column_count + contract.lineage_column_count);
-    const auto append_list = [&attnos, &contract](
+    std::array<std::uint32_t, 2U * kMaxProviderBoundaryColumns> attnos{};
+    std::size_t attno_count = 0;
+    const auto append_attno = [&attnos, &attno_count, &contract](
+            std::uint32_t attno) {
+        if (attno == 0
+            || coverage_contract_column(contract, attno) == nullptr) {
+            return false;
+        }
+        if (std::find(
+                attnos.begin(), attnos.begin() + attno_count, attno)
+            == attnos.begin() + attno_count) {
+            if (attno_count == attnos.size()) {
+                return false;
+            }
+            attnos[attno_count++] = attno;
+        }
+        return true;
+    };
+    const auto append_list = [&append_attno](
             const std::uint32_t* values,
             std::size_t count) {
         for (std::size_t index = 0; index < count; ++index) {
-            if (!append_unique_coverage_attno(
-                    attnos, contract, values[index])) {
+            if (!append_attno(values[index])) {
                 return false;
             }
         }
@@ -12273,7 +12493,7 @@ coverage_semantic_fingerprints(
         return false;
     }
     const std::size_t column_count =
-        kCoverageOccurrenceColumnCountV1 + attnos.size();
+        kCoverageOccurrenceColumnCountV1 + attno_count;
     if (column_count == kCoverageOccurrenceColumnCountV1
         || column_count > static_cast<std::size_t>(MaxTupleAttributeNumber)) {
         return false;
@@ -12325,7 +12545,7 @@ coverage_semantic_fingerprints(
         };
     }
     static constexpr char hex[] = "0123456789abcdef";
-    for (std::size_t index = 0; index < attnos.size(); ++index) {
+    for (std::size_t index = 0; index < attno_count; ++index) {
         const std::uint32_t attno = attnos[index];
         const BioseqCacheColumnSchemaV2* schema =
             coverage_contract_column(contract, attno);
@@ -15157,7 +15377,7 @@ capture_cleanup:
 }
 
 /** Seal full merged output, publish storage, then make registry COMPLETE last. */
-[[nodiscard]] bool complete_coverage_producer(
+[[nodiscard]] bool complete_coverage_producer_with_cpp_owners(
         ReusableCoverageState& state) {
     const CoverageDependencyTicketV1 dependency_ticket =
         coverage_dependency_ticket(
@@ -15195,8 +15415,12 @@ capture_cleanup:
         return false;
     }
     ReusableGenerationSnapshotV1 storage_snapshot{};
-    if (!snapshot_current_reusable_generation(
-            state.current_reference, &storage_snapshot)
+    if (!bioseq::pg_utils::invoke_pg_as_cpp(
+            [reference = state.current_reference,
+             snapshot = &storage_snapshot] {
+                return snapshot_current_reusable_generation(
+                    reference, snapshot);
+            })
         || storage_snapshot.reference != state.current_reference
         || storage_snapshot.entry_kind != CacheEntryKind::ReusableCoverage
         || storage_snapshot.state != CacheEntryState::Building
@@ -15218,6 +15442,7 @@ capture_cleanup:
     if (!publication) {
         return false;
     }
+    blocks.reset();
     destroy_coverage_builder(state);
     const VisibilityTicket refreshed = mint_visibility_ticket(
         storage_snapshot.metadata.observability,
@@ -15282,6 +15507,33 @@ capture_cleanup:
             &g_shared->stats.stored_bytes, state.payload_bytes);
     }
     return true;
+}
+
+/** Restore PostgreSQL ERROR only after coverage-owned C++ blocks unwind. */
+[[nodiscard]] bool complete_coverage_producer(
+        ReusableCoverageState& state) {
+    ErrorData* postgres_error = nullptr;
+    bool completed = false;
+    bool capture_failed = false;
+    try {
+        completed = complete_coverage_producer_with_cpp_owners(state);
+    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        postgres_error = error.release_error_data();
+    } catch (const bioseq::pg_utils::PostgresErrorCaptureFailure&) {
+        capture_failed = true;
+    } catch (...) {
+        return false;
+    }
+    if (postgres_error != nullptr) {
+        bioseq::pg_utils::rethrow_postgres_error_after_cleanup(
+            postgres_error);
+    }
+    if (capture_failed) {
+        bioseq::pg_utils::emit_postgres_error_after_cleanup(
+            ERRCODE_INTERNAL_ERROR,
+            "could not preserve PostgreSQL cache publish error");
+    }
+    return completed;
 }
 
 struct BoundedDiagnosticTextV1 {
@@ -20894,7 +21146,10 @@ void populate_exact_diagnostic_text(
         .canonical_plan = workspace.canonical_plan,
         .producer_plan = workspace.producer_plan,
     };
-    if (copy_exact_entry_text(entry, &diagnostic_text)) {
+    if (bioseq::pg_utils::invoke_pg_as_cpp(
+            [entry_pointer = &entry, output = &diagnostic_text] {
+                return copy_exact_entry_text(*entry_pointer, output);
+            })) {
         if (diagnostic_text.display_sql_bytes != 0) {
             row.sql = std::string{
                 diagnostic_text.display_sql.data(),
@@ -20926,7 +21181,10 @@ void populate_reusable_diagnostic_text(
         .canonical_plan = workspace.canonical_plan,
         .producer_plan = workspace.producer_plan,
     };
-    if (copy_reusable_entry_text(entry.reference, &diagnostic_text)) {
+    if (bioseq::pg_utils::invoke_pg_as_cpp(
+            [reference = &entry.reference, output = &diagnostic_text] {
+                return copy_reusable_entry_text(*reference, output);
+            })) {
         if (diagnostic_text.metadata.display_sql_bytes != 0) {
             row.sql = std::string{
                 diagnostic_text.display_sql.data(),
@@ -21069,9 +21327,12 @@ entries(const bioseq::pg_utils::sql_call_context& call) {
                             * capacity));
             });
         const ReusableGenerationDiagnosticsResultV1 snapshot =
-            snapshot_reusable_entries(
-                std::span<ReusableGenerationDiagnosticsRowV1>{
-                    reusable_snapshots, capacity});
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [reusable_snapshots, capacity] {
+                    return snapshot_reusable_entries(
+                        std::span<ReusableGenerationDiagnosticsRowV1>{
+                            reusable_snapshots, capacity});
+                });
         if (snapshot.error != ReusableRegistryErrorV1::None
             || snapshot.truncated) {
             pfree(reusable_snapshots);
@@ -21682,9 +21943,11 @@ entry_states() {
                     * capacity));
         });
     const ReusableGenerationDiagnosticsResultV1 copied =
-        snapshot_reusable_entries(
-            std::span<ReusableGenerationDiagnosticsRowV1>{
-                snapshots, capacity});
+        bioseq::pg_utils::invoke_pg_as_cpp([snapshots, capacity] {
+            return snapshot_reusable_entries(
+                std::span<ReusableGenerationDiagnosticsRowV1>{
+                    snapshots, capacity});
+        });
     if (copied.error == ReusableRegistryErrorV1::None
         && !copied.truncated) {
         rows.reserve(copied.count);
@@ -21813,9 +22076,11 @@ planner_reference_counts() {
                             * capacity));
             });
         const ReusableGenerationDiagnosticsResultV1 copied =
-            snapshot_reusable_entries(
-                std::span<ReusableGenerationDiagnosticsRowV1>{
-                    snapshots, capacity});
+            bioseq::pg_utils::invoke_pg_as_cpp([snapshots, capacity] {
+                return snapshot_reusable_entries(
+                    std::span<ReusableGenerationDiagnosticsRowV1>{
+                        snapshots, capacity});
+            });
         if (copied.error == ReusableRegistryErrorV1::None
             && !copied.truncated) {
             for (std::size_t index = 0;

@@ -3877,8 +3877,12 @@ PublishManifestResult publish_manifest(
         return result;
     }
 
-    const ManifestFileFinalization finalized = finalize_manifest_file(
-        descriptor, blocks, current);
+    const ManifestFileFinalization finalized =
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [descriptor_pointer = &descriptor, blocks, current] {
+                return finalize_manifest_file(
+                    *descriptor_pointer, blocks, current);
+            });
     if (finalized.error != StorageError::None) {
         result.error = finalized.error;
         return result;
