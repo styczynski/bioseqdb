@@ -72,6 +72,10 @@ from pathlib import Path
 from inspect_tool import (
     run_inspect as _run_inspect_impl,
     MATCHES_WARN_THRESHOLD,
+    MAX_INSPECT_MATCHES,
+    MAX_INSPECT_SNIPPET_LINES,
+    MAX_RETAINED_SNIPPET_BYTES,
+    MAX_TOTAL_RETAINED_SNIPPET_BYTES,
 )
 
 # Lazy provisioning for the document tools (npm qmd + poetry jsonschema). Imported here only
@@ -10778,8 +10782,12 @@ def tool_inspect(arguments: dict) -> str:
             return int(v)
         return default
 
-    max_matches = _int_arg("max_matches", 4)
-    snippet_lines = _int_arg("snippet_lines", 200)
+    # run_inspect validates/defaults/clamps these two result-size controls and
+    # surfaces any correction in warnings. Preserve the raw value here so a
+    # malformed direct/CLI caller does not silently become indistinguishable
+    # from an explicit default.
+    max_matches = arguments.get("max_matches", 4)
+    snippet_lines = arguments.get("snippet_lines", 200)
     max_llc_bc_files = _int_arg("max_llc_bc_files", 4)
     source_basename = arguments.get("source_basename")
     if source_basename is not None and not isinstance(source_basename, str):
@@ -13474,9 +13482,11 @@ TOOL_DEFINITIONS = [
             "and a sweep of inline sites where the function appears as "
             ".loc directives or DEBUG_VALUE annotations in other TUs' .s "
             "files (useful for [[gnu::always_inline]] functions that have "
-            "no standalone symbol). All large outputs are written to "
-            "/tmp/bioseq_inspect/ and pointed at via paths so the AI can "
-            "Read them on demand.\n\n"
+            "no standalone symbol). Full post-LTO objdump text is written "
+            "under /tmp/bioseq_inspect/. Pre-LTO assembly listings remain "
+            "in the selected build tree; each match returns that build path "
+            "and exact line range. JSON snippets are byte-bounded, while "
+            "those file paths preserve access to complete evidence.\n\n"
             "DOC0270/DOC0371 — fast core/test/cache trees do "
             "NOT carry per-TU .s/.bc files or DWARF. Call `start_build` for "
             "the requested target's mode with debug=true first to produce "
@@ -13501,11 +13511,25 @@ TOOL_DEFINITIONS = [
             "field surfaces the un-capped count so you can decide whether "
             "to retry with a tighter prefix; a top-level warning fires "
             f"when the count exceeds {MATCHES_WARN_THRESHOLD}.\n\n"
-            "Latency: lazy disk-cached llc fallback. First call after a "
-            "fresh debug build is ~25-100s (one llc per relevant .bc, "
-            "capped at 4). Subsequent calls reuse the cached .s and "
-            "complete in ~6-9s. Cache invalidates on .bc mtime; rebuilds "
-            "cleanly reset it.\n\n"
+            "Latency and observability: when available, ripgrep first scans "
+            "compiler listings in native bounded memory for exact symbol "
+            "labels plus an explicitly supplied source_basename; only "
+            "candidate listings enter the bounded Python parser. One "
+            "assembly-phase deadline covers both rg and every fallback "
+            "streaming chunk. If rg is absent or fails while time remains, "
+            "the parser streams every listing once; if the shared deadline "
+            "is exhausted it stops safely and reports incomplete evidence. "
+            "Fallback latency is proportional to total .s bytes. The lazy llc fallback can add "
+            "up to ~25s per selected .bc on a cold tree and reuses a sibling "
+            ".s until the .bc mtime changes. build_metadata.tools.rg records "
+            "the prefilter tool. summary.asm_listings_scanned retains its "
+            "legacy discovered-count meaning; asm_listings_candidates, "
+            "asm_listings_parsed, asm_listings_unparsed, "
+            "asm_listing_bytes_streamed, asm_listing_scan_duration_ms and "
+            "asm_listing_scan_incomplete expose actual work/completeness. "
+            "Summary also reports snippet byte limits/truncation and honest "
+            "source-state overflow/entries-cleared/records-dropped counts; "
+            "warnings identify every clamp or fail-closed omission.\n\n"
             "Caveats:\n"
             "  - llvm-objdump symbolises every branch target by finding "
             "the closest *named* symbol with a smaller address — even when "
@@ -13520,7 +13544,12 @@ TOOL_DEFINITIONS = [
             "  - At clang -O3 the default -discard-value-names strips "
             "DEBUG_VALUE annotations for templated/inlined code, so "
             "inline_sites[].debug_value_hits is often 0. The .loc "
-            "directive count is the primary signal."
+            "directive count is the primary signal.\n"
+            "  - Post-LTO extraction is not a whole-DSO disassembly: objdump "
+            "is filtered to each exact matched symbol and has a 120-second "
+            "per-process timeout; its c++filt pass has a 60-second timeout. "
+            "The one whole-DSO nm/c++filt symbol enumeration is separately "
+            "time-bounded to 60 seconds per process."
         ),
         "inputSchema": {
             "type": "object",
@@ -13548,29 +13577,33 @@ TOOL_DEFINITIONS = [
                     "type": "integer",
                     "default": 4,
                     "minimum": 1,
+                    "maximum": MAX_INSPECT_MATCHES,
                     "description":
                         "Cap on the number of returned symbols. Largest "
-                        "first (by computed size).",
+                        "first (by computed size); out-of-range direct calls "
+                        "are clamped with a warning.",
                 },
                 "snippet_lines": {
                     "type": "integer",
                     "default": 200,
                     "minimum": 1,
+                    "maximum": MAX_INSPECT_SNIPPET_LINES,
                     "description":
-                        "How many lines of asm/disasm to inline in the "
-                        "JSON. Full output is always written to /tmp and "
-                        "the path is included; use Read on the path for "
-                        "the rest.",
+                        "Maximum lines of asm/disasm to inline in JSON, also "
+                        f"bounded to {MAX_RETAINED_SNIPPET_BYTES} bytes per "
+                        f"snippet and {MAX_TOTAL_RETAINED_SNIPPET_BYTES} "
+                        "bytes total. Full objdump text is under /tmp; full "
+                        "assembly listings remain at returned build-tree "
+                        "paths.",
                 },
                 "source_basename": {
                     "type": "string",
                     "description":
                         "Basename of the source file (e.g. "
                         "'two_stacks_minimizers.cppm') used to filter "
-                        "the inline-site .loc sweep. Defaults to "
-                        "'<function_name>.cppm', which is usually wrong "
-                        "for namespaced functions — pass it explicitly "
-                        "for accurate inline_sites[].",
+                        "the inline-site .loc sweep. When omitted, that sweep "
+                        "is skipped with a warning; exact standalone pre-LTO "
+                        "symbol-block inspection remains enabled.",
                 },
                 "max_llc_bc_files": {
                     "type": "integer",
@@ -13588,7 +13621,8 @@ TOOL_DEFINITIONS = [
                     "description":
                         "Whether to run the llc-on-.bc fallback when no "
                         ".s files are present (clang ThinLTO case). "
-                        "Disable for fast/incomplete inspect calls.",
+                        "Disabling it prevents only .bc-to-.s synthesis; it "
+                        "does not disable scanning existing .s evidence.",
                 },
                 "debug": {
                     "type": "boolean",
@@ -14072,14 +14106,20 @@ TOOL_DEFINITIONS += [
             "focused Catch2 filter.tags for unit+integration and CMake-owned "
             "private-cluster execution for cache modes.\n"
             "  operation='inspect' — runs the inspect tool on a box-side binary, "
-            "same parameters as the local inspect tool.\n\n"
+            "with the local tool's exact-label prefilter, one end-to-end "
+            "assembly deadline, bounded streaming fallback, snippet/state "
+            "budgets, and source_basename semantics. "
+            "Omitting source_basename skips only the inline-site sweep.\n\n"
             "IMPORTANT CAVEATS:\n"
             "  - The box is x86_64 Linux. Build/test/bench modes expect the "
             "provisioned PostgreSQL + bioseq DB to be ready on the box; failures in "
             "our code should now be treated as real regressions, not as an expected "
             "::NEON/macOS dispatch.h gap.\n"
             "  - remote inspect needs a successfully-built binary on the box, so it "
-            "won't return useful disassembly until the build succeeds." + _REMOTE_MUTEX_NOTE
+            "won't return useful disassembly until the build succeeds. Paths in its "
+            "JSON are box-side paths: objdump files are under the box's /tmp, while "
+            "assembly listings remain in its build tree; use remote-ssh for follow-up "
+            "reads." + _REMOTE_MUTEX_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -14221,12 +14261,16 @@ TOOL_DEFINITIONS += [
                             "default": "bioseq_bench",
                             "description": "Which target binary to inspect on the box.",
                         },
-                        "max_matches": {"type": "integer", "minimum": 1, "default": 4,
-                                        "description": "Cap on returned symbols."},
-                        "snippet_lines": {"type": "integer", "minimum": 1, "default": 200,
-                                          "description": "Lines of asm/disasm to inline."},
+                        "max_matches": {"type": "integer", "minimum": 1,
+                                        "maximum": MAX_INSPECT_MATCHES, "default": 4,
+                                        "description": "Clamped cap on returned symbols."},
+                        "snippet_lines": {"type": "integer", "minimum": 1,
+                                          "maximum": MAX_INSPECT_SNIPPET_LINES,
+                                          "default": 200,
+                                          "description": "Clamped lines of bounded asm/disasm snippets to inline."},
                         "source_basename": {"type": "string",
-                                            "description": "Source basename for the inline-site sweep."},
+                                            "description": ("Source basename for the inline-site sweep; omission skips "
+                                                            "that sweep but preserves standalone pre-LTO blocks.")},
                         "max_llc_bc_files": {"type": "integer", "minimum": 0, "default": 4,
                                              "description": "Cap on .bc files llc-compiled for the pre-LTO view."},
                         "llc_on_bc": {"type": "boolean", "default": True,

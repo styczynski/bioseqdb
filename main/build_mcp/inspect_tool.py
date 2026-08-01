@@ -24,18 +24,20 @@ combining:
     works at -O3) and `DEBUG_VALUE: <fname>:` annotations (secondary,
     often empty at clang -O3 due to `-discard-value-names`).
 
-Returns a single JSON document matching the schema in
-IMPROVE_BUILD_MCP_IMPL_PLAN_1.md §3.
+Returns one JSON document containing linked and compiler-listing evidence.
 
-Latency story: lazy with disk-cached llc fallback. First call after a
-fresh build is ~25-100s (one llc per relevant .bc, capped via
-max_llc_bc_files=4). Subsequent calls reuse the cached `.s` and
-complete in ~6-9s. Cache invalidates on .bc mtime.
+Latency story: exact symbol labels and an explicitly supplied source basename
+prefilter the compiler listings in native code when ripgrep is available.
+Only matching listings enter the Python parser. The lazy llc fallback remains
+disk-cached and invalidates on .bc mtime. One assembly-phase deadline covers
+both prefiltering and every streamed fallback chunk; expiry returns explicitly
+incomplete evidence instead of overrunning the MCP request budget.
 
 Memory contract: this module is invoked from the long-lived MCP server.
-A single llc-emitted `.s` can be ~273 MB. We therefore stream-scan each
-`.s` exactly once per call and never hold contents across calls. See
-plan Risk #16.
+Compiler `.s` files can be several gigabytes. Candidate files are parsed once
+in fixed-size chunks, retained physical lines are capped, and only requested
+snippets plus aggregate `.file`/`.loc` state remain in memory. See plan
+Risk #16.
 
 Standalone CLI usage (kept for unit testing — the MCP server imports
 `run_inspect` directly):
@@ -50,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -73,6 +76,29 @@ OBJDUMP_TIMEOUT_SEC = 120
 DEMANGLER_TIMEOUT_SEC = 60
 LLC_TIMEOUT_SEC = 300
 HELP_TIMEOUT_SEC = 5
+ASSEMBLY_PHASE_TIMEOUT_SEC = 120
+
+# Assembly listings can be multiple gigabytes. Reads and retained line state
+# stay bounded even if a malformed listing contains a line without a newline.
+ASSEMBLY_READ_CHUNK_BYTES = 1024 * 1024
+ASSEMBLY_MAX_RETAINED_LINE_BYTES = 1024 * 1024
+ASSEMBLY_RG_MAX_ARG_BYTES = 24 * 1024
+ASSEMBLY_MAX_SOURCE_STATE_ENTRIES = 16 * 1024
+ASSEMBLY_MAX_SOURCE_STATE_BYTES = 4 * 1024 * 1024
+
+# Request/result bounds. Full objdump output remains on disk and full pre-LTO
+# listings remain in the build tree; these limits apply only to JSON snippets
+# and in-memory source-index bookkeeping.
+MIN_INSPECT_MATCHES = 1
+MAX_INSPECT_MATCHES = 64
+MIN_INSPECT_SNIPPET_LINES = 1
+MAX_INSPECT_SNIPPET_LINES = 2000
+MAX_RETAINED_SNIPPET_BYTES = 256 * 1024
+MAX_TOTAL_RETAINED_SNIPPET_BYTES = 1024 * 1024
+
+
+class AssemblyPhaseDeadlineExceeded(RuntimeError):
+    """Raised internally when bounded source/pre-LTO work exhausts its budget."""
 
 # Skip a `.bc` whose mtime is within this many seconds of "now" — protects
 # the lazy llc path from racing a concurrent ninja write. See plan Risk #9.
@@ -89,6 +115,7 @@ PREFERRED_NM = ["llvm-nm", "nm"]
 PREFERRED_OBJDUMP = ["llvm-objdump", "objdump"]
 PREFERRED_DEMANGLER = ["llvm-cxxfilt", "c++filt"]
 PREFERRED_LLC = ["llc"]
+PREFERRED_RG = ["rg"]
 
 # Probed only as a last resort — `which` already covers PATH. These exist
 # because Apple's developer Xcode includes its own LLVM tools at
@@ -121,6 +148,7 @@ def detect_tools() -> dict:
         "objdump": next((p for p in (_which(n) for n in PREFERRED_OBJDUMP) if p), None),
         "demangler": next((p for p in (_which(n) for n in PREFERRED_DEMANGLER) if p), None),
         "llc": next((p for p in (_which(n) for n in PREFERRED_LLC) if p), None),
+        "rg": next((p for p in (_which(n) for n in PREFERRED_RG) if p), None),
     }
 
 
@@ -292,60 +320,7 @@ def list_symbols(nm_path: str, binary: Path,
     return out
 
 
-# --------------------------- function block extraction ---------------------
-
-def extract_function_block(s_text: str, mangled: str) -> Optional[tuple[int, int, str]]:
-    """Find `<mangled>:` (must start at column 0) and return its full
-    function body delimited by matched `.cfi_startproc`/`.cfi_endproc`.
-
-    Mach-O assembly may use a one-extra-`_` prefix convention vs the binary
-    symbol table; we accept either form.
-
-    Returns (start_line_1based, end_line_1based, snippet) or None.
-    """
-    candidates = [mangled]
-    if mangled.startswith("_"):
-        candidates.append(mangled[1:])
-    else:
-        candidates.append("_" + mangled)
-    lines = s_text.splitlines()
-
-    start = None
-    for i, line in enumerate(lines):
-        for cand in candidates:
-            if line.startswith(cand + ":"):
-                # Sanity: the next ~8 lines should contain .cfi_startproc.
-                # Without this the regex would match unrelated labels that
-                # happen to share the prefix (e.g. `_ZN…__local_label`).
-                for j in range(i, min(i + 8, len(lines))):
-                    if ".cfi_startproc" in lines[j]:
-                        start = i
-                        break
-                if start is not None:
-                    break
-        if start is not None:
-            break
-
-    if start is None:
-        return None
-
-    end = None
-    depth = 0
-    for j in range(start, len(lines)):
-        if ".cfi_startproc" in lines[j]:
-            depth += 1
-        elif ".cfi_endproc" in lines[j]:
-            depth -= 1
-            if depth == 0:
-                end = j
-                break
-    if end is None:
-        return None
-    snippet = "\n".join(lines[start: end + 1])
-    return start + 1, end + 1, snippet
-
-
-# --------------------------- .file/.loc resolution -------------------------
+# --------------------------- assembly listing scan -------------------------
 
 FILE_DIR_RE = re.compile(
     r'^\s*\.file\s+(\d+)(?:\s+"([^"]*)")?\s+"([^"]*)"\s*(?:md5\s+0x[0-9a-fA-F]+)?\s*$'
@@ -359,60 +334,619 @@ DEBUG_VALUE_RE = re.compile(
     r"DEBUG_VALUE:\s+((?:[^<:]|::)+?)(?:<[^>]*>)?:(?!:)")
 
 
-def parse_file_table(s_text: str) -> dict[int, str]:
-    """Return {file_index → "comp_dir/file_name"} from .file directives."""
-    table: dict[int, str] = {}
-    for line in s_text.splitlines():
-        m = FILE_DIR_RE.match(line)
-        if m:
-            idx = int(m.group(1))
-            comp_dir = m.group(2) or ""
-            fname = m.group(3) or ""
-            table[idx] = (str(Path(comp_dir) / fname) if comp_dir
-                          else fname)
-    return table
+def _symbol_listing_labels(mangled: str,
+                           exact_match_labels: set[str]) -> tuple[str, ...]:
+    """Return the exact label plus an unambiguous Mach-O alternate.
 
-
-def scan_inline_site(text: str, s_file: Path,
-                     source_basename: str,
-                     func_name: str) -> Optional[dict]:
-    """Walk a single `.s` file's text and accumulate inline-site signals.
-
-    Returns the per-file inline-site dict, or None if the .s contains
-    neither matching `.loc` directives nor matching DEBUG_VALUE
-    annotations (so we don't emit empty entries for unrelated TUs).
+    Adding/removing one underscore is accepted only when that alternate is not
+    another matched symbol's exact spelling. This prevents `_foo` and `foo`
+    from both claiming whichever body happens to appear first.
     """
-    if source_basename not in text:
+    alternate = mangled[1:] if mangled.startswith("_") else "_" + mangled
+    labels = [mangled]
+    if alternate not in exact_match_labels:
+        labels.append(alternate)
+    return tuple(dict.fromkeys(labels))
+
+
+def _assembly_candidate_pattern(matches: list[dict],
+                                source_basename: Optional[str]) -> str:
+    """Build the ripgrep expression used to find relevant `.s` files.
+
+    Symbol alternatives are exact labels at column zero. A symbol prefix is
+    not sufficient: the colon must be followed by whitespace or end-of-line.
+    Source matching is included only when the caller supplied a basename.
+    """
+    exact_match_labels = {match["mangled"] for match in matches}
+    labels = tuple(dict.fromkeys(
+        label
+        for match in matches
+        for label in _symbol_listing_labels(
+            match["mangled"], exact_match_labels)
+    ))
+    alternatives: list[str] = []
+    if labels:
+        alternatives.append(
+            r"^(?:" + "|".join(re.escape(label) for label in labels)
+            + r"):(?:\s|$)")
+    if source_basename:
+        alternatives.append(re.escape(source_basename))
+    return "|".join(f"(?:{item})" for item in alternatives)
+
+
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    return list(dict.fromkeys(paths))
+
+
+def _argv_size_bytes(arguments: list[str]) -> int:
+    """Conservative cross-platform encoded command-line size estimate."""
+    return sum(len(os.fsencode(argument)) + 3 for argument in arguments)
+
+
+def _rg_path_batches(paths: list[Path], base_command: list[str]
+                     ) -> Optional[list[list[Path]]]:
+    """Batch paths so every rg argv remains below the Windows-safe limit."""
+    base_bytes = _argv_size_bytes(base_command)
+    if base_bytes >= ASSEMBLY_RG_MAX_ARG_BYTES:
         return None
-    ftab = parse_file_table(text)
-    target_indices = {idx for idx, path in ftab.items()
-                      if path.endswith(source_basename)}
-    if not target_indices:
-        return None
-    loc_hits = 0
-    first_loc_line: Optional[int] = None
-    last_loc_line: Optional[int] = None
-    debug_value_hits = 0
-    for i, line in enumerate(text.splitlines(), start=1):
-        m = LOC_RE.match(line)
-        if m and int(m.group(1)) in target_indices:
-            loc_hits += 1
-            if first_loc_line is None:
-                first_loc_line = i
-            last_loc_line = i
-        if "DEBUG_VALUE" in line:
-            m = DEBUG_VALUE_RE.search(line)
-            if m and m.group(1).strip() == func_name:
-                debug_value_hits += 1
-    if not (loc_hits or debug_value_hits):
-        return None
+    batches: list[list[Path]] = []
+    current: list[Path] = []
+    current_bytes = base_bytes
+    for path in paths:
+        path_bytes = len(os.fsencode(path)) + 3
+        if current and current_bytes + path_bytes > ASSEMBLY_RG_MAX_ARG_BYTES:
+            batches.append(current)
+            current = []
+            current_bytes = base_bytes
+        if current_bytes + path_bytes > ASSEMBLY_RG_MAX_ARG_BYTES:
+            return None
+        current.append(path)
+        current_bytes += path_bytes
+    if current:
+        batches.append(current)
+    return batches
+
+
+def prefilter_assembly_files(
+    s_files: list[Path],
+    matches: list[dict],
+    source_basename: Optional[str],
+    rg_path: Optional[str],
+    warnings: list[str],
+    phase_deadline: Optional[float] = None,
+) -> tuple[list[Path], str]:
+    """Return `.s` files that can contain requested source/pre-LTO evidence.
+
+    ripgrep performs the potentially multi-gigabyte discovery scan in bounded
+    native memory. If it is absent or fails, correctness wins: every listing
+    is returned and the bounded streaming parser below acts as the fallback.
+    """
+    unique_files = _unique_paths(s_files)
+    pattern = _assembly_candidate_pattern(matches, source_basename)
+    if not unique_files or not pattern:
+        return [], "not-needed"
+    if not rg_path:
+        return unique_files, "streaming-fallback"
+
+    matched_paths: set[Path] = set()
+    by_spelling = {str(path): path for path in unique_files}
+    by_absolute = {os.path.abspath(path): path for path in unique_files}
+    base_command = [
+        rg_path, "--files-with-matches", "--text", "--no-messages",
+        "--regexp", pattern, "--",
+    ]
+    batches = _rg_path_batches(unique_files, base_command)
+    if batches is None:
+        warnings.append(
+            "assembly prefilter query exceeds the 24-KiB argv budget; using "
+            "bounded streaming fallback")
+        return unique_files, "streaming-fallback"
+    deadline = (phase_deadline if phase_deadline is not None
+                else time.monotonic() + ASSEMBLY_PHASE_TIMEOUT_SEC)
+    try:
+        for batch in batches:
+            timeout_remaining = deadline - time.monotonic()
+            if timeout_remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    base_command, ASSEMBLY_PHASE_TIMEOUT_SEC)
+            proc = subprocess.run(
+                [*base_command, *(str(path) for path in batch)],
+                capture_output=True,
+                text=True,
+                timeout=timeout_remaining,
+            )
+            if proc.returncode not in (0, 1):
+                warnings.append(
+                    f"assembly prefilter failed (rc={proc.returncode}): "
+                    f"{proc.stderr.strip()[:200]}; using bounded streaming "
+                    "fallback")
+                return unique_files, "streaming-fallback"
+            for line in proc.stdout.splitlines():
+                candidate = by_spelling.get(line)
+                if candidate is None:
+                    candidate = by_absolute.get(os.path.abspath(line))
+                if candidate is not None:
+                    matched_paths.add(candidate)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        warnings.append(
+            f"assembly prefilter unavailable ({exc}); using bounded "
+            "streaming fallback")
+        return unique_files, "streaming-fallback"
+
+    return ([path for path in unique_files if path in matched_paths],
+            "ripgrep")
+
+
+def _bounded_binary_lines(stream: Any, stats: dict,
+                          phase_deadline: Optional[float] = None) -> Any:
+    """Yield decoded physical lines without retaining an unbounded line.
+
+    Real compiler assembly lines are short. For malformed input, retain only
+    the first MiB, discard the rest through its newline, and report the event
+    in scan statistics while preserving physical line numbering.
+    """
+    pending = bytearray()
+    truncated = False
+    while True:
+        if (phase_deadline is not None
+                and time.monotonic() >= phase_deadline):
+            raise AssemblyPhaseDeadlineExceeded(
+                "assembly phase deadline exhausted while streaming")
+        chunk = stream.read(ASSEMBLY_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        stats["bytes_streamed"] += len(chunk)
+        start = 0
+        while start < len(chunk):
+            newline = chunk.find(b"\n", start)
+            end = len(chunk) if newline < 0 else newline
+            if not truncated:
+                room = ASSEMBLY_MAX_RETAINED_LINE_BYTES - len(pending)
+                if room > 0:
+                    pending.extend(chunk[start:min(end, start + room)])
+                if end - start > max(room, 0):
+                    truncated = True
+            if newline < 0:
+                break
+            if truncated:
+                stats["truncated_lines"] += 1
+            stats["max_retained_line_bytes"] = max(
+                stats["max_retained_line_bytes"], len(pending))
+            yield pending.decode("utf-8", errors="replace")
+            pending.clear()
+            truncated = False
+            start = newline + 1
+    if pending or truncated:
+        if truncated:
+            stats["truncated_lines"] += 1
+        stats["max_retained_line_bytes"] = max(
+            stats["max_retained_line_bytes"], len(pending))
+        yield pending.decode("utf-8", errors="replace")
+
+
+def _new_snippet_budget() -> dict:
     return {
-        "assembly_listing_file": str(s_file),
-        "loc_directive_count": loc_hits,
-        "first_loc_line": first_loc_line,
-        "last_loc_line": last_loc_line,
-        "debug_value_hits": debug_value_hits,
-        "resolved_file_indices": sorted(target_indices),
+        "bytes_retained": 0,
+        "snippets_truncated": 0,
+        "bytes_rejected": 0,
+    }
+
+
+def _retain_capture_line(capture: dict, line: str,
+                         snippet_lines: int, budget: dict) -> None:
+    """Retain one snippet line within per-snippet and request byte limits."""
+    if capture["snippet_budget_truncated"]:
+        return
+    if len(capture["snippet"]) >= snippet_lines:
+        return
+    encoded = line.encode("utf-8", errors="replace")
+    separator_bytes = 1 if capture["snippet"] else 0
+    required = separator_bytes + len(encoded)
+    per_remaining = MAX_RETAINED_SNIPPET_BYTES - capture["snippet_bytes"]
+    total_remaining = (
+        MAX_TOTAL_RETAINED_SNIPPET_BYTES - budget["bytes_retained"])
+    allowed = max(0, min(required, per_remaining, total_remaining))
+    if allowed == required:
+        capture["snippet"].append(line)
+        capture["snippet_bytes"] += required
+        budget["bytes_retained"] += required
+        return
+
+    if allowed > separator_bytes:
+        retained = encoded[:allowed - separator_bytes].decode(
+            "utf-8", errors="ignore")
+        if retained:
+            capture["snippet"].append(retained)
+            retained_bytes = separator_bytes + len(
+                retained.encode("utf-8", errors="replace"))
+            capture["snippet_bytes"] += retained_bytes
+            budget["bytes_retained"] += retained_bytes
+            allowed = retained_bytes
+        else:
+            allowed = 0
+    else:
+        allowed = 0
+    rejected = max(0, required - allowed)
+    budget["bytes_rejected"] += rejected
+    capture["snippet_bytes_rejected"] += rejected
+    capture["snippet_budget_truncated"] = True
+    budget["snippets_truncated"] += 1
+
+
+def _release_capture_budget(capture: dict, budget: dict) -> None:
+    """Release provisional bytes for a label that failed the CFI check."""
+    budget["bytes_retained"] -= capture["snippet_bytes"]
+    budget["bytes_rejected"] -= capture["snippet_bytes_rejected"]
+    if capture["snippet_budget_truncated"]:
+        budget["snippets_truncated"] -= 1
+    capture["snippet"].clear()
+    capture["snippet_bytes"] = 0
+
+
+def _retain_text_snippet(text: str, snippet_lines: int,
+                         budget: dict) -> tuple[str, int, bool]:
+    """Retain a bounded snippet from an already-produced text artifact."""
+    capture = {
+        "snippet": [],
+        "snippet_bytes": 0,
+        "snippet_bytes_rejected": 0,
+        "snippet_budget_truncated": False,
+    }
+    for raw_line in io.StringIO(text):
+        if len(capture["snippet"]) >= snippet_lines:
+            break
+        line = raw_line.rstrip("\r\n")
+        _retain_capture_line(capture, line, snippet_lines, budget)
+        if capture["snippet_budget_truncated"]:
+            break
+    return ("\n".join(capture["snippet"]), capture["snippet_bytes"],
+            capture["snippet_budget_truncated"])
+
+
+def _stream_assembly_listing(
+    s_file: Path,
+    matches: list[dict],
+    source_basename: Optional[str],
+    function_name: str,
+    snippet_lines: int,
+    snippet_budget: Optional[dict] = None,
+    phase_deadline: Optional[float] = None,
+    exact_match_labels: Optional[set[str]] = None,
+) -> tuple[dict[str, dict], Optional[dict], dict]:
+    """Parse one candidate listing once with bounded retained state."""
+    labels_to_symbols: dict[str, list[str]] = {}
+    exact_match_labels = (exact_match_labels
+                          if exact_match_labels is not None
+                          else {match["mangled"] for match in matches})
+    for match in matches:
+        mangled = match["mangled"]
+        for label in _symbol_listing_labels(mangled, exact_match_labels):
+            labels_to_symbols.setdefault(label, []).append(mangled)
+    label_re = (re.compile(
+        r"^(" + "|".join(re.escape(label) for label in labels_to_symbols)
+        + r"):(?:\s|$)") if labels_to_symbols else None)
+
+    stats = {
+        "bytes_streamed": 0,
+        "truncated_lines": 0,
+        "max_retained_line_bytes": 0,
+    }
+    blocks: dict[str, dict] = {}
+    active: dict[str, dict] = {}
+    file_table: dict[int, str] = {}
+    loc_stats: dict[int, list[Optional[int]]] = {}
+    debug_value_hits = 0
+    retained_snippet_lines = max(0, snippet_lines)
+    snippet_budget = snippet_budget or _new_snippet_budget()
+    source_state_entries: set[int] = set()
+    source_state_bytes = 0
+    source_state_budget_exceeded = False
+    source_state_overflow_events = 0
+    source_state_entries_cleared = 0
+    source_state_records_dropped = 0
+
+    def fail_source_state_closed() -> None:
+        nonlocal source_state_budget_exceeded
+        nonlocal source_state_overflow_events
+        nonlocal source_state_entries_cleared
+        nonlocal source_state_records_dropped
+        nonlocal source_state_bytes
+        source_state_budget_exceeded = True
+        source_state_overflow_events += 1
+        source_state_entries_cleared += len(source_state_entries)
+        source_state_records_dropped += 1  # the record that crossed the bound
+        file_table.clear()
+        loc_stats.clear()
+        source_state_entries.clear()
+        source_state_bytes = 0
+
+    deadline_exceeded = False
+    with s_file.open("rb") as stream:
+        line_stream = enumerate(
+            _bounded_binary_lines(stream, stats, phase_deadline), start=1)
+        while True:
+            try:
+                line_number, line = next(line_stream)
+            except StopIteration:
+                break
+            except AssemblyPhaseDeadlineExceeded:
+                deadline_exceeded = True
+                break
+            # Advance active function captures before accepting another label.
+            for mangled, capture in tuple(active.items()):
+                _retain_capture_line(
+                    capture, line, retained_snippet_lines, snippet_budget)
+                capture["lines_seen"] += 1
+                if ".cfi_startproc" in line:
+                    capture["started"] = True
+                    capture["depth"] += 1
+                elif capture["started"] and ".cfi_endproc" in line:
+                    capture["depth"] -= 1
+                    if capture["depth"] == 0:
+                        blocks[mangled] = {
+                            "assembly_listing_file": str(s_file),
+                            "assembly_listing_lines": [
+                                capture["start_line"], line_number],
+                            "assembly_listing_snippet_first_lines":
+                                "\n".join(capture["snippet"]),
+                            "assembly_listing_snippet_bytes":
+                                capture["snippet_bytes"],
+                            "assembly_listing_snippet_budget_truncated":
+                                capture["snippet_budget_truncated"],
+                        }
+                        del active[mangled]
+                        continue
+                if not capture["started"] and capture["lines_seen"] >= 8:
+                    _release_capture_budget(capture, snippet_budget)
+                    del active[mangled]
+
+            if label_re is not None:
+                label_match = label_re.match(line)
+                if label_match:
+                    for mangled in labels_to_symbols[label_match.group(1)]:
+                        if mangled in blocks or mangled in active:
+                            continue
+                        active[mangled] = {
+                            "start_line": line_number,
+                            "lines_seen": 1,
+                            "started": ".cfi_startproc" in line,
+                            "depth": 1 if ".cfi_startproc" in line else 0,
+                            "snippet": [],
+                            "snippet_bytes": 0,
+                            "snippet_bytes_rejected": 0,
+                            "snippet_budget_truncated": False,
+                        }
+                        _retain_capture_line(
+                            active[mangled], line, retained_snippet_lines,
+                            snippet_budget)
+
+            if source_basename:
+                file_match = FILE_DIR_RE.match(line)
+                loc_match = LOC_RE.match(line)
+                if source_state_budget_exceeded:
+                    if file_match or loc_match:
+                        source_state_records_dropped += 1
+                elif file_match:
+                    idx = int(file_match.group(1))
+                    comp_dir = file_match.group(2) or ""
+                    fname = file_match.group(3) or ""
+                    resolved_path = (
+                        str(Path(comp_dir) / fname) if comp_dir else fname)
+                    old_path = file_table.get(idx)
+                    entry_delta = 0 if idx in source_state_entries else 1
+                    byte_delta = (
+                        len(os.fsencode(resolved_path))
+                        + (32 if entry_delta else 0))
+                    if old_path is not None:
+                        byte_delta -= len(os.fsencode(old_path))
+                    if (len(source_state_entries) + entry_delta
+                            > ASSEMBLY_MAX_SOURCE_STATE_ENTRIES
+                            or source_state_bytes + byte_delta
+                            > ASSEMBLY_MAX_SOURCE_STATE_BYTES):
+                        fail_source_state_closed()
+                    else:
+                        source_state_entries.add(idx)
+                        source_state_bytes += byte_delta
+                        file_table[idx] = resolved_path
+                if loc_match and not source_state_budget_exceeded:
+                    idx = int(loc_match.group(1))
+                    entry_delta = 0 if idx in source_state_entries else 1
+                    byte_delta = 32 if entry_delta else 0
+                    if (len(source_state_entries) + entry_delta
+                            > ASSEMBLY_MAX_SOURCE_STATE_ENTRIES
+                            or source_state_bytes + byte_delta
+                            > ASSEMBLY_MAX_SOURCE_STATE_BYTES):
+                        fail_source_state_closed()
+                    else:
+                        source_state_entries.add(idx)
+                        source_state_bytes += byte_delta
+                        values = loc_stats.setdefault(idx, [0, None, None])
+                        values[0] = int(values[0] or 0) + 1
+                        if values[1] is None:
+                            values[1] = line_number
+                        values[2] = line_number
+                if (not source_state_budget_exceeded
+                        and "DEBUG_VALUE" in line):
+                    debug_match = DEBUG_VALUE_RE.search(line)
+                    if (debug_match
+                            and debug_match.group(1).strip() == function_name):
+                        debug_value_hits += 1
+
+    inline_site: Optional[dict] = None
+    for capture in active.values():
+        _release_capture_budget(capture, snippet_budget)
+
+    if (source_basename and not source_state_budget_exceeded
+            and not deadline_exceeded):
+        target_indices = {
+            idx for idx, path in file_table.items()
+            if path.endswith(source_basename)
+        }
+        if target_indices:
+            loc_hits = sum(
+                int(loc_stats.get(idx, [0, None, None])[0] or 0)
+                for idx in target_indices)
+            first_lines = [
+                loc_stats[idx][1] for idx in target_indices
+                if idx in loc_stats and loc_stats[idx][1] is not None
+            ]
+            last_lines = [
+                loc_stats[idx][2] for idx in target_indices
+                if idx in loc_stats and loc_stats[idx][2] is not None
+            ]
+            if loc_hits or debug_value_hits:
+                inline_site = {
+                    "assembly_listing_file": str(s_file),
+                    "loc_directive_count": loc_hits,
+                    "first_loc_line": min(first_lines) if first_lines else None,
+                    "last_loc_line": max(last_lines) if last_lines else None,
+                    "debug_value_hits": debug_value_hits,
+                    "resolved_file_indices": sorted(target_indices),
+                }
+    stats.update({
+        "source_state_budget_exceeded": source_state_budget_exceeded,
+        "source_state_overflow_events": source_state_overflow_events,
+        "source_state_entries_cleared": source_state_entries_cleared,
+        "source_state_records_dropped": source_state_records_dropped,
+        "source_state_entries_retained": len(source_state_entries),
+        "source_state_bytes_retained": source_state_bytes,
+        "deadline_exceeded": deadline_exceeded,
+    })
+    return blocks, inline_site, stats
+
+
+def scan_assembly_listings(
+    s_files: list[Path],
+    matches: list[dict],
+    source_basename: Optional[str],
+    function_name: str,
+    snippet_lines: int,
+    rg_path: Optional[str],
+    warnings: list[str],
+    snippet_budget: Optional[dict] = None,
+) -> tuple[dict[str, dict], list[dict], dict]:
+    """Prefilter and stream source/pre-LTO evidence from assembly listings."""
+    phase_started = time.monotonic()
+    phase_deadline = phase_started + ASSEMBLY_PHASE_TIMEOUT_SEC
+    discovered = _unique_paths(s_files)
+    candidates, prefilter_method = prefilter_assembly_files(
+        discovered, matches, source_basename, rg_path, warnings,
+        phase_deadline=phase_deadline)
+    listings: dict[str, dict] = {}
+    inline_sites: list[dict] = []
+    bytes_streamed = 0
+    truncated_lines = 0
+    max_retained_line_bytes = 0
+    source_state_budget_exceeded_files = 0
+    source_state_overflow_events = 0
+    source_state_entries_cleared = 0
+    source_state_records_dropped = 0
+    max_source_state_entries_retained = 0
+    max_source_state_bytes_retained = 0
+    snippet_budget = snippet_budget or _new_snippet_budget()
+    scanned = 0
+    scan_incomplete = False
+    incomplete_reason: Optional[str] = None
+    read_failures = 0
+    all_exact_match_labels = {match["mangled"] for match in matches}
+    for s_file in candidates:
+        if time.monotonic() >= phase_deadline:
+            scan_incomplete = True
+            incomplete_reason = "assembly-phase-deadline"
+            break
+        unresolved_matches = [
+            match for match in matches
+            if match["mangled"] not in listings
+        ]
+        try:
+            blocks, inline_site, file_stats = _stream_assembly_listing(
+                s_file, unresolved_matches, source_basename, function_name,
+                snippet_lines, snippet_budget, phase_deadline,
+                all_exact_match_labels)
+        except OSError as exc:
+            warnings.append(f"failed to stream {s_file}: {exc}")
+            scan_incomplete = True
+            incomplete_reason = incomplete_reason or "listing-read-error"
+            read_failures += 1
+            continue
+        bytes_streamed += file_stats["bytes_streamed"]
+        truncated_lines += file_stats["truncated_lines"]
+        max_retained_line_bytes = max(
+            max_retained_line_bytes,
+            file_stats["max_retained_line_bytes"],
+        )
+        source_state_budget_exceeded_files += int(
+            file_stats["source_state_budget_exceeded"])
+        source_state_overflow_events += file_stats[
+            "source_state_overflow_events"]
+        source_state_entries_cleared += file_stats[
+            "source_state_entries_cleared"]
+        source_state_records_dropped += file_stats[
+            "source_state_records_dropped"]
+        max_source_state_entries_retained = max(
+            max_source_state_entries_retained,
+            file_stats["source_state_entries_retained"],
+        )
+        max_source_state_bytes_retained = max(
+            max_source_state_bytes_retained,
+            file_stats["source_state_bytes_retained"],
+        )
+        for mangled, block in blocks.items():
+            listings.setdefault(mangled, block)
+        if inline_site is not None:
+            inline_sites.append(inline_site)
+        if file_stats["deadline_exceeded"]:
+            scan_incomplete = True
+            incomplete_reason = "assembly-phase-deadline"
+            break
+        scanned += 1
+    if truncated_lines:
+        warnings.append(
+            f"{truncated_lines} overlong assembly line(s) were truncated to "
+            f"{ASSEMBLY_MAX_RETAINED_LINE_BYTES} bytes while scanning")
+    if snippet_budget["snippets_truncated"]:
+        warnings.append(
+            f"{snippet_budget['snippets_truncated']} assembly snippet(s) "
+            "were byte-truncated; full evidence remains available via each "
+            "assembly_listing_file and line range")
+    if source_state_budget_exceeded_files:
+        warnings.append(
+            "assembly source-index state exceeded its bounded entry/byte "
+            f"budget in {source_state_budget_exceeded_files} listing(s); "
+            "inline-site evidence for those listings was omitted fail-closed")
+    if incomplete_reason == "assembly-phase-deadline":
+        warnings.append(
+            f"assembly inspection stopped at its single "
+            f"{ASSEMBLY_PHASE_TIMEOUT_SEC}s phase deadline; source/pre-LTO "
+            "evidence is incomplete, while completed blocks remain valid")
+    return listings, inline_sites, {
+        "prefilter_method": prefilter_method,
+        "listings_discovered": len(discovered),
+        "listings_candidates": len(candidates),
+        "listings_scanned": scanned,
+        "bytes_streamed": bytes_streamed,
+        "truncated_lines": truncated_lines,
+        "max_retained_line_bytes": max_retained_line_bytes,
+        "snippet_bytes_retained": snippet_budget["bytes_retained"],
+        "snippet_bytes_rejected": snippet_budget["bytes_rejected"],
+        "snippets_byte_truncated": snippet_budget["snippets_truncated"],
+        "snippet_per_item_byte_limit": MAX_RETAINED_SNIPPET_BYTES,
+        "snippet_total_byte_limit": MAX_TOTAL_RETAINED_SNIPPET_BYTES,
+        "source_state_budget_exceeded_files":
+            source_state_budget_exceeded_files,
+        "source_state_overflow_events": source_state_overflow_events,
+        "source_state_entries_cleared": source_state_entries_cleared,
+        "source_state_records_dropped": source_state_records_dropped,
+        "source_state_max_entries_retained":
+            max_source_state_entries_retained,
+        "source_state_max_bytes_retained": max_source_state_bytes_retained,
+        "source_state_entry_limit": ASSEMBLY_MAX_SOURCE_STATE_ENTRIES,
+        "source_state_byte_limit": ASSEMBLY_MAX_SOURCE_STATE_BYTES,
+        "phase_deadline_seconds": ASSEMBLY_PHASE_TIMEOUT_SEC,
+        "scan_incomplete": scan_incomplete,
+        "incomplete_reason": incomplete_reason,
+        "read_failures": read_failures,
+        "listings_unparsed": max(0, len(candidates) - scanned),
     }
 
 
@@ -692,6 +1226,27 @@ def _error(message: str, **extra: Any) -> dict:
     return out
 
 
+def _validated_bounded_int(
+    name: str,
+    value: Any,
+    default: int,
+    minimum: int,
+    maximum: int,
+    warnings: list[str],
+) -> int:
+    """Return a safe integer and make every default/clamp visible."""
+    if type(value) is not int:
+        warnings.append(
+            f"{name}={value!r} is not an integer; using default {default}")
+        return default
+    bounded = min(max(value, minimum), maximum)
+    if bounded != value:
+        warnings.append(
+            f"{name}={value} is outside [{minimum}, {maximum}]; "
+            f"clamped to {bounded}")
+    return bounded
+
+
 def resolve_binary_candidate(
     binary_root: Path,
     target: str,
@@ -720,8 +1275,7 @@ def run_inspect(
     artifact_names: Optional[tuple[str, ...]] = None,
     shared_target_names: Optional[tuple[str, ...]] = None,
 ) -> dict:
-    """Inspect a function. Returns the JSON-serialisable dict described in
-    IMPROVE_BUILD_MCP_IMPL_PLAN_1.md §3.
+    """Inspect a function and return linked plus compiler-listing evidence.
 
     On error: returns `{"error": "...", ...}` — never raises. Callers
     serialise the dict to JSON and ship it back to the AI agent.
@@ -765,6 +1319,12 @@ def run_inspect(
             tools_searched=PREFERRED_OBJDUMP, hints=LLVM_HINTS)
 
     warnings: list[str] = []
+    max_matches = _validated_bounded_int(
+        "max_matches", max_matches, 4,
+        MIN_INSPECT_MATCHES, MAX_INSPECT_MATCHES, warnings)
+    snippet_lines = _validated_bounded_int(
+        "snippet_lines", snippet_lines, 200,
+        MIN_INSPECT_SNIPPET_LINES, MAX_INSPECT_SNIPPET_LINES, warnings)
     if not tools["demangler"]:
         warnings.append(
             "no demangler (c++filt / llvm-cxxfilt) found on PATH; "
@@ -907,6 +1467,8 @@ def run_inspect(
             "build_dir": str(build_dir),
             "binary_subdir": binary_subdir,
             "binary": str(binary),
+            "max_matches": max_matches,
+            "snippet_lines": snippet_lines,
         },
         "build_metadata": {
             "object_format": obj_format,
@@ -916,6 +1478,7 @@ def run_inspect(
                 "objdump": tools["objdump"],
                 "demangler": tools["demangler"],
                 "llc": tools["llc"],
+                "rg": tools.get("rg"),
                 "objdump_supports_disassemble_symbols": objdump_supports_filter,
                 "nm_supports_demangle": nm_supports_demangle,
             },
@@ -925,43 +1488,36 @@ def run_inspect(
         "summary": {},
     }
 
-    # Stream-scan .s files: read each ONCE per call, do BOTH the
-    # function-block extraction (for matches) AND the inline-site sweep
-    # in the same pass, then drop the text. This is the Phase B contract
-    # against unbounded MCP-server memory growth (plan Risk #16).
-    asm_listings_for_match: dict[str, dict] = {}
-    inline_sites: list[dict] = []
-    source_basename_resolved = source_basename or f"{function_name}.cppm"
-
-    for s_file in s_files:
-        try:
-            text = s_file.read_text(errors="replace")
-        except OSError as e:
-            warnings.append(f"failed to read {s_file}: {e}")
-            continue
-
-        for sym in matches:
-            mangled = sym["mangled"]
-            if mangled in asm_listings_for_match:
-                continue  # first match wins; don't reread the symbol later
-            block = extract_function_block(text, mangled)
-            if block:
-                start, end, txt = block
-                asm_listings_for_match[mangled] = {
-                    "assembly_listing_file": str(s_file),
-                    "assembly_listing_lines": [start, end],
-                    "assembly_listing_snippet_first_lines":
-                        "\n".join(txt.splitlines()[:snippet_lines]),
-                }
-
-        site = scan_inline_site(text, s_file,
-                                source_basename_resolved, function_name)
-        if site:
-            inline_sites.append(site)
-        # `text` falls out of scope here — reclaimed before the next .s.
+    # Candidate discovery is native when ripgrep is available. Candidate
+    # listings are then parsed exactly once with bounded line/snippet state.
+    # This preserves both source/pre-LTO views without materialising a
+    # multi-gigabyte compiler listing in the long-lived MCP server.
+    if not source_basename:
+        warnings.append(
+            "source_basename was not supplied; inline-site `.file`/`.loc` "
+            "sweep skipped. Pass the source basename (for example "
+            "'custom_scan.cppm') to request inline-source evidence; exact "
+            "standalone pre-LTO symbol blocks are still inspected.")
+    assembly_scan_started = time.monotonic()
+    snippet_budget = _new_snippet_budget()
+    asm_listings_for_match, inline_sites, assembly_scan_stats = (
+        scan_assembly_listings(
+            s_files=s_files,
+            matches=matches,
+            source_basename=source_basename or None,
+            function_name=function_name,
+            snippet_lines=snippet_lines,
+            rg_path=tools.get("rg"),
+            warnings=warnings,
+            snippet_budget=snippet_budget,
+        )
+    )
+    assembly_scan_duration_ms = int(
+        (time.monotonic() - assembly_scan_started) * 1000)
 
     # Per-match objdump + histogram. Done after the .s sweep so the .s
     # text is already discarded by the time we hold disasm strings.
+    assembly_snippets_truncated = snippet_budget["snippets_truncated"]
     for sym in matches:
         mangled = sym["mangled"]
         objdump_path, dis_warnings = disassemble_symbol(
@@ -975,7 +1531,9 @@ def run_inspect(
                 f"could not read disassembly file {objdump_path}: {e}")
             disasm_text = ""
         hist = instruction_histogram(disasm_text, arch_hint)
-        snippet = "\n".join(disasm_text.splitlines()[:snippet_lines])
+        snippet, objdump_snippet_bytes, objdump_snippet_truncated = (
+            _retain_text_snippet(disasm_text, snippet_lines, snippet_budget)
+        )
 
         asm_info = asm_listings_for_match.get(mangled, {})
         out["matches"].append({
@@ -986,18 +1544,77 @@ def run_inspect(
             "instruction_histogram": hist,
             "objdump_file": str(objdump_path),
             "objdump_snippet_first_lines": snippet,
+            "objdump_snippet_bytes": objdump_snippet_bytes,
+            "objdump_snippet_budget_truncated": objdump_snippet_truncated,
             "assembly_listing_file": asm_info.get("assembly_listing_file"),
             "assembly_listing_lines": asm_info.get("assembly_listing_lines"),
             "assembly_listing_snippet_first_lines":
                 asm_info.get("assembly_listing_snippet_first_lines"),
+            "assembly_listing_snippet_bytes":
+                asm_info.get("assembly_listing_snippet_bytes"),
+            "assembly_listing_snippet_budget_truncated":
+                asm_info.get("assembly_listing_snippet_budget_truncated"),
         })
+
+    post_lto_snippets_truncated = (
+        snippet_budget["snippets_truncated"] - assembly_snippets_truncated)
+    if post_lto_snippets_truncated:
+        warnings.append(
+            f"{post_lto_snippets_truncated} objdump snippet(s) were "
+            "byte-truncated; full post-LTO evidence remains available via "
+            "each objdump_file")
 
     out["inline_sites"] = inline_sites
     out["summary"] = {
         "matched_symbols": len(matches),
         "total_matches_before_cap": total_matches_before_cap,
         "total_symbols_scanned": len(syms),
-        "asm_listings_scanned": len(s_files),
+        "asm_listings_discovered": assembly_scan_stats[
+            "listings_discovered"],
+        "asm_listings_candidates": assembly_scan_stats[
+            "listings_candidates"],
+        # Compatibility: historically this field meant listings discovered,
+        # even though its name said "scanned". Keep that value stable and
+        # expose the actual parser count separately.
+        "asm_listings_scanned": assembly_scan_stats["listings_discovered"],
+        "asm_listings_parsed": assembly_scan_stats["listings_scanned"],
+        "asm_listing_bytes_streamed": assembly_scan_stats["bytes_streamed"],
+        "asm_listing_prefilter_method": assembly_scan_stats[
+            "prefilter_method"],
+        "asm_listing_scan_duration_ms": assembly_scan_duration_ms,
+        "asm_listing_phase_deadline_seconds": assembly_scan_stats[
+            "phase_deadline_seconds"],
+        "asm_listing_scan_incomplete": assembly_scan_stats[
+            "scan_incomplete"],
+        "asm_listing_incomplete_reason": assembly_scan_stats[
+            "incomplete_reason"],
+        "asm_listings_unparsed": assembly_scan_stats["listings_unparsed"],
+        "asm_listing_read_failures": assembly_scan_stats["read_failures"],
+        "asm_listing_truncated_lines": assembly_scan_stats[
+            "truncated_lines"],
+        "asm_listing_max_retained_line_bytes": assembly_scan_stats[
+            "max_retained_line_bytes"],
+        "retained_snippet_bytes": snippet_budget["bytes_retained"],
+        "rejected_snippet_bytes": snippet_budget["bytes_rejected"],
+        "snippets_byte_truncated": snippet_budget["snippets_truncated"],
+        "snippet_per_item_byte_limit": MAX_RETAINED_SNIPPET_BYTES,
+        "snippet_total_byte_limit": MAX_TOTAL_RETAINED_SNIPPET_BYTES,
+        "asm_source_state_budget_exceeded_files": assembly_scan_stats[
+            "source_state_budget_exceeded_files"],
+        "asm_source_state_overflow_events": assembly_scan_stats[
+            "source_state_overflow_events"],
+        "asm_source_state_entries_cleared": assembly_scan_stats[
+            "source_state_entries_cleared"],
+        "asm_source_state_records_dropped": assembly_scan_stats[
+            "source_state_records_dropped"],
+        "asm_source_state_max_entries_retained": assembly_scan_stats[
+            "source_state_max_entries_retained"],
+        "asm_source_state_max_bytes_retained": assembly_scan_stats[
+            "source_state_max_bytes_retained"],
+        "asm_source_state_entry_limit": assembly_scan_stats[
+            "source_state_entry_limit"],
+        "asm_source_state_byte_limit": assembly_scan_stats[
+            "source_state_byte_limit"],
         "total_loc_directives_in_inline_sites": sum(
             s["loc_directive_count"] for s in inline_sites),
         "total_debug_value_hits_in_inline_sites": sum(
@@ -1031,7 +1648,8 @@ def main() -> int:
     ap.add_argument("--source-basename", default=None,
                     help="Basename of the source file (e.g. "
                          "'two_stacks_minimizers.cppm') for inline-site "
-                         "sweep. Defaults to '<function>.cppm'.")
+                         "sweep. When omitted, the inline-site sweep is "
+                         "skipped; standalone symbol blocks remain enabled.")
     ap.add_argument("--no-llc", action="store_true",
                     help="Disable the llc-on-.bc fallback (skip the "
                          "pre-LTO view when no .s files are present).")

@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import queue
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -2570,6 +2571,623 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("bioseq.dylib", result["error"])
         self.assertIn("bioseq.so", result["error"])
         self.assertIn("bioseq.dll", result["error"])
+
+
+class InspectAssemblyStreamingTest(unittest.TestCase):
+    _SYMBOL = "_bioseq_customscan_methods"
+
+    @classmethod
+    def _matches(cls) -> list[dict[str, object]]:
+        return [{
+            "address": 0x1000,
+            "size": 64,
+            "type": "T",
+            "mangled": cls._SYMBOL,
+            "demangled": "bioseq_customscan_methods",
+        }]
+
+    def test_stream_scan_avoids_read_text_and_extracts_exact_evidence(
+            self) -> None:
+        listing_text = "\n".join((
+            '.file 7 "/src/backend/pg/table" "custom_scan.cppm"',
+            ".loc 7 10 0",
+            f"{self._SYMBOL}: # @bioseq_customscan_methods",
+            ".cfi_startproc",
+            "mov x0, x1",
+            ".loc 7 11 0",
+            "#DEBUG_VALUE: bioseq_customscan_methods:value",
+            ".cfi_endproc",
+            "",
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            listing = Path(tmp) / "custom_scan.s"
+            listing.write_text(listing_text, encoding="utf-8")
+            warnings: list[str] = []
+            bounded_lines = inspect_tool._bounded_binary_lines
+
+            class NoSplitText(str):
+                def splitlines(self, *args, **kwargs):
+                    raise AssertionError(
+                        "assembly scan must not call str.splitlines")
+
+            def guarded_lines(stream, stats, phase_deadline=None):
+                for line in bounded_lines(stream, stats, phase_deadline):
+                    yield NoSplitText(line)
+
+            with (
+                mock.patch.object(
+                    Path, "read_text",
+                    side_effect=AssertionError(
+                        "assembly scan must not call Path.read_text"),
+                ),
+                mock.patch.object(
+                    inspect_tool,
+                    "_bounded_binary_lines",
+                    side_effect=guarded_lines,
+                ),
+            ):
+                blocks, inline_sites, stats = (
+                    inspect_tool.scan_assembly_listings(
+                        [listing, listing],
+                        self._matches(),
+                        "custom_scan.cppm",
+                        "bioseq_customscan_methods",
+                        snippet_lines=3,
+                        rg_path=None,
+                        warnings=warnings,
+                    )
+                )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(stats["prefilter_method"], "streaming-fallback")
+        self.assertEqual(stats["listings_discovered"], 1)
+        self.assertEqual(stats["listings_candidates"], 1)
+        self.assertEqual(stats["listings_scanned"], 1)
+        block = blocks[self._SYMBOL]
+        self.assertEqual(block["assembly_listing_lines"], [3, 8])
+        self.assertEqual(
+            block["assembly_listing_snippet_first_lines"],
+            "\n".join((
+                f"{self._SYMBOL}: # @bioseq_customscan_methods",
+                ".cfi_startproc",
+                "mov x0, x1",
+            )),
+        )
+        self.assertEqual(len(inline_sites), 1)
+        self.assertEqual(inline_sites[0]["loc_directive_count"], 2)
+        self.assertEqual(inline_sites[0]["first_loc_line"], 2)
+        self.assertEqual(inline_sites[0]["last_loc_line"], 6)
+        self.assertEqual(inline_sites[0]["debug_value_hits"], 1)
+        self.assertEqual(inline_sites[0]["resolved_file_indices"], [7])
+
+    def test_ripgrep_prefilter_limits_and_deduplicates_stream_candidates(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            symbol_listing = root / "symbol.s"
+            inline_listing = root / "inline.s"
+            unrelated_listing = root / "unrelated.s"
+            symbol_listing.write_text(
+                f"{self._SYMBOL}:\n.cfi_startproc\nret\n.cfi_endproc\n",
+                encoding="utf-8",
+            )
+            inline_listing.write_text(
+                '.file 3 "/src" "custom_scan.cppm"\n.loc 3 44 0\n',
+                encoding="utf-8",
+            )
+            unrelated_listing.write_text(
+                f"{self._SYMBOL}_extra:\n.cfi_startproc\nret\n"
+                ".cfi_endproc\n",
+                encoding="utf-8",
+            )
+            rg_result = mock.Mock(
+                returncode=0,
+                stdout=(f"{symbol_listing}\n{inline_listing}\n"
+                        f"{symbol_listing}\n"),
+                stderr="",
+            )
+            warnings: list[str] = []
+            with (
+                mock.patch.object(
+                    inspect_tool.subprocess, "run", return_value=rg_result,
+                ) as rg_run,
+                mock.patch.object(
+                    inspect_tool,
+                    "_stream_assembly_listing",
+                    wraps=inspect_tool._stream_assembly_listing,
+                ) as stream_listing,
+            ):
+                blocks, inline_sites, stats = (
+                    inspect_tool.scan_assembly_listings(
+                        [symbol_listing, inline_listing, unrelated_listing],
+                        self._matches(),
+                        "custom_scan.cppm",
+                        "bioseq_customscan_methods",
+                        snippet_lines=10,
+                        rg_path="/usr/bin/rg",
+                        warnings=warnings,
+                    )
+                )
+
+        self.assertEqual(warnings, [])
+        rg_run.assert_called_once()
+        command = rg_run.call_args.args[0]
+        pattern = command[command.index("--regexp") + 1]
+        self.assertIsNotNone(re.search(pattern, f"{self._SYMBOL}:\n"))
+        self.assertIsNone(re.search(pattern, f"{self._SYMBOL}_extra:\n"))
+        self.assertEqual(
+            [call.args[0] for call in stream_listing.call_args_list],
+            [symbol_listing, inline_listing],
+        )
+        self.assertEqual(stats["prefilter_method"], "ripgrep")
+        self.assertEqual(stats["listings_discovered"], 3)
+        self.assertEqual(stats["listings_candidates"], 2)
+        self.assertEqual(stats["listings_scanned"], 2)
+        self.assertEqual(list(blocks), [self._SYMBOL])
+        self.assertEqual(len(inline_sites), 1)
+
+    def test_omitted_source_basename_skips_inline_sweep_with_warning(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            binary_root = build_dir / "bioseq"
+            target = "probe"
+            binary_root.mkdir()
+            (binary_root / target).write_bytes(b"not-an-object")
+            listing_dir = (
+                binary_root / "CMakeFiles" / f"{target}.dir")
+            listing_dir.mkdir(parents=True)
+            listing = listing_dir / "probe.s"
+            listing.write_text(
+                f"{self._SYMBOL}:\n.cfi_startproc\nret\n.cfi_endproc\n",
+                encoding="utf-8",
+            )
+            scratch = build_dir / "scratch"
+
+            def fake_disassemble(*args, **kwargs):
+                output = scratch / "disassembly.txt"
+                output.write_text("0000:\tret\n", encoding="utf-8")
+                return output, []
+
+            with (
+                mock.patch.object(inspect_tool, "detect_tools", return_value={
+                    "nm": "/usr/bin/nm",
+                    "objdump": "/usr/bin/objdump",
+                    "demangler": None,
+                    "llc": None,
+                    "rg": None,
+                }),
+                mock.patch.object(inspect_tool, "tool_supports", return_value=True),
+                mock.patch.object(
+                    inspect_tool, "list_symbols", return_value=self._matches()),
+                mock.patch.object(
+                    inspect_tool, "disassemble_symbol",
+                    side_effect=fake_disassemble),
+            ):
+                result = inspect_tool.run_inspect(
+                    function_name="bioseq_customscan_methods",
+                    target=target,
+                    build_dir=build_dir,
+                    max_matches=999,
+                    snippet_lines=0,
+                    source_basename=None,
+                    llc_on_bc=False,
+                    scratch_dir=scratch,
+                    shared_target_names=(),
+                )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["inline_sites"], [])
+        self.assertEqual(
+            result["query"]["max_matches"],
+            inspect_tool.MAX_INSPECT_MATCHES,
+        )
+        self.assertEqual(
+            result["query"]["snippet_lines"],
+            inspect_tool.MIN_INSPECT_SNIPPET_LINES,
+        )
+        self.assertTrue(any(
+            "source_basename was not supplied" in warning
+            for warning in result["warnings"]
+        ))
+        self.assertTrue(any(
+            "max_matches=999" in warning for warning in result["warnings"]
+        ))
+        self.assertTrue(any(
+            "snippet_lines=0" in warning for warning in result["warnings"]
+        ))
+        self.assertEqual(
+            result["matches"][0]["assembly_listing_file"], str(listing))
+        self.assertEqual(result["summary"]["asm_listings_discovered"], 1)
+        self.assertEqual(result["summary"]["asm_listings_candidates"], 1)
+        self.assertEqual(result["summary"]["asm_listings_scanned"], 1)
+        self.assertEqual(result["summary"]["asm_listings_parsed"], 1)
+        self.assertFalse(result["summary"]["asm_listing_scan_incomplete"])
+
+    def test_sparse_listing_read_and_retained_state_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            listing = Path(tmp) / "sparse.s"
+            sparse_prefix_bytes = inspect_tool.ASSEMBLY_READ_CHUNK_BYTES * 8
+            with listing.open("wb") as stream:
+                stream.seek(sparse_prefix_bytes)
+                stream.write(
+                    (f"\n{self._SYMBOL}:\n.cfi_startproc\nret\n"
+                     ".cfi_endproc\n").encode("utf-8"))
+
+            blocks, inline_site, stats = (
+                inspect_tool._stream_assembly_listing(
+                    listing,
+                    self._matches(),
+                    source_basename=None,
+                    function_name="bioseq_customscan_methods",
+                    snippet_lines=2,
+                )
+            )
+
+        self.assertIsNone(inline_site)
+        self.assertEqual(stats["truncated_lines"], 1)
+        self.assertLessEqual(
+            stats["max_retained_line_bytes"],
+            inspect_tool.ASSEMBLY_MAX_RETAINED_LINE_BYTES,
+        )
+        self.assertGreaterEqual(stats["bytes_streamed"], sparse_prefix_bytes)
+        block = blocks[self._SYMBOL]
+        self.assertEqual(block["assembly_listing_lines"], [2, 5])
+        self.assertEqual(
+            block["assembly_listing_snippet_first_lines"],
+            f"{self._SYMBOL}:\n.cfi_startproc",
+        )
+
+    def test_macho_underscore_directions_and_dual_symbol_collision(
+            self) -> None:
+        symbols = ("_strip_me", "add_me", "_dual", "dual")
+        matches = [{
+            "address": 0x1000 + index,
+            "size": 16,
+            "type": "T",
+            "mangled": symbol,
+            "demangled": symbol,
+        } for index, symbol in enumerate(symbols)]
+        text = "\n".join((
+            "strip_me:", ".cfi_startproc", "ret", ".cfi_endproc",
+            "_add_me:", ".cfi_startproc", "ret", ".cfi_endproc",
+            "_dual:", ".cfi_startproc", "ret", ".cfi_endproc", "",
+            "dual:", ".cfi_startproc", "nop", ".cfi_endproc", "",
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            listing = Path(tmp) / "symbols.s"
+            listing.write_text(text, encoding="utf-8")
+            blocks, _, _ = inspect_tool._stream_assembly_listing(
+                listing, matches, None, "unused", 10)
+            ambiguous = Path(tmp) / "ambiguous.s"
+            ambiguous.write_text(
+                "_dual:\n.cfi_startproc\nret\n.cfi_endproc\n",
+                encoding="utf-8",
+            )
+            ambiguous_again = Path(tmp) / "ambiguous_again.s"
+            ambiguous_again.write_text(
+                "_dual:\n.cfi_startproc\nnop\n.cfi_endproc\n",
+                encoding="utf-8",
+            )
+            ambiguous_blocks, _, _ = inspect_tool.scan_assembly_listings(
+                [ambiguous, ambiguous_again], matches[-2:], None, "unused",
+                10, None, [])
+
+        self.assertEqual(set(blocks), set(symbols))
+        self.assertEqual(blocks["_strip_me"]["assembly_listing_lines"], [1, 4])
+        self.assertEqual(blocks["add_me"]["assembly_listing_lines"], [5, 8])
+        self.assertEqual(blocks["_dual"]["assembly_listing_lines"], [9, 12])
+        self.assertEqual(blocks["dual"]["assembly_listing_lines"], [14, 17])
+        self.assertEqual(set(ambiguous_blocks), {"_dual"})
+
+    def test_first_matching_listing_wins_across_distinct_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first.s"
+            second = root / "second.s"
+            body = (f"{self._SYMBOL}:\n.cfi_startproc\nret\n"
+                    ".cfi_endproc\n")
+            first.write_text(body, encoding="utf-8")
+            second.write_text(body, encoding="utf-8")
+            blocks, _, stats = inspect_tool.scan_assembly_listings(
+                [first, second], self._matches(), None,
+                "bioseq_customscan_methods", 10, None, [])
+
+        self.assertEqual(
+            blocks[self._SYMBOL]["assembly_listing_file"], str(first))
+        self.assertEqual(stats["listings_scanned"], 2)
+
+    def test_chunk_split_label_file_loc_and_cfi_tokens_are_reassembled(
+            self) -> None:
+        text = "\n".join((
+            '.file 17 "/source" "custom_scan.cppm"',
+            ".loc 17 91 0",
+            f"{self._SYMBOL}:",
+            ".cfi_startproc",
+            "ret",
+            ".cfi_endproc",
+            "",
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            listing = Path(tmp) / "split.s"
+            listing.write_text(text, encoding="utf-8")
+            with mock.patch.object(
+                    inspect_tool, "ASSEMBLY_READ_CHUNK_BYTES", 5):
+                blocks, inline_site, stats = (
+                    inspect_tool._stream_assembly_listing(
+                        listing,
+                        self._matches(),
+                        "custom_scan.cppm",
+                        "bioseq_customscan_methods",
+                        10,
+                    )
+                )
+
+        self.assertEqual(blocks[self._SYMBOL]["assembly_listing_lines"], [3, 6])
+        self.assertIsNotNone(inline_site)
+        self.assertEqual(inline_site["loc_directive_count"], 1)
+        self.assertEqual(inline_site["resolved_file_indices"], [17])
+        self.assertEqual(stats["truncated_lines"], 0)
+
+    def test_cfi_start_window_accepts_line_eight_and_rejects_line_nine(
+            self) -> None:
+        accepted = "_accepted"
+        rejected = "_rejected"
+        matches = [
+            {"mangled": symbol, "demangled": symbol, "type": "T",
+             "address": index, "size": 1}
+            for index, symbol in enumerate((accepted, rejected))
+        ]
+        text = "\n".join((
+            f"{accepted}:",
+            "# 2", "# 3", "# 4", "# 5", "# 6", "# 7",
+            ".cfi_startproc", "ret", ".cfi_endproc",
+            f"{rejected}:",
+            "# 2", "# 3", "# 4", "# 5", "# 6", "# 7", "# 8",
+            ".cfi_startproc", "ret", ".cfi_endproc", "",
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            listing = Path(tmp) / "window.s"
+            listing.write_text(text, encoding="utf-8")
+            blocks, _, _ = inspect_tool._stream_assembly_listing(
+                listing, matches, None, "unused", 20)
+
+        self.assertIn(accepted, blocks)
+        self.assertNotIn(rejected, blocks)
+        self.assertEqual(blocks[accepted]["assembly_listing_lines"], [1, 10])
+
+    def test_rg_error_and_timeout_use_streaming_fallback_single_deadline(
+            self) -> None:
+        paths = [Path("one.s"), Path("two.s")]
+        for failure in (
+            mock.Mock(returncode=2, stdout="", stderr="bad regex"),
+            subprocess.TimeoutExpired("rg", 120),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                warnings: list[str] = []
+                side_effect = failure if isinstance(
+                    failure, BaseException) else None
+                with mock.patch.object(
+                        inspect_tool.subprocess, "run",
+                        return_value=None if side_effect else failure,
+                        side_effect=side_effect):
+                    candidates, method = inspect_tool.prefilter_assembly_files(
+                        paths, self._matches(), None, "/usr/bin/rg", warnings)
+                self.assertEqual(candidates, paths)
+                self.assertEqual(method, "streaming-fallback")
+                self.assertTrue(warnings)
+
+        warnings = []
+        first = mock.Mock(returncode=1, stdout="", stderr="")
+        timeout = subprocess.TimeoutExpired("rg", 115)
+        with (
+            mock.patch.object(
+                inspect_tool, "_rg_path_batches",
+                return_value=[[paths[0]], [paths[1]]],
+            ),
+            mock.patch.object(
+                inspect_tool.time, "monotonic",
+                side_effect=[100.0, 100.0, 105.0],
+            ),
+            mock.patch.object(
+                inspect_tool.subprocess, "run",
+                side_effect=[first, timeout],
+            ) as rg_run,
+        ):
+            candidates, method = inspect_tool.prefilter_assembly_files(
+                paths, self._matches(), None, "/usr/bin/rg", warnings)
+        self.assertEqual(candidates, paths)
+        self.assertEqual(method, "streaming-fallback")
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in rg_run.call_args_list],
+            [120.0, 115.0],
+        )
+
+    def test_rg_batches_keep_each_argv_below_24_kib(self) -> None:
+        base = [
+            "/usr/bin/rg", "--files-with-matches", "--text",
+            "--no-messages", "--regexp", r"^(?:_symbol):(?:\s|$)", "--",
+        ]
+        paths = [Path("segment" + ("x" * 300) + str(index) + ".s")
+                 for index in range(200)]
+        batches = inspect_tool._rg_path_batches(paths, base)
+        self.assertIsNotNone(batches)
+        self.assertGreater(len(batches), 1)
+        self.assertEqual([path for batch in batches for path in batch], paths)
+        for batch in batches:
+            self.assertLessEqual(
+                inspect_tool._argv_size_bytes(
+                    [*base, *(str(path) for path in batch)]),
+                inspect_tool.ASSEMBLY_RG_MAX_ARG_BYTES,
+            )
+
+    def test_one_assembly_deadline_covers_rg_and_streaming_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            listing = Path(tmp) / "deadline.s"
+            listing.write_text(
+                f"{self._SYMBOL}:\n.cfi_startproc\nret\n.cfi_endproc\n",
+                encoding="utf-8",
+            )
+
+            rg_warnings: list[str] = []
+            rg_error = mock.Mock(returncode=2, stdout="", stderr="failed")
+            with (
+                mock.patch.object(
+                    inspect_tool, "ASSEMBLY_PHASE_TIMEOUT_SEC", 10,
+                ),
+                mock.patch.object(
+                    inspect_tool.time, "monotonic",
+                    side_effect=[0.0, 0.0, 11.0],
+                ),
+                mock.patch.object(
+                    inspect_tool.subprocess, "run", return_value=rg_error,
+                ),
+            ):
+                _, _, rg_stats = inspect_tool.scan_assembly_listings(
+                    [listing], self._matches(), None,
+                    "bioseq_customscan_methods", 10, "/usr/bin/rg",
+                    rg_warnings)
+
+            stream_warnings: list[str] = []
+            with (
+                mock.patch.object(
+                    inspect_tool, "ASSEMBLY_PHASE_TIMEOUT_SEC", 10,
+                ),
+                mock.patch.object(
+                    inspect_tool, "ASSEMBLY_READ_CHUNK_BYTES", 8,
+                ),
+                mock.patch.object(
+                    inspect_tool.time, "monotonic",
+                    side_effect=[0.0, 0.0, 0.0, 11.0],
+                ),
+            ):
+                blocks, _, stream_stats = inspect_tool.scan_assembly_listings(
+                    [listing], self._matches(), None,
+                    "bioseq_customscan_methods", 10, None,
+                    stream_warnings)
+
+        self.assertTrue(rg_stats["scan_incomplete"])
+        self.assertEqual(
+            rg_stats["incomplete_reason"], "assembly-phase-deadline")
+        self.assertEqual(rg_stats["listings_scanned"], 0)
+        self.assertTrue(any("phase deadline" in warning
+                            for warning in rg_warnings))
+        self.assertEqual(blocks, {})
+        self.assertTrue(stream_stats["scan_incomplete"])
+        self.assertEqual(stream_stats["listings_scanned"], 0)
+        self.assertEqual(stream_stats["listings_unparsed"], 1)
+        self.assertTrue(any("evidence is incomplete" in warning
+                            for warning in stream_warnings))
+
+    def test_total_snippet_budget_warns_and_reports_truncation(self) -> None:
+        matches = [
+            {"mangled": symbol, "demangled": symbol, "type": "T",
+             "address": index, "size": 1}
+            for index, symbol in enumerate(("_first", "_second"))
+        ]
+        text = "\n".join((
+            "_first:", ".cfi_startproc", "x" * 80, ".cfi_endproc",
+            "_second:", ".cfi_startproc", "y" * 80, ".cfi_endproc", "",
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            listing = Path(tmp) / "budget.s"
+            listing.write_text(text, encoding="utf-8")
+            warnings: list[str] = []
+            request_budget = inspect_tool._new_snippet_budget()
+            with (
+                mock.patch.object(
+                    inspect_tool, "MAX_RETAINED_SNIPPET_BYTES", 48,
+                ),
+                mock.patch.object(
+                    inspect_tool, "MAX_TOTAL_RETAINED_SNIPPET_BYTES", 64,
+                ),
+            ):
+                blocks, _, stats = inspect_tool.scan_assembly_listings(
+                    [listing], matches, None, "unused", 20, None, warnings,
+                    snippet_budget=request_budget)
+                _, _, objdump_truncated = inspect_tool._retain_text_snippet(
+                    "post-lto-" + ("z" * 80), 20, request_budget)
+
+        self.assertEqual(set(blocks), {"_first", "_second"})
+        self.assertLessEqual(stats["snippet_bytes_retained"], 64)
+        self.assertGreaterEqual(stats["snippets_byte_truncated"], 1)
+        self.assertTrue(objdump_truncated)
+        self.assertLessEqual(request_budget["bytes_retained"], 64)
+        self.assertTrue(any("byte-truncated" in warning for warning in warnings))
+        self.assertTrue(any(
+            block["assembly_listing_snippet_budget_truncated"]
+            for block in blocks.values()
+        ))
+
+    def test_source_state_budget_fails_closed_with_warning_and_stats(
+            self) -> None:
+        text = "\n".join((
+            '.file 1 "/src" "custom_scan.cppm"',
+            ".loc 1 10 0",
+            '.file 2 "/src" "other.cppm"',
+            ".loc 2 20 0",
+            '.file 3 "/src" "third.cppm"',
+            ".loc 3 30 0",
+            "",
+        ))
+        with tempfile.TemporaryDirectory() as tmp:
+            listing = Path(tmp) / "state.s"
+            listing.write_text(text, encoding="utf-8")
+            warnings: list[str] = []
+            with mock.patch.object(
+                    inspect_tool, "ASSEMBLY_MAX_SOURCE_STATE_ENTRIES", 2):
+                _, inline_sites, stats = inspect_tool.scan_assembly_listings(
+                    [listing], [], "custom_scan.cppm", "unused", 10,
+                    None, warnings)
+
+        self.assertEqual(inline_sites, [])
+        self.assertEqual(stats["source_state_budget_exceeded_files"], 1)
+        self.assertEqual(stats["source_state_overflow_events"], 1)
+        self.assertEqual(stats["source_state_entries_cleared"], 2)
+        self.assertEqual(stats["source_state_records_dropped"], 2)
+        self.assertTrue(any("omitted fail-closed" in warning
+                            for warning in warnings))
+
+    def test_local_and_remote_inspect_schemas_document_bounded_contract(
+            self) -> None:
+        definitions = {
+            definition["name"]: definition
+            for definition in server.TOOL_DEFINITIONS
+        }
+        local = definitions["inspect"]
+        local_properties = local["inputSchema"]["properties"]
+        self.assertEqual(
+            local_properties["max_matches"]["maximum"],
+            inspect_tool.MAX_INSPECT_MATCHES,
+        )
+        self.assertEqual(
+            local_properties["snippet_lines"]["maximum"],
+            inspect_tool.MAX_INSPECT_SNIPPET_LINES,
+        )
+        self.assertIn(
+            "When omitted", local_properties["source_basename"]["description"])
+        self.assertIn("build tree", local["description"])
+        self.assertIn("build_metadata.tools.rg", local["description"])
+        self.assertIn("asm_listings_parsed", local["description"])
+        self.assertIn("asm_listing_scan_incomplete", local["description"])
+        self.assertIn("entries-cleared", local["description"])
+
+        remote_shapes = definitions["remote-run"]["inputSchema"]["oneOf"]
+        remote = next(shape for shape in remote_shapes
+                      if shape.get("title") == "inspect")
+        remote_properties = remote["properties"]
+        self.assertEqual(
+            remote_properties["max_matches"]["maximum"],
+            inspect_tool.MAX_INSPECT_MATCHES,
+        )
+        self.assertEqual(
+            remote_properties["snippet_lines"]["maximum"],
+            inspect_tool.MAX_INSPECT_SNIPPET_LINES,
+        )
+        self.assertIn("omission skips", remote_properties[
+            "source_basename"]["description"])
+        self.assertIn("box-side paths", definitions[
+            "remote-run"]["description"])
 
 
 class CacheRetirementProvenanceTest(unittest.TestCase):
