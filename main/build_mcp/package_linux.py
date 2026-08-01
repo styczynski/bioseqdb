@@ -532,6 +532,60 @@ def _source_snapshot(
         raise
 
 
+def _validate_committed_extension_dso_contract(
+    source: Path,
+) -> None:
+    """Fail before Docker when the committed Linux DSO producer drifts."""
+    helper = _require_regular(
+        source / "cmake/AddPostgreSQLExtension.cmake",
+        "committed extension DSO producer contract",
+    )
+    try:
+        contents = helper.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise PackageLinuxError(
+            f"cannot read committed extension DSO producer contract: {error}"
+        ) from error
+    marker = 'elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")'
+    source_lines = [line.partition("#")[0] for line in contents.splitlines()]
+    marker_positions = [
+        index for index, line in enumerate(source_lines)
+        if line.strip() == marker
+    ]
+    remainder = (
+        "\n".join(source_lines[marker_positions[0] + 1:])
+        if len(marker_positions) == 1
+        else ""
+    )
+    nested_depth = 0
+    linux_branch_lines: list[str] = []
+    terminator = False
+    for line in remainder.splitlines():
+        code = line.partition("#")[0]
+        command = code.strip().lower()
+        if command.startswith("if("):
+            nested_depth += 1
+        elif command.startswith("endif("):
+            if nested_depth == 0:
+                terminator = True
+                break
+            nested_depth -= 1
+        linux_branch_lines.append(code)
+    linux_branch = "\n".join(linux_branch_lines)
+    build_id_option = '"LINKER:--build-id=sha1"'
+    build_id_reference = '"${_bioseq_dso_elf_build_id_link_option}"'
+    if (
+        len(marker_positions) != 1
+        or not terminator
+        or linux_branch.count(build_id_option) != 1
+        or linux_branch.count(build_id_reference) != 1
+    ):
+        raise PackageLinuxError(
+            "committed Linux extension DSO producer does not attach exactly "
+            "one SHA-1 GNU build-ID option"
+        )
+
+
 def _material_dirty_rows(status: str) -> list[str]:
     material: list[str] = []
     for row in (value for value in status.splitlines() if value):
@@ -893,6 +947,9 @@ def run_package_linux(
         source_root = Path(str(snapshot["ephemeral_root"]))
         source = Path(str(snapshot["source"]))
         available_after_snapshot = _require_free_space(state_root)
+
+        notify("validating committed extension DSO producer contract")
+        _validate_committed_extension_dso_contract(source)
 
         notify("checking pre-existing Docker daemon")
         endpoint, socket_path = _require_healthy_docker(base_environment)

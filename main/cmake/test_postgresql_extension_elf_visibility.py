@@ -2,6 +2,7 @@
 """Focused contract for the manifest-derived PostgreSQL ELF export map."""
 import json
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 GENERATOR = ROOT / "GeneratePostgreSQLExtensionElfVersionScript.cmake"
+BUILD_ID_LINK_OPTION = "LINKER:--build-id=sha1"
+
+
+def assert_build_id_producer_contract() -> None:
+    """Keep Linux extension DSOs aligned with receipt qualification."""
+    helper = (ROOT / "AddPostgreSQLExtension.cmake").read_text(
+        encoding="utf-8")
+    if helper.count(BUILD_ID_LINK_OPTION) != 1:
+        raise SystemExit(
+            "production helper must attach exactly one SHA-1 GNU build-id option")
 
 
 def invoke(manifest: Path, output: Path,
@@ -44,6 +55,9 @@ def assert_ninja_build_graph() -> None:
         return
     if shutil.which("ninja") is None:
         raise SystemExit("Ninja is required for the Linux ELF build-graph contract")
+    readelf = shutil.which("readelf")
+    if readelf is None:
+        raise SystemExit("readelf is required for the Linux ELF build-id contract")
     helper = ROOT / "AddPostgreSQLExtension.cmake"
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
@@ -54,36 +68,56 @@ def assert_ninja_build_graph() -> None:
         (modules / "FindPostgreSQL.cmake").write_text(
             "set(PostgreSQL_FOUND TRUE)\n", encoding="utf-8")
         (source / "fixture.c").write_text(
-            "void owned_symbol(void) {}\n", encoding="utf-8")
+            "void owned_symbol(void) {}\n"
+            "void pg_finfo_owned_symbol(void) {}\n"
+            "void Pg_magic_func(void) {}\n",
+            encoding="utf-8")
         (source / "CMakeLists.txt").write_text(
             f'''cmake_minimum_required(VERSION 3.20)
 project(elf_version_script_graph C)
 list(PREPEND CMAKE_MODULE_PATH "${{CMAKE_CURRENT_SOURCE_DIR}}/modules")
 include("{helper}")
-file(WRITE "${{CMAKE_CURRENT_BINARY_DIR}}/manifest-one.json" [=[
-{{"manifest_version":1,"c_link_symbol_inventory_count":1,
-"c_finfo_symbol_inventory_count":1,"external_legacy_macro_symbol_count":0,
-"c_link_symbols":["owned_symbol"],"c_finfo_symbols":["pg_finfo_owned_symbol"],
-"external_legacy_macro_symbols":[],"c_symbol_owners":[{{"symbol":"owned_symbol",
-"finfo_symbol":"pg_finfo_owned_symbol"}}]}}
+set(fixture_manifest [=[
+{{"manifest_version":1,
+"c_routine_identity_count":1,
+"c_link_symbol_inventory_count":1,
+"c_finfo_symbol_inventory_count":1,
+"c_wrapper_entity_count":1,
+"retired_c_symbol_count":0,
+"generated_wrapper_symbol_count":1,
+"legacy_macro_symbol_count":0,
+"external_legacy_macro_symbol_count":0,
+"legacy_fmgr_macro_owner_count":0,
+"c_symbol_sharing_group_count":0,
+"c_routine_identities":["fixture.owned_symbol(text)"],
+"c_link_symbols":["owned_symbol"],
+"c_finfo_symbols":["pg_finfo_owned_symbol"],
+"c_symbol_owners":[{{"symbol":"owned_symbol",
+"finfo_symbol":"pg_finfo_owned_symbol","generated_wrapper":true,
+"routine_identities":["fixture.owned_symbol(text)"],
+"implementation_declarations":["fixture::owned_symbol"]}}],
+"retired_c_symbols":[],
+"generated_wrapper_symbols":["owned_symbol"],
+"legacy_macro_symbols":[],
+"external_legacy_macro_symbols":[],
+"legacy_fmgr_macro_owners":[]}}
 ]=])
-file(WRITE "${{CMAKE_CURRENT_BINARY_DIR}}/manifest-two.json" [=[
-{{"manifest_version":1,"c_link_symbol_inventory_count":1,
-"c_finfo_symbol_inventory_count":1,"external_legacy_macro_symbol_count":0,
-"c_link_symbols":["owned_symbol"],"c_finfo_symbols":["pg_finfo_owned_symbol"],
-"external_legacy_macro_symbols":[],"c_symbol_owners":[{{"symbol":"owned_symbol",
-"finfo_symbol":"pg_finfo_owned_symbol"}}]}}
-]=])
+file(WRITE "${{CMAKE_CURRENT_BINARY_DIR}}/manifest-one.json"
+  "${{fixture_manifest}}")
+file(WRITE "${{CMAKE_CURRENT_BINARY_DIR}}/manifest-two.json"
+  "${{fixture_manifest}}")
 add_library(fixture_extension MODULE fixture.c)
 bioseq_attach_extension_dso_closure(fixture_extension
   EXTENSION_NAME fixture
   SQL_MANIFEST "${{CMAKE_CURRENT_BINARY_DIR}}/manifest-one.json"
+  REPORT_PATH "${{CMAKE_CURRENT_BINARY_DIR}}/fixture-one-dso-report.json"
   CONTRACT manifest
   ABI_EXPORTS Pg_magic_func)
 add_library(fixture_extension_two MODULE fixture.c)
 bioseq_attach_extension_dso_closure(fixture_extension_two
   EXTENSION_NAME fixture_two
   SQL_MANIFEST "${{CMAKE_CURRENT_BINARY_DIR}}/manifest-two.json"
+  REPORT_PATH "${{CMAKE_CURRENT_BINARY_DIR}}/fixture-two-dso-report.json"
   CONTRACT manifest
   ABI_EXPORTS Pg_magic_func)
 get_property(map_target_one TARGET fixture_extension
@@ -124,6 +158,25 @@ file(WRITE "${{CMAKE_CURRENT_BINARY_DIR}}/map-targets.txt"
                 raise SystemExit(built.stderr)
             if not map_output.exists():
                 raise SystemExit("Ninja did not generate the ELF version script target")
+        built = subprocess.run(
+            ["cmake", "--build", str(build), "--target",
+             "fixture_extension", "fixture_extension_two"],
+            text=True, capture_output=True, check=False)
+        if built.returncode != 0:
+            raise SystemExit(built.stderr)
+        for dso in (build / "libfixture_extension.so",
+                    build / "libfixture_extension_two.so"):
+            inspected = subprocess.run(
+                [readelf, "-n", str(dso)], text=True,
+                capture_output=True, check=False)
+            if inspected.returncode != 0:
+                raise SystemExit(inspected.stderr)
+            build_ids = re.findall(
+                r"^\s*Build ID:\s*([0-9A-Fa-f]+)\s*$",
+                inspected.stdout, re.MULTILINE)
+            if len(build_ids) != 1 or len(build_ids[0]) != 40:
+                raise SystemExit(
+                    f"{dso.name} must contain exactly one SHA-1 GNU build ID")
 
 
 with tempfile.TemporaryDirectory() as temporary:
@@ -190,4 +243,5 @@ with tempfile.TemporaryDirectory() as temporary:
     if invoke(source, output, "owned_symbol").returncode == 0:
         raise SystemExit("ELF map accepted an ABI/fmgr export overlap")
 
+assert_build_id_producer_contract()
 assert_ninja_build_graph()

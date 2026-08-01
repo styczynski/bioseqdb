@@ -130,6 +130,53 @@ class PackageLinuxPureContractTests(unittest.TestCase):
                 {**base, "image": "sha256:" + "d" * 64}),
         )
 
+    def test_extension_dso_producer_contract_uses_committed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "main"
+            helper = source / "cmake/AddPostgreSQLExtension.cmake"
+            helper.parent.mkdir(parents=True)
+            valid = '''elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # endif()
+  if(TARGET fixture_map)
+    message(STATUS "fixture map already exists")
+  endif()
+  set(_bioseq_dso_elf_build_id_link_option
+    "LINKER:--build-id=sha1")
+  target_link_options(fixture PRIVATE
+    "${_bioseq_dso_elf_build_id_link_option}")
+  endif()
+'''
+            helper.write_text(valid, encoding="utf-8")
+            subject._validate_committed_extension_dso_contract(source)
+            harmless_decoys = (
+                valid + '\n# elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")\n'
+                'message(STATUS "elseif(CMAKE_SYSTEM_NAME STREQUAL '
+                '\\"Linux\\")")\n'
+            )
+            helper.write_text(harmless_decoys, encoding="utf-8")
+            subject._validate_committed_extension_dso_contract(source)
+            for invalid in (
+                valid.replace('"LINKER:--build-id=sha1"', ""),
+                valid.replace(
+                    '"${_bioseq_dso_elf_build_id_link_option}"', ""),
+                valid.replace(
+                    '"LINKER:--build-id=sha1"',
+                    '"LINKER:--build-id=sha1"\n'
+                    '    "LINKER:--build-id=sha1"'),
+                valid + '\nelseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")\n'
+                '  endif()\n',
+                valid.replace(
+                    '"LINKER:--build-id=sha1"',
+                    '# "LINKER:--build-id=sha1"'),
+                valid.replace(
+                    '"${_bioseq_dso_elf_build_id_link_option}"',
+                    '# "${_bioseq_dso_elf_build_id_link_option}"'),
+            ):
+                helper.write_text(invalid, encoding="utf-8")
+                with self.assertRaisesRegex(
+                    subject.PackageLinuxError, "exactly one"):
+                    subject._validate_committed_extension_dso_contract(source)
+
 
 class PackageLinuxServerModeTests(unittest.TestCase):
     def test_mode_is_fixed_local_only_and_remote_rejected(self) -> None:
@@ -592,6 +639,8 @@ class ProvenanceAndStorageTests(unittest.TestCase):
                     return_value=subject.MINIMUM_FREE_BYTES) as free_space,
                 mock.patch.object(subject, "_source_snapshot", return_value=snapshot),
                 mock.patch.object(
+                    subject, "_validate_committed_extension_dso_contract"),
+                mock.patch.object(
                     subject, "_require_healthy_docker",
                     side_effect=subject.PackageLinuxError("daemon unhealthy")),
                 mock.patch.object(subject, "_docker_image") as image,
@@ -604,6 +653,48 @@ class ProvenanceAndStorageTests(unittest.TestCase):
                     )
             self.assertEqual(free_space.call_count, 2)
             image.assert_not_called()
+
+    def test_producer_contract_failure_cleans_snapshot_before_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            project = repository / "main"
+            project.mkdir()
+            state = project / "build/package-linux"
+            state.mkdir(parents=True)
+            source_root = state / "source-test"
+            source = source_root / "main"
+            source.mkdir(parents=True)
+            snapshot = {
+                "ephemeral_root": source_root,
+                "source": source,
+                "archive": source_root / "main.tar",
+                "revision": "a" * 40,
+                "main_tree": "b" * 40,
+                "archive_sha256": "c" * 64,
+                "input_sha256": {},
+            }
+            with (
+                mock.patch.object(subject, "_native_arm64", return_value="arm64"),
+                mock.patch.object(
+                    subject, "_require_free_space",
+                    return_value=subject.MINIMUM_FREE_BYTES),
+                mock.patch.object(subject, "_source_snapshot", return_value=snapshot),
+                mock.patch.object(
+                    subject, "_validate_committed_extension_dso_contract",
+                    side_effect=subject.PackageLinuxError("producer drift")),
+                mock.patch.object(subject, "_require_healthy_docker") as docker,
+            ):
+                with self.assertRaisesRegex(
+                    subject.PackageLinuxError, "producer drift"):
+                    subject.run_package_linux(
+                        project_root=project,
+                        workspace_root=repository,
+                        log_handle=io.StringIO(),
+                        deadline=time.time() + 30,
+                        environment={},
+                    )
+            docker.assert_not_called()
+            self.assertFalse(source_root.exists())
 
     def test_post_snapshot_free_space_gate_fails_before_docker_and_cleans_source(
             self) -> None:

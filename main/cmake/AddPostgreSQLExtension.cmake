@@ -162,9 +162,13 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
     add_dependencies(${TARGET_NAME} "${_bioseq_dso_elf_version_script_target}")
     set(_bioseq_dso_elf_version_script_link_option
       "LINKER:--version-script=${_bioseq_dso_elf_version_script}")
+    set(_bioseq_dso_elf_build_id_link_option
+      "LINKER:--build-id=sha1")
     target_link_options(
       ${TARGET_NAME}
-      PRIVATE "${_bioseq_dso_elf_version_script_link_option}")
+      PRIVATE
+        "${_bioseq_dso_elf_version_script_link_option}"
+        "${_bioseq_dso_elf_build_id_link_option}")
     set_property(
       TARGET ${TARGET_NAME}
       APPEND PROPERTY LINK_DEPENDS "${_bioseq_dso_elf_version_script}")
@@ -174,7 +178,9 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
         BIOSEQ_EXTENSION_DSO_ELF_VERSION_SCRIPT
           "${_bioseq_dso_elf_version_script}"
         BIOSEQ_EXTENSION_DSO_ELF_VERSION_SCRIPT_TARGET
-          "${_bioseq_dso_elf_version_script_target}")
+          "${_bioseq_dso_elf_version_script_target}"
+        BIOSEQ_EXTENSION_DSO_ELF_BUILD_ID
+          "sha1")
   endif()
 
   set_property(TARGET ${TARGET_NAME} APPEND PROPERTY LINK_DEPENDS
