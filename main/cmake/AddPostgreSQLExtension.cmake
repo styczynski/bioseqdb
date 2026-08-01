@@ -144,6 +144,22 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
         "${ARG_SQL_MANIFEST}"
         "${_bioseq_dso_elf_version_script_generator}"
       VERBATIM)
+    # LINK_DEPENDS requests relinking when this file changes, but is not a
+    # build-graph consumer of an OUTPUT custom command with Ninja.  Give the
+    # output its own collision-resistant target and make the extension depend
+    # on it so the version script is generated before the linker sees it.
+    string(SHA256 _bioseq_dso_elf_version_script_target_hash
+      "${CMAKE_CURRENT_BINARY_DIR}|${TARGET_NAME}|${_bioseq_dso_elf_version_script}")
+    set(_bioseq_dso_elf_version_script_target
+      "bioseq_elf_version_script_${_bioseq_dso_elf_version_script_target_hash}")
+    if(TARGET "${_bioseq_dso_elf_version_script_target}")
+      message(FATAL_ERROR
+        "${TARGET_NAME}: ELF version-script target name collision: "
+        "${_bioseq_dso_elf_version_script_target}")
+    endif()
+    add_custom_target("${_bioseq_dso_elf_version_script_target}"
+      DEPENDS "${_bioseq_dso_elf_version_script}")
+    add_dependencies(${TARGET_NAME} "${_bioseq_dso_elf_version_script_target}")
     set(_bioseq_dso_elf_version_script_link_option
       "LINKER:--version-script=${_bioseq_dso_elf_version_script}")
     target_link_options(
@@ -156,7 +172,9 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
       ${TARGET_NAME}
       PROPERTIES
         BIOSEQ_EXTENSION_DSO_ELF_VERSION_SCRIPT
-          "${_bioseq_dso_elf_version_script}")
+          "${_bioseq_dso_elf_version_script}"
+        BIOSEQ_EXTENSION_DSO_ELF_VERSION_SCRIPT_TARGET
+          "${_bioseq_dso_elf_version_script_target}")
   endif()
 
   set_property(TARGET ${TARGET_NAME} APPEND PROPERTY LINK_DEPENDS
