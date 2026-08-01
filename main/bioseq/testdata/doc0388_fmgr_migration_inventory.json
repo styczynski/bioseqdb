@@ -11373,14 +11373,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
+        "sha256": "e3369a8208b425fa3e4927c666c5fee673da76361b31d197e969ef4303c171eb",
         "span": {
-          "byte_begin": 123983,
-          "byte_end": 124305,
+          "byte_begin": 124258,
+          "byte_end": 124580,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3850,
-          "line_end": 3860
+          "line_begin": 3853,
+          "line_end": 3863
         }
       },
       "sql_identity": "function:bioseq.bioseq_handler(internal)",
@@ -12119,14 +12119,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
+        "sha256": "e3369a8208b425fa3e4927c666c5fee673da76361b31d197e969ef4303c171eb",
         "span": {
-          "byte_begin": 18891,
-          "byte_end": 19500,
+          "byte_begin": 18962,
+          "byte_end": 19571,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 516,
-          "line_end": 535
+          "line_begin": 518,
+          "line_end": 537
         }
       },
       "sql_identity": "function:bioseq.get_storage_id(regclass)",
@@ -14143,14 +14143,14 @@
       "source": {
         "module": "bioseq.storage.manager:sequence_storage_manager",
         "path": "main/bioseq/backend/pg/storage_pg/sequence_storage_manager.cppm",
-        "sha256": "22e1f7af8d128272caf86e1b291ab83ad4bb029c688bfe4f2e65c62799b36b7f",
+        "sha256": "a42e96e191a44ac1f209158556b88b41c160e802956f451b1f9d83135b4694ea",
         "span": {
-          "byte_begin": 197062,
-          "byte_end": 219543,
+          "byte_begin": 197225,
+          "byte_end": 219706,
           "column_begin": 15,
           "column_end": 2,
-          "line_begin": 4470,
-          "line_end": 5017
+          "line_begin": 4472,
+          "line_end": 5019
         }
       },
       "sql_identity": "function:bioseq.reap_orphan_seq_sub_tables()",
@@ -16838,14 +16838,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
+        "sha256": "e3369a8208b425fa3e4927c666c5fee673da76361b31d197e969ef4303c171eb",
         "span": {
-          "byte_begin": 133634,
-          "byte_end": 134104,
+          "byte_begin": 133909,
+          "byte_end": 134379,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4172,
-          "line_end": 4188
+          "line_begin": 4175,
+          "line_end": 4191
         }
       },
       "sql_identity": "function:bioseq_internal.downgrade_bioseq_storage(regclass)",
@@ -18053,14 +18053,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
+        "sha256": "e3369a8208b425fa3e4927c666c5fee673da76361b31d197e969ef4303c171eb",
         "span": {
-          "byte_begin": 132941,
-          "byte_end": 133408,
+          "byte_begin": 133216,
+          "byte_end": 133683,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4149,
-          "line_end": 4165
+          "line_begin": 4152,
+          "line_end": 4168
         }
       },
       "sql_identity": "function:bioseq_internal.upgrade_bioseq_storage(regclass)",
@@ -18212,14 +18212,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
+        "sha256": "e3369a8208b425fa3e4927c666c5fee673da76361b31d197e969ef4303c171eb",
         "span": {
-          "byte_begin": 130461,
-          "byte_end": 132623,
+          "byte_begin": 130736,
+          "byte_end": 132898,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4063,
-          "line_end": 4138
+          "line_begin": 4066,
+          "line_end": 4141
         }
       },
       "sql_identity": "function:pg_catalog.alter_bioseq_table_reset(regclass,boolean,boolean,boolean,boolean)",
@@ -18287,14 +18287,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
+        "sha256": "e3369a8208b425fa3e4927c666c5fee673da76361b31d197e969ef4303c171eb",
         "span": {
-          "byte_begin": 126227,
-          "byte_end": 130174,
+          "byte_begin": 126502,
+          "byte_end": 130449,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3909,
-          "line_end": 4052
+          "line_begin": 3912,
+          "line_end": 4055
         }
       },
       "sql_identity": "function:pg_catalog.alter_bioseq_table_set(regclass,integer,integer,name,integer)",
@@ -18333,14 +18333,14 @@
       "source": {
         "module": "bioseq.storage.manager:sequence_storage_manager",
         "path": "main/bioseq/backend/pg/storage_pg/sequence_storage_manager.cppm",
-        "sha256": "22e1f7af8d128272caf86e1b291ab83ad4bb029c688bfe4f2e65c62799b36b7f",
+        "sha256": "a42e96e191a44ac1f209158556b88b41c160e802956f451b1f9d83135b4694ea",
         "span": {
-          "byte_begin": 220012,
-          "byte_end": 224699,
+          "byte_begin": 220175,
+          "byte_end": 224862,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5037,
-          "line_end": 5165
+          "line_begin": 5039,
+          "line_end": 5167
         }
       },
       "sql_identity": "procedure:bioseq.vacuum_seq_storage(regclass)",

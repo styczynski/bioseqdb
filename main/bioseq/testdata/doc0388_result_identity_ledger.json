@@ -3566,14 +3566,14 @@
       "source": {
         "module": "bioseq.storage.manager:sequence_storage_manager",
         "path": "main/bioseq/backend/pg/storage_pg/sequence_storage_manager.cppm",
-        "sha256": "22e1f7af8d128272caf86e1b291ab83ad4bb029c688bfe4f2e65c62799b36b7f",
+        "sha256": "a42e96e191a44ac1f209158556b88b41c160e802956f451b1f9d83135b4694ea",
         "span": {
-          "byte_begin": 197062,
-          "byte_end": 219543,
+          "byte_begin": 197225,
+          "byte_end": 219706,
           "column_begin": 15,
           "column_end": 2,
-          "line_begin": 4470,
-          "line_end": 5017
+          "line_begin": 4472,
+          "line_end": 5019
         }
       },
       "source_id": "S077",
