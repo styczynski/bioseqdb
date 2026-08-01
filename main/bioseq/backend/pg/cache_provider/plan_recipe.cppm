@@ -193,7 +193,100 @@ struct PlanFinder {
     std::size_t visited_count = 0;
     bool valid = true;
 
-    [[nodiscard]] bool visit(const Plan* plan, std::uint32_t depth);
+    [[nodiscard]] bool visit(const Plan* plan, std::uint32_t depth) {
+        if (!valid || plan == nullptr) return valid;
+        if (depth > kMaximumPlanWalkDepth
+            || visited_count >= visited.size()) {
+            valid = false;
+            return false;
+        }
+        for (std::size_t index = 0; index < visited_count; ++index) {
+            if (visited[index] == plan) return true;
+        }
+        visited[visited_count++] = plan;
+        if (IsA(plan, CustomScan)) {
+            const auto* custom = reinterpret_cast<const CustomScan*>(plan);
+            if (custom->methods == bioseq_customscan_methods()
+                && custom->scan.plan.plan_node_id == plan_node_id
+                && custom->scan.scanrelid == scan_relid) {
+                match = custom;
+                ++match_count;
+            }
+        }
+        if (!visit(outerPlan(plan), depth + 1U)
+            || !visit(innerPlan(plan), depth + 1U)) {
+            return false;
+        }
+        switch (nodeTag(plan)) {
+            case T_SubqueryScan:
+                return visit(
+                    reinterpret_cast<const SubqueryScan*>(plan)->subplan,
+                    depth + 1U);
+            case T_CustomScan:
+                return visit_list(
+                    reinterpret_cast<const CustomScan*>(plan)->custom_plans,
+                    depth + 1U);
+            case T_Append:
+                return visit_list(
+                    reinterpret_cast<const Append*>(plan)->appendplans,
+                    depth + 1U);
+            case T_MergeAppend:
+                return visit_list(
+                    reinterpret_cast<const MergeAppend*>(plan)->mergeplans,
+                    depth + 1U);
+            case T_BitmapAnd:
+                return visit_list(
+                    reinterpret_cast<const BitmapAnd*>(plan)->bitmapplans,
+                    depth + 1U);
+            case T_BitmapOr:
+                return visit_list(
+                    reinterpret_cast<const BitmapOr*>(plan)->bitmapplans,
+                    depth + 1U);
+            case T_Agg:
+                return visit_list(
+                    reinterpret_cast<const Agg*>(plan)->chain,
+                    depth + 1U);
+            case T_Result:
+            case T_ProjectSet:
+            case T_ModifyTable:
+            case T_RecursiveUnion:
+            case T_SeqScan:
+            case T_SampleScan:
+            case T_IndexScan:
+            case T_IndexOnlyScan:
+            case T_BitmapIndexScan:
+            case T_BitmapHeapScan:
+            case T_TidScan:
+            case T_TidRangeScan:
+            case T_FunctionScan:
+            case T_ValuesScan:
+            case T_TableFuncScan:
+            case T_CteScan:
+            case T_NamedTuplestoreScan:
+            case T_WorkTableScan:
+            case T_ForeignScan:
+            case T_NestLoop:
+            case T_MergeJoin:
+            case T_HashJoin:
+            case T_Material:
+            case T_Memoize:
+            case T_Sort:
+            case T_IncrementalSort:
+            case T_Group:
+            case T_WindowAgg:
+            case T_Unique:
+            case T_Gather:
+            case T_GatherMerge:
+            case T_Hash:
+            case T_SetOp:
+            case T_LockRows:
+            case T_Limit:
+                return true;
+            default:
+                valid = false;
+                return false;
+        }
+    }
 
     [[nodiscard]] bool visit_list(
             const List* plans,
@@ -206,101 +299,6 @@ struct PlanFinder {
         return true;
     }
 };
-
-bool PlanFinder::visit(const Plan* plan, std::uint32_t depth) {
-    if (!valid || plan == nullptr) return valid;
-    if (depth > kMaximumPlanWalkDepth
-        || visited_count >= visited.size()) {
-        valid = false;
-        return false;
-    }
-    for (std::size_t index = 0; index < visited_count; ++index) {
-        if (visited[index] == plan) return true;
-    }
-    visited[visited_count++] = plan;
-    if (IsA(plan, CustomScan)) {
-        const auto* custom = reinterpret_cast<const CustomScan*>(plan);
-        if (custom->methods == bioseq_customscan_methods()
-            && custom->scan.plan.plan_node_id == plan_node_id
-            && custom->scan.scanrelid == scan_relid) {
-            match = custom;
-            ++match_count;
-        }
-    }
-    if (!visit(outerPlan(plan), depth + 1U)
-        || !visit(innerPlan(plan), depth + 1U)) {
-        return false;
-    }
-    switch (nodeTag(plan)) {
-        case T_SubqueryScan:
-            return visit(
-                reinterpret_cast<const SubqueryScan*>(plan)->subplan,
-                depth + 1U);
-        case T_CustomScan:
-            return visit_list(
-                reinterpret_cast<const CustomScan*>(plan)->custom_plans,
-                depth + 1U);
-        case T_Append:
-            return visit_list(
-                reinterpret_cast<const Append*>(plan)->appendplans,
-                depth + 1U);
-        case T_MergeAppend:
-            return visit_list(
-                reinterpret_cast<const MergeAppend*>(plan)->mergeplans,
-                depth + 1U);
-        case T_BitmapAnd:
-            return visit_list(
-                reinterpret_cast<const BitmapAnd*>(plan)->bitmapplans,
-                depth + 1U);
-        case T_BitmapOr:
-            return visit_list(
-                reinterpret_cast<const BitmapOr*>(plan)->bitmapplans,
-                depth + 1U);
-        case T_Agg:
-            return visit_list(
-                reinterpret_cast<const Agg*>(plan)->chain,
-                depth + 1U);
-        case T_Result:
-        case T_ProjectSet:
-        case T_ModifyTable:
-        case T_RecursiveUnion:
-        case T_SeqScan:
-        case T_SampleScan:
-        case T_IndexScan:
-        case T_IndexOnlyScan:
-        case T_BitmapIndexScan:
-        case T_BitmapHeapScan:
-        case T_TidScan:
-        case T_TidRangeScan:
-        case T_FunctionScan:
-        case T_ValuesScan:
-        case T_TableFuncScan:
-        case T_CteScan:
-        case T_NamedTuplestoreScan:
-        case T_WorkTableScan:
-        case T_ForeignScan:
-        case T_NestLoop:
-        case T_MergeJoin:
-        case T_HashJoin:
-        case T_Material:
-        case T_Memoize:
-        case T_Sort:
-        case T_IncrementalSort:
-        case T_Group:
-        case T_WindowAgg:
-        case T_Unique:
-        case T_Gather:
-        case T_GatherMerge:
-        case T_Hash:
-        case T_SetOp:
-        case T_LockRows:
-        case T_Limit:
-            return true;
-        default:
-            valid = false;
-            return false;
-    }
-}
 
 [[nodiscard]] bool parse_recipe_header(
         const List* recipe,
