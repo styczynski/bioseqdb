@@ -692,6 +692,19 @@ def _error(message: str, **extra: Any) -> dict:
     return out
 
 
+def resolve_binary_candidate(
+    binary_root: Path,
+    target: str,
+    artifact_names: Optional[tuple[str, ...]] = None,
+) -> tuple[Path, tuple[Path, ...]]:
+    """Resolve the first existing target artifact and retain all diagnostics."""
+    candidate_names = artifact_names or (target,)
+    binary_candidates = tuple(binary_root / name for name in candidate_names)
+    binary = next((path for path in binary_candidates if path.is_file()),
+                  binary_candidates[0])
+    return binary, binary_candidates
+
+
 def run_inspect(
     function_name: str,
     target: str,
@@ -721,10 +734,8 @@ def run_inspect(
 
     scratch_dir = scratch_dir or DEFAULT_SCRATCH_DIR
     binary_root = build_dir / binary_subdir
-    candidate_names = artifact_names or (target,)
-    binary_candidates = tuple(binary_root / name for name in candidate_names)
-    binary = next((path for path in binary_candidates if path.exists()),
-                  binary_candidates[0])
+    binary, binary_candidates = resolve_binary_candidate(
+        binary_root, target, artifact_names)
 
     if not binary.exists():
         return _error(

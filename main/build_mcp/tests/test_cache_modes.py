@@ -2380,6 +2380,164 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("bioseq_caching/bioseq_cache.so", result["error"])
         self.assertEqual(result["binary_subdir"], "bioseq_caching")
 
+    def test_inspect_cache_dso_candidates_follow_configuration_and_platform(
+            self) -> None:
+        definition = server.INSPECT_TARGETS["postgresql_bioseq_cache"]
+        self.assertEqual(
+            definition.profiled_artifact_directory,
+            "artifacts/cache_production",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=Release\n",
+                encoding="utf-8",
+            )
+            for system_name, suffix in (
+                ("Darwin", ".dylib"),
+                ("Linux", ".so"),
+                ("Windows", ".dll"),
+            ):
+                with self.subTest(system_name=system_name):
+                    candidates = server._inspect_artifact_candidates(
+                        definition,
+                        build_dir,
+                        debug=True,
+                        system_name=system_name,
+                    )
+                    self.assertEqual(
+                        candidates,
+                        (
+                            "artifacts/cache_production/Release/"
+                            f"bioseq_cache{suffix}",
+                            f"bioseq_cache{suffix}",
+                        ),
+                    )
+
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=RelWithDebInfo\n",
+                encoding="utf-8",
+            )
+            candidates = server._inspect_artifact_candidates(
+                definition,
+                build_dir,
+                debug=False,
+                system_name="Linux",
+            )
+            self.assertEqual(
+                candidates[0],
+                "artifacts/cache_production/RelWithDebInfo/"
+                "bioseq_cache.so",
+            )
+
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                    server.os.environ, {"CMAKE_BUILD_TYPE": "Release"}):
+                candidates = server._inspect_artifact_candidates(
+                    definition,
+                    build_dir,
+                    debug=True,
+                    system_name="Linux",
+                )
+            self.assertEqual(
+                candidates[0],
+                "artifacts/cache_production/Debug/bioseq_cache.so",
+            )
+
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=../../wrong\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "invalid CMake"):
+                server._inspect_artifact_candidates(
+                    definition,
+                    build_dir,
+                    debug=False,
+                    system_name="Linux",
+                )
+
+    def test_inspect_cache_dso_resolution_rejects_wrong_config_and_directory(
+            self) -> None:
+        definition = server.INSPECT_TARGETS["postgresql_bioseq_cache"]
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            binary_root = build_dir / "bioseq_caching"
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=Release\n",
+                encoding="utf-8",
+            )
+            artifact_names = server._inspect_artifact_candidates(
+                definition,
+                build_dir,
+                debug=False,
+                system_name="Linux",
+            )
+            requested = binary_root / artifact_names[0]
+            stale_debug = (
+                binary_root
+                / "artifacts/cache_production/Debug/bioseq_cache.so"
+            )
+            legacy = binary_root / artifact_names[1]
+            for path in (requested, stale_debug, legacy):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            stale_debug.touch()
+            legacy.touch()
+            requested.mkdir()
+
+            binary, candidates = inspect_tool.resolve_binary_candidate(
+                binary_root,
+                "postgresql_bioseq_cache",
+                artifact_names,
+            )
+            self.assertEqual(binary, legacy)
+            self.assertEqual(candidates, (requested, legacy))
+
+            requested.rmdir()
+            requested.touch()
+            binary, candidates = inspect_tool.resolve_binary_candidate(
+                binary_root,
+                "postgresql_bioseq_cache",
+                artifact_names,
+            )
+
+        self.assertEqual(binary, requested)
+        self.assertEqual(candidates, (requested, legacy))
+
+    def test_inspect_cache_dso_missing_diagnostic_lists_profile_and_fallback(
+            self) -> None:
+        definition = server.INSPECT_TARGETS["postgresql_bioseq_cache"]
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            artifact_names = server._inspect_artifact_candidates(
+                definition,
+                build_dir,
+                debug=True,
+                system_name="Linux",
+            )
+            result = inspect_tool.run_inspect(
+                function_name="provider_plan_matches",
+                target="postgresql_bioseq_cache",
+                build_dir=build_dir,
+                binary_subdir="bioseq_caching",
+                artifact_names=artifact_names,
+                shared_target_names=definition.shared_target_names,
+            )
+
+        self.assertIn("error", result)
+        self.assertIn(
+            "bioseq_caching/artifacts/cache_production/Debug/"
+            "bioseq_cache.so",
+            result["error"],
+        )
+        self.assertIn(
+            "bioseq_caching/bioseq_cache.so",
+            result["error"],
+        )
+
     def test_postgresql_bioseq_inspect_mapping_uses_bench_e2e_dso_candidates(
             self) -> None:
         definition = server.INSPECT_TARGETS["postgresql_bioseq"]

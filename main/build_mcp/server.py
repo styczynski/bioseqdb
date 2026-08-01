@@ -1929,6 +1929,48 @@ class InspectTargetDefinition:
     mode: str
     artifact_names: tuple[str, ...]
     shared_target_names: tuple[str, ...] = ()
+    profiled_artifact_directory: str | None = None
+
+
+def _native_shared_library_suffix(system_name: str) -> str:
+    if system_name == "Darwin":
+        return ".dylib"
+    if system_name == "Windows":
+        return ".dll"
+    return ".so"
+
+
+def _inspect_artifact_candidates(
+    definition: InspectTargetDefinition,
+    build_dir: Path,
+    debug: bool,
+    *,
+    system_name: str | None = None,
+) -> tuple[str, ...]:
+    if definition.profiled_artifact_directory is None:
+        return definition.artifact_names
+
+    suffix = _native_shared_library_suffix(
+        system_name or host_platform.system())
+    native_names = tuple(
+        name for name in definition.artifact_names
+        if Path(name).suffix == suffix
+    )
+    if not native_names:
+        raise RuntimeError(
+            f"inspect target has no artifact for native suffix {suffix}")
+    configuration = (
+        _cmake_cache_value(build_dir, "CMAKE_BUILD_TYPE")
+        or ("Debug" if debug else "Release")
+    )
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", configuration) is None:
+        raise RuntimeError(
+            f"inspect build has invalid CMake configuration {configuration!r}")
+    profiled_names = tuple(
+        f"{definition.profiled_artifact_directory}/{configuration}/{name}"
+        for name in native_names
+    )
+    return profiled_names + native_names
 
 
 INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
@@ -1957,7 +1999,8 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
         mode="cache-unit",
         artifact_names=("bioseq_cache.dylib", "bioseq_cache.so",
                         "bioseq_cache.dll"),
-        shared_target_names=("bioseq_cache_core",)),
+        shared_target_names=("bioseq_cache_core",),
+        profiled_artifact_directory="artifacts/cache_production"),
     "bioseq_cache_unit_tests": InspectTargetDefinition(
         mode="cache-unit", artifact_names=("bioseq_cache_unit_tests",),
         shared_target_names=("bioseq_cache_core",)),
@@ -10773,6 +10816,15 @@ def tool_inspect(arguments: dict) -> str:
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, indent=2)
 
+    try:
+        artifact_names = _inspect_artifact_candidates(
+            target_definition,
+            inspect_build_dir,
+            debug_chosen,
+        )
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
     out = _run_inspect_impl(
         function_name=function_name,
         target=target,
@@ -10783,7 +10835,7 @@ def tool_inspect(arguments: dict) -> str:
         llc_on_bc=llc_on_bc,
         max_llc_bc_files=max_llc_bc_files,
         binary_subdir=MODES[inspect_mode].binary_subdir,
-        artifact_names=target_definition.artifact_names,
+        artifact_names=artifact_names,
         shared_target_names=target_definition.shared_target_names,
     )
     # Surface which tree was inspected so the AI agent can act on
