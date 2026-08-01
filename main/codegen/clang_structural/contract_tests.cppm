@@ -501,6 +501,12 @@ inline void run_preparation_contract_self_tests() {
             {
                 "-resource-dir",
                 (root / "untrusted-resource-dir").string(),
+                "-save-temps",
+                "--save-temps",
+                "-save-temps=obj",
+                "--save-temps=obj",
+                "-DKEEP_SAVE_TEMPS=1",
+                "-g",
             }),
         make_command(
             toolchain, root, production_only),
@@ -555,6 +561,13 @@ inline void run_preparation_contract_self_tests() {
                 (root / "untrusted-resource-dir").string()),
         "owned compile database did not replace an untrusted raw "
         "resource directory with the selected Clang resource directory");
+    require(
+        !first.compile_database_json.contains("save-temps")
+            && first.compile_database_json.contains(
+                "\"-DKEEP_SAVE_TEMPS=1\"")
+            && first.compile_database_json.contains("\"-g\""),
+        "owned compile database retained a non-semantic compiler temporary "
+        "emission flag or removed an independent debug flag");
     require(
         first.pcm_manifest_json.contains(
             production_profile.string())
@@ -1676,7 +1689,7 @@ inline void run_preparation_contract_self_tests() {
     write_file(
         quoted_response,
         "\"-I" + include_with_spaces.string()
-            + "\" -DFROM_QUOTED_RESPONSE=1\n");
+            + "\" -DFROM_QUOTED_RESPONSE=1 --save-temps=obj\n");
     const std::filesystem::path quoted_database =
         invalid_database(
             "quoted-response",
@@ -1698,6 +1711,12 @@ inline void run_preparation_contract_self_tests() {
                 quoted_response))
             != quoted_prepared.dependencies.end(),
         "quoted response file is absent from PREPARE dependencies");
+    require(
+        !quoted_prepared.compile_database_json.contains("save-temps")
+            && quoted_prepared.compile_database_json.contains(
+                "\"-DFROM_QUOTED_RESPONSE=1\""),
+        "PREPARE did not expand and sanitize the response-file compiler "
+        "temporary emission flag");
     const prepared_compilation_environment quoted_control =
         prepare(
             toolchain,
@@ -1716,7 +1735,7 @@ inline void run_preparation_contract_self_tests() {
     write_file(
         quoted_response,
         "\"-I" + include_with_spaces.string()
-            + "\" -DFROM_QUOTED_RESPONSE=2\n");
+            + "\" -DFROM_QUOTED_RESPONSE=2 --save-temps=obj\n");
     const prepared_compilation_environment
         quoted_response_mutation =
             prepare(
@@ -1732,7 +1751,7 @@ inline void run_preparation_contract_self_tests() {
     write_file(
         quoted_response,
         "\"-I" + include_with_spaces.string()
-            + "\" -DFROM_QUOTED_RESPONSE=1\n");
+            + "\" -DFROM_QUOTED_RESPONSE=1 --save-temps=obj\n");
     write_file(
         response_header,
         "#define BIOSEQ_PREPARE_RESPONSE_FIXTURE 2\n");

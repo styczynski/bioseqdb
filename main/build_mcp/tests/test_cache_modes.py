@@ -115,6 +115,12 @@ class CachePresetContractTest(unittest.TestCase):
                         "${sourceDir}/bioseq_caching",
                     )
 
+    def test_core_debug_preset_retains_inspection_artifact_flags(self) -> None:
+        variables = self.presets["bench-opt-debug"]["cacheVariables"]
+        flags = variables["CMAKE_CXX_FLAGS"]
+        self.assertIn("-save-temps=obj", flags.split())
+        self.assertIn("-g", flags.split())
+
 
 class CacheModeResolutionTest(unittest.TestCase):
     def _patch_toolchain(self, fast: str, debug: str):

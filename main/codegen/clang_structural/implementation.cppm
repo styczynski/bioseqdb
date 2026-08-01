@@ -4189,6 +4189,10 @@ void validate_owned_compile_database(
         || argument == "-MMD" || argument == "-MP"
         || argument == "-M" || argument == "-MM"
         || argument == "-fsyntax-only"
+        || argument == "-save-temps"
+        || argument == "--save-temps"
+        || argument.starts_with("-save-temps=")
+        || argument.starts_with("--save-temps=")
         || argument == "-fmodules-ts"
         || argument == "-fmodules-reduced-bmi"
         || argument.starts_with("-fmodule-output")
