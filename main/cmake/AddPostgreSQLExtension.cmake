@@ -94,34 +94,62 @@ function(bioseq_attach_extension_dso_closure TARGET_NAME)
   endforeach()
 
   if(APPLE)
-    # Clang emits C++ named-module initializers as externally visible Mach-O
-    # symbols even when the target uses hidden C++ visibility.  They are
-    # implementation details, not PostgreSQL ABI.  Hide only that mangled
-    # family at link time so the validator can continue enforcing the exact
-    # fmgr plus reviewed non-fmgr export surface.
-    set(_bioseq_dso_unexported_symbols
-      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.macho-unexported-symbols")
-    file(CONFIGURE
-      OUTPUT "${_bioseq_dso_unexported_symbols}"
-      CONTENT "__ZGIW*\n"
-      NEWLINE_STYLE UNIX)
-    set(_bioseq_dso_unexported_symbols_link_option
-      "LINKER:-unexported_symbols_list,${_bioseq_dso_unexported_symbols}")
+    # Hidden visibility on the extension's own C++ objects cannot constrain
+    # transitive static/object-library symbols.  Generate an exact Mach-O ABI
+    # allowlist from the same SQL ownership manifest used by the post-link
+    # validator and the ELF version script.
+    set(_bioseq_dso_macho_export_list
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.macho-exported-symbols")
+    set(_bioseq_dso_macho_export_list_generator
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/GeneratePostgreSQLExtensionMachOExportList.cmake")
+    set(_bioseq_dso_shared_export_map_generator
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/GeneratePostgreSQLExtensionElfVersionScript.cmake")
+    string(JOIN "|" _bioseq_dso_abi_exports_pipe ${ARG_ABI_EXPORTS})
+    add_custom_command(
+      OUTPUT "${_bioseq_dso_macho_export_list}"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DINPUT_MANIFEST=${ARG_SQL_MANIFEST}"
+        "-DOUTPUT=${_bioseq_dso_macho_export_list}"
+        "-DABI_EXPORTS_PIPE=${_bioseq_dso_abi_exports_pipe}"
+        -P "${_bioseq_dso_macho_export_list_generator}"
+      DEPENDS
+        "${ARG_SQL_MANIFEST}"
+        "${_bioseq_dso_macho_export_list_generator}"
+        "${_bioseq_dso_shared_export_map_generator}"
+      VERBATIM)
+    string(SHA256 _bioseq_dso_macho_export_list_target_hash
+      "${CMAKE_CURRENT_BINARY_DIR}|${TARGET_NAME}|${_bioseq_dso_macho_export_list}")
+    set(_bioseq_dso_macho_export_list_target
+      "bioseq_macho_export_list_${_bioseq_dso_macho_export_list_target_hash}")
+    if(TARGET "${_bioseq_dso_macho_export_list_target}")
+      message(FATAL_ERROR
+        "${TARGET_NAME}: Mach-O export-list target name collision: "
+        "${_bioseq_dso_macho_export_list_target}")
+    endif()
+    add_custom_target("${_bioseq_dso_macho_export_list_target}"
+      DEPENDS "${_bioseq_dso_macho_export_list}")
+    add_dependencies(
+      ${TARGET_NAME} "${_bioseq_dso_macho_export_list_target}")
+    set(_bioseq_dso_macho_export_list_link_option
+      "LINKER:-exported_symbols_list,${_bioseq_dso_macho_export_list}")
     target_link_options(
       ${TARGET_NAME}
-      PRIVATE "${_bioseq_dso_unexported_symbols_link_option}")
+      PRIVATE "${_bioseq_dso_macho_export_list_link_option}")
     set_property(
       TARGET ${TARGET_NAME}
-      APPEND PROPERTY LINK_DEPENDS "${_bioseq_dso_unexported_symbols}")
+      APPEND PROPERTY LINK_DEPENDS "${_bioseq_dso_macho_export_list}")
     set_target_properties(
       ${TARGET_NAME}
       PROPERTIES
-        BIOSEQ_EXTENSION_DSO_UNEXPORTED_SYMBOLS
-          "${_bioseq_dso_unexported_symbols}")
+        BIOSEQ_EXTENSION_DSO_MACHO_EXPORT_LIST
+          "${_bioseq_dso_macho_export_list}"
+        BIOSEQ_EXTENSION_DSO_MACHO_EXPORT_LIST_TARGET
+          "${_bioseq_dso_macho_export_list_target}")
     bioseq_assert_postgresql_extension_macho_visibility_contract(
       "${TARGET_NAME}"
-      "${_bioseq_dso_unexported_symbols}"
-      "${_bioseq_dso_unexported_symbols_link_option}")
+      "${_bioseq_dso_macho_export_list}"
+      "${_bioseq_dso_macho_export_list_target}"
+      "${_bioseq_dso_macho_export_list_link_option}")
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # ELF does not honour Mach-O's unexported-symbols mechanism.  Clang's C++
     # named-module initializers otherwise remain dynamic exports despite hidden
