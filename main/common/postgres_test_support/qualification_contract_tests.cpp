@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 import bioseq.test.postgres;
+import bioseq.common.memory_budget;
 
 using namespace std::chrono_literals;
 using namespace bioseq::postgres_test;
@@ -76,6 +77,28 @@ TEST_CASE("cgroup memory parser distinguishes unlimited and finite limits",
         parse_cgroup_memory_limit("8GiB"), std::invalid_argument);
     CHECK_THROWS_AS(
         parse_cgroup_memory_limit(""), std::invalid_argument);
+}
+
+TEST_CASE("Darwin page queues do not double-count speculative pages",
+          "[postgres-test-support][unit][qualification][memory]") {
+    using bioseq::common::memory::
+        darwin_conservative_available_page_bytes;
+
+    constexpr std::uint64_t page_bytes = 16'384;
+    // The illustrative speculative subset is already inside free_pages=100.
+    const auto available = darwin_conservative_available_page_bytes(
+        100, 50, page_bytes);
+    REQUIRE(available.has_value());
+    CHECK(*available == 150 * page_bytes);
+
+    CHECK_FALSE(darwin_conservative_available_page_bytes(
+        1, 1, 0).has_value());
+    CHECK_FALSE(darwin_conservative_available_page_bytes(
+        (std::numeric_limits<std::uint64_t>::max)(),
+        1, page_bytes).has_value());
+    CHECK_FALSE(darwin_conservative_available_page_bytes(
+        (std::numeric_limits<std::uint64_t>::max)() / 2 + 1,
+        0, 2).has_value());
 }
 
 TEST_CASE("nested cgroup memory limits constrain total and live headroom",

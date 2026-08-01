@@ -39,6 +39,7 @@ module;
 
 export module bioseq.test.postgres:qualification;
 
+import bioseq.common.memory_budget;
 import :supervision;
 
 export namespace bioseq::postgres_test {
@@ -1242,15 +1243,19 @@ struct qualified_cpu_capacity {
     if (::host_page_size(mach_host_self(), &page_size) != KERN_SUCCESS) {
         throw std::runtime_error("cannot read host page size");
     }
-    const std::uint64_t available_pages =
-        static_cast<std::uint64_t>(statistics.free_count)
-        + static_cast<std::uint64_t>(statistics.inactive_count)
-        + static_cast<std::uint64_t>(statistics.speculative_count);
+    const auto available =
+        bioseq::common::memory::
+            darwin_conservative_available_page_bytes(
+                static_cast<std::uint64_t>(statistics.free_count),
+                static_cast<std::uint64_t>(statistics.inactive_count),
+                static_cast<std::uint64_t>(page_size));
+    if (!available) {
+        throw std::overflow_error(
+            "invalid or overflowing host available-memory page observation");
+    }
     return {
         .total = total,
-        .available = checked_product(
-            available_pages,
-            static_cast<std::uint64_t>(page_size))};
+        .available = *available};
 #elif defined(__linux__)
     std::ifstream input("/proc/meminfo");
     std::uint64_t total_kib{};

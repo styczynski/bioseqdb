@@ -60,6 +60,7 @@ target_link_libraries(bioseq_postgres_test_support
   PUBLIC
     bioseq_durable_file_io
     bioseq_libpq_client
+    bioseq_memory_budget
     Threads::Threads)
 target_compile_definitions(bioseq_postgres_test_support
   PRIVATE
