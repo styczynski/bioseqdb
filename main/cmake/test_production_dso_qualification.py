@@ -199,6 +199,23 @@ class ProductionDsoQualificationTest(unittest.TestCase):
                     qualifier.QualificationError, "invalid seal"):
                 self._run_with(arguments, listings, "x86_64")
 
+    def test_missing_compiler_identity_fails_closed(self) -> None:
+        for language in ("c", "cxx"):
+            for field, failure in (
+                ("compiler", f"{language} compiler"),
+                ("compiler_id", f"identify the {language} compiler"),
+                ("compiler_version", f"identify the {language} compiler"),
+            ):
+                with self.subTest(language=language, field=field):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        arguments, listings = self._fixture(
+                            Path(tmp), "Linux", "x86_64")
+                        setattr(arguments, f"{language}_{field}", "")
+                        with self.assertRaisesRegex(
+                                qualifier.QualificationError,
+                                failure):
+                            self._run_with(arguments, listings, "x86_64")
+
     def test_atomic_writer_replaces_regular_receipt_without_partial_file(
             self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

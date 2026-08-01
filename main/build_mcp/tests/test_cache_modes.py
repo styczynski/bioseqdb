@@ -581,6 +581,11 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("CACHE_TARGET postgresql_bioseq_cache", root_cmake)
         self.assertIn(
             "test_production_dso_qualification.py", root_cmake)
+        self.assertIn("LANGUAGES C CXX", root_cmake)
+        self.assertIn(
+            'set(CMAKE_C_COMPILER "${CMAKE_C_COMPILER}"', root_cmake)
+        self.assertIn(
+            'set(CMAKE_CXX_COMPILER "${CMAKE_CXX_COMPILER}"', root_cmake)
         for mode in ("cache-bioseq-integration", "cache-bioseq-bench"):
             with self.subTest(mode=mode):
                 self.assertIn(target, server.MODES[mode].targets)
@@ -597,6 +602,9 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("NAMES otool", helper)
         self.assertIn('CMAKE_SYSTEM_NAME STREQUAL "Linux"', helper)
         self.assertIn("NAMES readelf", helper)
+        self.assertIn("CMAKE_${_language}_${_field}", helper)
+        self.assertIn(
+            "requires an identified ${_language}", helper)
         self.assertIn("BIOSEQ_PRODUCTION_DSO_QUALIFICATION_RECEIPT", helper)
         self.assertIn("_macho_dependencies", qualifier)
         self.assertIn("_macho_uuids", qualifier)
@@ -1839,6 +1847,34 @@ class CacheModeRoutingTest(unittest.TestCase):
                 fixture = self._production_dso_fixture(Path(tmp))
                 mutate(fixture)
                 with self.assertRaises(RuntimeError):
+                    server._cache_bioseq_dso_qualification_evidence(
+                        fixture["binary_dir"],
+                        expected_build_dir=fixture["build_dir"],
+                        expected_preset="cache-bioseq-fixture",
+                    )
+
+    def test_builder_rejects_missing_compiler_cache_coordinate(self) -> None:
+        for language in ("C", "CXX"):
+            with self.subTest(language=language), \
+                    tempfile.TemporaryDirectory() as tmp:
+                fixture = self._production_dso_fixture(Path(tmp))
+                cache = fixture["cmake_cache"]
+                retained = [
+                    line for line in cache.read_text(encoding="utf-8").splitlines()
+                    if not line.startswith(f"CMAKE_{language}_COMPILER:")
+                ]
+                cache.write_text("\n".join(retained) + "\n", encoding="utf-8")
+                document = fixture["document"]
+                document["build_context"]["cmake_cache"].update({
+                    "size_bytes": cache.stat().st_size,
+                    "sha256": server._sha256_path(cache),
+                })
+                sealed = self._seal_dso_document(document)
+                fixture["receipt"].write_text(
+                    json.dumps(sealed), encoding="utf-8")
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "current CMake cache context differs"):
                     server._cache_bioseq_dso_qualification_evidence(
                         fixture["binary_dir"],
                         expected_build_dir=fixture["build_dir"],

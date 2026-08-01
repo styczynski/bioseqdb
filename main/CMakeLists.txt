@@ -334,6 +334,14 @@ else()
   message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
 endif()
 
+# Compiler paths are production-evidence coordinates.  Persist both selected
+# languages uniformly so the sealed DSO receipt can verify the live CMake
+# context on every supported local and package toolchain.
+set(CMAKE_C_COMPILER "${CMAKE_C_COMPILER}"
+  CACHE FILEPATH "Selected C compiler" FORCE)
+set(CMAKE_CXX_COMPILER "${CMAKE_CXX_COMPILER}"
+  CACHE FILEPATH "Selected C++ compiler" FORCE)
+
 # Distribution packages must never retain a path into the disposable build
 # container. Force this globally before targets are created; target-level
 # properties below provide a second, auditable guard on the two shipped DSOs.
@@ -407,7 +415,7 @@ endif()
 project(
   bioseq
   VERSION 4.2.3
-  LANGUAGES CXX
+  LANGUAGES C CXX
 )
 
 # CMake's import-std support creates this static helper during project().  Its

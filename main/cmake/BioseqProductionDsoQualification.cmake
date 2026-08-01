@@ -44,6 +44,15 @@ function(bioseq_add_production_dso_qualification)
     message(FATAL_ERROR
       "production DSO qualification requires one explicit CMAKE_BUILD_TYPE")
   endif()
+  foreach(_language IN ITEMS C CXX)
+    foreach(_field IN ITEMS COMPILER COMPILER_ID COMPILER_VERSION)
+      if(NOT CMAKE_${_language}_${_field})
+        message(FATAL_ERROR
+          "production DSO qualification requires an identified ${_language} "
+          "compiler; CMAKE_${_language}_${_field} is empty")
+      endif()
+    endforeach()
+  endforeach()
 
   if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     find_program(_bioseq_dso_qualification_tool NAMES otool NO_CACHE REQUIRED)
