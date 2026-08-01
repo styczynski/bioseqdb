@@ -35,6 +35,7 @@ _ROW_SCHEMA = "bioseq_doc0388_row_authority_migration_ledger/v1"
 _DISPOSITIONS = frozenset({"retain", "fold", "replace", "remove"})
 _ROUTINE_KINDS = frozenset({"create_function", "create_procedure"})
 _ID_RE = re.compile(r"^([PS])(\d{3})$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _INDEX_TABLE_SHARD_IDENTITY = "table:bioseq_internal.index_table_shard"
 _INDEX_TABLE_SHARD_CODEC = "index_table_shard_codec"
 _INDEX_TABLE_SHARD_OWNER = (
@@ -277,6 +278,22 @@ def _json_bytes(value: object) -> bytes:
     return (json.dumps(
         value, indent=2, sort_keys=True, ensure_ascii=True,
     ) + "\n").encode("utf-8")
+
+
+def _candidate_manifest_semantic_projection(
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    projection = dict(manifest)
+    compilation_signature = projection.pop(
+        "compilation_signature", None)
+    if (
+        not isinstance(compilation_signature, str)
+        or _SHA256_RE.fullmatch(compilation_signature) is None
+    ):
+        raise LedgerError(
+            "candidate manifest compilation_signature must be "
+            "a lowercase SHA-256 digest")
+    return projection
 
 
 def _load_json(path: Path, label: str) -> dict[str, Any]:
@@ -2702,7 +2719,8 @@ def _catalog_join(
         "schema": _JOIN_SCHEMA,
         "inputs": {
             "approved_delta_semantic_sha256": _sha256(_json_bytes(delta)),
-            "candidate_manifest_semantic_sha256": _sha256(_json_bytes(manifest)),
+            "candidate_manifest_semantic_sha256": _sha256(_json_bytes(
+                _candidate_manifest_semantic_projection(manifest))),
             "legacy_sql_sha256": _LEGACY_SHA256,
         },
         "counts": {
@@ -4471,6 +4489,18 @@ def _self_test(root: Path, manifest_path: Path | None, git: str) -> None:
         raise LedgerError(
             "statement target mutations require a candidate manifest")
     manifest = _load_json(manifest_path, "candidate manifest")
+    mutation = copy.deepcopy(manifest)
+    del mutation["compilation_signature"]
+    _expect_failure(
+        lambda: _candidate_manifest_semantic_projection(mutation),
+        "lowercase SHA-256 digest",
+    )
+    mutation = copy.deepcopy(manifest)
+    mutation["compilation_signature"] = "not-a-sha256"
+    _expect_failure(
+        lambda: _candidate_manifest_semantic_projection(mutation),
+        "lowercase SHA-256 digest",
+    )
     _, legacy_statements = _split_legacy(blob)
     delta_probe = _load_json(paths["delta"], "approved catalog delta")
     expected_statement_targets, manifest_index = _derive_statement_targets(
@@ -4636,6 +4666,36 @@ def _self_test(root: Path, manifest_path: Path | None, git: str) -> None:
         "physical closure differs",
     )
     join = artifacts["join"]
+    signature_mutation = copy.deepcopy(manifest)
+    replacement_signature = "0" * 64
+    if signature_mutation["compilation_signature"] == replacement_signature:
+        replacement_signature = "f" * 64
+    signature_mutation["compilation_signature"] = replacement_signature
+    signature_join = _catalog_join(
+        delta_probe,
+        signature_mutation,
+        legacy_statements,
+        _compile_rules(rules_probe),
+    )
+    if _json_bytes(signature_join) != _json_bytes(join):
+        raise LedgerError(
+            "candidate manifest compilation provenance changed "
+            "the semantic catalog join")
+    semantic_mutation = copy.deepcopy(manifest)
+    semantic_mutation["script_sha256"] = "0" * 64
+    semantic_join = _catalog_join(
+        delta_probe,
+        semantic_mutation,
+        legacy_statements,
+        _compile_rules(rules_probe),
+    )
+    if (
+        semantic_join["inputs"]["candidate_manifest_semantic_sha256"]
+        == join["inputs"]["candidate_manifest_semantic_sha256"]
+    ):
+        raise LedgerError(
+            "candidate manifest semantic mutation did not change "
+            "the catalog-join seal")
     mutation = copy.deepcopy(join)
     mutation["derived_input_names"][0]["target_sql_name"] = "mutated"
     _expect_failure(
