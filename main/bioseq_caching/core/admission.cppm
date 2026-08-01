@@ -147,6 +147,9 @@ public:
         return admission_ != nullptr;
     }
 
+    /* DOC0321 unavoidable type-cycle exception: these bodies require the
+     * complete BasicCacheAdmission type, whose inline try_reserve body in
+     * turn requires the complete CachePermit type. */
     /** Return excess bytes to the counter while retaining the smaller permit. */
     void shrink_to(std::uint64_t bytes) noexcept;
 

@@ -7278,6 +7278,15 @@ struct ExactCoverageSemanticFrameV1 {
     return l.format_version < r.format_version;
 }
 
+struct ExactCoverageSemanticCollectorV1;
+
+/* DOC0321 unavoidable type-cycle exception: the collector walk calls this
+ * decoder, while the decoder requires the complete collector to insert its
+ * validated frame. */
+[[nodiscard]] bool collect_exact_coverage_frame(
+    ExactCoverageSemanticCollectorV1& collector,
+    const CustomScan& scan) noexcept;
+
 /** Walk all finalized Plan children without recursion cycles or unbounded work. */
 struct ExactCoverageSemanticCollectorV1 {
     std::array<ExactCoverageSemanticFrameV1,
@@ -7287,7 +7296,94 @@ struct ExactCoverageSemanticCollectorV1 {
     std::size_t visited_count = 0;
     bool valid = true;
 
-    [[nodiscard]] bool collect_plan(const Plan* plan);
+    [[nodiscard]] bool collect_plan(const Plan* plan) {
+        if (!valid || plan == nullptr) {
+            return valid;
+        }
+        for (std::size_t index = 0; index < visited_count; ++index) {
+            if (visited[index] == plan) {
+                return true;
+            }
+        }
+        if (visited_count >= visited.size()) {
+            valid = false;
+            return false;
+        }
+        visited[visited_count++] = plan;
+        if (IsA(plan, CustomScan)) {
+            const auto* custom = reinterpret_cast<const CustomScan*>(plan);
+            if (custom->methods == &coverage_scan_methods()
+                && !collect_exact_coverage_frame(*this, *custom)) {
+                valid = false;
+                return false;
+            }
+        }
+        if (!collect_plan(outerPlan(plan)) || !collect_plan(innerPlan(plan))) {
+            return false;
+        }
+        switch (nodeTag(plan)) {
+            case T_SubqueryScan:
+                return collect_plan(
+                    reinterpret_cast<const SubqueryScan*>(plan)->subplan);
+            case T_CustomScan:
+                return collect_plan_list(
+                    reinterpret_cast<const CustomScan*>(plan)->custom_plans);
+            case T_Append:
+                return collect_plan_list(
+                    reinterpret_cast<const Append*>(plan)->appendplans);
+            case T_MergeAppend:
+                return collect_plan_list(
+                    reinterpret_cast<const MergeAppend*>(plan)->mergeplans);
+            case T_BitmapAnd:
+                return collect_plan_list(
+                    reinterpret_cast<const BitmapAnd*>(plan)->bitmapplans);
+            case T_BitmapOr:
+                return collect_plan_list(
+                    reinterpret_cast<const BitmapOr*>(plan)->bitmapplans);
+            case T_Agg:
+                return collect_plan_list(
+                    reinterpret_cast<const Agg*>(plan)->chain);
+            case T_Result:
+            case T_ProjectSet:
+            case T_ModifyTable:
+            case T_RecursiveUnion:
+            case T_SeqScan:
+            case T_SampleScan:
+            case T_IndexScan:
+            case T_IndexOnlyScan:
+            case T_BitmapIndexScan:
+            case T_BitmapHeapScan:
+            case T_TidScan:
+            case T_TidRangeScan:
+            case T_FunctionScan:
+            case T_ValuesScan:
+            case T_TableFuncScan:
+            case T_CteScan:
+            case T_NamedTuplestoreScan:
+            case T_WorkTableScan:
+            case T_ForeignScan:
+            case T_NestLoop:
+            case T_MergeJoin:
+            case T_HashJoin:
+            case T_Material:
+            case T_Memoize:
+            case T_Sort:
+            case T_IncrementalSort:
+            case T_Group:
+            case T_WindowAgg:
+            case T_Unique:
+            case T_Gather:
+            case T_GatherMerge:
+            case T_Hash:
+            case T_SetOp:
+            case T_LockRows:
+            case T_Limit:
+                return true;
+            default:
+                valid = false;
+                return false;
+        }
+    }
 
     [[nodiscard]] bool collect_plan_list(const List* plans) {
         const ListCell* cell = nullptr;
@@ -7381,95 +7477,6 @@ struct ExactCoverageSemanticCollectorV1 {
         return false;
     }
     return collector.insert(candidate);
-}
-
-bool ExactCoverageSemanticCollectorV1::collect_plan(const Plan* plan) {
-    if (!valid || plan == nullptr) {
-        return valid;
-    }
-    for (std::size_t index = 0; index < visited_count; ++index) {
-        if (visited[index] == plan) {
-            return true;
-        }
-    }
-    if (visited_count >= visited.size()) {
-        valid = false;
-        return false;
-    }
-    visited[visited_count++] = plan;
-    if (IsA(plan, CustomScan)) {
-        const auto* custom = reinterpret_cast<const CustomScan*>(plan);
-        if (custom->methods == &coverage_scan_methods()
-            && !collect_exact_coverage_frame(*this, *custom)) {
-            valid = false;
-            return false;
-        }
-    }
-    if (!collect_plan(outerPlan(plan)) || !collect_plan(innerPlan(plan))) {
-        return false;
-    }
-    switch (nodeTag(plan)) {
-        case T_SubqueryScan:
-            return collect_plan(
-                reinterpret_cast<const SubqueryScan*>(plan)->subplan);
-        case T_CustomScan:
-            return collect_plan_list(
-                reinterpret_cast<const CustomScan*>(plan)->custom_plans);
-        case T_Append:
-            return collect_plan_list(
-                reinterpret_cast<const Append*>(plan)->appendplans);
-        case T_MergeAppend:
-            return collect_plan_list(
-                reinterpret_cast<const MergeAppend*>(plan)->mergeplans);
-        case T_BitmapAnd:
-            return collect_plan_list(
-                reinterpret_cast<const BitmapAnd*>(plan)->bitmapplans);
-        case T_BitmapOr:
-            return collect_plan_list(
-                reinterpret_cast<const BitmapOr*>(plan)->bitmapplans);
-        case T_Agg:
-            return collect_plan_list(
-                reinterpret_cast<const Agg*>(plan)->chain);
-        case T_Result:
-        case T_ProjectSet:
-        case T_ModifyTable:
-        case T_RecursiveUnion:
-        case T_SeqScan:
-        case T_SampleScan:
-        case T_IndexScan:
-        case T_IndexOnlyScan:
-        case T_BitmapIndexScan:
-        case T_BitmapHeapScan:
-        case T_TidScan:
-        case T_TidRangeScan:
-        case T_FunctionScan:
-        case T_ValuesScan:
-        case T_TableFuncScan:
-        case T_CteScan:
-        case T_NamedTuplestoreScan:
-        case T_WorkTableScan:
-        case T_ForeignScan:
-        case T_NestLoop:
-        case T_MergeJoin:
-        case T_HashJoin:
-        case T_Material:
-        case T_Memoize:
-        case T_Sort:
-        case T_IncrementalSort:
-        case T_Group:
-        case T_WindowAgg:
-        case T_Unique:
-        case T_Gather:
-        case T_GatherMerge:
-        case T_Hash:
-        case T_SetOp:
-        case T_LockRows:
-        case T_Limit:
-            return true;
-        default:
-            valid = false;
-            return false;
-    }
 }
 
 /** Frame all reusable semantics that can affect one exact root's result. */
@@ -10948,11 +10955,485 @@ struct ExactProviderRecipeCollectorV1 {
         return false;
     }
 
-    [[nodiscard]] bool collect_expression(Node* node) noexcept;
-    [[nodiscard]] bool collect_plan_expressions(const Plan* plan) noexcept;
+    [[nodiscard]] static bool collect_exact_subplan_ids_walker(
+            Node* node, void* opaque) {
+        auto* collector = static_cast<ExactProviderRecipeCollectorV1*>(opaque);
+        if (node == nullptr || collector == nullptr || !collector->valid) {
+            return !collector || !collector->valid;
+        }
+        if (IsA(node, SubPlan)) {
+            const auto* subplan = reinterpret_cast<const SubPlan*>(node);
+            if (collector->remember_subplan(subplan->plan_id)) {
+                return true;
+            }
+        }
+        return expression_tree_walker(
+            node, collect_exact_subplan_ids_walker, collector);
+    }
+
+    [[nodiscard]] bool collect_expression(Node* node) noexcept {
+        return node == nullptr
+            || !collect_exact_subplan_ids_walker(node, this);
+    }
+    /** Collect every PG17 Plan field that can contain executable expressions. */
+    [[nodiscard]] bool collect_plan_expressions(
+            const Plan* plan) noexcept {
+        if (plan == nullptr
+            || !collect_expression(reinterpret_cast<Node*>(plan->targetlist))
+            || !collect_expression(reinterpret_cast<Node*>(plan->qual))
+            || !collect_expression(reinterpret_cast<Node*>(plan->initPlan))) {
+            return false;
+        }
+
+        switch (nodeTag(plan)) {
+            case T_Result:
+                return collect_expression(
+                    reinterpret_cast<const Result*>(plan)->resconstantqual);
+            case T_ModifyTable: {
+                const auto* modify = reinterpret_cast<const ModifyTable*>(plan);
+                const ListCell* per_relation_cell = nullptr;
+                foreach(per_relation_cell, modify->withCheckOptionLists) {
+                    const auto* options = static_cast<const List*>(
+                        lfirst(per_relation_cell));
+                    if (options != NIL && !IsA(options, List)) {
+                        return false;
+                    }
+                    const ListCell* option_cell = nullptr;
+                    foreach(option_cell, options) {
+                        const auto* option = static_cast<const WithCheckOption*>(
+                            lfirst(option_cell));
+                        if (option == nullptr || !IsA(option, WithCheckOption)
+                            || !collect_expression(option->qual)) {
+                            return false;
+                        }
+                    }
+                }
+                foreach(per_relation_cell, modify->mergeActionLists) {
+                    const auto* actions = static_cast<const List*>(
+                        lfirst(per_relation_cell));
+                    if (actions != NIL && !IsA(actions, List)) {
+                        return false;
+                    }
+                    const ListCell* action_cell = nullptr;
+                    foreach(action_cell, actions) {
+                        const auto* action = static_cast<const MergeAction*>(
+                            lfirst(action_cell));
+                        if (action == nullptr || !IsA(action, MergeAction)
+                            || !collect_expression(action->qual)
+                            || !collect_expression(reinterpret_cast<Node*>(
+                                action->targetList))) {
+                            return false;
+                        }
+                    }
+                }
+                return collect_expression(reinterpret_cast<Node*>(
+                           modify->returningLists))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           modify->onConflictSet))
+                    && collect_expression(modify->onConflictWhere)
+                    && collect_expression(reinterpret_cast<Node*>(
+                           modify->exclRelTlist))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           modify->mergeJoinConditions));
+            }
+            case T_Append:
+                return collect_partition_prune_expressions(
+                    reinterpret_cast<const Append*>(plan)->part_prune_info);
+            case T_MergeAppend:
+                return collect_partition_prune_expressions(
+                    reinterpret_cast<const MergeAppend*>(plan)->part_prune_info);
+            case T_SampleScan: {
+                const auto* sample = reinterpret_cast<const SampleScan*>(plan);
+                const auto* clause = sample->tablesample;
+                return clause != nullptr && IsA(clause, TableSampleClause)
+                    && collect_expression(reinterpret_cast<Node*>(clause->args))
+                    && collect_expression(reinterpret_cast<Node*>(
+                        clause->repeatable));
+            }
+            case T_IndexScan: {
+                const auto* scan = reinterpret_cast<const IndexScan*>(plan);
+                return collect_expression(
+                           reinterpret_cast<Node*>(scan->indexqual))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->indexqualorig))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->indexorderby))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->indexorderbyorig));
+            }
+            case T_IndexOnlyScan: {
+                const auto* scan = reinterpret_cast<const IndexOnlyScan*>(plan);
+                return collect_expression(
+                           reinterpret_cast<Node*>(scan->indexqual))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->recheckqual))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->indexorderby))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->indextlist));
+            }
+            case T_BitmapIndexScan: {
+                const auto* scan = reinterpret_cast<const BitmapIndexScan*>(plan);
+                return collect_expression(
+                           reinterpret_cast<Node*>(scan->indexqual))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->indexqualorig));
+            }
+            case T_BitmapHeapScan:
+                return collect_expression(reinterpret_cast<Node*>(
+                    reinterpret_cast<const BitmapHeapScan*>(plan)
+                        ->bitmapqualorig));
+            case T_TidScan:
+                return collect_expression(reinterpret_cast<Node*>(
+                    reinterpret_cast<const TidScan*>(plan)->tidquals));
+            case T_TidRangeScan:
+                return collect_expression(reinterpret_cast<Node*>(
+                    reinterpret_cast<const TidRangeScan*>(plan)->tidrangequals));
+            case T_FunctionScan: {
+                const List* functions =
+                    reinterpret_cast<const FunctionScan*>(plan)->functions;
+                const ListCell* function_cell = nullptr;
+                foreach(function_cell, functions) {
+                    const auto* function = static_cast<const RangeTblFunction*>(
+                        lfirst(function_cell));
+                    if (function == nullptr || !IsA(function, RangeTblFunction)
+                        || !collect_expression(function->funcexpr)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            case T_ValuesScan:
+                return collect_expression(reinterpret_cast<Node*>(
+                    reinterpret_cast<const ValuesScan*>(plan)->values_lists));
+            case T_TableFuncScan: {
+                const auto* table_func =
+                    reinterpret_cast<const TableFuncScan*>(plan)->tablefunc;
+                return table_func != nullptr && IsA(table_func, TableFunc)
+                    && collect_expression(reinterpret_cast<Node*>(
+                           table_func->ns_uris))
+                    && collect_expression(table_func->docexpr)
+                    && collect_expression(table_func->rowexpr)
+                    && collect_expression(reinterpret_cast<Node*>(
+                           table_func->colexprs))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           table_func->coldefexprs))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           table_func->colvalexprs))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           table_func->passingvalexprs));
+            }
+            case T_ForeignScan: {
+                const auto* scan = reinterpret_cast<const ForeignScan*>(plan);
+                return collect_expression(
+                           reinterpret_cast<Node*>(scan->fdw_exprs))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->fdw_scan_tlist))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->fdw_recheck_quals));
+            }
+            case T_CustomScan: {
+                const auto* scan = reinterpret_cast<const CustomScan*>(plan);
+                return collect_expression(reinterpret_cast<Node*>(
+                           scan->custom_exprs))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           scan->custom_scan_tlist));
+            }
+            case T_NestLoop: {
+                const auto* join = reinterpret_cast<const NestLoop*>(plan);
+                if (!collect_expression(reinterpret_cast<Node*>(
+                        join->join.joinqual))) {
+                    return false;
+                }
+                const ListCell* parameter_cell = nullptr;
+                foreach(parameter_cell, join->nestParams) {
+                    const auto* parameter = static_cast<const NestLoopParam*>(
+                        lfirst(parameter_cell));
+                    if (parameter == nullptr || !IsA(parameter, NestLoopParam)
+                        || !collect_expression(reinterpret_cast<Node*>(
+                            parameter->paramval))) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            case T_MergeJoin: {
+                const auto* join = reinterpret_cast<const MergeJoin*>(plan);
+                return collect_expression(reinterpret_cast<Node*>(
+                           join->join.joinqual))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           join->mergeclauses));
+            }
+            case T_HashJoin: {
+                const auto* join = reinterpret_cast<const HashJoin*>(plan);
+                return collect_expression(reinterpret_cast<Node*>(
+                           join->join.joinqual))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           join->hashclauses))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           join->hashkeys));
+            }
+            case T_Memoize:
+                return collect_expression(reinterpret_cast<Node*>(
+                    reinterpret_cast<const Memoize*>(plan)->param_exprs));
+            case T_WindowAgg: {
+                const auto* aggregate = reinterpret_cast<const WindowAgg*>(plan);
+                return collect_expression(aggregate->startOffset)
+                    && collect_expression(aggregate->endOffset)
+                    && collect_expression(reinterpret_cast<Node*>(
+                           aggregate->runCondition))
+                    && collect_expression(reinterpret_cast<Node*>(
+                           aggregate->runConditionOrig));
+            }
+            case T_Hash:
+                return collect_expression(reinterpret_cast<Node*>(
+                    reinterpret_cast<const Hash*>(plan)->hashkeys));
+            case T_Limit: {
+                const auto* limit = reinterpret_cast<const Limit*>(plan);
+                return collect_expression(limit->limitOffset)
+                    && collect_expression(limit->limitCount);
+            }
+            case T_ProjectSet:
+            case T_RecursiveUnion:
+            case T_BitmapAnd:
+            case T_BitmapOr:
+            case T_SeqScan:
+            case T_SubqueryScan:
+            case T_CteScan:
+            case T_NamedTuplestoreScan:
+            case T_WorkTableScan:
+            case T_Material:
+            case T_Sort:
+            case T_IncrementalSort:
+            case T_Group:
+            case T_Agg:
+            case T_Unique:
+            case T_Gather:
+            case T_GatherMerge:
+            case T_SetOp:
+            case T_LockRows:
+                return true;
+            default:
+                return false;
+        }
+    }
+    /** Collect executor expressions hidden outside common Plan fields. */
     [[nodiscard]] bool collect_partition_prune_expressions(
-        const PartitionPruneInfo* prune_info) noexcept;
-    [[nodiscard]] bool collect_plan(const Plan* plan);
+            const PartitionPruneInfo* prune_info) noexcept {
+        if (prune_info == nullptr) {
+            return true;
+        }
+        if (!IsA(prune_info, PartitionPruneInfo)) {
+            return false;
+        }
+        const ListCell* hierarchy_cell = nullptr;
+        foreach(hierarchy_cell, prune_info->prune_infos) {
+            const auto* hierarchy = static_cast<const List*>(
+                lfirst(hierarchy_cell));
+            if (hierarchy != NIL && !IsA(hierarchy, List)) {
+                return false;
+            }
+            const ListCell* relation_cell = nullptr;
+            foreach(relation_cell, hierarchy) {
+                const auto* relation = static_cast<
+                    const PartitionedRelPruneInfo*>(lfirst(relation_cell));
+                if (relation == nullptr
+                    || !IsA(relation, PartitionedRelPruneInfo)) {
+                    return false;
+                }
+                const List* step_lists[] = {
+                    relation->initial_pruning_steps,
+                    relation->exec_pruning_steps,
+                };
+                for (const List* steps : step_lists) {
+                    const ListCell* step_cell = nullptr;
+                    foreach(step_cell, steps) {
+                        const auto* step = static_cast<
+                            const PartitionPruneStep*>(lfirst(step_cell));
+                        if (step == nullptr) {
+                            return false;
+                        }
+                        switch (nodeTag(step)) {
+                            case T_PartitionPruneStepOp:
+                                if (!collect_expression(
+                                        reinterpret_cast<Node*>(
+                                            reinterpret_cast<const
+                                                PartitionPruneStepOp*>(step)
+                                                ->exprs))) {
+                                    return false;
+                                }
+                                break;
+                            case T_PartitionPruneStepCombine:
+                                break;
+                            default:
+                                return false;
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    /** Append one provider recipe and recurse over the finalized Plan in preorder. */
+    [[nodiscard]] bool collect_plan(const Plan* plan) {
+        if (!valid || plan == nullptr) {
+            return valid;
+        }
+        for (std::size_t index = 0; index < visited_count; ++index) {
+            if (visited[index] == plan) {
+                return true;
+            }
+        }
+        if (visited_count >= visited.size()
+            || plan_ordinal == (std::numeric_limits<std::uint32_t>::max)()) {
+            valid = false;
+            return false;
+        }
+        visited[visited_count++] = plan;
+        const std::uint32_t current_ordinal = plan_ordinal++;
+        if (!collect_plan_expressions(plan)) {
+            valid = false;
+            return false;
+        }
+
+        const provider_registry::ProviderV2* matched_provider = nullptr;
+        for (std::uint32_t index = 0; index < providers.provider_count; ++index) {
+            const provider_registry::ProviderV2* provider =
+                providers.providers[index];
+            if (provider != nullptr
+                && reuse::provider_plan_matches(plan, provider)) {
+                if (matched_provider != nullptr) {
+                    valid = false;
+                    return false;
+                }
+                matched_provider = provider;
+            }
+        }
+        if (matched_provider != nullptr) {
+            if (!provider_allows_exact_source_elision(matched_provider)
+                || recipe_count >= kMaxProviderRecipesPerExactPlan
+                || matched_provider->provider_id
+                    > static_cast<std::uint32_t>(INT_MAX)
+                || matched_provider->abi_version
+                    > static_cast<std::uint32_t>(INT_MAX)
+                || current_ordinal > static_cast<std::uint32_t>(INT_MAX)) {
+                valid = false;
+                return false;
+            }
+            reuse::PlannerOwnedDigestRecipeV1 recipe{};
+            reuse::ProviderCallDiagnosticV1 diagnostic{};
+            if (!reuse::invoke_build_recipe_fail_open(
+                    matched_provider,
+                    root,
+                    plan,
+                    planner_context,
+                    &recipe,
+                    &diagnostic)
+                || recipe.serialized_bytes
+                    > kMaxProviderRecipeBytes - serialized_recipe_bytes) {
+                valid = false;
+                return false;
+            }
+#if defined(BIOSEQ_CACHE_TESTING)
+            if (g_test_exact_recipe_fault
+                    == TestExactRecipeFault::ExpectedDigestMismatch
+                && !test_recipe_fault_applied) {
+                recipe.value.expected_generation_digest[0] ^= 0xa5U;
+                test_recipe_fault_applied = true;
+            }
+#endif
+            Const* expected = make_binary_node(std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(
+                    recipe.value.expected_generation_digest),
+                sizeof(recipe.value.expected_generation_digest)});
+            if (expected == nullptr
+                || recipe.value.digest_format_version
+                    != kExactProviderRecipePlanFormatV1) {
+                valid = false;
+                return false;
+            }
+            List* encoded_recipe = list_make5(
+                    makeInteger(static_cast<int>(
+                        recipe.value.digest_format_version)),
+                    makeInteger(static_cast<int>(matched_provider->provider_id)),
+                    makeInteger(static_cast<int>(matched_provider->abi_version)),
+                    makeInteger(static_cast<int>(current_ordinal)),
+                    expected);
+            encoded_recipe = lappend(
+                encoded_recipe, copyObject(recipe.value.plan_domain_nodes));
+            recipes = lappend(recipes, encoded_recipe);
+            serialized_recipe_bytes += recipe.serialized_bytes;
+            ++recipe_count;
+        }
+
+        if (!collect_plan(outerPlan(plan)) || !collect_plan(innerPlan(plan))) {
+            return false;
+        }
+        switch (nodeTag(plan)) {
+            case T_SubqueryScan:
+                return collect_plan(
+                    reinterpret_cast<const SubqueryScan*>(plan)->subplan);
+            case T_CustomScan:
+                return collect_plan_list(
+                    reinterpret_cast<const CustomScan*>(plan)->custom_plans);
+            case T_Append:
+                return collect_plan_list(
+                    reinterpret_cast<const Append*>(plan)->appendplans);
+            case T_MergeAppend:
+                return collect_plan_list(
+                    reinterpret_cast<const MergeAppend*>(plan)->mergeplans);
+            case T_BitmapAnd:
+                return collect_plan_list(
+                    reinterpret_cast<const BitmapAnd*>(plan)->bitmapplans);
+            case T_BitmapOr:
+                return collect_plan_list(
+                    reinterpret_cast<const BitmapOr*>(plan)->bitmapplans);
+            case T_CteScan:
+                return !remember_subplan(
+                    reinterpret_cast<const CteScan*>(plan)->ctePlanId);
+            case T_Agg:
+                return collect_plan_list(
+                    reinterpret_cast<const Agg*>(plan)->chain);
+            case T_Result:
+            case T_ProjectSet:
+            case T_ModifyTable:
+            case T_RecursiveUnion:
+            case T_SeqScan:
+            case T_SampleScan:
+            case T_IndexScan:
+            case T_IndexOnlyScan:
+            case T_BitmapIndexScan:
+            case T_BitmapHeapScan:
+            case T_TidScan:
+            case T_TidRangeScan:
+            case T_FunctionScan:
+            case T_ValuesScan:
+            case T_TableFuncScan:
+            case T_NamedTuplestoreScan:
+            case T_WorkTableScan:
+            case T_ForeignScan:
+            case T_NestLoop:
+            case T_MergeJoin:
+            case T_HashJoin:
+            case T_Material:
+            case T_Memoize:
+            case T_Sort:
+            case T_IncrementalSort:
+            case T_Group:
+            case T_WindowAgg:
+            case T_Unique:
+            case T_Gather:
+            case T_GatherMerge:
+            case T_Hash:
+            case T_SetOp:
+            case T_LockRows:
+            case T_Limit:
+                return true;
+            default:
+                valid = false;
+                return false;
+        }
+    }
 
     [[nodiscard]] bool collect_plan_list(const List* plans) {
         const ListCell* cell = nullptr;
@@ -10965,483 +11446,7 @@ struct ExactProviderRecipeCollectorV1 {
     }
 };
 
-bool collect_exact_subplan_ids_walker(Node* node, void* opaque) {
-    auto* collector = static_cast<ExactProviderRecipeCollectorV1*>(opaque);
-    if (node == nullptr || collector == nullptr || !collector->valid) {
-        return !collector || !collector->valid;
-    }
-    if (IsA(node, SubPlan)) {
-        const auto* subplan = reinterpret_cast<const SubPlan*>(node);
-        if (collector->remember_subplan(subplan->plan_id)) {
-            return true;
-        }
-    }
-    return expression_tree_walker(
-        node, collect_exact_subplan_ids_walker, collector);
-}
 
-bool ExactProviderRecipeCollectorV1::collect_expression(
-        Node* node) noexcept {
-    return node == nullptr
-        || !collect_exact_subplan_ids_walker(node, this);
-}
-
-/** Collect executor expressions hidden outside Plan's common expression fields. */
-bool ExactProviderRecipeCollectorV1::collect_partition_prune_expressions(
-        const PartitionPruneInfo* prune_info) noexcept {
-    if (prune_info == nullptr) {
-        return true;
-    }
-    if (!IsA(prune_info, PartitionPruneInfo)) {
-        return false;
-    }
-    const ListCell* hierarchy_cell = nullptr;
-    foreach(hierarchy_cell, prune_info->prune_infos) {
-        const auto* hierarchy = static_cast<const List*>(
-            lfirst(hierarchy_cell));
-        if (hierarchy != NIL && !IsA(hierarchy, List)) {
-            return false;
-        }
-        const ListCell* relation_cell = nullptr;
-        foreach(relation_cell, hierarchy) {
-            const auto* relation = static_cast<
-                const PartitionedRelPruneInfo*>(lfirst(relation_cell));
-            if (relation == nullptr
-                || !IsA(relation, PartitionedRelPruneInfo)) {
-                return false;
-            }
-            const List* step_lists[] = {
-                relation->initial_pruning_steps,
-                relation->exec_pruning_steps,
-            };
-            for (const List* steps : step_lists) {
-                const ListCell* step_cell = nullptr;
-                foreach(step_cell, steps) {
-                    const auto* step = static_cast<
-                        const PartitionPruneStep*>(lfirst(step_cell));
-                    if (step == nullptr) {
-                        return false;
-                    }
-                    switch (nodeTag(step)) {
-                        case T_PartitionPruneStepOp:
-                            if (!collect_expression(reinterpret_cast<Node*>(
-                                    reinterpret_cast<
-                                        const PartitionPruneStepOp*>(step)
-                                        ->exprs))) {
-                                return false;
-                            }
-                            break;
-                        case T_PartitionPruneStepCombine:
-                            break;
-                        default:
-                            return false;
-                    }
-                }
-            }
-        }
-    }
-    return true;
-}
-
-/** Collect every PG17 Plan-type field that can contain executable expressions. */
-bool ExactProviderRecipeCollectorV1::collect_plan_expressions(
-        const Plan* plan) noexcept {
-    if (plan == nullptr
-        || !collect_expression(reinterpret_cast<Node*>(plan->targetlist))
-        || !collect_expression(reinterpret_cast<Node*>(plan->qual))
-        || !collect_expression(reinterpret_cast<Node*>(plan->initPlan))) {
-        return false;
-    }
-
-    switch (nodeTag(plan)) {
-        case T_Result:
-            return collect_expression(
-                reinterpret_cast<const Result*>(plan)->resconstantqual);
-        case T_ModifyTable: {
-            const auto* modify = reinterpret_cast<const ModifyTable*>(plan);
-            const ListCell* per_relation_cell = nullptr;
-            foreach(per_relation_cell, modify->withCheckOptionLists) {
-                const auto* options = static_cast<const List*>(
-                    lfirst(per_relation_cell));
-                if (options != NIL && !IsA(options, List)) {
-                    return false;
-                }
-                const ListCell* option_cell = nullptr;
-                foreach(option_cell, options) {
-                    const auto* option = static_cast<const WithCheckOption*>(
-                        lfirst(option_cell));
-                    if (option == nullptr || !IsA(option, WithCheckOption)
-                        || !collect_expression(option->qual)) {
-                        return false;
-                    }
-                }
-            }
-            foreach(per_relation_cell, modify->mergeActionLists) {
-                const auto* actions = static_cast<const List*>(
-                    lfirst(per_relation_cell));
-                if (actions != NIL && !IsA(actions, List)) {
-                    return false;
-                }
-                const ListCell* action_cell = nullptr;
-                foreach(action_cell, actions) {
-                    const auto* action = static_cast<const MergeAction*>(
-                        lfirst(action_cell));
-                    if (action == nullptr || !IsA(action, MergeAction)
-                        || !collect_expression(action->qual)
-                        || !collect_expression(reinterpret_cast<Node*>(
-                            action->targetList))) {
-                        return false;
-                    }
-                }
-            }
-            return collect_expression(reinterpret_cast<Node*>(
-                       modify->returningLists))
-                && collect_expression(reinterpret_cast<Node*>(
-                       modify->onConflictSet))
-                && collect_expression(modify->onConflictWhere)
-                && collect_expression(reinterpret_cast<Node*>(
-                       modify->exclRelTlist))
-                && collect_expression(reinterpret_cast<Node*>(
-                       modify->mergeJoinConditions));
-        }
-        case T_Append:
-            return collect_partition_prune_expressions(
-                reinterpret_cast<const Append*>(plan)->part_prune_info);
-        case T_MergeAppend:
-            return collect_partition_prune_expressions(
-                reinterpret_cast<const MergeAppend*>(plan)->part_prune_info);
-        case T_SampleScan: {
-            const auto* sample = reinterpret_cast<const SampleScan*>(plan);
-            const auto* clause = sample->tablesample;
-            return clause != nullptr && IsA(clause, TableSampleClause)
-                && collect_expression(reinterpret_cast<Node*>(clause->args))
-                && collect_expression(reinterpret_cast<Node*>(
-                    clause->repeatable));
-        }
-        case T_IndexScan: {
-            const auto* scan = reinterpret_cast<const IndexScan*>(plan);
-            return collect_expression(reinterpret_cast<Node*>(scan->indexqual))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->indexqualorig))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->indexorderby))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->indexorderbyorig));
-        }
-        case T_IndexOnlyScan: {
-            const auto* scan = reinterpret_cast<const IndexOnlyScan*>(plan);
-            return collect_expression(reinterpret_cast<Node*>(scan->indexqual))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->recheckqual))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->indexorderby))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->indextlist));
-        }
-        case T_BitmapIndexScan: {
-            const auto* scan = reinterpret_cast<const BitmapIndexScan*>(plan);
-            return collect_expression(reinterpret_cast<Node*>(scan->indexqual))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->indexqualorig));
-        }
-        case T_BitmapHeapScan:
-            return collect_expression(reinterpret_cast<Node*>(
-                reinterpret_cast<const BitmapHeapScan*>(plan)
-                    ->bitmapqualorig));
-        case T_TidScan:
-            return collect_expression(reinterpret_cast<Node*>(
-                reinterpret_cast<const TidScan*>(plan)->tidquals));
-        case T_TidRangeScan:
-            return collect_expression(reinterpret_cast<Node*>(
-                reinterpret_cast<const TidRangeScan*>(plan)->tidrangequals));
-        case T_FunctionScan: {
-            const List* functions = reinterpret_cast<const FunctionScan*>(plan)
-                ->functions;
-            const ListCell* function_cell = nullptr;
-            foreach(function_cell, functions) {
-                const auto* function = static_cast<const RangeTblFunction*>(
-                    lfirst(function_cell));
-                if (function == nullptr || !IsA(function, RangeTblFunction)
-                    || !collect_expression(function->funcexpr)) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        case T_ValuesScan:
-            return collect_expression(reinterpret_cast<Node*>(
-                reinterpret_cast<const ValuesScan*>(plan)->values_lists));
-        case T_TableFuncScan: {
-            const auto* table_func = reinterpret_cast<const TableFuncScan*>(plan)
-                ->tablefunc;
-            return table_func != nullptr && IsA(table_func, TableFunc)
-                && collect_expression(reinterpret_cast<Node*>(
-                       table_func->ns_uris))
-                && collect_expression(table_func->docexpr)
-                && collect_expression(table_func->rowexpr)
-                && collect_expression(reinterpret_cast<Node*>(
-                       table_func->colexprs))
-                && collect_expression(reinterpret_cast<Node*>(
-                       table_func->coldefexprs))
-                && collect_expression(reinterpret_cast<Node*>(
-                       table_func->colvalexprs))
-                && collect_expression(reinterpret_cast<Node*>(
-                       table_func->passingvalexprs));
-        }
-        case T_ForeignScan: {
-            const auto* scan = reinterpret_cast<const ForeignScan*>(plan);
-            return collect_expression(reinterpret_cast<Node*>(scan->fdw_exprs))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->fdw_scan_tlist))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->fdw_recheck_quals));
-        }
-        case T_CustomScan: {
-            const auto* scan = reinterpret_cast<const CustomScan*>(plan);
-            return collect_expression(reinterpret_cast<Node*>(
-                       scan->custom_exprs))
-                && collect_expression(reinterpret_cast<Node*>(
-                       scan->custom_scan_tlist));
-        }
-        case T_NestLoop: {
-            const auto* join = reinterpret_cast<const NestLoop*>(plan);
-            if (!collect_expression(reinterpret_cast<Node*>(
-                    join->join.joinqual))) {
-                return false;
-            }
-            const ListCell* parameter_cell = nullptr;
-            foreach(parameter_cell, join->nestParams) {
-                const auto* parameter = static_cast<const NestLoopParam*>(
-                    lfirst(parameter_cell));
-                if (parameter == nullptr || !IsA(parameter, NestLoopParam)
-                    || !collect_expression(reinterpret_cast<Node*>(
-                        parameter->paramval))) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        case T_MergeJoin: {
-            const auto* join = reinterpret_cast<const MergeJoin*>(plan);
-            return collect_expression(reinterpret_cast<Node*>(
-                       join->join.joinqual))
-                && collect_expression(reinterpret_cast<Node*>(
-                       join->mergeclauses));
-        }
-        case T_HashJoin: {
-            const auto* join = reinterpret_cast<const HashJoin*>(plan);
-            return collect_expression(reinterpret_cast<Node*>(
-                       join->join.joinqual))
-                && collect_expression(reinterpret_cast<Node*>(
-                       join->hashclauses))
-                && collect_expression(reinterpret_cast<Node*>(
-                       join->hashkeys));
-        }
-        case T_Memoize:
-            return collect_expression(reinterpret_cast<Node*>(
-                reinterpret_cast<const Memoize*>(plan)->param_exprs));
-        case T_WindowAgg: {
-            const auto* aggregate = reinterpret_cast<const WindowAgg*>(plan);
-            return collect_expression(aggregate->startOffset)
-                && collect_expression(aggregate->endOffset)
-                && collect_expression(reinterpret_cast<Node*>(
-                       aggregate->runCondition))
-                && collect_expression(reinterpret_cast<Node*>(
-                       aggregate->runConditionOrig));
-        }
-        case T_Hash:
-            return collect_expression(reinterpret_cast<Node*>(
-                reinterpret_cast<const Hash*>(plan)->hashkeys));
-        case T_Limit: {
-            const auto* limit = reinterpret_cast<const Limit*>(plan);
-            return collect_expression(limit->limitOffset)
-                && collect_expression(limit->limitCount);
-        }
-        case T_ProjectSet:
-        case T_RecursiveUnion:
-        case T_BitmapAnd:
-        case T_BitmapOr:
-        case T_SeqScan:
-        case T_SubqueryScan:
-        case T_CteScan:
-        case T_NamedTuplestoreScan:
-        case T_WorkTableScan:
-        case T_Material:
-        case T_Sort:
-        case T_IncrementalSort:
-        case T_Group:
-        case T_Agg:
-        case T_Unique:
-        case T_Gather:
-        case T_GatherMerge:
-        case T_SetOp:
-        case T_LockRows:
-            return true;
-        default:
-            return false;
-    }
-}
-
-/** Append one provider recipe and recurse over the finalized Plan in preorder. */
-bool ExactProviderRecipeCollectorV1::collect_plan(const Plan* plan) {
-    if (!valid || plan == nullptr) {
-        return valid;
-    }
-    for (std::size_t index = 0; index < visited_count; ++index) {
-        if (visited[index] == plan) {
-            return true;
-        }
-    }
-    if (visited_count >= visited.size()
-        || plan_ordinal == (std::numeric_limits<std::uint32_t>::max)()) {
-        valid = false;
-        return false;
-    }
-    visited[visited_count++] = plan;
-    const std::uint32_t current_ordinal = plan_ordinal++;
-    if (!collect_plan_expressions(plan)) {
-        valid = false;
-        return false;
-    }
-
-    const provider_registry::ProviderV2* matched_provider = nullptr;
-    for (std::uint32_t index = 0; index < providers.provider_count; ++index) {
-        const provider_registry::ProviderV2* provider =
-            providers.providers[index];
-        if (provider != nullptr
-            && reuse::provider_plan_matches(plan, provider)) {
-            if (matched_provider != nullptr) {
-                valid = false;
-                return false;
-            }
-            matched_provider = provider;
-        }
-    }
-    if (matched_provider != nullptr) {
-        if (!provider_allows_exact_source_elision(matched_provider)
-            || recipe_count >= kMaxProviderRecipesPerExactPlan
-            || matched_provider->provider_id
-                > static_cast<std::uint32_t>(INT_MAX)
-            || matched_provider->abi_version
-                > static_cast<std::uint32_t>(INT_MAX)
-            || current_ordinal > static_cast<std::uint32_t>(INT_MAX)) {
-            valid = false;
-            return false;
-        }
-        reuse::PlannerOwnedDigestRecipeV1 recipe{};
-        reuse::ProviderCallDiagnosticV1 diagnostic{};
-        if (!reuse::invoke_build_recipe_fail_open(
-                matched_provider,
-                root,
-                plan,
-                planner_context,
-                &recipe,
-                &diagnostic)
-            || recipe.serialized_bytes
-                > kMaxProviderRecipeBytes - serialized_recipe_bytes) {
-            valid = false;
-            return false;
-        }
-#if defined(BIOSEQ_CACHE_TESTING)
-        if (g_test_exact_recipe_fault
-                == TestExactRecipeFault::ExpectedDigestMismatch
-            && !test_recipe_fault_applied) {
-            recipe.value.expected_generation_digest[0] ^= 0xa5U;
-            test_recipe_fault_applied = true;
-        }
-#endif
-        Const* expected = make_binary_node(std::span<const std::byte>{
-            reinterpret_cast<const std::byte*>(
-                recipe.value.expected_generation_digest),
-            sizeof(recipe.value.expected_generation_digest)});
-        if (expected == nullptr
-            || recipe.value.digest_format_version
-                != kExactProviderRecipePlanFormatV1) {
-            valid = false;
-            return false;
-        }
-        List* encoded_recipe = list_make5(
-                makeInteger(static_cast<int>(
-                    recipe.value.digest_format_version)),
-                makeInteger(static_cast<int>(matched_provider->provider_id)),
-                makeInteger(static_cast<int>(matched_provider->abi_version)),
-                makeInteger(static_cast<int>(current_ordinal)),
-                expected);
-        encoded_recipe = lappend(
-            encoded_recipe, copyObject(recipe.value.plan_domain_nodes));
-        recipes = lappend(recipes, encoded_recipe);
-        serialized_recipe_bytes += recipe.serialized_bytes;
-        ++recipe_count;
-    }
-
-    if (!collect_plan(outerPlan(plan)) || !collect_plan(innerPlan(plan))) {
-        return false;
-    }
-    switch (nodeTag(plan)) {
-        case T_SubqueryScan:
-            return collect_plan(
-                reinterpret_cast<const SubqueryScan*>(plan)->subplan);
-        case T_CustomScan:
-            return collect_plan_list(
-                reinterpret_cast<const CustomScan*>(plan)->custom_plans);
-        case T_Append:
-            return collect_plan_list(
-                reinterpret_cast<const Append*>(plan)->appendplans);
-        case T_MergeAppend:
-            return collect_plan_list(
-                reinterpret_cast<const MergeAppend*>(plan)->mergeplans);
-        case T_BitmapAnd:
-            return collect_plan_list(
-                reinterpret_cast<const BitmapAnd*>(plan)->bitmapplans);
-        case T_BitmapOr:
-            return collect_plan_list(
-                reinterpret_cast<const BitmapOr*>(plan)->bitmapplans);
-        case T_CteScan:
-            return !remember_subplan(
-                reinterpret_cast<const CteScan*>(plan)->ctePlanId);
-        case T_Agg:
-            return collect_plan_list(
-                reinterpret_cast<const Agg*>(plan)->chain);
-        case T_Result:
-        case T_ProjectSet:
-        case T_ModifyTable:
-        case T_RecursiveUnion:
-        case T_SeqScan:
-        case T_SampleScan:
-        case T_IndexScan:
-        case T_IndexOnlyScan:
-        case T_BitmapIndexScan:
-        case T_BitmapHeapScan:
-        case T_TidScan:
-        case T_TidRangeScan:
-        case T_FunctionScan:
-        case T_ValuesScan:
-        case T_TableFuncScan:
-        case T_NamedTuplestoreScan:
-        case T_WorkTableScan:
-        case T_ForeignScan:
-        case T_NestLoop:
-        case T_MergeJoin:
-        case T_HashJoin:
-        case T_Material:
-        case T_Memoize:
-        case T_Sort:
-        case T_IncrementalSort:
-        case T_Group:
-        case T_WindowAgg:
-        case T_Unique:
-        case T_Gather:
-        case T_GatherMerge:
-        case T_Hash:
-        case T_SetOp:
-        case T_LockRows:
-        case T_Limit:
-            return true;
-        default:
-            valid = false;
-            return false;
-    }
-}
 
 /** Capture main-tree recipes first, then referenced global plans by plan ID. */
 [[nodiscard]] bool collect_exact_provider_recipes(
@@ -17458,7 +17463,137 @@ struct ReusableCoveragePathProbeV1 {
     std::size_t visited_count = 0;
     bool valid = true;
 
-    [[nodiscard]] bool contains(const Path* path);
+    /** Recognize a cache-owned coverage node anywhere in one chosen Path tree. */
+    [[nodiscard]] bool contains(const Path* path) {
+        if (!valid || path == nullptr) {
+            return false;
+        }
+        for (std::size_t index = 0; index < visited_count; ++index) {
+            if (visited[index] == path) {
+                return false;
+            }
+        }
+        if (visited_count >= visited.size()) {
+            valid = false;
+            return false;
+        }
+        visited[visited_count++] = path;
+        switch (nodeTag(path)) {
+            case T_BitmapHeapPath:
+                return contains(
+                    reinterpret_cast<const BitmapHeapPath*>(path)->bitmapqual);
+            case T_BitmapAndPath:
+                return contains_list(
+                    reinterpret_cast<const BitmapAndPath*>(path)->bitmapquals);
+            case T_BitmapOrPath:
+                return contains_list(
+                    reinterpret_cast<const BitmapOrPath*>(path)->bitmapquals);
+            case T_SubqueryScanPath:
+                return contains(
+                    reinterpret_cast<const SubqueryScanPath*>(path)->subpath);
+            case T_ForeignPath:
+                return contains(
+                    reinterpret_cast<const ForeignPath*>(path)->fdw_outerpath);
+            case T_CustomPath: {
+                const auto* custom = reinterpret_cast<const CustomPath*>(path);
+                return custom->methods == &coverage_path_methods()
+                    || contains_list(custom->custom_paths);
+            }
+            case T_AppendPath:
+                return contains_list(
+                    reinterpret_cast<const AppendPath*>(path)->subpaths);
+            case T_MergeAppendPath:
+                return contains_list(
+                    reinterpret_cast<const MergeAppendPath*>(path)->subpaths);
+            case T_MaterialPath:
+                return contains(
+                    reinterpret_cast<const MaterialPath*>(path)->subpath);
+            case T_MemoizePath:
+                return contains(
+                    reinterpret_cast<const MemoizePath*>(path)->subpath);
+            case T_UniquePath:
+                return contains(
+                    reinterpret_cast<const UniquePath*>(path)->subpath);
+            case T_GatherPath:
+                return contains(
+                    reinterpret_cast<const GatherPath*>(path)->subpath);
+            case T_GatherMergePath:
+                return contains(
+                    reinterpret_cast<const GatherMergePath*>(path)->subpath);
+            case T_NestPath:
+            case T_MergePath:
+            case T_HashPath: {
+                const auto* join = reinterpret_cast<const JoinPath*>(path);
+                return contains(join->outerjoinpath)
+                    || contains(join->innerjoinpath);
+            }
+            case T_ProjectionPath:
+                return contains(
+                    reinterpret_cast<const ProjectionPath*>(path)->subpath);
+            case T_ProjectSetPath:
+                return contains(
+                    reinterpret_cast<const ProjectSetPath*>(path)->subpath);
+            case T_SortPath:
+                return contains(
+                    reinterpret_cast<const SortPath*>(path)->subpath);
+            case T_IncrementalSortPath:
+                return contains(
+                    reinterpret_cast<const IncrementalSortPath*>(path)
+                        ->spath.subpath);
+            case T_GroupPath:
+                return contains(
+                    reinterpret_cast<const GroupPath*>(path)->subpath);
+            case T_UpperUniquePath:
+                return contains(
+                    reinterpret_cast<const UpperUniquePath*>(path)->subpath);
+            case T_AggPath:
+                return contains(
+                    reinterpret_cast<const AggPath*>(path)->subpath);
+            case T_GroupingSetsPath:
+                return contains(
+                    reinterpret_cast<const GroupingSetsPath*>(path)->subpath);
+            case T_MinMaxAggPath: {
+                const auto* aggregate = reinterpret_cast<const MinMaxAggPath*>(
+                    path);
+                const ListCell* cell = nullptr;
+                foreach(cell, aggregate->mmaggregates) {
+                    const auto* info = static_cast<const MinMaxAggInfo*>(
+                        lfirst(cell));
+                    if (info != nullptr
+                        && contains(info->path)) {
+                        return true;
+                    }
+                    if (!valid) {
+                        return false;
+                    }
+                }
+                return false;
+            }
+            case T_WindowAggPath:
+                return contains(
+                    reinterpret_cast<const WindowAggPath*>(path)->subpath);
+            case T_SetOpPath:
+                return contains(
+                    reinterpret_cast<const SetOpPath*>(path)->subpath);
+            case T_RecursiveUnionPath: {
+                const auto* recursive =
+                    reinterpret_cast<const RecursiveUnionPath*>(path);
+                return contains(recursive->leftpath)
+                    || contains(recursive->rightpath);
+            }
+            case T_LockRowsPath:
+                return contains(
+                    reinterpret_cast<const LockRowsPath*>(path)->subpath);
+            case T_ModifyTablePath:
+                return contains(
+                    reinterpret_cast<const ModifyTablePath*>(path)->subpath);
+            case T_LimitPath:
+                return contains(
+                    reinterpret_cast<const LimitPath*>(path)->subpath);
+            default:
+                return false;
+        }
+    }
 
     /** Lists here are selected children, never relation path alternatives. */
     [[nodiscard]] bool contains_list(const List* paths) {
@@ -17475,137 +17610,6 @@ struct ReusableCoveragePathProbeV1 {
     }
 };
 
-/** Recognize a cache-owned coverage node anywhere in one chosen Path tree. */
-bool ReusableCoveragePathProbeV1::contains(const Path* path) {
-    if (!valid || path == nullptr) {
-        return false;
-    }
-    for (std::size_t index = 0; index < visited_count; ++index) {
-        if (visited[index] == path) {
-            return false;
-        }
-    }
-    if (visited_count >= visited.size()) {
-        valid = false;
-        return false;
-    }
-    visited[visited_count++] = path;
-    switch (nodeTag(path)) {
-        case T_BitmapHeapPath:
-            return contains(
-                reinterpret_cast<const BitmapHeapPath*>(path)->bitmapqual);
-        case T_BitmapAndPath:
-            return contains_list(
-                reinterpret_cast<const BitmapAndPath*>(path)->bitmapquals);
-        case T_BitmapOrPath:
-            return contains_list(
-                reinterpret_cast<const BitmapOrPath*>(path)->bitmapquals);
-        case T_SubqueryScanPath:
-            return contains(
-                reinterpret_cast<const SubqueryScanPath*>(path)->subpath);
-        case T_ForeignPath:
-            return contains(
-                reinterpret_cast<const ForeignPath*>(path)->fdw_outerpath);
-        case T_CustomPath: {
-            const auto* custom = reinterpret_cast<const CustomPath*>(path);
-            return custom->methods == &coverage_path_methods()
-                || contains_list(custom->custom_paths);
-        }
-        case T_AppendPath:
-            return contains_list(
-                reinterpret_cast<const AppendPath*>(path)->subpaths);
-        case T_MergeAppendPath:
-            return contains_list(
-                reinterpret_cast<const MergeAppendPath*>(path)->subpaths);
-        case T_MaterialPath:
-            return contains(
-                reinterpret_cast<const MaterialPath*>(path)->subpath);
-        case T_MemoizePath:
-            return contains(
-                reinterpret_cast<const MemoizePath*>(path)->subpath);
-        case T_UniquePath:
-            return contains(
-                reinterpret_cast<const UniquePath*>(path)->subpath);
-        case T_GatherPath:
-            return contains(
-                reinterpret_cast<const GatherPath*>(path)->subpath);
-        case T_GatherMergePath:
-            return contains(
-                reinterpret_cast<const GatherMergePath*>(path)->subpath);
-        case T_NestPath:
-        case T_MergePath:
-        case T_HashPath: {
-            const auto* join = reinterpret_cast<const JoinPath*>(path);
-            return contains(join->outerjoinpath)
-                || contains(join->innerjoinpath);
-        }
-        case T_ProjectionPath:
-            return contains(
-                reinterpret_cast<const ProjectionPath*>(path)->subpath);
-        case T_ProjectSetPath:
-            return contains(
-                reinterpret_cast<const ProjectSetPath*>(path)->subpath);
-        case T_SortPath:
-            return contains(
-                reinterpret_cast<const SortPath*>(path)->subpath);
-        case T_IncrementalSortPath:
-            return contains(
-                reinterpret_cast<const IncrementalSortPath*>(path)
-                    ->spath.subpath);
-        case T_GroupPath:
-            return contains(
-                reinterpret_cast<const GroupPath*>(path)->subpath);
-        case T_UpperUniquePath:
-            return contains(
-                reinterpret_cast<const UpperUniquePath*>(path)->subpath);
-        case T_AggPath:
-            return contains(
-                reinterpret_cast<const AggPath*>(path)->subpath);
-        case T_GroupingSetsPath:
-            return contains(
-                reinterpret_cast<const GroupingSetsPath*>(path)->subpath);
-        case T_MinMaxAggPath: {
-            const auto* aggregate = reinterpret_cast<const MinMaxAggPath*>(
-                path);
-            const ListCell* cell = nullptr;
-            foreach(cell, aggregate->mmaggregates) {
-                const auto* info = static_cast<const MinMaxAggInfo*>(
-                    lfirst(cell));
-                if (info != nullptr
-                    && contains(info->path)) {
-                    return true;
-                }
-                if (!valid) {
-                    return false;
-                }
-            }
-            return false;
-        }
-        case T_WindowAggPath:
-            return contains(
-                reinterpret_cast<const WindowAggPath*>(path)->subpath);
-        case T_SetOpPath:
-            return contains(
-                reinterpret_cast<const SetOpPath*>(path)->subpath);
-        case T_RecursiveUnionPath: {
-            const auto* recursive =
-                reinterpret_cast<const RecursiveUnionPath*>(path);
-            return contains(recursive->leftpath)
-                || contains(recursive->rightpath);
-        }
-        case T_LockRowsPath:
-            return contains(
-                reinterpret_cast<const LockRowsPath*>(path)->subpath);
-        case T_ModifyTablePath:
-            return contains(
-                reinterpret_cast<const ModifyTablePath*>(path)->subpath);
-        case T_LimitPath:
-            return contains(
-                reinterpret_cast<const LimitPath*>(path)->subpath);
-        default:
-            return false;
-    }
-}
 
 [[nodiscard]] bool path_contains_reusable_coverage(const Path* path) {
     ReusableCoveragePathProbeV1 probe{};
@@ -18467,7 +18471,115 @@ struct MainTreeCoverageMarkerCollectorV1 {
     bool include_enabled = false;
     bool valid = true;
 
-    [[nodiscard]] bool collect(Plan* plan);
+    /** Collect selected coverage markers before mutating any finalized Plan. */
+    [[nodiscard]] bool collect(Plan* plan) {
+        if (!valid || plan == nullptr) {
+            return valid;
+        }
+        for (std::size_t index = 0; index < visited_count; ++index) {
+            if (visited[index] == plan) {
+                return true;
+            }
+        }
+        if (visited_count >= visited.size()) {
+            valid = false;
+            return false;
+        }
+        visited[visited_count++] = plan;
+        if (IsA(plan, CustomScan)) {
+            auto* custom = reinterpret_cast<CustomScan*>(plan);
+            if (custom->methods == &coverage_scan_methods()) {
+                if (custom->custom_private == NIL
+                    || list_length(custom->custom_private) < 11
+                    || !IsA(list_nth(custom->custom_private, 10), Integer)) {
+                    valid = false;
+                    return false;
+                }
+                auto* marker = static_cast<Integer*>(
+                    list_nth(custom->custom_private, 10));
+                const int value = marker->ival;
+                if (value < static_cast<int>(CoverageBypassMarkerV1::Enabled)
+                    || value > static_cast<int>(
+                        CoverageBypassMarkerV1::Permanent)) {
+                    valid = false;
+                    return false;
+                }
+                if (value == static_cast<int>(
+                        CoverageBypassMarkerV1::Provisional)
+                    || (include_enabled
+                        && value == static_cast<int>(
+                            CoverageBypassMarkerV1::Enabled))) {
+                    if (marker_count >= markers.size()) {
+                        valid = false;
+                        return false;
+                    }
+                    markers[marker_count++] = marker;
+                }
+            }
+        }
+        if (!collect(outerPlan(plan)) || !collect(innerPlan(plan))) {
+            return false;
+        }
+        switch (nodeTag(plan)) {
+            case T_SubqueryScan:
+                return collect(reinterpret_cast<SubqueryScan*>(plan)->subplan);
+            case T_CustomScan:
+                return collect_list(
+                    reinterpret_cast<CustomScan*>(plan)->custom_plans);
+            case T_Append:
+                return collect_list(reinterpret_cast<Append*>(plan)->appendplans);
+            case T_MergeAppend:
+                return collect_list(
+                    reinterpret_cast<MergeAppend*>(plan)->mergeplans);
+            case T_BitmapAnd:
+                return collect_list(
+                    reinterpret_cast<BitmapAnd*>(plan)->bitmapplans);
+            case T_BitmapOr:
+                return collect_list(
+                    reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
+            case T_Agg:
+                return collect_list(reinterpret_cast<Agg*>(plan)->chain);
+            case T_Result:
+            case T_ProjectSet:
+            case T_ModifyTable:
+            case T_RecursiveUnion:
+            case T_SeqScan:
+            case T_SampleScan:
+            case T_IndexScan:
+            case T_IndexOnlyScan:
+            case T_BitmapIndexScan:
+            case T_BitmapHeapScan:
+            case T_TidScan:
+            case T_TidRangeScan:
+            case T_FunctionScan:
+            case T_ValuesScan:
+            case T_TableFuncScan:
+            case T_CteScan:
+            case T_NamedTuplestoreScan:
+            case T_WorkTableScan:
+            case T_ForeignScan:
+            case T_NestLoop:
+            case T_MergeJoin:
+            case T_HashJoin:
+            case T_Material:
+            case T_Memoize:
+            case T_Sort:
+            case T_IncrementalSort:
+            case T_Group:
+            case T_WindowAgg:
+            case T_Unique:
+            case T_Gather:
+            case T_GatherMerge:
+            case T_Hash:
+            case T_SetOp:
+            case T_LockRows:
+            case T_Limit:
+                return true;
+            default:
+                valid = false;
+                return false;
+        }
+    }
 
     [[nodiscard]] bool collect_list(List* plans) {
         ListCell* cell = nullptr;
@@ -18480,114 +18592,6 @@ struct MainTreeCoverageMarkerCollectorV1 {
     }
 };
 
-bool MainTreeCoverageMarkerCollectorV1::collect(Plan* plan) {
-    if (!valid || plan == nullptr) {
-        return valid;
-    }
-    for (std::size_t index = 0; index < visited_count; ++index) {
-        if (visited[index] == plan) {
-            return true;
-        }
-    }
-    if (visited_count >= visited.size()) {
-        valid = false;
-        return false;
-    }
-    visited[visited_count++] = plan;
-    if (IsA(plan, CustomScan)) {
-        auto* custom = reinterpret_cast<CustomScan*>(plan);
-        if (custom->methods == &coverage_scan_methods()) {
-            if (custom->custom_private == NIL
-                || list_length(custom->custom_private) < 11
-                || !IsA(list_nth(custom->custom_private, 10), Integer)) {
-                valid = false;
-                return false;
-            }
-            auto* marker = static_cast<Integer*>(
-                list_nth(custom->custom_private, 10));
-            const int value = marker->ival;
-            if (value < static_cast<int>(CoverageBypassMarkerV1::Enabled)
-                || value > static_cast<int>(
-                    CoverageBypassMarkerV1::Permanent)) {
-                valid = false;
-                return false;
-            }
-            if (value == static_cast<int>(
-                    CoverageBypassMarkerV1::Provisional)
-                || (include_enabled
-                    && value == static_cast<int>(
-                        CoverageBypassMarkerV1::Enabled))) {
-                if (marker_count >= markers.size()) {
-                    valid = false;
-                    return false;
-                }
-                markers[marker_count++] = marker;
-            }
-        }
-    }
-    if (!collect(outerPlan(plan)) || !collect(innerPlan(plan))) {
-        return false;
-    }
-    switch (nodeTag(plan)) {
-        case T_SubqueryScan:
-            return collect(reinterpret_cast<SubqueryScan*>(plan)->subplan);
-        case T_CustomScan:
-            return collect_list(
-                reinterpret_cast<CustomScan*>(plan)->custom_plans);
-        case T_Append:
-            return collect_list(reinterpret_cast<Append*>(plan)->appendplans);
-        case T_MergeAppend:
-            return collect_list(
-                reinterpret_cast<MergeAppend*>(plan)->mergeplans);
-        case T_BitmapAnd:
-            return collect_list(
-                reinterpret_cast<BitmapAnd*>(plan)->bitmapplans);
-        case T_BitmapOr:
-            return collect_list(
-                reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
-        case T_Agg:
-            return collect_list(reinterpret_cast<Agg*>(plan)->chain);
-        case T_Result:
-        case T_ProjectSet:
-        case T_ModifyTable:
-        case T_RecursiveUnion:
-        case T_SeqScan:
-        case T_SampleScan:
-        case T_IndexScan:
-        case T_IndexOnlyScan:
-        case T_BitmapIndexScan:
-        case T_BitmapHeapScan:
-        case T_TidScan:
-        case T_TidRangeScan:
-        case T_FunctionScan:
-        case T_ValuesScan:
-        case T_TableFuncScan:
-        case T_CteScan:
-        case T_NamedTuplestoreScan:
-        case T_WorkTableScan:
-        case T_ForeignScan:
-        case T_NestLoop:
-        case T_MergeJoin:
-        case T_HashJoin:
-        case T_Material:
-        case T_Memoize:
-        case T_Sort:
-        case T_IncrementalSort:
-        case T_Group:
-        case T_WindowAgg:
-        case T_Unique:
-        case T_Gather:
-        case T_GatherMerge:
-        case T_Hash:
-        case T_SetOp:
-        case T_LockRows:
-        case T_Limit:
-            return true;
-        default:
-            valid = false;
-            return false;
-    }
-}
 
 /**
  * Replace every exact scan's provisional recipes with post-setrefs recipes.
