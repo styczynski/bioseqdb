@@ -133,7 +133,7 @@ function(_bioseq_highway_normalize_definitions output)
     _bioseq_highway_reject_control_characters(
       "Highway policy definition" "${_definition}")
     if(NOT _definition MATCHES
-        "^[A-Za-z_][A-Za-z0-9_]*(=[^;[:space:]]+)?$")
+        "^[A-Za-z_][A-Za-z0-9_]*(=[^; ]+)?$")
       _bioseq_highway_fail(
         "invalid Highway policy definition '${_definition}'")
     endif()
