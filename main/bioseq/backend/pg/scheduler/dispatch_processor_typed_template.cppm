@@ -2294,7 +2294,13 @@ make_fragment_index_persist_target(
         // scheme-tagged READY-generation writer; never relabel it Exact/Scalar.
         && pipe::target_index_sketch_backend_from_params(params)
             != bioseq::simd::MinimizerSketchBackend::
-                PaperNtHashSimd;
+                PaperNtHashSimd
+        // A generated Highway table is process-local and has exactly one
+        // scheduler-owned selection root. Background PostgreSQL workers may
+        // not reconstruct it from an architecture enum or redispatch, so
+        // ExactSimd recomputes remain foreground-only.
+        && pipe::target_index_sketch_backend_from_params(params)
+            != bioseq::simd::MinimizerSketchBackend::ExactSimd;
 }
 
 // DOC0345 Patch J — select the target index sketch backend for recompute from
@@ -2524,6 +2530,13 @@ template <sequence_alphabet Alphabet>
     if (!can_defer_recompute_minimizer_persist(ctx, params)) {
         if (ctx.recompute_async_persist_active
             && target_backend_from_params_for_recompute(params)
+                == bioseq::simd::MinimizerSketchBackend::ExactSimd) {
+            bioseq_log<DBG>("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} because the selected Highway table is process-local and has one scheduler dispatch owner; ExactSimd recompute continues in the foreground",
+                    static_cast<unsigned long long>(sequence_rowno),
+                    static_cast<unsigned long long>(loc.total_bp_size),
+                    reason);
+        } else if (ctx.recompute_async_persist_active
+            && target_backend_from_params_for_recompute(params)
                 == bioseq::simd::MinimizerSketchBackend::
                     PaperNtHashSimd) {
             bioseq_log<DBG>("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} because Paper persistence requires a scheme-tagged READY generation; Paper recompute continues without fallback",
@@ -2592,7 +2605,6 @@ template <sequence_alphabet Alphabet>
         bioseq::settings::index_memory_cap_mb,
         static_cast<std::int32_t>(  // DOC0345 Patch K — thread backend into the async worker
             target_backend_from_params_for_recompute(params)),
-        params.highway_executed_target,
         requested_provider_wire_value);
     bioseq_log<DBG>("[bioseq] index: recompute async-mps-build row={} index={} target_bp={} reason={} async_staged={}",
             static_cast<unsigned long long>(sequence_rowno),
