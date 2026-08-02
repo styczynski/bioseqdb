@@ -4,7 +4,8 @@ cmake_minimum_required(VERSION 4.2)
 # ExternalProject with either GCC 16.1/libstdc++ or Clang 22/libc++, keeping its
 # C and legacy C++ dependencies out of the main module graph. Components are
 # selected by BIOSEQ_CODEGEN_ENABLE_EXTERNAL / BIOSEQ_CODEGEN_ENABLE_WEBSITE /
-# BIOSEQ_CODEGEN_ENABLE_SQL / BIOSEQ_CODEGEN_ENABLE_HIGHWAY.
+# BIOSEQ_CODEGEN_ENABLE_SQL / BIOSEQ_CODEGEN_ENABLE_HIGHWAY /
+# BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION.
 
 if(NOT BIOSEQ_REPOSITORY_ROOT)
   get_filename_component(BIOSEQ_REPOSITORY_ROOT
@@ -124,15 +125,19 @@ option(BIOSEQ_CODEGEN_ENABLE_EXTERNAL "Build the external-API-client component" 
 option(BIOSEQ_CODEGEN_ENABLE_WEBSITE "Build the website component" OFF)
 option(BIOSEQ_CODEGEN_ENABLE_SQL "Build the PostgreSQL extension SQL component" OFF)
 option(BIOSEQ_CODEGEN_ENABLE_HIGHWAY "Build the Highway target-module component" OFF)
+option(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
+  "Build the generic template-flatten namespace materializer" OFF)
 
 if(NOT BIOSEQ_CODEGEN_ENABLE_EXTERNAL
    AND NOT BIOSEQ_CODEGEN_ENABLE_WEBSITE
    AND NOT BIOSEQ_CODEGEN_ENABLE_SQL
-   AND NOT BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
+   AND NOT BIOSEQ_CODEGEN_ENABLE_HIGHWAY
+   AND NOT BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)
   message(FATAL_ERROR
     "bioseq_codegen requires at least one enabled component "
     "(BIOSEQ_CODEGEN_ENABLE_EXTERNAL / BIOSEQ_CODEGEN_ENABLE_WEBSITE / "
-    "BIOSEQ_CODEGEN_ENABLE_SQL / BIOSEQ_CODEGEN_ENABLE_HIGHWAY)")
+    "BIOSEQ_CODEGEN_ENABLE_SQL / BIOSEQ_CODEGEN_ENABLE_HIGHWAY / "
+    "BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)")
 endif()
 
 set(CMAKE_CXX_STANDARD 26)
@@ -167,7 +172,8 @@ set(_codegen_component_entries "")
 
 if(BIOSEQ_CODEGEN_ENABLE_SQL
     OR BIOSEQ_CODEGEN_ENABLE_WEBSITE
-    OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
+    OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY
+    OR BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)
   # One Clang 22 AST/token/USR implementation serves SQL, website, and Highway
   # collection. Clang/LLVM types remain confined to the named module
   # implementation unit; importers see only the compiler-neutral model.
@@ -222,6 +228,25 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL
   if(NOT "${BIOSEQ_CODEGEN_LLVM_LIB}" STREQUAL
       "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
     list(APPEND _codegen_link_libs "${BIOSEQ_CODEGEN_LLVM_LIB}")
+  endif()
+endif()
+
+if(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
+    OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
+  list(APPEND _codegen_module_files
+    "${_codegen_src}/namespace_materialization/model.cppm"
+    "${_codegen_src}/namespace_materialization/validator.cppm"
+    "${_codegen_src}/namespace_materialization/manifest.cppm"
+    "${_codegen_src}/namespace_materialization/renderer.cppm"
+    "${_codegen_src}/namespace_materialization/contract_tests.cppm"
+    "${_codegen_src}/namespace_materialization/index.cppm")
+  if(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)
+    string(APPEND _codegen_component_imports
+      "import bioseq.codegen.namespace_materialization;\n")
+    string(APPEND _codegen_component_entries
+      "        {\"namespace_materialization\", "
+      "&bioseq::codegen::namespace_materialization::self_test, "
+      "&bioseq::codegen::namespace_materialization::run},\n")
   endif()
 endif()
 
@@ -519,7 +544,8 @@ if(_codegen_link_libs)
 endif()
 if(BIOSEQ_CODEGEN_ENABLE_SQL
     OR BIOSEQ_CODEGEN_ENABLE_WEBSITE
-    OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
+    OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY
+    OR BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)
   target_include_directories(bioseq_codegen SYSTEM PRIVATE
     "${_bioseq_llvm_incdir}")
   target_link_options(bioseq_codegen PRIVATE
