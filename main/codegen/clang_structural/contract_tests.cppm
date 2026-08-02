@@ -124,6 +124,48 @@ inline void require(bool condition, std::string_view message) {
     }
 }
 
+[[nodiscard]] inline std::string_view source_text(
+    std::string_view source,
+    source_range range) {
+    if (range.end.byte_offset < range.begin.byte_offset
+        || range.end.byte_offset > source.size()) {
+        throw std::runtime_error(
+            "PREPARE contract fixture received an invalid source range");
+    }
+    return source.substr(
+        range.begin.byte_offset,
+        range.end.byte_offset - range.begin.byte_offset);
+}
+
+[[nodiscard]] inline std::string_view callable_kind_name(
+    callable_kind kind) noexcept {
+    switch (kind) {
+        case callable_kind::function: return "function";
+        case callable_kind::member_function: return "member_function";
+        case callable_kind::constructor: return "constructor";
+        case callable_kind::destructor: return "destructor";
+        case callable_kind::operator_function: return "operator_function";
+        case callable_kind::conversion_function:
+            return "conversion_function";
+        case callable_kind::lambda: return "lambda";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] inline std::string callable_inventory(
+    const marked_namespace_record& name_space) {
+    std::ostringstream result;
+    result << "observed " << name_space.callables.size()
+           << " callable(s):";
+    for (const callable_insertion_record& callable :
+         name_space.callables) {
+        result << " [" << callable_kind_name(callable.kind)
+               << ", name='" << callable.qualified_name
+               << "', usr='" << callable.stable_usr << "']";
+    }
+    return result.str();
+}
+
 template <typename Operation>
 inline void require_failure(
     Operation&& operation,
@@ -446,6 +488,437 @@ export namespace bioseq::codegen::clang_structural {
 inline void run_preparation_contract_self_tests() {
     using namespace contract_detail;
 
+    constexpr std::string_view token_slice_source = R"CPP(module;
+export module fixture.token_slice;
+import fixture.dependency;
+#define BIOSEQ_TOKEN_BRANCH 1
+namespace envelope {
+inline namespace [[bioseq::template_flatten("Alphabet")]] selected {
+[[bioseq::template_flatten_when("small"), maybe_unused]]
+static constexpr unsigned table = 7U;
+template <class Value>
+[[bioseq::template_flatten_entry("map")]]
+inline Value map_value(Value value = Value{}) { return value; }
+using scalar_type = unsigned long;
+#if BIOSEQ_TOKEN_BRANCH
+constexpr int branch_true = 1;
+#else
+constexpr int branch_false = 2;
+#endif
+namespace nested {
+constexpr int indirect = 9;
+}
+}
+}
+)CPP";
+    const translation_unit token_slice = scan_token_slice(
+        "token_slice_contract.cppm", token_slice_source);
+    require(
+        token_slice.mode == collection_mode::token_slice
+            && token_slice.schema_version == model_schema_version
+            && token_slice.source_path
+                == std::filesystem::path{"token_slice_contract.cppm"}
+            && !token_slice.source_sha256.empty(),
+        "token-slice collection does not identify its source and schema");
+    require(
+        token_slice.module_name == "fixture.token_slice"
+            && token_slice.source_module.provided_module
+                == "fixture.token_slice"
+            && token_slice.source_module.is_interface
+            && !token_slice.source_module.is_partition
+            && token_slice.source_module.imported_modules
+                == std::vector<std::string>{"fixture.dependency"}
+            && source_text(
+                   token_slice_source,
+                   token_slice.source_module.declaration_range)
+                == "export module fixture.token_slice;",
+        "token-slice collection lost exact module/import geometry");
+
+    const auto selected_namespace = std::ranges::find(
+        token_slice.namespaces,
+        "envelope::selected",
+        &namespace_record::qualified_name);
+    require(
+        selected_namespace != token_slice.namespaces.end(),
+        "token-slice collection omitted the selected namespace");
+    require(
+        selected_namespace->is_inline
+            && !selected_namespace->is_anonymous
+            && !selected_namespace->is_reopened
+            && !selected_namespace->provenance_id.empty()
+            && selected_namespace->stable_usr.empty(),
+        "token-slice namespace mixed lexical and semantic identity facts");
+    require(
+        source_text(
+            token_slice_source,
+            selected_namespace->keyword_range) == "namespace"
+            && source_text(
+                   token_slice_source,
+                   selected_namespace->name_range) == "selected"
+            && source_text(
+                   token_slice_source,
+                   selected_namespace->open_brace_range) == "{"
+            && source_text(
+                   token_slice_source,
+                   selected_namespace->close_brace_range) == "}"
+            && selected_namespace->body_range.begin.byte_offset
+                == selected_namespace->open_brace_range.end.byte_offset
+            && selected_namespace->body_range.end.byte_offset
+                == selected_namespace->close_brace_range.begin.byte_offset,
+        "token-slice namespace keyword/name/brace/body geometry is not exact");
+    require(
+        selected_namespace->attributes.size() == 1,
+        "token-slice namespace marker count is not exact");
+    const attribute_record& namespace_marker =
+        selected_namespace->attributes.front();
+    require(
+        namespace_marker.qualified_name == "bioseq::template_flatten"
+            && namespace_marker.vendor_namespace == "bioseq"
+            && namespace_marker.name == "template_flatten"
+            && namespace_marker.argument_text == "\"Alphabet\""
+            && namespace_marker.placement
+                == attribute_placement::namespace_head
+            && source_text(
+                   token_slice_source,
+                   namespace_marker.range)
+                == "bioseq::template_flatten(\"Alphabet\")"
+            && source_text(
+                   token_slice_source,
+                   namespace_marker.argument_range) == "\"Alphabet\""
+            && source_text(
+                   token_slice_source,
+                   namespace_marker.complete_range)
+                == "[[bioseq::template_flatten(\"Alphabet\")]]",
+        "token-slice namespace marker identity or source geometry changed");
+
+    std::vector<const declaration_record*> selected_children;
+    for (const declaration_record& declaration :
+         token_slice.declarations) {
+        if (declaration.enclosing_qualified_name
+            == "envelope::selected") {
+            selected_children.push_back(&declaration);
+        }
+    }
+    std::vector<std::string> selected_child_names;
+    std::ranges::transform(
+        selected_children,
+        std::back_inserter(selected_child_names),
+        [](const declaration_record* declaration) {
+            return declaration->name;
+        });
+    std::ranges::sort(selected_child_names);
+    require(
+        selected_child_names == std::vector<std::string>{
+            "branch_false",
+            "branch_true",
+            "map_value",
+            "nested",
+            "scalar_type",
+            "table",
+        },
+        "token-slice collection did not return exactly the direct namespace "
+        "children from both raw conditional branches");
+    require(
+        std::ranges::all_of(
+            selected_children,
+            [](const declaration_record* declaration) {
+                return declaration->specifiers.direct_namespace_member
+                    && !declaration->provenance_id.empty()
+                    && !declaration
+                            ->immediate_namespace_provenance_id.empty()
+                    && declaration
+                            ->immediate_namespace_stable_usr.empty()
+                    && declaration->stable_usr.empty();
+            }),
+        "token-slice direct children mixed semantic identity into raw facts");
+    const auto selected_child = [&](std::string_view name)
+        -> const declaration_record& {
+        const auto found = std::ranges::find(
+            selected_children,
+            name,
+            [](const declaration_record* declaration) {
+                return std::string_view{declaration->name};
+            });
+        if (found == selected_children.end()) {
+            throw std::runtime_error(
+                "PREPARE contract fixture cannot find direct child '"
+                + std::string{name} + "'");
+        }
+        return **found;
+    };
+    const declaration_record& table = selected_child("table");
+    require(
+        table.kind == declaration_kind::variable
+            && table.payload_kind
+                == declaration_payload_kind::variable_initializer
+            && table.specifiers.is_variable
+            && table.specifiers.is_definition
+            && table.specifiers.is_static
+            && table.specifiers.is_constexpr
+            && table.specifiers.has_explicit_type
+            && table.explicit_declared_type == "unsigned"
+            && source_text(token_slice_source, table.declaration_range)
+                == "[[bioseq::template_flatten_when(\"small\"), "
+                   "maybe_unused]]\n"
+                   "static constexpr unsigned table = 7U;"
+            && source_text(
+                   token_slice_source,
+                   table.declaration_head_range)
+                == "[[bioseq::template_flatten_when(\"small\"), "
+                   "maybe_unused]]\n"
+                   "static constexpr unsigned table "
+            && source_text(
+                   token_slice_source,
+                   table.body_or_initializer_range) == "7U",
+        "token-slice variable declaration/head/initializer facts changed");
+    require(
+        table.attributes.size() == 2,
+        "token-slice shared attribute block did not retain both segments");
+    const auto table_marker = std::ranges::find(
+        table.attributes,
+        "bioseq::template_flatten_when",
+        &attribute_record::qualified_name);
+    require(
+        table_marker != table.attributes.end()
+            && table_marker->argument_text == "\"small\""
+            && source_text(
+                   token_slice_source,
+                   table_marker->range)
+                == "bioseq::template_flatten_when(\"small\")"
+            && source_text(
+                   token_slice_source,
+                   table_marker->argument_range) == "\"small\""
+            && source_text(
+                   token_slice_source,
+                   table_marker->complete_range)
+                == "bioseq::template_flatten_when(\"small\"),",
+        "token-slice shared attribute segment geometry is not removable");
+
+    const declaration_record& map_value = selected_child("map_value");
+    require(
+        map_value.kind == declaration_kind::function
+            && map_value.payload_kind
+                == declaration_payload_kind::function_body
+            && map_value.specifiers.is_function
+            && map_value.specifiers.is_definition
+            && map_value.specifiers.is_template
+            && map_value.specifiers.is_inline
+            && map_value.specifiers.has_default_arguments
+            && map_value.parameters.size() == 1
+            && map_value.parameters.front().name == "value"
+            && map_value.parameters.front().has_default
+            && source_text(
+                   token_slice_source,
+                   map_value.declaration_head_range)
+                == "template <class Value>\n"
+                   "[[bioseq::template_flatten_entry(\"map\")]]\n"
+                   "inline Value map_value(Value value = Value{}) "
+            && source_text(
+                   token_slice_source,
+                   map_value.body_or_initializer_range)
+                == "{ return value; }",
+        "token-slice function head/body/template/default-argument facts "
+        "changed");
+    const auto map_marker = std::ranges::find(
+        map_value.attributes,
+        "bioseq::template_flatten_entry",
+        &attribute_record::qualified_name);
+    require(
+        map_marker != map_value.attributes.end()
+            && source_text(
+                   token_slice_source,
+                   map_marker->complete_range)
+                == "[[bioseq::template_flatten_entry(\"map\")]]",
+        "token-slice function marker geometry changed");
+
+    const declaration_record& scalar_type =
+        selected_child("scalar_type");
+    require(
+        scalar_type.kind == declaration_kind::alias
+            && scalar_type.payload_kind
+                == declaration_payload_kind::alias_rhs
+            && scalar_type.specifiers.is_using_alias
+            && scalar_type.specifiers.is_definition
+            && scalar_type.explicit_declared_type == "unsigned long"
+            && source_text(
+                   token_slice_source,
+                   scalar_type.body_or_initializer_range)
+                == "unsigned long",
+        "token-slice alias RHS geometry or classification changed");
+    const auto indirect = std::ranges::find(
+        token_slice.declarations,
+        "indirect",
+        &declaration_record::name);
+    require(
+        indirect != token_slice.declarations.end()
+            && indirect->enclosing_qualified_name
+                == "envelope::selected::nested"
+            && std::ranges::none_of(
+                selected_children,
+                [](const declaration_record* declaration) {
+                    return declaration->name == "indirect";
+                }),
+        "token-slice direct-child classification leaked a nested member");
+
+    require(
+        token_slice.preprocessor_directives.size() == 4,
+        "token-slice preprocessor geometry omitted a raw directive");
+    const auto branch_if = std::ranges::find(
+        token_slice.preprocessor_directives,
+        preprocessor_directive_kind::if_,
+        &preprocessor_directive_record::kind);
+    const auto branch_else = std::ranges::find(
+        token_slice.preprocessor_directives,
+        preprocessor_directive_kind::else_,
+        &preprocessor_directive_record::kind);
+    const auto branch_endif = std::ranges::find(
+        token_slice.preprocessor_directives,
+        preprocessor_directive_kind::endif,
+        &preprocessor_directive_record::kind);
+    require(
+        branch_if != token_slice.preprocessor_directives.end()
+            && branch_else
+                != token_slice.preprocessor_directives.end()
+            && branch_endif
+                != token_slice.preprocessor_directives.end()
+            && source_text(
+                   token_slice_source,
+                   branch_if->complete_range)
+                == "#if BIOSEQ_TOKEN_BRANCH\n"
+            && source_text(
+                   token_slice_source,
+                   branch_if->argument_range)
+                == "BIOSEQ_TOKEN_BRANCH"
+            && branch_if->nesting_depth == 0
+            && branch_else->nesting_depth == 0
+            && branch_endif->nesting_depth == 0
+            && !branch_if->active
+            && !branch_else->active
+            && !branch_endif->active,
+        "token-slice preprocessor range/depth/activity facts changed");
+
+    constexpr std::string_view probe_source = R"CPP(
+export module fixture.declaration_probe;
+export namespace bioseq::fixture {
+[[bioseq::template_flatten_provenance("canonical.cppm#declaration:101", "0")]]
+struct scalar_type;
+[[bioseq::template_flatten_provenance("canonical.cppm#declaration:202", "1")]]
+scalar_type map_value(scalar_type value);
+}
+)CPP";
+    const translation_unit declaration_probe =
+        scan_declaration_probe_from_code(
+            "declaration_probe_contract.cppm",
+            probe_source,
+            {"-std=c++20", "-xc++"},
+            "declaration_probe_contract");
+    require(
+        declaration_probe.mode == collection_mode::declaration_probe
+            && declaration_probe.source_module.provided_module
+                == "fixture.declaration_probe"
+            && declaration_probe.source_module.is_interface,
+        "declaration probe lost its collection mode or module identity");
+    const auto probed_scalar = std::ranges::find(
+        declaration_probe.declarations,
+        "canonical.cppm#declaration:101",
+        &declaration_record::provenance_id);
+    const auto probed_map = std::ranges::find(
+        declaration_probe.declarations,
+        "canonical.cppm#declaration:202",
+        &declaration_record::provenance_id);
+    require(
+        probed_scalar != declaration_probe.declarations.end()
+            && probed_map != declaration_probe.declarations.end(),
+        "declaration probe did not restore exact canonical provenance IDs");
+    require(
+        !probed_scalar->stable_usr.empty()
+            && !probed_map->stable_usr.empty()
+            && probed_scalar->stable_usr != probed_map->stable_usr
+            && !probed_scalar
+                    ->immediate_namespace_provenance_id.empty()
+            && !probed_map
+                    ->immediate_namespace_provenance_id.empty()
+            && !probed_scalar->immediate_namespace_stable_usr.empty()
+            && probed_scalar->immediate_namespace_stable_usr
+                == probed_map->immediate_namespace_stable_usr,
+        "declaration probe did not bind stable declaration/namespace "
+        "semantic identities");
+    require(
+        probed_scalar->attachment == module_attachment::named_module
+            && probed_map->attachment
+                == module_attachment::named_module
+            && probed_scalar->linkage == entity_linkage::external
+            && probed_map->linkage == entity_linkage::external
+            && probed_scalar->payload_kind
+                == declaration_payload_kind::none
+            && probed_map->payload_kind
+                == declaration_payload_kind::none,
+        "declaration probe linkage/module attachment/body-free facts "
+        "changed");
+    require(
+        std::ranges::contains(
+            probed_map->referenced_declaration_provenance_ids,
+            probed_scalar->provenance_id),
+        "declaration probe did not link a referenced semantic declaration "
+        "back to canonical provenance");
+
+    constexpr std::string_view global_probe_source = R"CPP(
+namespace bioseq::fixture {
+[[bioseq::template_flatten_provenance("global.cpp#declaration:11", "0")]]
+extern int global_value;
+}
+)CPP";
+    const translation_unit global_probe = scan_declaration_probe_from_code(
+        "global_declaration_probe.cpp",
+        global_probe_source,
+        {"-std=c++20", "-xc++"},
+        "global_declaration_probe_contract");
+    const auto global_value = std::ranges::find(
+        global_probe.declarations,
+        "global.cpp#declaration:11",
+        &declaration_record::provenance_id);
+    require(
+        global_value != global_probe.declarations.end()
+            && global_value->attachment
+                == module_attachment::global_module
+            && global_value->linkage == entity_linkage::external,
+        "declaration probe did not distinguish global-module attachment");
+
+    require_failure(
+        [&] {
+            constexpr std::string_view source = R"CPP(
+export module fixture.invalid_body_probe;
+export namespace bioseq::fixture {
+[[bioseq::template_flatten_provenance("canonical.cppm#declaration:303", "0")]]
+int invalid_body() { return 3; }
+}
+)CPP";
+            static_cast<void>(scan_declaration_probe_from_code(
+                "invalid_body_probe.cppm",
+                source,
+                {"-std=c++20", "-xc++"},
+                "invalid_body_probe_contract"));
+        },
+        "declaration probe contains a function body",
+        "body-free function-declaration probe");
+    require_failure(
+        [&] {
+            constexpr std::string_view source = R"CPP(
+export module fixture.invalid_initializer_probe;
+export namespace bioseq::fixture {
+[[bioseq::template_flatten_provenance("canonical.cppm#declaration:404", "0")]]
+struct invalid_record { int initialized_member = 4; };
+}
+)CPP";
+            static_cast<void>(scan_declaration_probe_from_code(
+                "invalid_initializer_probe.cppm",
+                source,
+                {"-std=c++20", "-xc++"},
+                "invalid_initializer_probe_contract"));
+        },
+        "declaration probe contains a default member initializer",
+        "body-free default-member-initializer probe");
+
     constexpr std::string_view simd_marker_source = R"CPP(
 export module fixture.simd_marker;
 export namespace bioseq::fixture {
@@ -517,13 +990,31 @@ namespace [[bioseq::similar]] decoy {}
         "Clang structural scan binds one exact SIMD namespace");
     const marked_namespace_record& clang_namespace =
         clang_simd.marked_namespaces.front();
+    const std::string clang_callable_inventory =
+        callable_inventory(clang_namespace);
     require(
         clang_namespace.qualified_name
-                == "bioseq::fixture::target"
-            && !clang_namespace.target_usr.empty()
-            && clang_namespace.callables.size() == 6,
-        "Clang structural scan binds the marked namespace and all callable "
-        "definitions");
+            == "bioseq::fixture::target",
+        "Clang structural scan bound the SIMD marker to namespace '"
+            + clang_namespace.qualified_name
+            + "' instead of 'bioseq::fixture::target'");
+    require(
+        !clang_namespace.target_usr.empty(),
+        "Clang structural scan returned an empty namespace USR; "
+            + clang_callable_inventory);
+    require(
+        clang_namespace.callables.size() == 6,
+        "Clang structural scan expected exactly six source callable "
+        "definitions; " + clang_callable_inventory);
+    require(
+        std::ranges::all_of(
+            clang_namespace.callables,
+            [](const callable_insertion_record& callable) {
+                return !callable.qualified_name.empty()
+                    && !callable.stable_usr.empty();
+            }),
+        "Clang structural scan returned a callable without a qualified name "
+        "or stable USR; " + clang_callable_inventory);
     require(
         std::ranges::all_of(
             clang_namespace.callables,
@@ -546,40 +1037,85 @@ namespace [[bioseq::similar]] decoy {}
             }),
         "Clang structural scan proves function-prefix and lambda-body "
         "HWY_ATTR insertion points");
+    for (const auto [kind, description] : {
+             std::pair{callable_kind::function, "free function"},
+             std::pair{callable_kind::constructor, "constructor"},
+             std::pair{
+                 callable_kind::operator_function,
+                 "operator function"},
+             std::pair{
+                 callable_kind::member_function,
+                 "member function"},
+             std::pair{callable_kind::lambda, "lambda"},
+         }) {
+        require(
+            std::ranges::contains(
+                clang_namespace.callables,
+                kind,
+                &callable_insertion_record::kind),
+            "Clang structural scan omitted the expected "
+                + std::string{description} + "; "
+                + clang_callable_inventory);
+    }
     require(
-        std::ranges::contains(
+        std::ranges::any_of(
             clang_namespace.callables,
-            callable_kind::function,
-            &callable_insertion_record::kind)
-            && std::ranges::contains(
-                clang_namespace.callables,
-                callable_kind::constructor,
-                &callable_insertion_record::kind)
-            && std::ranges::contains(
-                clang_namespace.callables,
-                callable_kind::operator_function,
-                &callable_insertion_record::kind)
-            && std::ranges::contains(
-                clang_namespace.callables,
-                callable_kind::member_function,
-                &callable_insertion_record::kind)
-            && std::ranges::contains(
-                clang_namespace.callables,
-                callable_kind::lambda,
-                &callable_insertion_record::kind)
-            && std::ranges::any_of(
-                clang_namespace.callables,
-                [](const callable_insertion_record& callable) {
-                    return callable.kind == callable_kind::function
-                        && callable.templated;
-                }),
-        "Clang structural scan classifies templates, members, constructors, "
-        "operators, and lambdas");
+            [](const callable_insertion_record& callable) {
+                return callable.kind == callable_kind::function
+                    && callable.templated
+                    && callable.qualified_name.contains("map_value");
+            }),
+        "Clang structural scan omitted the templated map_value definition; "
+            + clang_callable_inventory);
 
     const configured_toolchain toolchain;
     assert_toolchain_exists(toolchain);
     temporary_tree temporary;
     const std::filesystem::path root = temporary.root();
+
+    const std::filesystem::path identical_dependency_source =
+        root / "dependency-only-identical.cppm";
+    const auto require_dependency_only_failure =
+        [&](const auto& canonical_sources,
+            std::string_view expected_diagnostic,
+            std::string_view case_name) {
+            require_failure(
+                [&] {
+                    static_cast<void>(
+                        prepare_dependency_compilation_environment(
+                            canonical_sources,
+                            identical_dependency_source,
+                            root / "dependency-only-unused-commands.json",
+                            toolchain.clang_binary,
+                            toolchain.clang_scan_deps,
+                            toolchain.llvm_config,
+                            toolchain.compiler_inventory,
+                            toolchain.clang_sha256,
+                            toolchain.clang_scan_deps_sha256,
+                            toolchain.llvm_config_sha256,
+                            toolchain.compiler_inventory_sha256,
+                            root / "dependency-only-unused-pcm",
+                            "production",
+                            "support"));
+                },
+                expected_diagnostic,
+                case_name);
+        };
+    require_dependency_only_failure(
+        identical_dependency_source,
+        "canonical source and signature donor must be distinct",
+        "scalar dependency-only source classification");
+    require_dependency_only_failure(
+        std::vector<std::filesystem::path>{},
+        "dependency-only preparation requires at least one canonical source",
+        "vector dependency-only empty classification");
+    require_dependency_only_failure(
+        std::vector<std::filesystem::path>{
+            root / "canonical-a.cppm",
+            identical_dependency_source,
+        },
+        "canonical source and signature donor must be distinct",
+        "vector dependency-only donor classification");
 
     const std::filesystem::path source_root = root / "sources";
     const std::filesystem::path conditional_root =
