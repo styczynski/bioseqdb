@@ -24,6 +24,7 @@ module;
 export module bioseq.codegen.inputs.dispatch_processor_typed;
 
 import bioseq.scheduler.dispatch_processor;
+import bioseq.highway.dispatch_contract;
 import bioseq.common.mlogging;
 import bioseq.common.hashing;
 import bioseq.common.sequan_compat;
@@ -2359,6 +2360,11 @@ template <sequence_alphabet Alphabet>
         Minimap2Params mps_params = params;
         mps_params.kmer_size = 15;
         mps_params.window_size = 10;
+        if (mps_params.highway_kernels == nullptr) {
+            raise_typed_dispatch_pg_error_as_cpp(
+                ERRCODE_INTERNAL_ERROR,
+                "transient MPS build has no selected Highway minimizer table");
+        }
 
         const bool scalar_query_selected =
             mps_params.minimizer_algorithm
@@ -2375,6 +2381,7 @@ template <sequence_alphabet Alphabet>
                 mps_store,
                 target_view,
                 backend,
+                &mps_params.highway_kernels->minimizers,
                 scalar_query_selected
                     ? &scalar_target_build_proof : nullptr);
 
@@ -2585,6 +2592,7 @@ template <sequence_alphabet Alphabet>
         bioseq::settings::index_memory_cap_mb,
         static_cast<std::int32_t>(  // DOC0345 Patch K — thread backend into the async worker
             target_backend_from_params_for_recompute(params)),
+        params.highway_executed_target,
         requested_provider_wire_value);
     bioseq_log<DBG>("[bioseq] index: recompute async-mps-build row={} index={} target_bp={} reason={} async_staged={}",
             static_cast<unsigned long long>(sequence_rowno),
@@ -4212,12 +4220,18 @@ template <class S>
                     bioseq::parallelism::MemoryAdmissionController::instance()
                         .try_reserve(peak_bytes);
                 if (build_permit) {
+                    if (params.highway_kernels == nullptr) {
+                        raise_typed_dispatch_pg_error_as_cpp(
+                            ERRCODE_INTERNAL_ERROR,
+                            "opportunistic MPF build has no selected Highway minimizer table");
+                    }
                     ensure_q();
                     OpportunisticFragmentIndexStorage ram_store;
 	                                        bioseq::indexing::MinimizersPerFragmentIndex<
 	                                            OpportunisticFragmentIndexStorage>::build(
 	                                                ram_store, ft_pg_view,
-                            target_backend_from_params_for_recompute(params));
+                            target_backend_from_params_for_recompute(params),
+                            &params.highway_kernels->minimizers);
 	                                        const std::string_view opportunistic_index_name =
 	                                            want_seq
 	                                                ? kMinimizersPerSequenceIndex

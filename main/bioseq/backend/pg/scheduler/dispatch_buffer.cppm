@@ -34,7 +34,6 @@
  */
 module;
 
-#include <hwy/highway.h>  // only for HWY_NAMESPACE when naming active-target scheduler types
 #include "common.h"
 extern "C" {
 #include "executor/instrument.h"
@@ -1241,8 +1240,7 @@ private:
         bioseq::pg_types::seq* rewidth = nullptr;
         if (header->storage_unit_byte_width
                 != mmsearch_context.storage_unit_byte_width) {
-            rewidth = ::bioseq::simd::active_target::
-                stdc_rewidth_to_type_params(
+            rewidth = ::bioseq::simd::stdc_rewidth_to_type_params(
                     *header,
                     compact_sequence_stdc_type_params{
                         mmsearch_context.alphabet_code,
@@ -1909,8 +1907,8 @@ public:
 			const bioseq::pg_types::seq* preparation_query_header = query_header;
 			if (query_header->storage_unit_byte_width
 					!= mmsearch_context.storage_unit_byte_width) {
-				bioseq::pg_types::seq* rewidthed = ::bioseq::simd::active_target::
-					stdc_rewidth_to_type_params(
+				bioseq::pg_types::seq* rewidthed =
+					::bioseq::simd::stdc_rewidth_to_type_params(
 						*query_header,
 						compact_sequence_stdc_type_params{
 							mmsearch_context.alphabet_code,
@@ -2637,8 +2635,8 @@ public:
                         != mmsearch_context.storage_unit_byte_width) {
                     MemoryContext old_context = MemoryContextSwitchTo(
                         batch_payload_ctx);
-                    dispatch_query = ::bioseq::simd::active_target::
-                        stdc_rewidth_to_type_params(
+                    dispatch_query =
+                        ::bioseq::simd::stdc_rewidth_to_type_params(
                             *source_query,
                             compact_sequence_stdc_type_params{
                                 mmsearch_context.alphabet_code,
@@ -2844,8 +2842,8 @@ public:
                 const bioseq::pg_types::seq* dispatch_query_hdr = query_hdr;
                 if (query_hdr->storage_unit_byte_width
                         != mmsearch_context.storage_unit_byte_width) {
-                    bioseq::pg_types::seq* rewidth = ::bioseq::simd::active_target::
-                        stdc_rewidth_to_type_params(
+                    bioseq::pg_types::seq* rewidth =
+                        ::bioseq::simd::stdc_rewidth_to_type_params(
                             *query_hdr,
                             compact_sequence_stdc_type_params{
                                 mmsearch_context.alphabet_code,
@@ -3193,6 +3191,65 @@ public:
 					} else if (group.persisted_mps_shape_v5_reader) {
 						record_format5_memory_evidence(
 							*group.persisted_mps_shape_v5_reader);
+					}
+					if (group.persisted_grouped32_reader) {
+						const auto& evidence = group.persisted_grouped32_reader
+							->simd_route_evidence();
+						const bool evidence_absent =
+							!evidence.saturated
+							&& evidence.attempted_spans == 0u
+							&& evidence.accepted_spans == 0u
+							&& evidence.rejected_spans == 0u
+							&& evidence.scalar_required_spans == 0u
+							&& evidence.vectorized_words == 0u
+							&& evidence.selected_hwy_target == 0u
+							&& evidence.selected_vector_stream_width == 0u;
+						if (!evidence_absent) {
+							constexpr std::uint64_t counter_max =
+								(std::numeric_limits<std::uint64_t>::max)();
+							const std::uint64_t expected_hwy_target =
+								static_cast<std::uint64_t>(
+									base_params.highway_executed_target);
+							const bool accepted_rejected_overflow =
+								evidence.rejected_spans
+									> counter_max - evidence.accepted_spans;
+							const std::uint64_t classified_attempts =
+								accepted_rejected_overflow
+									? 0u
+									: evidence.accepted_spans
+										+ evidence.rejected_spans;
+							const bool total_calls_overflow =
+								evidence.scalar_required_spans
+									> counter_max - evidence.attempted_spans;
+							const std::uint64_t total_calls =
+								total_calls_overflow
+									? 0u
+									: evidence.attempted_spans
+										+ evidence.scalar_required_spans;
+							const bool vector_route_consistent =
+								evidence.attempted_spans == 0u
+									? evidence.selected_vector_stream_width == 0u
+										&& evidence.vectorized_words == 0u
+									: evidence.selected_vector_stream_width == 2u
+										&& evidence.vectorized_words > 0u;
+							const bool valid =
+								!evidence.saturated
+								&& expected_hwy_target != 0u
+								&& evidence.selected_hwy_target
+									== expected_hwy_target
+								&& !accepted_rejected_overflow
+								&& classified_attempts
+									== evidence.attempted_spans
+								&& !total_calls_overflow
+								&& total_calls != 0u
+								&& vector_route_consistent;
+							if (valid) {
+								read_delta.indexing_grouped32_validate_calls =
+									total_calls;
+							} else {
+								read_delta.stats_saturated = true;
+							}
+						}
 					}
 					operational.merge(read_delta);
 					merge_cold_index_preparation_stats(
