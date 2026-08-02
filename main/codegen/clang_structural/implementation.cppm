@@ -4306,7 +4306,7 @@ struct conditional_state {
 [[nodiscard]] std::string compiler_owned_function_identity(
     const clang::FunctionDecl* function,
     std::string_view owning_module) {
-    if (function == nullptr || function->getName().empty()
+    if (function == nullptr || function->getDeclName().isEmpty()
         || owning_module.empty()
         || function->getTemplatedKind()
             != clang::FunctionDecl::TK_NonTemplate
@@ -5524,7 +5524,7 @@ class structural_visitor final
 
     [[nodiscard]] bool eligible(
         const clang::NamedDecl* declaration) const {
-        return !declaration->getName().empty()
+        return !declaration->getDeclName().isEmpty()
             && is_main_file_declaration(declaration, sources_);
     }
 

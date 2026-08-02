@@ -1093,6 +1093,26 @@ namespace [[bioseq::similar]] decoy {}
                 + std::string{description} + "; "
                 + clang_callable_inventory);
     }
+    const auto constructor = std::ranges::find(
+        clang_namespace.callables,
+        callable_kind::constructor,
+        &callable_insertion_record::kind);
+    require(
+        constructor != clang_namespace.callables.end()
+            && constructor->qualified_name
+                == "bioseq::fixture::target::worker::worker",
+        "Clang structural scan returned the wrong constructor identity; "
+            + clang_callable_inventory);
+    const auto call_operator = std::ranges::find(
+        clang_namespace.callables,
+        callable_kind::operator_function,
+        &callable_insertion_record::kind);
+    require(
+        call_operator != clang_namespace.callables.end()
+            && call_operator->qualified_name
+                == "bioseq::fixture::target::worker::operator()",
+        "Clang structural scan returned the wrong overloaded-operator "
+        "identity; " + clang_callable_inventory);
     require(
         std::ranges::any_of(
             clang_namespace.callables,
