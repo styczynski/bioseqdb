@@ -344,7 +344,6 @@ inline void validate_no_forbidden_source_macros(
         "DisableTargets",
         "select_highway_target_once",
         "registered_highway_dispatch_info",
-        "registered_highway_target_binding",
     };
     for (std::string_view spelling : forbidden) {
         if (source.contains(spelling)) {
@@ -379,7 +378,6 @@ inline void validate_slot_expression(const slot_spec& slot) {
         "SupportedTargets",
         "select_highway_target_once",
         "registered_highway_dispatch_info",
-        "registered_highway_target_binding",
     };
     for (std::string_view spelling : forbidden) {
         if (slot.expression.contains(spelling)) {

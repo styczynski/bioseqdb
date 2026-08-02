@@ -516,28 +516,13 @@ inline void verify_generated_closure() {
                         && artifact.content.contains(
                             "registered_highway_dispatch_info() noexcept")
                         && artifact.content.contains(
-                            "registered_highway_target_binding(")
-                        && artifact.content.contains(
                             "static_cast<std::int64_t>(3ULL)")
-                        && artifact.content.contains(
-                            "case 1ULL:")
-                        && artifact.content.contains(
-                            "N_EMU128::BindHighwayTarget()")
-                        && artifact.content.contains(
-                            "case 2ULL:")
-                        && artifact.content.contains(
-                            "N_SSE2::BindHighwayTarget()")
-                        && artifact.content.contains(
-                            "plan.runnable_targets & exact_target")
-                        && artifact.content.contains(
-                            "binding->target != exact_target")
-                        && artifact.content.contains(
-                            "binding->kernels->complete()")
+                        && !artifact.content.contains("import ")
+                        && !artifact.content.contains("BindHighwayTarget")
                         && !artifact.content.contains("HWY_EXPORT(")
                         && !artifact.content.contains(
                             "HWY_DYNAMIC_DISPATCH("),
-                    "the cold contract implementation owns the exact mask "
-                    "and direct exact-target rebinder without redispatch");
+                    "the cold contract implementation owns only the exact mask");
                 break;
             case artifact_kind::test_support:
                 ++test_support_count;

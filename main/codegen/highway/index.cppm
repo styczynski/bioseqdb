@@ -466,8 +466,7 @@ inline void run_contract_self_test() {
             != std::string::npos
         || inventory->content.find("registered_highway_dispatch_info")
             == std::string::npos
-        || inventory->content.find("registered_highway_target_binding")
-            == std::string::npos
+        || inventory->content.find("import ") != std::string::npos
         || generated.policy_evidence_json.find(
                "\"path\":\"highway_registry.cppm\"")
             == std::string::npos
