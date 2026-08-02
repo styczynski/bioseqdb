@@ -1,7 +1,5 @@
-// Generator input only. CMake instantiates this implementation-unit template
-// once for every entry in BIOSEQ_DISPATCH_PROCESSOR_TYPED_SHAPE_REGISTRY.
-// The configured build-tree units are ordinary .cppm implementation units;
-// this authored file is deliberately excluded from every compiler target.
+// Attribute-driven namespace-materialization input only. This scan-only module
+// supplies canonical source geometry; it is never attached to a compiler target.
 module;
 
 #include "common.h"
@@ -23,8 +21,9 @@ module;
 #include <vector>
 #include <unistd.h>
 
-module bioseq.scheduler.dispatch_processor;
+export module bioseq.codegen.inputs.dispatch_processor_typed;
 
+import bioseq.scheduler.dispatch_processor;
 import bioseq.common.mlogging;
 import bioseq.common.hashing;
 import bioseq.common.sequan_compat;
@@ -58,10 +57,8 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
-@BIOSEQ_TYPED_EXTRA_IMPORT@
+import bioseq.parallelism.pipeline_ops;
 import bioseq.scheduler.supervisor_pg;
-
-@BIOSEQ_TYPED_SHAPE_DEFINES@
 
 /*-------------------------------------------------------------------------
  *
@@ -182,89 +179,35 @@ import bioseq.scheduler.supervisor_pg;
  *-------------------------------------------------------------------------
  */
 namespace bioseq::simd {
+namespace typed_dispatch {
 
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY) \
-    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY) \
-    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY) \
-    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY) \
-    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY)
-#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY 1
-#endif
+using Alphabet
+    [[bioseq::template_flatten(
+        "identity", "alphabet",
+        "dna4", "::seq::dna4",
+        "dna5", "::seq::dna5")]]
+    = ::seq::dna4;
 
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY) \
-    || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY)
-#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY 1
-#endif
+static constexpr std::size_t StorageWidth
+    [[bioseq::template_flatten(
+        "identity", "width",
+        "w1", "1",
+        "w2", "2",
+        "w4", "4",
+        "w8", "8")]]
+    = 1;
 
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION must name the concrete scanner helper"
-#endif
-[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
-    bioseq::storage::basic_lazy_sequence_view<
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET> query_view,
-    std::optional<bioseq::storage::basic_lazy_sequence_view<
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET>> target_recipe_view,
-    const bioseq::pg_types::seq* target_hdr,
-    std::size_t i,
-    sequence_size_t target_bp_size,
-    std::size_t min_bp,
-    const Minimap2Params& dispatch_params,
-    const Minimap2Params& params,
-    bool per_row_query_mode,
-    std::optional<std::vector<MinimapSketchData>>& cached_query_minimizers,
-    std::optional<pipe::MinimizerRangeExecutionProof>&
-        cached_query_minimizer_proof,
-    bool& consumed_shared_cached_query_proof,
-    uint8_t alphabet_code,
-    uint8_t storage_unit_byte_width,
-    BatchProcessor::ScannerPgContext* scanner_pg_ctx,
-    bioseq::parallelism::GlobalPool& pool,
-    pg_sequence_read_session* active_read_session);
-#endif
-
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION must name the concrete in-memory helper"
-#endif
-[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
-    const bioseq::pg_types::seq* row_query_hdr,
-    const bioseq::pg_types::seq* target_hdr,
-    sequence_size_t target_bp_size,
-    const Minimap2Params& params,
-    bool chunked_scanner_forced);
-#endif
-
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_LEAF_HELPERS)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION must name the concrete standard in-memory helper"
-#endif
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION must name the concrete segmented in-memory helper"
-#endif
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION must name the concrete chunked in-memory helper"
-#endif
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION must name the concrete chunked segmented in-memory helper"
-#endif
-[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
-    const bioseq::pg_types::seq* row_query_hdr,
-    const bioseq::pg_types::seq* target_hdr,
-    const Minimap2Params& params);
-[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
-    const bioseq::pg_types::seq* row_query_hdr,
-    const bioseq::pg_types::seq* target_hdr,
-    const Minimap2Params& params);
-[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
-    const bioseq::pg_types::seq* row_query_hdr,
-    const bioseq::pg_types::seq* target_hdr,
-    const Minimap2Params& params);
-[[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION(
-    const bioseq::pg_types::seq* row_query_hdr,
-    const bioseq::pg_types::seq* target_hdr,
-    const Minimap2Params& params);
-#endif
+static constexpr std::uint8_t CompileShard
+    [[bioseq::template_flatten(
+        "shard", "shape",
+        "root", "0",
+        "scanner_pg", "1",
+        "inmemory", "2",
+        "inmemory_standard", "3",
+        "inmemory_segmented", "4",
+        "inmemory_chunked", "5",
+        "inmemory_chunked_segmented", "6")]]
+    = 0;
 
 namespace {
 
@@ -442,20 +385,6 @@ choose_deferred_minimizer_persist_index(
     return std::nullopt;
 }
 
-#if 0  // Prohibited: biological index payloads may not be staged outside PostgreSQL.
-[[nodiscard]] std::string make_async_persist_temp_path(
-        std::string_view index_name,
-        std::uint64_t sequence_rowno) {
-    const char* prefix =
-        index_name == kMinimizersPerSequenceIndex ? "mps" : "mpf";
-    return fmt::format(
-        "/tmp/bioseq_async_{}_{}_{}_{}.bin",
-        prefix,
-        static_cast<long long>(::getpid()),
-        static_cast<unsigned long long>(sequence_rowno),
-        static_cast<unsigned long long>(bioseq::instr::clock::now_ns()));
-}
-#endif
 
 /*
  * Scale k/w for the small-query regime typical inside Postgres — short
@@ -2330,293 +2259,6 @@ private:
     }
 };
 
-#if 0  // Prohibited external-file producer; retained only as archaeology.
-struct AsyncPersistFileChunkHeader {
-    std::int64_t sub_key;
-    std::uint32_t chunk_no;
-    std::uint32_t reserved;
-    std::uint64_t size;
-};
-
-static_assert(sizeof(AsyncPersistFileChunkHeader) == 24);
-
-struct AsyncPersistFileFragmentStorage {
-    std::map<bioseq::indexing::index_sub_key_t, std::vector<std::size_t>> plans{};
-    std::string path{};
-    std::ofstream out{};
-    std::uint64_t chunk_count = 0;
-    std::uint64_t file_bytes = 0;
-    Oid db_oid = InvalidOid;
-    Oid main_relfilenode = InvalidOid;
-    std::uint64_t sequence_rowno = 0;
-    bioseq::storage::indexing::SortedPairRunStore sorted_runs{};
-
-    explicit AsyncPersistFileFragmentStorage(std::string p)
-        : path(std::move(p)),
-          out(path, std::ios::binary | std::ios::trunc) {
-        if (!out) {
-            bioseq_log<ERR, PG>(
-                   "bioseq async persist: failed to open temp payload file {}",
-                   path);
-        }
-    }
-
-    [[noreturn]] void index_error(std::string_view msg) const {
-        bioseq_log_progress<ERR, PG>( "bioseq async persist file storage: {}", msg);
-        abort();
-    }
-
-    void resize(bioseq::indexing::index_sub_key_t sub_key, std::size_t bytes_count) {
-        const std::size_t n =
-            bytes_count == 0
-                ? 1
-                : (bytes_count + bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES - 1)
-                    / bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES;
-        std::vector<std::size_t> plan(n);
-        std::size_t remaining = bytes_count;
-        for (std::size_t i = 0; i < n; ++i) {
-            const std::size_t bytes =
-                std::min(remaining, bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES);
-            plan[i] = bytes;
-            remaining -= bytes;
-        }
-        plans[sub_key] = std::move(plan);
-    }
-
-    void resize_chunks(
-            bioseq::indexing::index_sub_key_t sub_key,
-            std::span<const std::size_t> per_chunk_bytes) {
-        std::vector<std::size_t> plan(per_chunk_bytes.begin(), per_chunk_bytes.end());
-        for (std::size_t bytes : plan) {
-            if (bytes > bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES) {
-                index_error("chunk payload exceeds MAX_INDEX_CHUNK_SIZE_BYTES");
-            }
-        }
-        plans[sub_key] = std::move(plan);
-    }
-
-    [[nodiscard]] std::size_t number_of_sub_keys() const {
-        return plans.size();
-    }
-
-    [[nodiscard]] std::size_t number_of_chunks(
-            bioseq::indexing::index_sub_key_t sub_key) const {
-        if (auto it = plans.find(sub_key); it != plans.end()) {
-            return it->second.size();
-        }
-        return 0;
-    }
-
-    [[nodiscard]] std::size_t chunk_byte_size(
-            bioseq::indexing::index_sub_key_t sub_key,
-            std::size_t chunk_no) const {
-        if (auto it = plans.find(sub_key);
-            it != plans.end() && chunk_no < it->second.size()) {
-            return it->second[chunk_no];
-        }
-        return 0;
-    }
-
-    template <class T>
-    [[nodiscard]] const T* read_chunk(
-            bioseq::indexing::index_sub_key_t,
-            std::size_t) {
-        index_error("read_chunk is not supported by async write-only storage");
-    }
-
-    void prefetch_chunk(bioseq::indexing::index_sub_key_t, std::size_t) {}
-
-    template <class F>
-    void read_chunks_in_range(
-            bioseq::indexing::index_sub_key_t,
-            bioseq::indexing::index_sub_key_t,
-            F&&) {
-        index_error("read_chunks_in_range is not supported by async write-only storage");
-    }
-
-    template <class F>
-    void for_each_sub_key(F&& fn) const {
-        for (const auto& [sub_key, _] : plans) {
-            fn(sub_key);
-        }
-    }
-
-    void clear_entity() {
-        plans.clear();
-    }
-
-    void clear(std::string_view) {
-        clear_entity();
-    }
-
-    template <class T, class F>
-    void write_to_each(bioseq::indexing::index_sub_key_t sub_key, F&& writer) {
-        auto it = plans.find(sub_key);
-        if (it == plans.end()) {
-            index_error("write_to_each without resize");
-        }
-        const std::vector<std::size_t>& plan = it->second;
-        for (std::size_t chunk_no = 0; chunk_no < plan.size();) {
-            const std::size_t payload_bytes = plan[chunk_no];
-            if (payload_bytes % sizeof(T) != 0) {
-                index_error("chunk payload not a whole number of T");
-            }
-            std::vector<char> payload(payload_bytes, char{0});
-            const std::size_t next =
-                writer(chunk_no, reinterpret_cast<T*>(payload.data()),
-                       payload_bytes / sizeof(T));
-            if (next < chunk_no || next > plan.size()) {
-                index_error("writer produced invalid next chunk");
-            }
-
-            const AsyncPersistFileChunkHeader header{
-                .sub_key = static_cast<std::int64_t>(sub_key),
-                .chunk_no = static_cast<std::uint32_t>(chunk_no),
-                .reserved = 0,
-                .size = static_cast<std::uint64_t>(payload_bytes),
-            };
-            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-            if (!payload.empty()) {
-                out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
-            }
-            if (!out) {
-                index_error("write failed");
-            }
-            ++chunk_count;
-            file_bytes += sizeof(header) + payload_bytes;
-            chunk_no = (next == chunk_no) ? chunk_no + 1 : next;
-        }
-        plans.erase(it);
-    }
-
-    [[nodiscard]] std::size_t run_buffer_bytes() const noexcept {
-        if (bioseq::settings::index_run_buffer_bytes > 0) {
-            return static_cast<std::size_t>(
-                bioseq::settings::index_run_buffer_bytes);
-        }
-        constexpr std::uint64_t desired = std::uint64_t{512} << 20;
-        constexpr std::uint64_t floor = std::uint64_t{64} << 20;
-        const std::uint64_t cap =
-            bioseq::parallelism::MemoryAdmissionController::instance()
-                .index_memory_cap_bytes();
-        if (cap == 0) {
-            return static_cast<std::size_t>(desired);
-        }
-        return static_cast<std::size_t>(
-            std::max<std::uint64_t>(std::min(desired, cap), floor));
-    }
-
-    [[nodiscard]] std::size_t spill_sorted_run(
-            std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted) {
-        return sorted_runs.spill_sorted_run(sorted);
-    }
-
-    [[nodiscard]] std::size_t spill_sorted_run_owned(
-            std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted) {
-        return sorted_runs.spill_sorted_run_owned(std::move(sorted));
-    }
-
-    [[nodiscard]] std::size_t spill_sorted_run_owned_admitted(
-            std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted,
-            std::uint64_t admitted_bytes,
-            bioseq::parallelism::MemoryPermit permit) {
-        return sorted_runs.spill_sorted_run_owned_admitted(
-            std::move(sorted), admitted_bytes, std::move(permit));
-    }
-
-    template <class F>
-    void merge_runs(F&& on_kmer) {
-        sorted_runs.merge_runs(std::forward<F>(on_kmer));
-    }
-
-    void release_resident_runs_noexcept() noexcept {
-        sorted_runs.release_resident_runs_noexcept();
-    }
-
-    void release_runs_noexcept() noexcept {
-        sorted_runs.release_runs_noexcept();
-    }
-
-    void release_runs() {
-        release_runs_noexcept();
-    }
-
-    [[nodiscard]] bioseq::storage::indexing::SortedRunStoreStats
-    sorted_run_stats() const noexcept {
-        return sorted_runs.stats();
-    }
-
-    void snapshot_sorted_run_stats_before_release() {
-        const auto st = sorted_runs.stats();
-        const std::uint64_t total_runs = sorted_runs.run_count();
-        bioseq::storage::indexing::g_last_index_merge_run_count = total_runs;
-        bioseq::storage::indexing::g_last_mps_build_stats =
-            bioseq::storage::indexing::LastMpsBuildStats{
-                .backend_pid = static_cast<std::uint64_t>(MyProcPid),
-                .db_oid = static_cast<std::uint64_t>(db_oid),
-                .relfilenode = static_cast<std::uint64_t>(main_relfilenode),
-                .sequence_rowno = sequence_rowno,
-                .total_run_count = total_runs,
-                .resident_runs = st.resident_runs,
-                .file_runs = st.file_runs,
-                .resident_run_bytes = st.resident_bytes,
-                .resident_peak_bytes = st.resident_peak_bytes,
-                .spilled_run_bytes = st.spilled_bytes,
-                .postgres_temp_file_bytes = st.postgres_temp_file_bytes,
-                .postgres_temp_file_count = st.postgres_temp_file_count,
-                .merge_reader_buffer_bytes = st.merge_reader_buffer_bytes,
-                .merge_pass_count = st.merge_pass_count,
-                .spill_count_from_pressure = st.spill_count_from_pressure,
-                .resident_demotions = st.resident_demotions,
-                .position_spill_bytes = st.position_spill_bytes,
-                .position_spill_count = st.position_spill_count,
-            };
-        bioseq_log<DBG>("[bioseq.index.mps_build.row] backend_pid={} async_file=1 db_oid={} relfilenode={} sequence_rowno={} "
-                "resident_runs={} file_runs={} resident_run_bytes={} resident_peak_bytes={} "
-                "spilled_run_bytes={} postgres_temp_file_bytes={} postgres_temp_file_count={} "
-                "merge_reader_buffer_bytes={} merge_pass_count={} spill_count_from_pressure={} "
-                "resident_demotions={} position_spill_bytes={} position_spill_count={}",
-                MyProcPid,
-                static_cast<unsigned long long>(db_oid),
-                static_cast<unsigned long long>(main_relfilenode),
-                static_cast<unsigned long long>(sequence_rowno),
-                static_cast<unsigned long long>(st.resident_runs),
-                static_cast<unsigned long long>(st.file_runs),
-                static_cast<unsigned long long>(st.resident_bytes),
-                static_cast<unsigned long long>(st.resident_peak_bytes),
-                static_cast<unsigned long long>(st.spilled_bytes),
-                static_cast<unsigned long long>(st.postgres_temp_file_bytes),
-                static_cast<unsigned long long>(st.postgres_temp_file_count),
-                static_cast<unsigned long long>(st.merge_reader_buffer_bytes),
-                static_cast<unsigned long long>(st.merge_pass_count),
-                static_cast<unsigned long long>(st.spill_count_from_pressure),
-                static_cast<unsigned long long>(st.resident_demotions),
-                static_cast<unsigned long long>(st.position_spill_bytes),
-                static_cast<unsigned long long>(st.position_spill_count));
-    }
-
-    void finish() {
-        out.flush();
-        if (!out) {
-            index_error("flush failed");
-        }
-        out.close();
-    }
-
-    void remove_noexcept() noexcept {
-        try {
-            if (out.is_open()) {
-                out.close();
-            }
-            if (!path.empty()) {
-                std::remove(path.c_str());
-            }
-            release_runs_noexcept();
-        } catch (...) {
-        }
-    }
-};
-#endif
 
 [[nodiscard]] bioseq::parallelism::pg::PersistTarget
 make_fragment_index_persist_target(
@@ -2637,23 +2279,6 @@ make_fragment_index_persist_target(
     };
 }
 
-#if 0  // Prohibited external-file producer; no finish/stage entry is compiled.
-[[nodiscard]] bool finish_and_stage_async_index_file(
-        const BatchProcessor::ScannerPgContext& ctx,
-        const bioseq::storage::seq_locator& loc,
-        std::uint64_t sequence_rowno,
-        std::string_view index_name,
-        AsyncPersistFileFragmentStorage& file_store) {
-    file_store.finish();
-    const auto persist_target =
-        make_fragment_index_persist_target(ctx, loc, sequence_rowno, index_name);
-    return bioseq::parallelism::pg::stage_async_index_persist_file(
-        persist_target,
-        std::move(file_store.path),
-        file_store.file_bytes,
-        file_store.chunk_count);
-}
-#endif
 
 [[nodiscard]] bool can_defer_recompute_minimizer_persist(
         const BatchProcessor::ScannerPgContext& ctx,
@@ -3117,7 +2742,7 @@ try_materialize_target_for_segment_workers(
     return ResidentTargetForWorkers<Alphabet>{std::move(owner)};
 }
 
-#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY)
+[[bioseq::template_flatten_when("shape", "root")]]
 /// Compare every locator field before one resident target is shared by a
 /// query-parallel batch. The comparison stays PostgreSQL-free so it can also
 /// serve as a preflight proof before any worker is entered.
@@ -3135,6 +2760,7 @@ try_materialize_target_for_segment_workers(
         && left.source_epoch == right.source_epoch;
 }
 
+[[bioseq::template_flatten_when("shape", "root")]]
 /// Validate the complete immutable Format-6 reader identity before it is
 /// borrowed concurrently. No worker may observe a partially authenticated,
 /// mixed-format, or legacy-transcoded prepared group.
@@ -3203,6 +2829,7 @@ try_materialize_target_for_segment_workers(
         && !receipt.saturated;
 }
 
+[[bioseq::template_flatten_when("shape", "root")]]
 /// Format-5 counterpart of the concurrent-reader proof. The reader owns only
 /// independent fragment address plans. Query routing/count reduction is
 /// transient wave state, and every persisted posting remains owned by exactly
@@ -3309,6 +2936,7 @@ try_materialize_target_for_segment_workers(
         && read.source_decoded_bp == 0u;
 }
 
+[[bioseq::template_flatten_when("shape", "root")]]
 /// Attach the retained query-sketch proof after a worker has joined. The
 /// prebuilt-minimizer entry point must not publish its own query proof; this
 /// check makes duplicate attachment fail closed on the PostgreSQL thread.
@@ -3347,9 +2975,7 @@ inline void attach_retained_format6_query_proof(
             proof.scalar);
     }
 }
-#endif
 
-#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY)
 /**
  * Promote one decoded sequence locator through the statement's exact source
  * provider, then expose only the canonical lazy facade to the algorithm.
@@ -3357,6 +2983,7 @@ inline void attach_retained_format6_query_proof(
  * and is closed only after the callback has joined/drained all algorithm work.
  */
 template <class Alphabet, class Fn>
+[[bioseq::template_flatten_when("shape", "root", "scanner_pg")]]
 inline void with_source_provider_pg_locator(
         BatchProcessor::ScannerPgContext& context,
         const bioseq::storage::seq_locator& locator,
@@ -3461,6 +3088,7 @@ inline void with_source_provider_pg_locator(
 }
 
 template <class Alphabet, class Fn>
+[[bioseq::template_flatten_when("shape", "root", "scanner_pg")]]
 inline void with_pg_sequence_recipe(
         BatchProcessor::ScannerPgContext& context,
         const Datum recipe,
@@ -3513,6 +3141,7 @@ inline void with_pg_sequence_recipe(
 }
 
 template <class S, class Fn>
+[[bioseq::template_flatten_when("shape", "root", "scanner_pg")]]
 inline void with_source_provider_pg_target(
         BatchProcessor::ScannerPgContext& context,
         const bioseq::storage::seq_locator& locator,
@@ -3533,13 +3162,11 @@ inline void with_source_provider_pg_target(
         active_read_session,
         std::forward<Fn>(callback));
 }
-#endif
 
-#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER) \
-    && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY)
 // Keep the PG-backed scanner row path as a separate function so GCC does not
 // compile the whole typed scheduler as one very large control-flow graph.
 template <class S>
+[[bioseq::template_flatten_when("shape", "scanner_pg")]]
 [[nodiscard]] MatchResultCollection process_scanner_pg_row_typed(
     bioseq::storage::basic_lazy_sequence_view<
         typename compact_sequence_range<S>::traits::alphabet_type> query_view,
@@ -5011,10 +4638,9 @@ template <class S>
     }
     return collection;
 }
-#endif
 
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY)
 template <class S>
+[[bioseq::template_flatten_when("shape", "inmemory_standard")]]
 [[nodiscard]] MatchResultCollection process_inmemory_standard_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
@@ -5029,10 +4655,9 @@ template <class S>
     return minimap_port_pg_checked(
         lazy_query_view, lazy_target_view, params);
 }
-#endif
 
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY)
 template <class S>
+[[bioseq::template_flatten_when("shape", "inmemory_segmented")]]
 [[nodiscard]] MatchResultCollection process_inmemory_segmented_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
@@ -5047,10 +4672,9 @@ template <class S>
     return minimap_port_segmented_pg_checked(
         lazy_query_view, lazy_target_view, params);
 }
-#endif
 
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY)
 template <class S>
+[[bioseq::template_flatten_when("shape", "inmemory_chunked")]]
 [[nodiscard]] MatchResultCollection process_inmemory_chunked_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
@@ -5067,10 +4691,9 @@ template <class S>
         });
     return collection;
 }
-#endif
 
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY)
 template <class S>
+[[bioseq::template_flatten_when("shape", "inmemory_chunked_segmented")]]
 [[nodiscard]] MatchResultCollection process_inmemory_chunked_segmented_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
@@ -5087,12 +4710,9 @@ template <class S>
         });
     return collection;
 }
-#endif
 
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY) \
-    || (!defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER) \
-        && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY))
 template <class S>
+[[bioseq::template_flatten_when("shape", "inmemory")]]
 [[nodiscard]] MatchResultCollection process_inmemory_row_typed(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
@@ -5100,52 +4720,23 @@ template <class S>
     const Minimap2Params& params,
     const bool chunked_scanner_forced)
 {
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_LEAF_HELPERS)
     const bool segmented = target_bp_size > kPgSegmentationThresholdBp;
     if (chunked_scanner_forced) {
         return segmented
-            ? BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION(
+            ? process_inmemory_chunked_segmented_row(
                 row_query_hdr, target_hdr, params)
-            : BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
+            : process_inmemory_chunked_row(
                 row_query_hdr, target_hdr, params);
     }
     return segmented
-        ? BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
+        ? process_inmemory_segmented_row(
             row_query_hdr, target_hdr, params)
-        : BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
+        : process_inmemory_standard_row(
             row_query_hdr, target_hdr, params);
-#else
-    compact_sequence_range<S> query_seq{*row_query_hdr};
-    compact_sequence_range<S> target_seq{*target_hdr};
-    if (chunked_scanner_forced) {
-        MatchResultCollection collection;
-        bioseq::storage::with_lazy_test_chunked(
-            query_seq, target_seq,
-            [&collection, &params, target_bp_size](
-                    auto query_view, auto target_view) {
-                collection = target_bp_size > kPgSegmentationThresholdBp
-                    ? minimap_port_segmented_pg_checked(
-                        query_view, target_view, params)
-                    : minimap_port_pg_checked(
-                        query_view, target_view, params);
-            });
-        return collection;
-    }
-    const auto lazy_query_view =
-        bioseq::storage::as_lazy_sequence_view(query_seq);
-    const auto lazy_target_view =
-        bioseq::storage::as_lazy_sequence_view(target_seq);
-    return (target_bp_size > kPgSegmentationThresholdBp)
-        ? minimap_port_segmented_pg_checked(
-            lazy_query_view, lazy_target_view, params)
-        : minimap_port_pg_checked(
-            lazy_query_view, lazy_target_view, params);
-#endif
 }
-#endif
 
-#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY)
 template <class S>
+[[bioseq::template_flatten_when("shape", "root")]]
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_typed(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -6135,8 +5726,18 @@ template <class S>
 							throw bioseq::gpu::vulkan::VulkanRuntimeError(
 								"persisted GPU Format-5 environment/cache preview is invalid");
 						}
+						auto complete_environment = *staged_environment;
+						complete_environment.record_highway_target(
+							dispatch_params.highway_dispatch,
+							dispatch_params.highway_executed_target);
+						if (!::bioseq::pipeline_stats::environment_is_valid_for_backend(
+								complete_environment,
+								::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu)) {
+							throw bioseq::gpu::vulkan::VulkanRuntimeError(
+								"persisted GPU Format-5 Highway environment proof is invalid");
+						}
 						for (StagedJob& job : staged_jobs) {
-							job.environment = *staged_environment;
+							job.environment = complete_environment;
 							staged_stats.merge_job(job);
 						}
 						if (record_target_operational_outcomes) {
@@ -7974,21 +7575,12 @@ template <class S>
                                 static_cast<size_t>(target_hdr->bp_size));
                             Minimap2Params params = apply_size_heuristic(dispatch_params, min_bp);
                             parallel_collections[i] =
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER)
-                                BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
+                                process_inmemory_row(
                                     row_query_hdr,
                                     target_hdr,
                                     static_cast<sequence_size_t>(target_hdr->bp_size),
                                     params,
                                     false);
-#else
-                                process_inmemory_row_typed<S>(
-                                    row_query_hdr,
-                                    target_hdr,
-                                    static_cast<sequence_size_t>(target_hdr->bp_size),
-                                    params,
-                                    false);
-#endif
                             parallel_params[i] = params;
                             parallel_done[i] = 1;
                         }
@@ -8222,8 +7814,7 @@ template <class S>
                                 row_view query_lazy_view,
                                 std::optional<row_view> target_lazy_view,
                                 pg_sequence_read_session* active_session) {
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
-                        return BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
+                        return process_scanner_pg_row(
                             query_lazy_view,
                             target_lazy_view,
                             target_hdr,
@@ -8241,26 +7832,6 @@ template <class S>
                             scanner_pg_ctx,
                             pool,
                             active_session);
-#else
-                        return process_scanner_pg_row_typed<S>(
-                            query_lazy_view,
-                            target_lazy_view,
-                            target_hdr,
-                            i,
-                            target_bp_size,
-                            min_bp,
-                            dispatch_params,
-                            params,
-                            per_row_query_mode,
-                            cached_query_minimizers,
-                            cached_query_minimizer_proof,
-                            consumed_shared_cached_query_proof,
-                            alphabet_code,
-                            storage_unit_byte_width,
-                            scanner_pg_ctx,
-                            pool,
-                            active_session);
-#endif
                         };
                         auto execute_with_optional_target_recipe =
                             [has_target_recipe, &collection,
@@ -8389,21 +7960,12 @@ template <class S>
                         }
                     } else if (target_hdr != nullptr) {
                         collection =
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER)
-                            BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
+                            process_inmemory_row(
                                 row_query_hdr,
                                 target_hdr,
                                 target_bp_size,
                                 params,
                                 chunked_scanner_forced);
-#else
-                            process_inmemory_row_typed<S>(
-                                row_query_hdr,
-                                target_hdr,
-                                target_bp_size,
-                                params,
-                                chunked_scanner_forced);
-#endif
                     } else if (scanner_pg_ctx != nullptr
                                && scanner_pg_ctx->target_locators[i].has_value()) {
                         // DOC0274 (round-2 revert): inmemory_forced=ON cannot satisfy its
@@ -8472,28 +8034,17 @@ template <class S>
             }
     return results;
 }
-#endif
 
 } // namespace
 
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET must name the concrete sequence alphabet"
-#endif
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH must name the concrete storage-unit byte width"
-#endif
-
-#if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION must name the concrete scanner helper"
-#endif
-
+[[bioseq::template_flatten_when("shape", "scanner_pg")]]
+[[bioseq::template_flatten_entry("scanner_pg")]]
 [[nodiscard]] MatchResultCollection
-BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
+process_scanner_pg_row(
     bioseq::storage::basic_lazy_sequence_view<
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET> query_view,
+        Alphabet> query_view,
     std::optional<bioseq::storage::basic_lazy_sequence_view<
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET>> target_recipe_view,
+        Alphabet>> target_recipe_view,
     const bioseq::pg_types::seq* target_hdr,
     const std::size_t i,
     const sequence_size_t target_bp_size,
@@ -8513,8 +8064,8 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
 {
     using S = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+        Alphabet,
+        StorageWidth>;
     return process_scanner_pg_row_typed<S>(
         query_view,
         target_recipe_view,
@@ -8534,13 +8085,11 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
         pool,
         active_read_session);
 }
-#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION must name the concrete in-memory helper"
-#endif
 
+[[bioseq::template_flatten_when("shape", "inmemory")]]
+[[bioseq::template_flatten_entry("inmemory")]]
 [[nodiscard]] MatchResultCollection
-BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
+process_inmemory_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
     const sequence_size_t target_bp_size,
@@ -8549,8 +8098,8 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
 {
     using S = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+        Alphabet,
+        StorageWidth>;
     return process_inmemory_row_typed<S>(
         row_query_hdr,
         target_hdr,
@@ -8558,93 +8107,83 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
         params,
         chunked_scanner_forced);
 }
-#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION must name the concrete standard in-memory helper"
-#endif
 
+[[bioseq::template_flatten_when("shape", "inmemory_standard")]]
+[[bioseq::template_flatten_entry("inmemory_standard")]]
 [[nodiscard]] MatchResultCollection
-BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
+process_inmemory_standard_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     using S = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+        Alphabet,
+        StorageWidth>;
     return process_inmemory_standard_row_typed<S>(
         row_query_hdr,
         target_hdr,
         params);
 }
-#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION must name the concrete segmented in-memory helper"
-#endif
 
+[[bioseq::template_flatten_when("shape", "inmemory_segmented")]]
+[[bioseq::template_flatten_entry("inmemory_segmented")]]
 [[nodiscard]] MatchResultCollection
-BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
+process_inmemory_segmented_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     using S = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+        Alphabet,
+        StorageWidth>;
     return process_inmemory_segmented_row_typed<S>(
         row_query_hdr,
         target_hdr,
         params);
 }
-#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION must name the concrete chunked in-memory helper"
-#endif
 
+[[bioseq::template_flatten_when("shape", "inmemory_chunked")]]
+[[bioseq::template_flatten_entry("inmemory_chunked")]]
 [[nodiscard]] MatchResultCollection
-BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
+process_inmemory_chunked_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     using S = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+        Alphabet,
+        StorageWidth>;
     return process_inmemory_chunked_row_typed<S>(
         row_query_hdr,
         target_hdr,
         params);
 }
-#elif defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY)
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION must name the concrete chunked segmented in-memory helper"
-#endif
 
+[[bioseq::template_flatten_when("shape", "inmemory_chunked_segmented")]]
+[[bioseq::template_flatten_entry("inmemory_chunked_segmented")]]
 [[nodiscard]] MatchResultCollection
-BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION(
+process_inmemory_chunked_segmented_row(
     const bioseq::pg_types::seq* row_query_hdr,
     const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     using S = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+        Alphabet,
+        StorageWidth>;
     return process_inmemory_chunked_segmented_row_typed<S>(
         row_query_hdr,
         target_hdr,
         params);
 }
-#else
-#ifndef BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION
-#error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION must name the concrete typed dispatch function"
-#endif
 
+[[bioseq::template_flatten_when("shape", "root")]]
+[[bioseq::template_flatten_entry("root")]]
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>>
-BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION(
+process_sequences(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -8660,8 +8199,8 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION(
 {
     using S = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
+        Alphabet,
+        StorageWidth>;
     return process_sequences_typed<S>(
         batch_size,
         alphabet_code,
@@ -8676,6 +8215,6 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION(
         stats,
         scanner_pg_ctx);
 }
-#endif
 
+} // namespace typed_dispatch
 } // namespace bioseq::simd
