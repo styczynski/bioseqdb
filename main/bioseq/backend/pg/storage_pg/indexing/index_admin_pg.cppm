@@ -5,7 +5,6 @@
  *        symbol-count reader glue, and the C++ impls behind the SQL surface.
  */
 module;
-#include <hwy/highway.h>  // DOC0345 Patch I — HWY_NAMESPACE macro names MinimizerAlgorithmType / MinimizerSketchBackend
 #include "common.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -59,7 +58,8 @@ import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_hashmap_format6;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.sequences.minimap_port;   // DOC0345 Patch I — MinimizerAlgorithmType (spec's bioseq.pipeline.minimap_port name does not exist)
-import bioseq.sequences.kmers;          // DOC0345 Patch I — MinimizerSketchBackend, minimizer_sketch_backend_name
+import bioseq.sequences.kmers;          // Legacy minimizer/index APIs
+import bioseq.sequences.kmers.highway_contract;  // Target-neutral minimizer model
 import bioseq.indexing.symbol_counts;
 import bioseq.storage.indexing_pg.chunked_storage;
 import bioseq.storage.indexing_pg.residency;
@@ -291,11 +291,11 @@ inline void note_policy_on_insert_writes(
 // selected ExactSimd or PaperNtHashSimd index as Scalar.
 // Defined before its first caller (index_build_on_insert); the spec placed it
 // near layout_of_name, which is below index_build_on_insert.
-[[nodiscard]] inline bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend
+[[nodiscard]] inline bioseq::minimizers::MinimizerSketchBackend
 resolve_index_sketch_backend_from_gucs() noexcept
 {
-    using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+    using bioseq::simd::MinimizerAlgorithmType;
+    using bioseq::minimizers::MinimizerSketchBackend;
     if (bioseq::aligner::settings::vulkan_enabled
         && bioseq::aligner::settings::vulkan_gpu_index_build_enabled
         && static_cast<int>(bioseq::aligner::settings::minimizer_algorithm.value())
@@ -328,10 +328,10 @@ resolve_index_sketch_backend_from_gucs() noexcept
 // PSO interposer reads) before the build routes the sketch through the cached
 // metallib + .metalar archives instead, exactly like the query path.
 inline void ensure_vulkan_index_build_runtime_ready(
-    bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend)
+    bioseq::minimizers::MinimizerSketchBackend backend)
 {
     if (backend
-        != bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::VulkanSegment) {
+        != bioseq::minimizers::MinimizerSketchBackend::VulkanSegment) {
         return;
     }
     (void)bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
@@ -346,10 +346,10 @@ inline void ensure_vulkan_index_build_runtime_ready(
 /// the same guard until it can source a published PostgreSQL locator. Silently
 /// substituting Scalar/Exact is never permitted.
 [[noreturn]] inline void reject_paper_for_legacy_fragment_persistence(
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        bioseq::minimizers::MinimizerSketchBackend backend,
         std::string_view operation) {
     if (backend
-        != bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::
+        != bioseq::minimizers::MinimizerSketchBackend::
             PaperNtHashSimd) {
         bioseq_report<ERR, PG>()
             .code(ERRCODE_INTERNAL_ERROR)
@@ -410,7 +410,7 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
     }
     const auto backend = resolve_index_sketch_backend_from_gucs();  // DOC0345 Patch I
     if (backend
-        == bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::
+        == bioseq::minimizers::MinimizerSketchBackend::
             PaperNtHashSimd) {
         constexpr auto types = pg_supported_indexes::list_types();
         for (std::size_t i = 0; i < types.size(); ++i) {
@@ -676,8 +676,8 @@ inline void rebuild_one_fragmented_maybe_resident(
         bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
         std::uint8_t requested_width,
         std::uint64_t rowno,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
-    if (backend == bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar
+        bioseq::minimizers::MinimizerSketchBackend backend) {
+    if (backend == bioseq::minimizers::MinimizerSketchBackend::Scalar
         && name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
         if (auto resident =
                 try_materialize_for_parallel_sequence_index_build(
@@ -750,7 +750,7 @@ inline void build_and_verify_minimizer_format6_generation_pg(
             typename bioseq::storage::postgres_lazy_sequence_binding<R>::
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        bioseq::minimizers::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider);
 
 template <class R>
@@ -764,7 +764,7 @@ inline void build_and_verify_grouped32_minimizer_generation_pg(
             typename bioseq::storage::postgres_lazy_sequence_binding<R>::
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        bioseq::minimizers::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider);
 
 [[noreturn]] inline void reject_grouped32_nonlocator_source_as_cpp(
@@ -1034,7 +1034,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         "[bioseq] index: update_index name={} backend={} vulkan_enabled={} "
         "vulkan_gpu_index_build={} minimizer_algorithm={} grouped32={}",
         name,
-        bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(backend),
+        bioseq::minimizers::minimizer_sketch_backend_name(backend),
         bioseq::aligner::settings::vulkan_enabled,
         bioseq::aligner::settings::vulkan_gpu_index_build_enabled,
         static_cast<int>(bioseq::aligner::settings::minimizer_algorithm.value()),
@@ -1292,7 +1292,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
             const std::uint8_t alpha = hdr->alphabet_code;
             const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
             if (is_minimizer_index && !use_grouped32_generation
-                && backend == bioseq::simd::HWY_NAMESPACE::
+                && backend == bioseq::minimizers::
                     MinimizerSketchBackend::PaperNtHashSimd) {
                 reject_paper_for_legacy_fragment_persistence(
                     backend, "bioseq.update_index");
@@ -1498,11 +1498,11 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
 class ScopedForcedPaperIndexFailureForTest {
 public:
     void arm_after_publisher_state_begin(
-            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend)
+            bioseq::minimizers::MinimizerSketchBackend backend)
             noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
         if (static_cast<int>(bioseq::settings::test_force_paper_index_failure.value()) == 1
-            && backend == bioseq::simd::HWY_NAMESPACE::
+            && backend == bioseq::minimizers::
                 MinimizerSketchBackend::PaperNtHashSimd) {
             bioseq::indexing::arm_forced_packed_paper_index_status_for_test(
                 bioseq::indexing::PackedPaperNthashIndexStatus::
@@ -2011,7 +2011,7 @@ private:
             typename bioseq::storage::postgres_lazy_sequence_binding<R>::
                 alphabet_type>,
         bioseq::storage::postgres_lazy_sequence_binding<R>,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend,
+        bioseq::minimizers::MinimizerSketchBackend,
         IndexPayloadStorageBackend);
 
     ReadyMinimizerGenerationIndexKindPg index_kind_ =
@@ -2021,8 +2021,8 @@ private:
     std::uint64_t position_count_ = 0;
     std::uint64_t writer_rows_ = 0;
     std::uint64_t writer_batches_ = 0;
-    bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend selected_backend_ =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+    bioseq::minimizers::MinimizerSketchBackend selected_backend_ =
+        bioseq::minimizers::MinimizerSketchBackend::Scalar;
     ReadyMinimizerGenerationExecutionEvidencePg execution_{};
     std::optional<std::uint64_t> replaced_generation_id_{};
     std::uint64_t mps_spill_generation_token_ = 0;
@@ -2038,7 +2038,7 @@ private:
             std::uint64_t position_count,
             std::uint64_t writer_rows,
             std::uint64_t writer_batches,
-            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+            bioseq::minimizers::MinimizerSketchBackend backend,
             ReadyMinimizerGenerationExecutionEvidencePg execution,
             std::optional<std::uint64_t> replaced_generation_id,
             std::uint64_t mps_spill_generation_token,
@@ -2099,7 +2099,7 @@ public:
     [[nodiscard]] std::uint64_t writer_batches() const noexcept {
         return writer_batches_;
     }
-    [[nodiscard]] bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend
+    [[nodiscard]] bioseq::minimizers::MinimizerSketchBackend
     selected_backend() const noexcept { return selected_backend_; }
     [[nodiscard]] const ReadyMinimizerGenerationExecutionEvidencePg&
     execution() const noexcept { return execution_; }
@@ -2175,7 +2175,7 @@ concept publicly_relabelable_ready_minimizer_publication = requires(
     publication.generation_id = std::uint64_t{1};
     publication.source_identity = std::uint64_t{1};
     publication.selected_backend =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+        bioseq::minimizers::MinimizerSketchBackend::Scalar;
     publication.published = true;
 };
 static_assert(!publicly_relabelable_ready_minimizer_publication<
@@ -2557,8 +2557,8 @@ struct ReadyMinimizerFormat6PublicationPg {
     std::uint64_t source_content_crc64 = 0u;
     std::uint64_t unique_hash_count = 0u;
     std::uint64_t total_posting_count = 0u;
-    bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend selected_backend =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+    bioseq::minimizers::MinimizerSketchBackend selected_backend =
+        bioseq::minimizers::MinimizerSketchBackend::Scalar;
     bioseq::indexing::MinimizerFormat6Head head{};
     bioseq::indexing::MinimizerFormat6Manifest manifest{};
     std::optional<std::uint64_t> replaced_generation_id{};
@@ -2582,12 +2582,12 @@ build_and_publish_minimizer_format6_generation_pg(
             typename bioseq::storage::postgres_lazy_sequence_binding<R>::
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        bioseq::minimizers::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider) {
     using SourceBinding =
         bioseq::storage::postgres_lazy_sequence_binding<R>;
     using Backend =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+        bioseq::minimizers::MinimizerSketchBackend;
     using MpsIndex =
         bioseq::indexing::MinimizerSequenceMergedIndex<IndexStorageFragmentPg>;
     using Traits = typename compact_sequence_range<R>::traits;
@@ -2748,7 +2748,7 @@ build_and_publish_minimizer_format6_generation_pg(
                 "source/backend combination has no canonical Format-6 profile",
                 fmt::format(
                     "backend={} alphabet_code={} k={} w={} format_error={}",
-                    bioseq::simd::HWY_NAMESPACE::
+                    bioseq::minimizers::
                         minimizer_sketch_backend_name(backend),
                     state->source.alphabet_code,
                     kKmerSize, kWindowSize,
@@ -2789,7 +2789,7 @@ build_and_publish_minimizer_format6_generation_pg(
                 "Format-6 minimizer spill producer failed",
                 fmt::format(
                     "backend={} wire_error={}",
-                    bioseq::simd::HWY_NAMESPACE::
+                    bioseq::minimizers::
                         minimizer_sketch_backend_name(backend),
                     static_cast<unsigned>(spill.error())));
         }
@@ -3052,7 +3052,7 @@ inline void build_and_verify_minimizer_format6_generation_pg(
             typename bioseq::storage::postgres_lazy_sequence_binding<R>::
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        bioseq::minimizers::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider) {
     using SourceBinding =
         bioseq::storage::postgres_lazy_sequence_binding<R>;
@@ -3119,7 +3119,7 @@ inline void build_and_verify_minimizer_format6_generation_pg(
                 fmt::format(
                     "index={} backend={}",
                     index_name,
-                    bioseq::simd::HWY_NAMESPACE::
+                    bioseq::minimizers::
                         minimizer_sketch_backend_name(backend)));
         }
     }
@@ -3149,12 +3149,12 @@ build_and_publish_grouped32_minimizer_generation_pg(
             typename bioseq::storage::postgres_lazy_sequence_binding<R>::
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        bioseq::minimizers::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider) {
     using SourceBinding =
         bioseq::storage::postgres_lazy_sequence_binding<R>;
     using Backend =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+        bioseq::minimizers::MinimizerSketchBackend;
     using MpfIndex =
         bioseq::indexing::MinimizersPerFragmentIndex<IndexStorageFragmentPg>;
     using MpsIndex =
@@ -3291,7 +3291,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 ERRCODE_FEATURE_NOT_SUPPORTED,
                 "READY minimizer backend has no canonical Format-5 profile",
                 fmt::format("backend={} wire_error={}",
-                    bioseq::simd::HWY_NAMESPACE::
+                    bioseq::minimizers::
                         minimizer_sketch_backend_name(backend),
                     static_cast<unsigned>(derived_profile.error())));
         }
@@ -3340,8 +3340,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
         std::uint64_t position_count = 0;
         std::uint64_t writer_rows = 0;
         std::uint64_t writer_batches = 0;
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend selected_backend =
-            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+        bioseq::minimizers::MinimizerSketchBackend selected_backend =
+            bioseq::minimizers::MinimizerSketchBackend::Scalar;
         ReadyMinimizerGenerationExecutionEvidencePg execution{};
         std::optional<std::uint64_t> replaced_generation_id{};
         std::uint64_t mps_spill_generation_token = 0;
@@ -3496,7 +3496,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 state->mps_spill_started = false;
             }
             if (state->encode_error) {
-                if (backend == bioseq::simd::HWY_NAMESPACE::
+                if (backend == bioseq::minimizers::
                         MinimizerSketchBackend::PaperNtHashSimd
                     && *state->encode_error
                         == bioseq::indexing::MinimizerGenerationWireError::
@@ -3512,7 +3512,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                     ERRCODE_DATA_CORRUPTED,
                     "READY minimizer generation encoder failed",
                     fmt::format("backend={} wire_error={}",
-                        bioseq::simd::HWY_NAMESPACE::
+                        bioseq::minimizers::
                             minimizer_sketch_backend_name(backend),
                         static_cast<unsigned>(*state->encode_error)));
             }
@@ -3572,7 +3572,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                     "READY minimizer selected backend execution proof was rejected",
                     fmt::format(
                         "backend={} scans={} retries={} scalar={} exact={} paper={} vulkan={} vulkan_roundtrips={}",
-                        bioseq::simd::HWY_NAMESPACE::
+                        bioseq::minimizers::
                             minimizer_sketch_backend_name(backend),
                         producer_scans, geometry_retries, scalar_runs,
                         exact_runs, paper_runs, vulkan_runs,
@@ -3765,7 +3765,7 @@ inline void build_and_verify_grouped32_minimizer_generation_pg(
             typename bioseq::storage::postgres_lazy_sequence_binding<R>::
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        bioseq::minimizers::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider) {
     const ReadyMinimizerGenerationPublicationPg publication =
         build_and_publish_grouped32_minimizer_generation_pg(
@@ -3798,7 +3798,7 @@ inline void build_and_verify_grouped32_minimizer_generation_pg(
             ERRCODE_DATA_CORRUPTED,
             "normal minimizer rebuild publication proof was rejected",
             fmt::format("index={} backend={}", index_name,
-                bioseq::simd::HWY_NAMESPACE::
+                bioseq::minimizers::
                     minimizer_sketch_backend_name(backend)));
     }
 }
@@ -3822,7 +3822,7 @@ build_and_publish_grouped32_minimizer_generation_pg<
         IndexStorageFragmentPg&,
         ready_minimizer_generation_compile_contract_detail::sequence_view,
         ready_minimizer_generation_compile_contract_detail::source_binding,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend,
+        bioseq::minimizers::MinimizerSketchBackend,
         IndexPayloadStorageBackend);
 
 /// Result of the test seam that instantiates the production coordinator
@@ -3850,10 +3850,10 @@ struct ReadyMinimizerGenerationCoordinatorFixtureResult {
     }
 };
 
-[[nodiscard]] inline bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend
+[[nodiscard]] inline bioseq::minimizers::MinimizerSketchBackend
 ready_minimizer_fixture_backend_from_name(std::string_view name) {
     using Backend =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+        bioseq::minimizers::MinimizerSketchBackend;
     if (name == "scalar") return Backend::Scalar;
     if (name == "exact_simd") return Backend::ExactSimd;
     if (name == "paper_nthash_simd") return Backend::PaperNtHashSimd;
@@ -3870,8 +3870,8 @@ ready_minimizer_fixture_backend_from_name(std::string_view name) {
 }
 
 struct ReadyMinimizerFixtureBackendRequest {
-    bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+    bioseq::minimizers::MinimizerSketchBackend backend =
+        bioseq::minimizers::MinimizerSketchBackend::Scalar;
     Rev3PgFailureInjection failure = Rev3PgFailureInjection::none;
 #ifdef BIOSEQ_TEST_INDEXES
     bioseq::storage::ScannerPgLeafFailure scanner_failure =
@@ -3905,7 +3905,7 @@ ready_minimizer_fixture_backend_request(std::string_view name) {
     for (const auto& [backend_name, failure] : scanner_failures) {
         if (name == backend_name) {
             return {
-                .backend = bioseq::simd::HWY_NAMESPACE::
+                .backend = bioseq::minimizers::
                     MinimizerSketchBackend::Scalar,
                 .scanner_failure = failure,
             };
@@ -3913,7 +3913,7 @@ ready_minimizer_fixture_backend_request(std::string_view name) {
     }
     if (name == "scalar_fail_sorted_compact_create_before_nth2") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .sorted_run_failure =
                 SortedRunPgLeafFailure::compact_create_before,
@@ -3958,7 +3958,7 @@ ready_minimizer_fixture_backend_request(std::string_view name) {
     for (const auto& [backend_name, failure] : sorted_run_failures) {
         if (name == backend_name) {
             return {
-                .backend = bioseq::simd::HWY_NAMESPACE::
+                .backend = bioseq::minimizers::
                     MinimizerSketchBackend::Scalar,
                 .sorted_run_failure = failure,
             };
@@ -3966,84 +3966,84 @@ ready_minimizer_fixture_backend_request(std::string_view name) {
     }
     if (name == "scalar_fail_pg_spill") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::mps_spill,
         };
     }
     if (name == "scalar_fail_pg_merge") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::mps_merge,
         };
     }
     if (name == "scalar_fail_pg_tts_create") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_tts_create,
         };
     }
     if (name == "scalar_fail_pg_tuple_form") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_tuple_form,
         };
     }
     if (name == "scalar_fail_pg_tts_store") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_tts_store,
         };
     }
     if (name == "scalar_fail_pg_tts_drop") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_tts_drop,
         };
     }
     if (name == "scalar_fail_pg_multi_insert") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_multi_insert,
         };
     }
     if (name == "scalar_fail_pg_reread") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_reread,
         };
     }
     if (name == "scalar_fail_pg_spi_publish") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_spi_publish,
         };
     }
     if (name == "scalar_fail_pg_writer_close") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_writer_close,
         };
     }
     if (name == "scalar_fail_pg_storage_close") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_storage_close,
         };
     }
     if (name == "scalar_fail_pg_post_publish_reread") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::
                 generation_post_publish_reread,
@@ -4051,7 +4051,7 @@ ready_minimizer_fixture_backend_request(std::string_view name) {
     }
     if (name == "scalar_fail_pg_reader_close") {
         return {
-            .backend = bioseq::simd::HWY_NAMESPACE::
+            .backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .failure = Rev3PgFailureInjection::generation_reader_close,
         };
@@ -4096,7 +4096,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
         std::uint64_t sequence_rowno,
         std::string_view backend_name) {
     using Backend =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+        bioseq::minimizers::MinimizerSketchBackend;
     constexpr std::uint16_t kKmerSize = 15u;
     constexpr std::uint16_t kWindowSize = 10u;
 
@@ -4172,7 +4172,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
     try {
         state->result.emplace(
             ReadyMinimizerGenerationCoordinatorFixtureResult{
-                .selected_backend_name = bioseq::simd::HWY_NAMESPACE::
+                .selected_backend_name = bioseq::minimizers::
                     minimizer_sketch_backend_name(backend),
                 .column_attno = seq_attno,
                 .sequence_rowno = sequence_rowno,
@@ -4579,8 +4579,8 @@ struct Rev3GenerationStorageStateResult {
 /// the historical 4096-event shape. No path retains biological source bytes.
 struct Rev3PgIntegrationFixtureProducer {
     std::uint64_t target_length = 0;
-    bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend =
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+    bioseq::minimizers::MinimizerSketchBackend backend =
+        bioseq::minimizers::MinimizerSketchBackend::Scalar;
 
     [[nodiscard]] bioseq::indexing::MinimizerSchemeIdentity
     minimizer_scheme_identity() const noexcept {
@@ -4599,13 +4599,13 @@ struct Rev3PgIntegrationFixtureProducer {
             std::uint64_t,
             bioseq::indexing::CanonicalMinimizerEventReceiver receiver) {
         const std::uint64_t fixture_event_limit =
-            backend == bioseq::simd::HWY_NAMESPACE::
+            backend == bioseq::minimizers::
                 MinimizerSketchBackend::VulkanSegment
             ? 32768u : 4096u;
         const std::uint64_t event_count = std::min<std::uint64_t>(
             target_length, fixture_event_limit);
         const bool spread_across_target = event_count > 1
-            && backend == bioseq::simd::HWY_NAMESPACE::
+            && backend == bioseq::minimizers::
                 MinimizerSketchBackend::VulkanSegment;
         const std::uint64_t position_divisor = spread_across_target
             ? event_count - 1u : 1u;
@@ -4649,7 +4649,7 @@ build_rev3_pg_integration_fixture_impl(
         std::uint16_t kmer_size,
         std::uint16_t window_size,
         bioseq::indexing::MinimizerGenerationWireFormat wire_format,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        bioseq::minimizers::MinimizerSketchBackend backend) {
     if (!OidIsValid(rel_oid)
         || !bioseq::pg_utils::invoke_pg_as_cpp(
             [rel_oid] { return IsBioseqColumnTableAmTable(rel_oid); })) {
@@ -4858,7 +4858,7 @@ build_rev3_pg_integration_fixture_impl(
             state->generation->manifest.position_segment_count;
         const std::uint64_t expected_event_count =
             std::min<std::uint64_t>(target_length,
-                backend == bioseq::simd::HWY_NAMESPACE::
+                backend == bioseq::minimizers::
                     MinimizerSketchBackend::VulkanSegment
                 ? 32768u : 4096u);
         if (result.control_count != expected_event_count
@@ -4939,7 +4939,7 @@ read_rev3_pg_integration_fixture_impl(
 		std::uint16_t kmer_size,
 		std::uint16_t window_size,
 		bioseq::indexing::MinimizerGenerationWireFormat wire_format,
-		bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+		bioseq::minimizers::MinimizerSketchBackend backend) {
     if (!OidIsValid(rel_oid)
         || !bioseq::pg_utils::invoke_pg_as_cpp(
             [rel_oid] { return IsBioseqColumnTableAmTable(rel_oid); })) {
@@ -5841,7 +5841,7 @@ read_rev3_pg_full_generation_fixture_impl(
         std::uint16_t kmer_size,
         std::uint16_t window_size,
         bioseq::indexing::MinimizerGenerationWireFormat wire_format,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        bioseq::minimizers::MinimizerSketchBackend backend) {
     if (!OidIsValid(rel_oid)
         || !bioseq::pg_utils::invoke_pg_as_cpp(
             [rel_oid] { return IsBioseqColumnTableAmTable(rel_oid); })) {
@@ -5906,7 +5906,7 @@ read_rev3_pg_full_generation_fixture_impl(
             index_name, rid.db_oid, rid.tablespace_oid, rid.relfilenode,
             seq_attno, source.locator.bucket_idx, source.locator.shard_idx);
         result.selected_backend_name =
-            bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(
+            bioseq::minimizers::minimizer_sketch_backend_name(
                 backend);
         identity.table_name = result.table_name;
         const auto expected =
@@ -6266,7 +6266,7 @@ inline void exercise_rev3_pg_session_failure_impl(
             bioseq::indexing::expected_minimizer_compatibility_for_backend(
                 bioseq::indexing::MinimizerGenerationWireFormat::
                     sorted_dense_global64,
-                bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar,
+                bioseq::minimizers::MinimizerSketchBackend::Scalar,
                 source.alphabet_code,
                 source.storage_unit_byte_width,
                 static_cast<std::uint16_t>(bioseq::aligner::settings::kmer_size),
@@ -6454,7 +6454,7 @@ struct CacheKeys {
             .main_relfilenode = relation_identity.relfilenode,
             .column_attno = column_attno,
             .index_name_hash = name_hash,
-            .sketch_backend = bioseq::simd::HWY_NAMESPACE::
+            .sketch_backend = bioseq::minimizers::
                 MinimizerSketchBackend::Scalar,
             .minimizer_scheme =
                 bioseq::indexing::kLegacyMinimapV1SchemeIdentity,

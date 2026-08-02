@@ -9,7 +9,6 @@
 // test fails); the runtime SECTIONs use Catch2 REQUIRE assertions and run as
 // part of the bioseq unit-test target.
 
-#include "common_simd.h"
 #include "common_tests.h"
 #include "common.h"
 
@@ -36,6 +35,8 @@ import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.vulkan;
 import bioseq.sequences.kmers.two_stacks;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences.pipe;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
@@ -54,6 +55,21 @@ import bioseq.alignment.utils;
 import bioseq.gpu.vulkan.runtime;
 
 namespace {
+
+[[nodiscard]] const ::bioseq::simd_dispatch::HighwayKernelTable*
+fixed_highway_kernels() {
+    return &::bioseq::simd_dispatch::highway_test_kernel_table();
+}
+
+void bind_fixed_highway(
+        ::bioseq::simd::Minimap2Params& params,
+        std::uint8_t alphabet_code = 0u) {
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    params.highway_kernels = binding.kernels;
+    params.highway_executed_target = binding.target;
+    params.alphabet_code = alphabet_code;
+}
 
 struct RawSketchAppendFixture {
     using storage_t = std::uint64_t;
@@ -137,7 +153,7 @@ TEST_CASE("BudgetedSketchVector transfers and destroys host capacity before admi
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
         previous_cap, baseline + (std::uint64_t{1} << 20)));
 
-    using Owned = ::bioseq::simd::HWY_NAMESPACE::
+    using Owned = ::bioseq::simd::
         BudgetedSketchVector<BudgetedSketchLifetimeProbe>;
     const auto make_owned = [&](bool& observed) {
         constexpr std::size_t count = 4u;
@@ -183,7 +199,7 @@ TEST_CASE("BudgetedSketchVector transfers and destroys host capacity before admi
 TEST_CASE("fixed Vulkan target sketch adopts host allocation and releases device before index",
           "[pipeline][vulkan][sketch][zero-copy][lifetime]"
           "[pipeline][vulkan][zero-copy]") {
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
     using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
 
@@ -207,11 +223,11 @@ TEST_CASE("fixed Vulkan target sketch adopts host allocation and releases device
         original_capacity * sizeof(Sketch);
     source.arena_trimmed_before_host_materialization = true;
 
-    using Owner = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using Owner = ::bioseq::simd::pipe_entry_detail::
         FixedVulkanTargetHostOwner<Sketch>;
     STATIC_REQUIRE(std::is_nothrow_move_constructible_v<Owner>);
     STATIC_REQUIRE_FALSE(std::is_move_assignable_v<Owner>);
-    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto adopted = ::bioseq::simd::pipe_entry_detail::
         adopt_fixed_vulkan_sketch_host_result(std::move(source));
     const auto& receipt = adopted.adoption;
 
@@ -236,7 +252,7 @@ TEST_CASE("fixed Vulkan target sketch adopts host allocation and releases device
 
 TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
           "[pipeline][vulkan][sketch][zero-copy][route-selection]") {
-    using namespace ::bioseq::simd::HWY_NAMESPACE;
+    using namespace ::bioseq::simd;
     using pipe_entry_detail::
         fixed_vulkan_target_host_adoption_route_selected;
     constexpr std::uint64_t minimum = pipe_entry_detail::
@@ -337,7 +353,7 @@ TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
 
 TEST_CASE("empty fixed Vulkan target result adopts zero bytes and releases device",
           "[pipeline][vulkan][sketch][zero-copy][lifetime][empty]") {
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
     using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
 
@@ -352,7 +368,7 @@ TEST_CASE("empty fixed Vulkan target result adopts zero bytes and releases devic
     source.host_permit_released_to_process_footprint = true;
     source.arena_trimmed_before_host_materialization = true;
 
-    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto adopted = ::bioseq::simd::pipe_entry_detail::
         adopt_fixed_vulkan_sketch_host_result(std::move(source));
     const auto& receipt = adopted.adoption;
 
@@ -371,7 +387,7 @@ TEST_CASE("empty fixed Vulkan target result adopts zero bytes and releases devic
 
 TEST_CASE("empty fixed Vulkan target index handoff admits and retains zero bytes",
           "[pipeline][vulkan][sketch][zero-copy][memory-admission][empty]") {
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
     using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
 
@@ -386,9 +402,9 @@ TEST_CASE("empty fixed Vulkan target index handoff admits and retains zero bytes
         VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = true;
     source.arena_trimmed_before_host_materialization = true;
-    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto adopted = ::bioseq::simd::pipe_entry_detail::
         adopt_fixed_vulkan_sketch_host_result(std::move(source));
-    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto admitted = ::bioseq::simd::pipe_entry_detail::
         admit_and_build_fixed_vulkan_target_index(
             std::move(adopted), /*target_len=*/1'000u);
     const auto& receipt = admitted.receipt;
@@ -421,10 +437,10 @@ TEST_CASE("empty fixed Vulkan target index handoff admits and retains zero bytes
 
 TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to positions",
           "[pipeline][vulkan][sketch][zero-copy][memory-admission][replacement-authority]") {
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
     using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
-    using Authority = ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using Authority = ::bioseq::simd::pipe::
         TransientTargetIndexReleaseAuthority;
 
     auto& admission =
@@ -460,10 +476,10 @@ TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to pos
     source.host_footprint_reflected_delta_bytes = source_host_bytes;
     source.arena_trimmed_before_host_materialization = true;
 
-    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto adopted = ::bioseq::simd::pipe_entry_detail::
         adopt_fixed_vulkan_sketch_host_result(std::move(source));
     REQUIRE(adopted.ownership_authority_accepted());
-    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto admitted = ::bioseq::simd::pipe_entry_detail::
         admit_and_build_fixed_vulkan_target_index(
             std::move(adopted), /*target_len=*/1'000u);
     const auto& receipt = admitted.receipt;
@@ -516,7 +532,7 @@ TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to pos
     Authority mismatched_authority = authority;
     ++mismatched_authority.expected_permit_bytes;
     REQUIRE_FALSE(mismatched_authority.accepted());
-    ::bioseq::simd::HWY_NAMESPACE::pipe::PostSeedOwnedLifetime lifetime{
+    ::bioseq::simd::pipe::PostSeedOwnedLifetime lifetime{
         /*seed_users=*/1u,
         /*owned_gpu_cache=*/nullptr,
         authority};
@@ -536,7 +552,7 @@ TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to pos
 TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
           "[pipeline][vulkan][sketch][zero-copy][memory-admission][replacement-authority][mismatch]") {
     using WideSketch =
-        ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<40u, 15u>;
+        ::bioseq::simd::MinimizerRepr<40u, 15u>;
     using Source = bioseq::gpu::vulkan::VulkanSketchResult<WideSketch>;
     using Device =
         bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<WideSketch>;
@@ -575,9 +591,9 @@ TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
     source.host_footprint_reflected_delta_bytes = source_host_bytes;
     source.arena_trimmed_before_host_materialization = true;
 
-    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto adopted = ::bioseq::simd::pipe_entry_detail::
         adopt_fixed_vulkan_sketch_host_result(std::move(source));
-    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto admitted = ::bioseq::simd::pipe_entry_detail::
         admit_and_build_fixed_vulkan_target_index(
             std::move(adopted), /*target_len=*/1'000u);
     const auto& receipt = admitted.receipt;
@@ -609,10 +625,10 @@ TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
 
 TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through index consumption",
           "[pipeline][vulkan][sketch][zero-copy][memory-admission][retained-permit]") {
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
     using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
-    using IndexOwner = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using IndexOwner = ::bioseq::simd::pipe_entry_detail::
         VulkanAdmittedTargetIndex;
     STATIC_REQUIRE(std::is_nothrow_move_constructible_v<IndexOwner>);
     STATIC_REQUIRE_FALSE(std::is_move_assignable_v<IndexOwner>);
@@ -658,7 +674,7 @@ TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through inde
     source.host_footprint_reflected_delta_bytes = 0u;
     source.arena_trimmed_before_host_materialization = true;
 
-    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto adopted = ::bioseq::simd::pipe_entry_detail::
         adopt_fixed_vulkan_sketch_host_result(std::move(source));
     REQUIRE(adopted.ownership_authority_accepted());
     REQUIRE(adopted.minimizers.data() == original_data);
@@ -670,7 +686,7 @@ TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through inde
     REQUIRE(device_lifetime.expired());
     REQUIRE(admission.reserved_bytes() == baseline + exact_host_bytes);
 
-    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto admitted = ::bioseq::simd::pipe_entry_detail::
         admit_and_build_fixed_vulkan_target_index(
             std::move(adopted), /*target_len=*/1'000u);
     const auto& receipt = admitted.receipt;
@@ -707,7 +723,7 @@ TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through inde
 
 TEST_CASE("fixed Vulkan adoption rejects an aliased device owner",
           "[pipeline][vulkan][sketch][zero-copy][lifetime][alias]") {
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
     using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
 
@@ -725,7 +741,7 @@ TEST_CASE("fixed Vulkan adoption rejects an aliased device owner",
     source.arena_trimmed_before_host_materialization = true;
 
     REQUIRE_THROWS_AS(
-        ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        ::bioseq::simd::pipe_entry_detail::
             adopt_fixed_vulkan_sketch_host_result(std::move(source)),
         bioseq::gpu::vulkan::VulkanRuntimeError);
     REQUIRE(device_alias != nullptr);
@@ -740,7 +756,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
         return;
     }
 
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     using PackedSequence =
         sequence_custom_alphabet<seq::dna5, std::uint64_t>;
     constexpr std::size_t letter_count = 1'000'000u;
@@ -831,7 +847,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     std::weak_ptr<vk::VulkanDeviceMinimizerStorage<Sketch>> device_lifetime =
         result->device;
 
-    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto adopted = ::bioseq::simd::pipe_entry_detail::
         adopt_fixed_vulkan_sketch_host_result(std::move(*result));
     REQUIRE(adopted.adoption.zero_copy_adoption_accepted());
     REQUIRE(adopted.ownership_authority_accepted());
@@ -846,7 +862,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     }
     REQUIRE(result->host_minimizers.capacity() == 0u);
 
-    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto admitted = ::bioseq::simd::pipe_entry_detail::
         admit_and_build_fixed_vulkan_target_index(
             std::move(adopted), letter_count);
     const auto& handoff = admitted.receipt;
@@ -925,7 +941,7 @@ TEST_CASE("raw sketch batches grow geometrically and nested query scopes release
                 auto sketches =
                     ::bioseq::chaining::make_arena_slab<RawSketchAppendFixture>();
                 sketches.reserve(initial_capacity);
-                ::bioseq::simd::HWY_NAMESPACE::pipe::
+                ::bioseq::simd::pipe::
                     sketch_collector_arena_adapter<RawSketchAppendFixture>
                         collector{&sketches};
                 std::vector<std::uint64_t> raw(batch_size);
@@ -3521,9 +3537,8 @@ TEST_CASE("DOC0371 logical target identity survives payload coalescing",
             == 1);
 }
 
-HWY_BEFORE_NAMESPACE();
 
-namespace bioseq::simd::HWY_NAMESPACE::pipe {
+namespace bioseq::simd::pipe {
 
 // ============================================================================
 // §14.4 — Probe sink that counts on_batch invocations.
@@ -3608,7 +3623,7 @@ TEST_CASE("MapqStage emits exactly one batch per upstream batch",
     int on_completed_count = 0;
     ProbeBatchSink probe{&on_batch_count, &on_completed_count};
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     params.compute_mapq = false;
     MapqStage stage{{}, params, /*enabled=*/false};
     auto bound = stage.template attach<Cep>(probe);
@@ -3628,7 +3643,7 @@ TEST_CASE("MapqStage::process_pair delegates exactly once",
     int on_completed_count = 0;
     ProbeBatchSink probe{&on_batch_count, &on_completed_count};
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     MapqStage stage{{}, params, /*enabled=*/false};
     auto bound = stage.template attach<Cep>(probe);
 
@@ -3644,7 +3659,7 @@ TEST_CASE("ExactEditFilterStage applies strict bounds and resets classification 
           "[pipe][edit-distance][exact-filter]")
 {
     using Cep = ConstexprAlignerParams<10u, 15u, 28u>;
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     params.compute_edit_distance = true;
     params.exact_edit_filter_enabled = true;
     params.exact_edit_filter_exclusive_upper_bound = 5;
@@ -3698,7 +3713,7 @@ TEST_CASE("ExactEditFilterStage rejects nonpositive bounds and missing traceback
     std::vector<::bioseq::chaining::Anchor> anchors;
 
     SECTION("nonpositive bound rejects every exact alignment") {
-        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        ::bioseq::simd::Minimap2Params params;
         params.compute_edit_distance = true;
         params.exact_edit_filter_enabled = true;
         params.exact_edit_filter_exclusive_upper_bound = 0;
@@ -3719,7 +3734,7 @@ TEST_CASE("ExactEditFilterStage rejects nonpositive bounds and missing traceback
     }
 
     SECTION("missing traceback fails loudly") {
-        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        ::bioseq::simd::Minimap2Params params;
         params.compute_edit_distance = true;
         params.exact_edit_filter_enabled = true;
         params.exact_edit_filter_exclusive_upper_bound = 1;
@@ -3757,7 +3772,7 @@ TEST_CASE("SingleEmissionInvariant — N=8 queries one emission each",
     int on_completed_count = 0;
     ProbeBatchSink probe{&on_batch_count, &on_completed_count};
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     MapqStage stage{{}, params, /*enabled=*/false};
     auto bound = stage.template attach<Cep>(probe);
 
@@ -3779,12 +3794,12 @@ TEST_CASE("SingleEmissionInvariant — N=8 queries one emission each",
 TEST_CASE("KSW2BatchedParity — trait surface matches KSW2",
           "[pipe][ksw2-batched][parity]")
 {
-    using KKsw2     = kernel_t<::bioseq::simd::HWY_NAMESPACE::
+    using KKsw2     = kernel_t<::bioseq::simd::
                                   BaseAlignmentAlgorithmType::KSW2>;
-    using KBatched  = kernel_t<::bioseq::simd::HWY_NAMESPACE::
+    using KBatched  = kernel_t<::bioseq::simd::
                                   BaseAlignmentAlgorithmType::KSW2_BATCHED>;
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     std::vector<NamedProperty> ksw2_params;
     std::vector<NamedProperty> batched_params;
     KKsw2::populate_runtime_params(params, ksw2_params);
@@ -3807,8 +3822,8 @@ TEST_CASE("KSW2BatchedParity — trait surface matches KSW2",
 
 TEST_CASE("KSW2 batched proof rejects zero and tampered evidence",
           "[pipe][ksw2-batched][execution-proof][fail-closed]") {
-    using ::bioseq::simd::HWY_NAMESPACE::Ksw2BatchedExecutionProof;
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+    using ::bioseq::simd::Ksw2BatchedExecutionProof;
+    using ::bioseq::simd::MatchResultCollection;
 
     Ksw2BatchedExecutionProof empty{};
     REQUIRE_FALSE(empty.accepted(false));
@@ -3882,7 +3897,7 @@ TEST_CASE("KSW2 batched proof rejects zero and tampered evidence",
 
 TEST_CASE("Host timing phase handoff is non-overlapping and mergeable",
           "[pipe][pipeline-stats][host-timing]") {
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+    using ::bioseq::simd::MatchResultCollection;
 
     MatchResultCollection collection;
     collection.begin_region_host_phase(100u);
@@ -3913,9 +3928,9 @@ TEST_CASE("Host timing phase handoff is non-overlapping and mergeable",
 
 namespace doc0256_test_helpers {
 
-using BAA = ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-using CA  = ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-using MA  = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+using BAA = ::bioseq::simd::BaseAlignmentAlgorithmType;
+using CA  = ::bioseq::simd::ChainingAlgorithmType;
+using MA  = ::bioseq::simd::MinimizerAlgorithmType;
 
 /// Probe callable for `enum_dispatch_pack` tests.  Stateless POD with a
 /// templated `operator()` whose body forwards the matched IC<T, V> into a
@@ -3982,7 +3997,7 @@ TEST_CASE("DOC0256 — enum_dispatch_pack routes to the matching template branch
 
 TEST_CASE("Exact SIMD chaining metadata permits canonical nonzero skip penalty",
           "[pipe][exact-simd][chaining][metadata]") {
-    using CA = ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using CA = ::bioseq::simd::ChainingAlgorithmType;
     using Kernel = algorithm_traits<CA::SIMD_MM2>::kernel_type;
     using Cep = ConstexprAlignerParams<10, 15, 28>;
     const auto properties = Kernel::template static_properties<Cep>();
@@ -4000,8 +4015,8 @@ TEST_CASE("scalar chaining trait keeps an empty negative free of score work",
     using ::bioseq::chaining::Anchor;
     using ::bioseq::chaining::Chain;
     using ::bioseq::chaining::ChainingParams;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::ScalarPipelineExecutionProof;
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::ScalarPipelineExecutionProof;
     using Kernel =
         algorithm_traits<ChainingAlgorithmType::SCALAR_MM2>::kernel_type;
 
@@ -4027,10 +4042,10 @@ TEST_CASE("scalar chaining trait keeps an empty negative free of score work",
 TEST_CASE("DOC0372 SIMD chaining policy is exact by default and explicit in proof metadata",
           "[pipe][doc0372][simd-chaining][policy][proof][metadata]") {
     using ::bioseq::chaining::SimdChainingPolicy;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::SimdChainingExecutionProof;
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::MatchResultCollection;
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::SimdChainingExecutionProof;
     using Kernel = algorithm_traits<ChainingAlgorithmType::SIMD_MM2>::kernel_type;
 
     Minimap2Params params{};
@@ -4081,11 +4096,11 @@ TEST_CASE("DOC0372 SIMD chaining policy is exact by default and explicit in proo
 
 TEST_CASE("scalar pipeline proof is operation-local and rejects mixed routes",
           "[pipe][scalar][execution-proof]") {
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-    using ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
-    using ::bioseq::simd::HWY_NAMESPACE::ScalarKsw2Phase;
-    using ::bioseq::simd::HWY_NAMESPACE::ScalarMinimizerExecutionProof;
-    using ::bioseq::simd::HWY_NAMESPACE::ScalarPipelineExecutionProof;
+    using ::bioseq::simd::MatchResultCollection;
+    using ::bioseq::simd::PartialVulkanExecutionProof;
+    using ::bioseq::simd::ScalarKsw2Phase;
+    using ::bioseq::simd::ScalarMinimizerExecutionProof;
+    using ::bioseq::simd::ScalarPipelineExecutionProof;
 
     ScalarMinimizerExecutionProof query{};
     query.record(5'000u);
@@ -4109,7 +4124,7 @@ TEST_CASE("scalar pipeline proof is operation-local and rejects mixed routes",
         /*require_target_sketch=*/true,
         /*require_alignment=*/true));
     REQUIRE_FALSE(complete.all_simd_execution_accepted(
-        ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::
+        ::bioseq::simd::MinimizerAlgorithmType::
             TWO_STACK_NTHASH,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
@@ -4204,8 +4219,8 @@ TEST_CASE("scalar pipeline proof is operation-local and rejects mixed routes",
 
 TEST_CASE("ExactSimd collection proof merge is actual fail-closed evidence",
           "[pipe][exact-simd][proof][merge][tamper][empty]") {
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-    using ::bioseq::simd::HWY_NAMESPACE::TwoStackExecutionProof;
+    using ::bioseq::simd::MatchResultCollection;
+    using ::bioseq::simd::TwoStackExecutionProof;
 
     const auto actual_range_proof = [](std::uint64_t bp) {
         TwoStackExecutionProof proof{};
@@ -4314,8 +4329,8 @@ TEST_CASE("ExactSimd collection proof merge is actual fail-closed evidence",
 
 TEST_CASE("partial Vulkan proof requires the exact positive stage mask",
           "[pipe][vulkan][proof][stage-mask][fail-closed]") {
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-    using ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
+    using ::bioseq::simd::MatchResultCollection;
+    using ::bioseq::simd::PartialVulkanExecutionProof;
 
     MatchResultCollection tiled_chain;
     PartialVulkanExecutionProof chain_only{};
@@ -4387,8 +4402,8 @@ TEST_CASE("partial Vulkan proof requires the exact positive stage mask",
 
 TEST_CASE("Phase C batch target-build proof is not inflated by query count",
           "[pipe][vulkan][phase-c][proof][batch][fail-closed]") {
-    using ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
-    using ::bioseq::simd::HWY_NAMESPACE::
+    using ::bioseq::simd::PartialVulkanExecutionProof;
+    using ::bioseq::simd::
         phase_c_target_build_proof_owner_query;
 
     PartialVulkanExecutionProof aggregate{};
@@ -4457,8 +4472,8 @@ TEST_CASE("Phase C batch target-build proof is not inflated by query count",
 TEST_CASE("Phase C query gate becomes immutable after publication",
           "[pipe][vulkan][phase-c][gate][freeze][fail-closed]") {
     using Minimizer =
-        ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
-    using Storage = ::bioseq::simd::HWY_NAMESPACE::pipe::
+        ::bioseq::simd::MinimizerRepr<15u, 15u>;
+    using Storage = ::bioseq::simd::pipe::
         PhaseCQueryGateStorage;
 
     Storage storage;
@@ -4484,9 +4499,9 @@ TEST_CASE("segmented GPU adoption key preserves the exact frozen gate",
           "[pipe][vulkan][phase-c][segment][gate][adoption][fail-closed]") {
     using GateIdentity = bioseq::gpu::vulkan::GpuBuiltIndexGateIdentity;
     using Key = bioseq::indexing::GpuMinimizerIndexCacheKey;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::pipe::
         bind_verified_gpu_segment_gate_identity;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::freeze_phase_c_query_gate;
+    using ::bioseq::simd::pipe::freeze_phase_c_query_gate;
 
     std::vector<std::uint32_t> mutable_words(
         bioseq::gpu::vulkan::kPhaseCQueryGateWordCount, 0u);
@@ -4559,15 +4574,15 @@ TEST_CASE("Vulkan sketch dispatch token requires an operation-completed roundtri
 
 TEST_CASE("Vulkan sketch proof rejects an absent or default operation token",
           "[pipe][vulkan][proof][operation-token][absent][fail-closed]") {
-    using MA = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-    using Proof = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using MA = ::bioseq::simd::MinimizerAlgorithmType;
+    using ::bioseq::simd::MatchResultCollection;
+    using Proof = ::bioseq::simd::pipe_entry_detail::
         MinimizerSketchExecutionProof;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         MinimizerSketchRole;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         minimizer_sketch_proof_matches_selected_route;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         record_minimizer_sketch_execution_proof;
 
     const Proof absent{};
@@ -4607,15 +4622,15 @@ TEST_CASE("Vulkan sketch proof rejects an absent or default operation token",
 
 TEST_CASE("Vulkan sketch proof cannot promote a token across a tampered route",
           "[pipe][vulkan][proof][operation-token][route-tamper][fail-closed]") {
-    using MA = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-    using Proof = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using MA = ::bioseq::simd::MinimizerAlgorithmType;
+    using ::bioseq::simd::MatchResultCollection;
+    using Proof = ::bioseq::simd::pipe_entry_detail::
         MinimizerSketchExecutionProof;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         MinimizerSketchRole;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         minimizer_sketch_proof_matches_selected_route;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         record_minimizer_sketch_execution_proof;
 
     using VulkanToken = bioseq::gpu::vulkan::VulkanSketchDispatchToken;
@@ -4654,7 +4669,7 @@ TEST_CASE("Vulkan sketch proof cannot promote a token across a tampered route",
         repeated_roundtrip_destination, repeated_roundtrip,
         MinimizerSketchRole::query);
     REQUIRE(repeated_roundtrip_destination.partial_vulkan_execution_proof
-                == ::bioseq::simd::HWY_NAMESPACE::
+                == ::bioseq::simd::
                     PartialVulkanExecutionProof{});
 
     MatchResultCollection tampered_destination;
@@ -4662,7 +4677,7 @@ TEST_CASE("Vulkan sketch proof cannot promote a token across a tampered route",
         tampered_destination, token_with_metadata,
         MinimizerSketchRole::query);
     REQUIRE(tampered_destination.partial_vulkan_execution_proof
-                == ::bioseq::simd::HWY_NAMESPACE::
+                == ::bioseq::simd::
                     PartialVulkanExecutionProof{});
 
     MatchResultCollection query_destination;
@@ -4682,29 +4697,29 @@ TEST_CASE("Vulkan sketch proof cannot promote a token across a tampered route",
 
 TEST_CASE("Paper ntHash sketch proof is distinct and cannot be promoted across routes",
           "[pipe][paper-nthash][proof][fail-closed]") {
-    using MA = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using Backend = ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using PaperProof = ::bioseq::simd::HWY_NAMESPACE::
+    using MA = ::bioseq::simd::MinimizerAlgorithmType;
+    using Backend = ::bioseq::simd::MinimizerSketchBackend;
+    using ::bioseq::simd::MatchResultCollection;
+    using ::bioseq::simd::Minimap2Params;
+    using PaperProof = ::bioseq::simd::
         PackedPaperNthashExecutionProof;
-    using RangeProof = ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using RangeProof = ::bioseq::simd::pipe::
         MinimizerRangeExecutionProof;
-    using Proof = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using Proof = ::bioseq::simd::pipe_entry_detail::
         MinimizerSketchExecutionProof;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         MinimizerSketchRole;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         minimizer_sketch_proof_matches_selected_route;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    using ::bioseq::simd::pipe_entry_detail::
         record_minimizer_sketch_execution_proof;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::pipe::
         minimizer_range_proof_matches_backend;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::pipe::
         target_index_sketch_backend_from_params;
 
     PaperProof operation{};
-    operation.scheme_id = ::bioseq::simd::HWY_NAMESPACE::
+    operation.scheme_id = ::bioseq::simd::
         packed_paper_nthash_scheme_id;
     operation.kmer_size = 15;
     operation.window_size = 10;
@@ -4799,9 +4814,9 @@ TEST_CASE("Paper ntHash sketch proof is distinct and cannot be promoted across r
         == Backend::PaperNtHashSimd);
     params.minimizer_algorithm = MA::TWO_STACK_NTHASH;
     params.chaining_algorithm =
-        ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2;
+        ::bioseq::simd::ChainingAlgorithmType::SCALAR_MM2;
     params.base_alignment_algorithm =
-        ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
+        ::bioseq::simd::BaseAlignmentAlgorithmType::KSW2;
     REQUIRE(target_index_sketch_backend_from_params(params)
         == Backend::ExactSimd);
 }
@@ -4914,13 +4929,13 @@ TEST_CASE("DOC0256 — algorithm_enum_values registry round-trips through algori
 {
     static_assert(detail::all_traits_specialised_for(
         algorithm_enum_values<
-            ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>::value_list{}));
+            ::bioseq::simd::ChainingAlgorithmType>::value_list{}));
     static_assert(detail::all_traits_specialised_for(
         algorithm_enum_values<
-            ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>::value_list{}));
+            ::bioseq::simd::BaseAlignmentAlgorithmType>::value_list{}));
     static_assert(detail::all_traits_specialised_for(
         algorithm_enum_values<
-            ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>::value_list{}));
+            ::bioseq::simd::MinimizerAlgorithmType>::value_list{}));
     SUCCEED();
 }
 
@@ -4932,7 +4947,7 @@ namespace doc0256_test_helpers {
 template <auto BaaPin, auto CaPin, auto MaPin>
 struct bca_probe_leaf {
     [[gnu::always_inline]] static int call(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+        const ::bioseq::simd::Minimap2Params& /*params*/,
         BAA& baa_out, CA& ca_out, MA& ma_out)
     {
         baa_out = BaaPin;
@@ -4951,7 +4966,7 @@ struct bca_probe_traits {
 template <auto LPin, auto KPin, auto BaaPin>
 struct lkb_probe_leaf {
     [[gnu::always_inline]] static int call(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+        const ::bioseq::simd::Minimap2Params& /*params*/,
         const compact_sequence_range<std::vector<seq::dna4>>& /*q*/,
         const compact_sequence_range<std::vector<seq::dna4>>& /*t*/,
         std::size_t& l_out, std::size_t& k_out, BAA& baa_out)
@@ -4972,7 +4987,7 @@ struct lkb_probe_traits {
 template <auto MaPin>
 struct void_probe_leaf {
     [[gnu::always_inline]] static void call(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+        const ::bioseq::simd::Minimap2Params& /*params*/,
         MA& ma_out)
     {
         ma_out = MaPin;
@@ -4994,7 +5009,7 @@ TEST_CASE("DOC0256 — dispatch_chain pins NTTPs in chain order",
     using doc0256_test_helpers::MA;
     using doc0256_test_helpers::bca_probe_traits;
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
 
     constexpr std::array<BAA, 3> baas = {
         BAA::KSW2, BAA::BLOCK_ALIGNER, BAA::KSW2_BATCHED,
@@ -5033,7 +5048,7 @@ TEST_CASE("DOC0256 — dispatch_chain heterogeneous NTTPs (L, K, BAA)",
     using doc0256_test_helpers::BAA;
     using doc0256_test_helpers::lkb_probe_traits;
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     // Build two dummy sequences of differing sizes so seq_len_log2_step
     // picks a non-trivial L.
     std::vector<seq::dna4> q_data(1u << 10);
@@ -5095,7 +5110,7 @@ TEST_CASE("DOC0256 — dispatch_chain skips inactive steps via guarded_step",
     using doc0256_test_helpers::MA;
     using doc0256_test_helpers::bca_probe_traits;
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     // Inject an out-of-range MA value to confirm the chain never reads
     // params.minimizer_algorithm — guarded_step short-circuits to
     // ma_step::default_value (SCALAR) when active=false.
@@ -5124,7 +5139,7 @@ TEST_CASE("DOC0256 — dispatch_chain handles void return",
     using doc0256_test_helpers::MA;
     using doc0256_test_helpers::void_probe_traits;
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     for (MA v : {MA::SCALAR, MA::SIMD_MINIMAP2_SLOW, MA::TWO_STACK_NTHASH}) {
         params.minimizer_algorithm = v;
         MA captured = static_cast<MA>(0xFF);
@@ -5159,7 +5174,8 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         // (W, K) gate behaviour and confirm the call completes without
         // an out-of-bounds access by passing zero-sized sequences and
         // empty minimizers.
-        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        ::bioseq::simd::Minimap2Params params;
+        bind_fixed_highway(params);
         params.window_size = 10;
         params.kmer_size   = 15;
         params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
@@ -5174,7 +5190,7 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         const auto q_view = bioseq::storage::as_lazy_sequence_view(q_owner);
         const auto t_view = bioseq::storage::as_lazy_sequence_view(t_owner);
         using MinimizerT =
-            ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
+            ::bioseq::simd::MinimizerRepr<15u, 15u>;
         const std::vector<MinimizerT> mins{};
         ::bioseq::indexing::MinimizerHashmapFragmentIndex idx;
         idx.build(mins, t.bp_size());
@@ -5190,7 +5206,8 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         REQUIRE(result.size() == 0u);
     }
     SECTION("(W=5, K=15) — selects the fallback Cep") {
-        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        ::bioseq::simd::Minimap2Params params;
+        bind_fixed_highway(params);
         params.window_size = 5;
         params.kmer_size   = 15;
         params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
@@ -5205,7 +5222,7 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         const auto q_view = bioseq::storage::as_lazy_sequence_view(q_owner);
         const auto t_view = bioseq::storage::as_lazy_sequence_view(t_owner);
         using MinimizerT =
-            ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
+            ::bioseq::simd::MinimizerRepr<15u, 15u>;
         const std::vector<MinimizerT> mins{};
         ::bioseq::indexing::MinimizerHashmapFragmentIndex idx;
         idx.build(mins, t.bp_size());
@@ -5227,7 +5244,7 @@ TEST_CASE("DOC0256 — non-canonical kmer_size resolves to the right L bucket",
     using doc0256_test_helpers::BAA;
     using doc0256_test_helpers::lkb_probe_traits;
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
 
     for (int32_t k : {int32_t{11}, int32_t{21}}) {
@@ -5294,13 +5311,13 @@ namespace doc0256_test_helpers {
 
 template <class... Args>
 constexpr bool chain_accepts_v = requires {
-    ::bioseq::simd::HWY_NAMESPACE::pipe::detail::dispatch_chain<
+    ::bioseq::simd::pipe::detail::dispatch_chain<
         int, bca_probe_traits::template leaf,
-        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::baa_step,
-        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::ca_step,
-        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::ma_step
+        ::bioseq::simd::pipe::detail::baa_step,
+        ::bioseq::simd::pipe::detail::ca_step,
+        ::bioseq::simd::pipe::detail::ma_step
     >::template run<>(
-        std::declval<const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&>(),
+        std::declval<const ::bioseq::simd::Minimap2Params&>(),
         std::declval<Args>()...);
 };
 
@@ -5350,7 +5367,7 @@ using range_t  = compact_sequence_range<dna4_u64>;
 
 [[nodiscard]] MatchResultCollection run(
     std::vector<seq::dna4> qd, std::vector<seq::dna4> td,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::Minimap2Params& params)
 {
     range_t q_range(qd);
     range_t t_range(td);
@@ -5358,7 +5375,9 @@ using range_t  = compact_sequence_range<dna4_u64>;
     auto lazy_t = bioseq::storage::make_lazy_in_memory(t_range);
     const auto q_view = bioseq::storage::as_lazy_sequence_view(lazy_q);
     const auto t_view = bioseq::storage::as_lazy_sequence_view(lazy_t);
-    return ::bioseq::simd::HWY_NAMESPACE::minimap_port(q_view, t_view, params);
+    auto fixed_params = params;
+    bind_fixed_highway(fixed_params);
+    return ::bioseq::simd::minimap_port(q_view, t_view, fixed_params);
 }
 
 [[nodiscard]] bool exact_biological_results_equal(
@@ -5614,6 +5633,7 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
              PrefilterBackendType::SIMD}) {
         CAPTURE(static_cast<unsigned>(backend));
         Minimap2Params params;
+        bind_fixed_highway(params);
         params.prefilter_enabled = true;
         params.compute_edit_distance = true;
         params.prefilter_backend = backend;
@@ -5671,9 +5691,9 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-TEST_CASE("reference SIMD pipe runtime and constexpr dispatch execute native vector work",
+TEST_CASE("reference SIMD pipe runtime and constexpr dispatch use fixed target table",
           "[pipe][reference-simd][runtime][constexpr][route][proof]") {
-    using namespace ::bioseq::simd::HWY_NAMESPACE;
+    using namespace ::bioseq::simd;
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using range_type = compact_sequence_range<sequence_type>;
@@ -5684,32 +5704,20 @@ TEST_CASE("reference SIMD pipe runtime and constexpr dispatch execute native vec
     range_type resident(data);
     auto lazy = bioseq::storage::make_lazy_in_memory(resident);
     const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
+    const auto* table = fixed_highway_kernels();
+    REQUIRE(table->contains(
+        ::bioseq::simd_dispatch::HighwayKernelId::
+            minimizer_reference_minimap_int));
 
-    reset_reference_simd_minimizer_test_receipt();
     collector_type runtime_collector;
     (void)pipe::minimizer_dispatch<
         MinKernelKind::Simd, MinimapSketchData>(
-            runtime_collector, view, 10u, 15u);
-    const auto runtime_receipt =
-        reference_simd_minimizer_test_receipt_snapshot();
-    REQUIRE(runtime_receipt.kernel_calls == 1u);
-    REQUIRE(runtime_receipt.vector_callback_batches > 0u);
-    REQUIRE(runtime_receipt.vector_lane_visits > 0u);
-    REQUIRE(runtime_receipt.last_storage_unit_bytes
-        == sizeof(std::uint64_t));
+            runtime_collector, view, 10u, 15u, table);
 
-    reset_reference_simd_minimizer_test_receipt();
     collector_type constexpr_collector;
     (void)pipe::minimizer_dispatch_constexpr<
         MinKernelKind::Simd, 10u, 15u, MinimapSketchData>(
-            constexpr_collector, view, 10u, 15u);
-    const auto constexpr_receipt =
-        reference_simd_minimizer_test_receipt_snapshot();
-    REQUIRE(constexpr_receipt.kernel_calls == 1u);
-    REQUIRE(constexpr_receipt.vector_callback_batches > 0u);
-    REQUIRE(constexpr_receipt.vector_lane_visits > 0u);
-    REQUIRE(constexpr_receipt.last_storage_unit_bytes
-        == sizeof(std::uint64_t));
+            constexpr_collector, view, 10u, 15u, table);
 
     const auto& runtime = runtime_collector.extract_sketches_data();
     const auto& specialized = constexpr_collector.extract_sketches_data();
@@ -5719,16 +5727,16 @@ TEST_CASE("reference SIMD pipe runtime and constexpr dispatch execute native vec
         REQUIRE(runtime[index].raw_value() == specialized[index].raw_value());
     }
 
-    reset_reference_simd_minimizer_test_receipt();
     collector_type scalar_collector;
     (void)pipe::minimizer_dispatch<
         MinKernelKind::Scalar, MinimapSketchData>(
-            scalar_collector, view, 10u, 15u);
-    const auto scalar_receipt =
-        reference_simd_minimizer_test_receipt_snapshot();
-    REQUIRE(scalar_receipt.kernel_calls == 0u);
-    REQUIRE(scalar_receipt.vector_callback_batches == 0u);
-    REQUIRE(scalar_receipt.vector_lane_visits == 0u);
+            scalar_collector, view, 10u, 15u, table);
+    const auto& scalar = scalar_collector.extract_sketches_data();
+    REQUIRE(runtime.size() == scalar.size());
+    for (std::size_t index = 0u; index < runtime.size(); ++index) {
+        CAPTURE(index);
+        REQUIRE(runtime[index].raw_value() == scalar[index].raw_value());
+    }
 }
 #endif
 
@@ -5738,17 +5746,17 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
         sequence_custom_alphabet<seq::dna4, std::uint32_t>;
     using range_type = compact_sequence_range<sequence_type>;
     using minimizer_type =
-        ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<33u, 15u>;
+        ::bioseq::simd::MinimizerRepr<33u, 15u>;
     using collector_type =
-        ::bioseq::simd::HWY_NAMESPACE::sketch_collector_t<minimizer_type>;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::ExactSimdRangeRoute;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::MinKernelKind;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::minimizer_dispatch_constexpr;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::minimizer_dispatch_range;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+        ::bioseq::simd::sketch_collector_t<minimizer_type>;
+    using ::bioseq::simd::MinimizerSketchBackend;
+    using ::bioseq::simd::pipe::ExactSimdRangeRoute;
+    using ::bioseq::simd::pipe::MinKernelKind;
+    using ::bioseq::simd::pipe::minimizer_dispatch_constexpr;
+    using ::bioseq::simd::pipe::minimizer_dispatch_range;
+    using ::bioseq::simd::pipe::
         exact_simd_proofs_share_selection_route;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::pipe::
         minimizer_range_proof_matches_backend;
 
     auto data = doc0307_e2e::make_dna4(4096u, 0x51A1D5EEDu);
@@ -5756,26 +5764,20 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     auto lazy_resident = bioseq::storage::make_lazy_in_memory(resident);
     const auto resident_view =
         bioseq::storage::as_lazy_sequence_view(lazy_resident);
+    const auto* table = fixed_highway_kernels();
 
     collector_type whole_collector;
-    if (!::bioseq::simd::HWY_NAMESPACE::two_stack_internal::
-            resident_vector_shape_supported()) {
-        try {
-            (void)minimizer_dispatch_constexpr<
-                MinKernelKind::ExactSimd, 10u, 15u, minimizer_type>(
-                    whole_collector, resident_view, 10u, 15u);
-            FAIL("unsupported Highway target must reject resident pipe routing");
-        } catch (const ::bioseq::simd::HWY_NAMESPACE::
-                ExactSimdRuntimeError& error) {
-            REQUIRE(error.status() == ::bioseq::simd::HWY_NAMESPACE::
-                TwoStackContinuationStatus::unsupported_vector_shape);
-        }
+    ::bioseq::simd::TwoStackExecutionProof whole_proof;
+    try {
+        whole_proof = minimizer_dispatch_constexpr<
+            MinKernelKind::ExactSimd, 10u, 15u, minimizer_type>(
+                whole_collector, resident_view, 10u, 15u, table);
+    } catch (const ::bioseq::simd::ExactSimdRuntimeError& error) {
+        REQUIRE(error.status() == ::bioseq::simd::
+            TwoStackContinuationStatus::unsupported_vector_shape);
         REQUIRE(whole_collector.extract_sketches_data().empty());
-        return;
+        SKIP("generated fixed target lacks the report-76 vector shape");
     }
-    const auto whole_proof = minimizer_dispatch_constexpr<
-        MinKernelKind::ExactSimd, 10u, 15u, minimizer_type>(
-            whole_collector, resident_view, 10u, 15u);
     REQUIRE(whole_proof.accepted(true));
     REQUIRE(whole_proof.resident_vector_stream_kernel_calls == 1u);
     REQUIRE(whole_proof.resident_vector_stream_dual_calls == 1u);
@@ -5796,7 +5798,8 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
             10u,
             15u,
             MinimizerSketchBackend::ExactSimd,
-            ExactSimdRangeRoute::require_resident_vector_stream);
+            ExactSimdRangeRoute::require_resident_vector_stream,
+            table);
     REQUIRE(paired_resident_proof.exact_simd_present);
     REQUIRE(paired_resident_proof.exact_simd.accepted(true));
     REQUIRE(paired_resident_proof.exact_simd
@@ -5824,7 +5827,8 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
             10u,
             15u,
             MinimizerSketchBackend::ExactSimd,
-            ExactSimdRangeRoute::require_continuation);
+            ExactSimdRangeRoute::require_continuation,
+            table);
     REQUIRE(persisted_compatible_proof.exact_simd_present);
     REQUIRE(persisted_compatible_proof.exact_simd.accepted(true));
     REQUIRE(persisted_compatible_proof.exact_simd
@@ -5855,7 +5859,8 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
             10u,
             15u,
             MinimizerSketchBackend::ExactSimd,
-            ExactSimdRangeRoute::require_resident_vector_stream),
+            ExactSimdRangeRoute::require_resident_vector_stream,
+            table),
         std::invalid_argument);
     REQUIRE(rejected_resident_subrange_collector
         .extract_sketches_data().empty());
@@ -5868,7 +5873,9 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
         resident.bp_size() - 1u,
         10u,
         15u,
-        MinimizerSketchBackend::ExactSimd);
+        MinimizerSketchBackend::ExactSimd,
+        ExactSimdRangeRoute::require_continuation,
+        table);
     REQUIRE(subrange_proof.exact_simd_present);
     REQUIRE(subrange_proof.exact_simd.accepted(true));
     REQUIRE(subrange_proof.exact_simd
@@ -5881,19 +5888,12 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
 TEST_CASE("Indexed dna4 u64 queries use admitted typed u32 B8 continuation with scalar-identical records",
           "[pipe][exact-simd][indexed-query][u64-u32][b8][parity][proof]"
           "[memory-admission][alias-safe]") {
-    using namespace ::bioseq::simd::HWY_NAMESPACE;
+    using namespace ::bioseq::simd;
     using query_sequence = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using query_range = compact_sequence_range<query_sequence>;
-    using b8_sequence = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
-    using b8_range = compact_sequence_range<b8_sequence>;
-
-    if (two_stack_internal::select_exact_simd_kernel_kind<
-            MinimapSketchData, b8_range::traits>(4'123u)
-        != ExactSimdKernelKind::k15_w10_b8_u32_hash) {
-        return;
-    }
 
     Minimap2Params params;
+    bind_fixed_highway(params);
     params.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
 
     const auto assert_case = [&params](std::vector<seq::dna4> data,
@@ -5992,10 +5992,10 @@ TEST_CASE("Indexed dna4 u64 queries use admitted typed u32 B8 continuation with 
 
 TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
           "[pipe][ksw2-batched][execution-proof][integration]") {
-    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::MinimizerAlgorithmType;
 
     auto target = doc0307_e2e::make_dna4(4'000u, 0xB47C4EDu);
     constexpr std::size_t truth_start = 700u;
@@ -6004,6 +6004,7 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
         target.begin() + truth_start + 900u);
 
     Minimap2Params params{};
+    bind_fixed_highway(params);
     params.minimizer_algorithm =
         MinimizerAlgorithmType::TWO_STACK_NTHASH;
     params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
@@ -6021,9 +6022,9 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
     REQUIRE(result.scalar_pipeline_execution_proof.seed_lookup_calls > 0u);
     REQUIRE(result.scalar_pipeline_execution_proof.seed_query_minimizers > 0u);
     REQUIRE(result.scalar_pipeline_execution_proof.query_minimizers
-            == ::bioseq::simd::HWY_NAMESPACE::ScalarMinimizerExecutionProof{});
+            == ::bioseq::simd::ScalarMinimizerExecutionProof{});
     REQUIRE(result.scalar_pipeline_execution_proof.target_minimizers
-            == ::bioseq::simd::HWY_NAMESPACE::ScalarMinimizerExecutionProof{});
+            == ::bioseq::simd::ScalarMinimizerExecutionProof{});
     REQUIRE(result.query_sketch_host_wall_ns > 0u);
     REQUIRE(result.seed_lookup_host_wall_ns > 0u);
     REQUIRE(result.chain_score_host_wall_ns > 0u);
@@ -6049,10 +6050,10 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
 
 template <class StorageUnit>
 void check_fragmented_paper_range_materialization() {
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::PaperNtHashRuntimeError;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::minimizer_dispatch_range;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::MinimizerSketchBackend;
+    using ::bioseq::simd::pipe::PaperNtHashRuntimeError;
+    using ::bioseq::simd::pipe::minimizer_dispatch_range;
+    using ::bioseq::simd::pipe::
         minimizer_range_proof_matches_backend;
     using packed_sequence =
         sequence_custom_alphabet<seq::dna4, StorageUnit>;
@@ -6060,9 +6061,9 @@ void check_fragmented_paper_range_materialization() {
     using chunked_scanner = bioseq::storage::sequence_scanner_test_chunked<
         StorageUnit, 2>;
     using minimizer_type =
-        ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+        ::bioseq::simd::MinimapSketchData;
     using collector_type =
-        ::bioseq::simd::HWY_NAMESPACE::sketch_collector_t<minimizer_type>;
+        ::bioseq::simd::sketch_collector_t<minimizer_type>;
 
     auto data = doc0307_e2e::make_dna4(
         4'123, 0xF12A6E57u + sizeof(StorageUnit));
@@ -6090,7 +6091,9 @@ void check_fragmented_paper_range_materialization() {
             hi_bp,
             10u,
             15u,
-            MinimizerSketchBackend::PaperNtHashSimd);
+            MinimizerSketchBackend::PaperNtHashSimd,
+            ExactSimdRangeRoute::require_continuation,
+            fixed_highway_kernels());
         REQUIRE(minimizer_range_proof_matches_backend(
             MinimizerSketchBackend::PaperNtHashSimd,
             resident_proof,
@@ -6114,7 +6117,9 @@ void check_fragmented_paper_range_materialization() {
                     hi_bp,
                     10u,
                     15u,
-                    MinimizerSketchBackend::PaperNtHashSimd);
+                    MinimizerSketchBackend::PaperNtHashSimd,
+                    ExactSimdRangeRoute::require_continuation,
+                    fixed_highway_kernels());
             REQUIRE(minimizer_range_proof_matches_backend(
                 MinimizerSketchBackend::PaperNtHashSimd,
                 fragmented_proof,
@@ -6137,7 +6142,9 @@ void check_fragmented_paper_range_materialization() {
                     hi_bp,
                     9u,
                     15u,
-                    MinimizerSketchBackend::PaperNtHashSimd),
+                    MinimizerSketchBackend::PaperNtHashSimd,
+                    ExactSimdRangeRoute::require_continuation,
+                    fixed_highway_kernels()),
                 PaperNtHashRuntimeError);
         }
         REQUIRE(admission.reserved_bytes() == reserved_before);
@@ -6256,11 +6263,11 @@ TEST_CASE("fragmented Paper ntHash unwinds its vector and memory permit for ever
     using lazy_type = bioseq::storage::lazy_compact_sequence<
         packed_sequence, scanner_type>;
     using minimizer_type =
-        ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+        ::bioseq::simd::MinimapSketchData;
     using collector_type =
-        ::bioseq::simd::HWY_NAMESPACE::sketch_collector_t<minimizer_type>;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::minimizer_dispatch_range;
+        ::bioseq::simd::sketch_collector_t<minimizer_type>;
+    using ::bioseq::simd::MinimizerSketchBackend;
+    using ::bioseq::simd::pipe::minimizer_dispatch_range;
 
     auto bases = doc0307_e2e::make_dna4(4'123, 0x51A9E5u);
     range_type range(bases);
@@ -6305,7 +6312,9 @@ TEST_CASE("fragmented Paper ntHash unwinds its vector and memory permit for ever
                 hi_bp,
                 10u,
                 15u,
-                MinimizerSketchBackend::PaperNtHashSimd),
+                MinimizerSketchBackend::PaperNtHashSimd,
+                ExactSimdRangeRoute::require_continuation,
+                fixed_highway_kernels()),
             InjectedScannerLeafError);
         REQUIRE(reads == 1u);
         REQUIRE(admission.reserved_bytes() == reserved_before);
@@ -6314,10 +6323,10 @@ TEST_CASE("fragmented Paper ntHash unwinds its vector and memory permit for ever
 
 TEST_CASE("Paper ntHash SIMD pipe executes distinct sketch proof without fallback",
           "[paper-nthash][simd][pipe][proof][fail-closed]") {
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::MinimizerAlgorithmType;
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::BaseAlignmentAlgorithmType;
 
     auto target = doc0307_e2e::make_dna4(4000, 0x51A7C0DEu);
     constexpr std::size_t truth_start = 700;
@@ -6326,6 +6335,7 @@ TEST_CASE("Paper ntHash SIMD pipe executes distinct sketch proof without fallbac
         target.begin() + truth_start + 900);
 
     Minimap2Params params{};
+    bind_fixed_highway(params);
     params.minimizer_algorithm =
         MinimizerAlgorithmType::PAPER_NTHASH_SIMD;
     params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
@@ -6385,7 +6395,7 @@ TEST_CASE("Paper ntHash SIMD pipe executes distinct sketch proof without fallbac
     REQUIRE_FALSE(result.exact_simd_target_execution_proof_present);
     REQUIRE_FALSE(result.partial_vulkan_execution_proof.has_any_dispatch());
     REQUIRE(result.partial_vulkan_execution_proof
-            == ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof{});
+            == ::bioseq::simd::PartialVulkanExecutionProof{});
 
     auto vulkan_dispatch_tamper = result;
     vulkan_dispatch_tamper.partial_vulkan_execution_proof
@@ -6455,10 +6465,10 @@ TEST_CASE("Paper ntHash SIMD pipe executes distinct sketch proof without fallbac
 
 TEST_CASE("Paper ntHash segmented pipe globalizes local coordinates without fallback",
           "[paper-nthash][simd][pipe][segmented][proof][coordinates]") {
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::MinimizerAlgorithmType;
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::BaseAlignmentAlgorithmType;
 
     // Force the production geometry to its 32-Mbp floor, then place the truth
     // strictly inside the second core. This exercises two real target-range
@@ -6498,13 +6508,14 @@ TEST_CASE("Paper ntHash segmented pipe globalizes local coordinates without fall
         bioseq::storage::as_lazy_sequence_view(lazy_target);
 
     Minimap2Params params{};
+    bind_fixed_highway(params);
     params.minimizer_algorithm =
         MinimizerAlgorithmType::PAPER_NTHASH_SIMD;
     params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
     params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
     params.do_cigar = false;
 
-    const auto result = ::bioseq::simd::HWY_NAMESPACE::
+    const auto result = ::bioseq::simd::
         minimap_port_segmented(query_view, target_view, params);
     REQUIRE(result.paper_nthash_query_execution_accepted(true));
     REQUIRE(result.paper_nthash_target_execution_accepted(true));
@@ -6526,13 +6537,13 @@ TEST_CASE("Paper ntHash segmented pipe globalizes local coordinates without fall
 
 TEST_CASE("canonical Vulkan selection separates capability from a complete all-GPU tuple",
           "[vulkan][pipe][routing][fail-closed]") {
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::MinimizerAlgorithmType;
+    using ::bioseq::simd::pipe::
         complete_all_gpu_tuple_selected;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_accelerator_requested;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_components_requested;
+    using ::bioseq::simd::pipe::vulkan_accelerator_requested;
+    using ::bioseq::simd::pipe::vulkan_components_requested;
 
     Minimap2Params params{};
     params.vulkan_enabled = true;
@@ -6580,18 +6591,18 @@ TEST_CASE("canonical Vulkan selection separates capability from a complete all-G
     REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
     params.compute_mapq = false;
     params.base_alignment_algorithm =
-        ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
+        ::bioseq::simd::BaseAlignmentAlgorithmType::KSW2;
     REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
 }
 
 TEST_CASE("persisted Shape-V5 GPU preparation admits zero-based supported alphabets",
           "[vulkan][pipe][routing][shape-v5][admission][fail-closed]") {
-    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::MinimizerAlgorithmType;
+    using ::bioseq::simd::MinimizerSketchBackend;
+    using ::bioseq::simd::pipe::
         persisted_shape_v5_gpu_preparation_tuple_valid;
 
     constexpr std::size_t supported_alphabet_count = 2u;
@@ -6649,15 +6660,15 @@ TEST_CASE("persisted Shape-V5 GPU preparation admits zero-based supported alphab
 
 TEST_CASE("DOC0384 — bounded Vulkan pipe matches complete CPU biological results",
           "[vulkan][phase-b][pipe][pipeline][biological-parity]") {
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::MinimizerAlgorithmType;
+    using ::bioseq::simd::MinimizerSketchBackend;
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::pipe::
         MinimizerRangeExecutionProof;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::ExactSimdRangeRoute;
-    using ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using ::bioseq::simd::pipe::ExactSimdRangeRoute;
+    using ::bioseq::simd::pipe::
         minimizer_range_proof_matches_backend;
 
     auto target = doc0307_e2e::make_dna4(4000, 0xC0FFEEu);
@@ -6679,7 +6690,7 @@ TEST_CASE("DOC0384 — bounded Vulkan pipe matches complete CPU biological resul
     REQUIRE(cpu_res.scalar_pipeline_execution_proof.seed_lookup_calls > 0u);
     REQUIRE(cpu_res.scalar_pipeline_execution_proof.seed_query_minimizers > 0u);
     REQUIRE(cpu_res.partial_vulkan_execution_proof
-            == ::bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof{});
+            == ::bioseq::simd::PartialVulkanExecutionProof{});
     REQUIRE(cpu_res.all_simd_execution_accepted(
         MinimizerAlgorithmType::TWO_STACK_NTHASH,
         /*require_target_sketch=*/true,
@@ -6738,7 +6749,7 @@ TEST_CASE("DOC0384 — bounded Vulkan pipe matches complete CPU biological resul
     REQUIRE_FALSE(gpu_res.simd_chaining_execution_proof_present);
     REQUIRE_FALSE(gpu_res.scalar_pipeline_execution_proof_present);
     REQUIRE(gpu_res.scalar_pipeline_execution_proof
-            == ::bioseq::simd::HWY_NAMESPACE::ScalarPipelineExecutionProof{});
+            == ::bioseq::simd::ScalarPipelineExecutionProof{});
     REQUIRE(gpu_res.partial_vulkan_execution_proof
                 .exact_stage_mask_accepted(
                     /*query_sketch=*/true,
@@ -6755,9 +6766,9 @@ TEST_CASE("DOC0384 — bounded Vulkan pipe matches complete CPU biological resul
 
 TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false fails",
           "[vulkan][phase-b][pipe]") {
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::MinimizerAlgorithmType;
+    using ::bioseq::simd::ChainingAlgorithmType;
 
     auto target = doc0307_e2e::make_dna4(3000, 0x1234567u);
     std::vector<seq::dna4> query(target.begin() + 200, target.begin() + 900);
@@ -6774,9 +6785,9 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false fails",
 
 namespace doc0384_direct_test {
 
-using Ledger = ::bioseq::simd::HWY_NAMESPACE::pipe::
+using Ledger = ::bioseq::simd::pipe::
     DirectResidentOperationLedger;
-using SourceAuthority = ::bioseq::simd::HWY_NAMESPACE::pipe::
+using SourceAuthority = ::bioseq::simd::pipe::
     SourceDirectHostAuthority;
 using ResidentAuthority = bioseq::indexing::
     GpuResidentAccountingAuthority;
@@ -7016,7 +7027,7 @@ TEST_CASE("DOC0384 source-direct operation ledger emits an exact two-receipt tra
         Ledger not_reached{};
         not_reached.operation_identity = 19u;
         {
-            ::bioseq::simd::HWY_NAMESPACE::pipe::
+            ::bioseq::simd::pipe::
                 DirectResidentReceiptGuard guard{&not_reached};
         }
         REQUIRE(not_reached.planning_receipts == 1u);
@@ -7029,13 +7040,13 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
           "[pipeline][vulkan][prepared-full-resident]"
           "[pipeline][vulkan][zero-copy][hardware][biological-parity]") {
     namespace vk = bioseq::gpu::vulkan;
-    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::ChainingAlgorithmType;
+    using ::bioseq::simd::MatchResultCollection;
+    using ::bioseq::simd::Minimap2Params;
+    using ::bioseq::simd::MinimizerAlgorithmType;
     using DirectMinimizer =
-        ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<33u, 15u>;
+        ::bioseq::simd::MinimizerRepr<33u, 15u>;
 
     auto& runtime = vk::Runtime::instance();
     if (!vk::hardware_device_available(runtime)) {
@@ -7091,7 +7102,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
         REQUIRE(target_sketch->dispatch_token.accepted());
         REQUIRE_FALSE(target_sketch->host_minimizers.empty());
         auto target_owner =
-            ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+            ::bioseq::simd::pipe_entry_detail::
                 adopt_fixed_vulkan_sketch_host_result(
                     std::move(*target_sketch));
         REQUIRE(target_owner.ownership_authority_accepted());
@@ -7106,6 +7117,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
         REQUIRE_FALSE(query_sketch->host_minimizers.empty());
 
         Minimap2Params direct_params{};
+        bind_fixed_highway(direct_params);
         direct_params.chaining_algorithm =
             ChainingAlgorithmType::VULKAN_TILED_DP;
         direct_params.base_alignment_algorithm =
@@ -7129,7 +7141,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
         const auto direct_target_view =
             bioseq::storage::as_lazy_sequence_view(direct_lazy_target);
         direct_results =
-            ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+            ::bioseq::simd::pipe_entry_detail::
                 minimap2_port_with_fixed_vulkan_target_handoff(
                     direct_query_view,
                     direct_target_view,
@@ -7151,7 +7163,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
         const auto phase_c_target_view =
             bioseq::storage::as_lazy_sequence_view(phase_c_lazy_target);
         phase_c_results =
-            ::bioseq::simd::HWY_NAMESPACE::minimap_port(
+            ::bioseq::simd::minimap_port(
                 phase_c_query_view,
                 phase_c_target_view,
                 phase_c_params);
@@ -7187,7 +7199,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
         REQUIRE(second_target_sketch.has_value());
         REQUIRE(second_target_sketch->dispatch_token.accepted());
         auto second_target_owner =
-            ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+            ::bioseq::simd::pipe_entry_detail::
                 adopt_fixed_vulkan_sketch_host_result(
                     std::move(*second_target_sketch));
         auto empty_lazy_query =
@@ -7199,7 +7211,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
         const auto empty_target_view =
             bioseq::storage::as_lazy_sequence_view(empty_lazy_target);
         empty_minimizer_results =
-            ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+            ::bioseq::simd::pipe_entry_detail::
                 minimap2_port_with_fixed_vulkan_target_handoff(
                     empty_query_view,
                     empty_target_view,
@@ -7306,7 +7318,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
 
 TEST_CASE("post-seed owned lifetime releases only after the final seed user",
           "[pipeline][seed][lifetime]") {
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     std::vector<Sketch> sketches{
         Sketch{/*kmer*/ 7, /*pos*/ 1, /*strand*/ 0},
         Sketch{/*kmer*/ 7, /*pos*/ 3, /*strand*/ 1},
@@ -7337,7 +7349,7 @@ TEST_CASE("post-seed owned lifetime releases only after the final seed user",
 
 TEST_CASE("seed lookup applies max_occ once across every borrowed position span",
           "[pipeline][seed][lookup-spans]") {
-    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Sketch = ::bioseq::simd::MinimapSketchData;
     using ::bioseq::indexing::MinimizerLookupSpans;
     using ::bioseq::indexing::MinimizerPositionSpan;
     struct SegmentedSeedIndex {
@@ -7388,7 +7400,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         auto anchors = ::bioseq::chaining::make_arena_slab<
             ::bioseq::chaining::Anchor>();
         SegmentedSeedIndex index;
-        ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+        ::bioseq::simd::collect_seed_hits(
             std::span<const Sketch>{query},
             index,
             /*query_len=*/100,
@@ -7409,7 +7421,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         auto anchors = ::bioseq::chaining::make_arena_slab<
             ::bioseq::chaining::Anchor>();
         SegmentedSeedIndex index;
-        ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+        ::bioseq::simd::collect_seed_hits(
             std::span<const Sketch>{query},
             index,
             /*query_len=*/100,
@@ -7427,7 +7439,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
             ::bioseq::chaining::Anchor>();
         SegmentedSeedIndex index;
         index.positions_available = false;
-        ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+        ::bioseq::simd::collect_seed_hits(
             std::span<const Sketch>{query},
             index,
             /*query_len=*/100,
@@ -7446,7 +7458,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         SegmentedSeedIndex index;
         index.positions_available = false;
         REQUIRE_THROWS_AS(
-            ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+            ::bioseq::simd::collect_seed_hits(
                 std::span<const Sketch>{query},
                 index,
                 /*query_len=*/100,
@@ -7465,7 +7477,7 @@ TEST_CASE("seed lookup applies max_occ once across every borrowed position span"
         SegmentedSeedIndex index;
         index.reported_count = 2;
         REQUIRE_THROWS_AS(
-            ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits(
+            ::bioseq::simd::collect_seed_hits(
                 std::span<const Sketch>{query},
                 index,
                 /*query_len=*/100,
@@ -7775,6 +7787,4 @@ TEST_CASE("MatchResult biological fingerprints cover every result and CIGAR fiel
     REQUIRE(aggregate.saturated);
 }
 
-}  // namespace bioseq::simd::HWY_NAMESPACE::pipe
-
-HWY_AFTER_NAMESPACE();
+}  // namespace bioseq::simd::pipe

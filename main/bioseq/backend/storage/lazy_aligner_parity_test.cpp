@@ -9,31 +9,46 @@
 // region through the no-fragment lazy wrapper and through three chunked
 // scanners and asserts identical score + CIGAR.
 
-#include "common_simd.h"
 #include "common_tests.h"
 #include "common.h"
 
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
-import bioseq.alignment;            // HwyKsw2Aligner, KswZ2Params, KswAlignResult
+import bioseq.alignment;            // KswZ2Params, KswAlignResult
 import bioseq.alignment.utils;      // ScoringMatrix
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.common.context;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
 
 using namespace seq::literals;
 
-HWY_BEFORE_NAMESPACE();
-namespace bioseq::simd::HWY_NAMESPACE {
+namespace bioseq::simd {
 
 namespace {
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t  = compact_sequence_range<dna4_u64>;
+
+[[nodiscard]] const AlignmentKernels<seq::dna4>&
+fixed_alignment_kernels() {
+    const auto& root =
+        ::bioseq::simd_dispatch::highway_test_kernel_table();
+    for (const auto& entry : root.alignment_by_alphabet) {
+        if (entry.alphabet_code == 0u && entry.typed_table != nullptr) {
+            return *static_cast<const AlignmentKernels<seq::dna4>*>(
+                entry.typed_table);
+        }
+    }
+    throw std::logic_error{
+        "generated fixed-target test table lacks DNA4 alignment"};
+}
 
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
     std::vector<seq::dna4> v(n);
@@ -59,8 +74,8 @@ template <class LazyQ, class LazyT>
     params.end_bonus  = 0;
     const auto query_view = bioseq::storage::as_lazy_sequence_view(q);
     const auto target_view = bioseq::storage::as_lazy_sequence_view(t);
-    return HwyKsw2Aligner::z2_align<false>(
-        query_view, target_view, 0, qlen, 0, tlen, sm, params);
+    return fixed_alignment_kernels().ksw2_z2(
+        false, query_view, target_view, 0, qlen, 0, tlen, sm, params);
 }
 
 }  // namespace
@@ -117,5 +132,4 @@ TEST_CASE("DOC0263 §11.3 — KSW2 alignment is bit-identical under fragmentatio
     }
 }
 
-}  // namespace bioseq::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
+}  // namespace bioseq::simd

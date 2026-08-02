@@ -73,6 +73,7 @@ inline void require_rejected(Function&& function, std::string_view message) {
             .highway_digest =
                 "00000000000000000000000000000000"
                 "00000000000000000000000000000000",
+            .static_target_token = "HWY_SCALAR",
             .targets = {
                 target_spec{
                     .platform = "x86",
@@ -235,13 +236,15 @@ inline void verify_slot_callable_ownership() {
 inline void verify_generated_closure() {
     const generation_result generated = render_generation(two_target_plan());
     require(
-        generated.artifacts.size() == 7u,
-        "two targets and one source produce two primaries, binders, partitions, and one registry");
+        generated.artifacts.size() == 8u,
+        "two targets and one source produce two primaries, binders, "
+        "partitions, one registry, and fixed-target test support");
 
     std::size_t primary_count = 0;
     std::size_t binder_count = 0;
     std::size_t partition_count = 0;
     std::size_t registry_count = 0;
+    std::size_t test_support_count = 0;
     std::size_t export_count = 0;
     std::size_t dispatch_count = 0;
     std::set<std::pair<std::string, std::string>> target_source_closure;
@@ -311,12 +314,26 @@ inline void verify_generated_closure() {
                             "static_cast<std::int64_t>(3ULL)"),
                     "the registry owns one dispatch and the exact compiled mask");
                 break;
+            case artifact_kind::test_support:
+                ++test_support_count;
+                require(
+                    artifact.module_name == "bioseq.highway.test_support"
+                        && artifact.target_token == "HWY_SCALAR"
+                        && artifact.content.contains(
+                            "N_SCALAR::BindHighwayTarget()")
+                        && artifact.content.contains(
+                            "highway_test_kernel_table()")
+                        && !artifact.content.contains("HWY_DYNAMIC_DISPATCH("),
+                    "test support binds the configured fixed target without "
+                    "introducing runtime dispatch");
+                break;
         }
     }
 
     require(
         primary_count == 2u && binder_count == 2u
-            && partition_count == 2u && registry_count == 1u,
+            && partition_count == 2u && registry_count == 1u
+            && test_support_count == 1u,
         "the generated artifact-kind closure is exact");
     require(
         export_count == 1u && dispatch_count == 1u,
@@ -332,10 +349,86 @@ inline void verify_generated_closure() {
         generated.artifact_manifest_json.contains(
             "\"path\":\"dispatch_registry.cppm\"")
             && generated.artifact_manifest_json.contains(
+                "\"path\":\"test_support.cppm\"")
+            && generated.artifact_manifest_json.contains(
                 "\"path\":\"x86/scalar/fixture.cppm\"")
             && generated.artifact_manifest_json.contains(
                 "\"path\":\"x86/emu128/fixture.cppm\""),
         "the artifact manifest records the complete generated topology");
+}
+
+inline void verify_typed_alignment_binder() {
+    generation_plan plan = two_target_plan();
+    plan.source_inventory.require_complete_table = false;
+    plan.source_inventory.required_slots.clear();
+    plan.source_inventory.slots.clear();
+
+    const auto append_alphabet = [&plan](
+        const std::uint8_t code,
+        const std::string_view alphabet) {
+        const std::string family =
+            "alignment_" + std::to_string(code);
+        const auto append = [&](
+            const std::string_view owner,
+            const std::string_view member) {
+            plan.source_inventory.slots.push_back(slot_spec{
+                .owner_key = std::string{owner},
+                .family_field = family,
+                .slot_field = std::string{member},
+                .expression =
+                    "&::bioseq::simd::{target_namespace}::"
+                    + std::string{member} + "<" + std::string{alphabet} + ">",
+            });
+        };
+        append("ksw2", "ksw2_z2");
+        append("ksw2", "ksw2_d2");
+        append("ksw2_batched", "ksw2_batched");
+        append("block_aligner", "block_prepare");
+        append("block_aligner", "block_try_certified_gap");
+        append("block_aligner", "block_align");
+    };
+    append_alphabet(0u, "::seq::dna4");
+    append_alphabet(1u, "::seq::dna5");
+
+    const generation_result generated = render_generation(plan);
+    std::size_t checked_binders = 0u;
+    for (const generated_artifact& artifact : generated.artifacts) {
+        if (artifact.kind != artifact_kind::binder) continue;
+        ++checked_binders;
+        require(
+            artifact.content.contains("import bioseq.sequences;")
+                && artifact.content.contains(
+                    "AlignmentKernels<::seq::dna4> alignment_0")
+                && artifact.content.contains(
+                    "AlignmentKernels<::seq::dna5> alignment_1")
+                && artifact.content.contains(
+                    ".alphabet_code = 0u, .typed_table = &alignment_0")
+                && artifact.content.contains(
+                    ".alphabet_code = 1u, .typed_table = &alignment_1")
+                && artifact.content.contains(
+                    "highway_kernel_set(HighwayKernelId::alignment_ksw2)")
+                && artifact.content.contains(
+                    "highway_kernel_set(HighwayKernelId::alignment_ksw2_batched)")
+                && artifact.content.contains(
+                    "highway_kernel_set(HighwayKernelId::alignment_block_aligner)")
+                && !artifact.content.contains("table.alignment_0"),
+            "each binder synthesizes exact typed alignment tables without "
+            "inventing root-table fields");
+    }
+    require(checked_binders == 2u, "both fixed targets receive typed alignment tables");
+
+    generation_plan incomplete = plan;
+    incomplete.source_inventory.slots.pop_back();
+    require_rejected(
+        [&] { (void)render_generation(incomplete); },
+        "a typed alignment family missing any function slot is rejected");
+
+    generation_plan mixed = plan;
+    mixed.source_inventory.slots.front().expression =
+        "&::bioseq::simd::{target_namespace}::ksw2_z2<::seq::dna5>";
+    require_rejected(
+        [&] { (void)render_generation(mixed); },
+        "a typed alignment family mixing alphabet arguments is rejected");
 }
 
 }  // namespace contract_detail
@@ -344,6 +437,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_exact_structural_marker();
     contract_detail::verify_slot_callable_ownership();
     contract_detail::verify_generated_closure();
+    contract_detail::verify_typed_alignment_binder();
 }
 
 }  // namespace bioseq::codegen::highway

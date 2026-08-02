@@ -5,7 +5,7 @@
  * This module implements the constexpr-dispatched stage pipeline described in
  * `TEMPLATED_MINIMAP_PORT_PIPELINE_API_V2_CONSTEXPR_DISPATCHED_STAGES_AND_METADATA__DOC0249.md`.
  * It is a parallel API layer that sits above the existing kernel functions in
- * `bioseq::simd::active_target` and provides:
+ * the target-neutral `bioseq::simd` namespace and provides:
  *
  *   - Compile-time parameter packs (`ConstexprAlignerParams<W,K,L>` /
  *     `ConstexprAlignerFallbackParams<L>`).
@@ -65,8 +65,6 @@ module;
 #define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard]]
 #endif
 
-#include <hwy/highway.h>
-
 #include "common.h"
 
 #include <bit>
@@ -98,6 +96,7 @@ export module bioseq.sequences.pipe;
 import bioseq.common.mlogging;
 import bioseq.common.templating;
 import bioseq.common.sequan_compat;
+import bioseq.highway.dispatch_contract;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
@@ -1698,6 +1697,11 @@ template <typename T, std::size_t N>
 /// Exact CPU/GPU execution environment captured by the timed runtime.
 struct ExecutionEnvironmentProof {
     std::uint32_t effective_cpu_workers = 0;
+    std::int64_t highway_compiled_targets = 0;
+    std::int64_t highway_cpu_supported_targets = 0;
+    std::int64_t highway_runnable_targets = 0;
+    std::int64_t highway_executed_target = 0;
+    bool highway_executed_target_mixed = false;
     bool gpu_environment_present = false;
     std::array<std::uint8_t, 16> gpu_device_uuid{};
     std::array<char, 128> gpu_driver_identity{};
@@ -1712,6 +1716,11 @@ struct ExecutionEnvironmentProof {
     [[nodiscard]] static constexpr bool is_unset(
         const ExecutionEnvironmentProof& value) noexcept {
         return value.effective_cpu_workers == 0
+            && value.highway_compiled_targets == 0
+            && value.highway_cpu_supported_targets == 0
+            && value.highway_runnable_targets == 0
+            && value.highway_executed_target == 0
+            && !value.highway_executed_target_mixed
             && !value.gpu_environment_present
             && all_zero(value.gpu_device_uuid)
             && all_zero(value.gpu_driver_identity)
@@ -1730,6 +1739,12 @@ struct ExecutionEnvironmentProof {
         const ExecutionEnvironmentProof& lhs,
         const ExecutionEnvironmentProof& rhs) noexcept {
         return lhs.effective_cpu_workers == rhs.effective_cpu_workers
+            && lhs.highway_compiled_targets
+                == rhs.highway_compiled_targets
+            && lhs.highway_cpu_supported_targets
+                == rhs.highway_cpu_supported_targets
+            && lhs.highway_runnable_targets
+                == rhs.highway_runnable_targets
             && lhs.gpu_environment_present == rhs.gpu_environment_present
             && lhs.gpu_device_uuid == rhs.gpu_device_uuid
             && lhs.gpu_driver_identity == rhs.gpu_driver_identity
@@ -1759,6 +1774,53 @@ struct ExecutionEnvironmentProof {
             || rhs.mixed_invalid
             || !payload_equal(*this, rhs)) {
             mixed_invalid = true;
+            return;
+        }
+
+        if (highway_executed_target_mixed
+            || rhs.highway_executed_target_mixed) {
+            highway_executed_target_mixed = true;
+            highway_executed_target = 0;
+        } else if (highway_executed_target == 0) {
+            highway_executed_target = rhs.highway_executed_target;
+        } else if (rhs.highway_executed_target != 0
+            && highway_executed_target
+                != rhs.highway_executed_target) {
+            highway_executed_target_mixed = true;
+            highway_executed_target = 0;
+        }
+    }
+
+    /// Record the registry plan and the binding returned by the sole runtime
+    /// dispatch. Plan-mask drift is an environment invariant failure; target
+    /// drift is represented explicitly so aggregation never reports a false
+    /// singular architecture.
+    void record_highway_target(
+        const ::bioseq::simd_dispatch::HighwayDispatchInfo& plan,
+        const std::int64_t executed_target) noexcept
+    {
+        if (highway_compiled_targets == 0
+            && highway_cpu_supported_targets == 0
+            && highway_runnable_targets == 0) {
+            highway_compiled_targets = plan.compiled_targets;
+            highway_cpu_supported_targets = plan.cpu_supported_targets;
+            highway_runnable_targets = plan.runnable_targets;
+        } else if (highway_compiled_targets != plan.compiled_targets
+            || highway_cpu_supported_targets
+                != plan.cpu_supported_targets
+            || highway_runnable_targets != plan.runnable_targets) {
+            mixed_invalid = true;
+        }
+
+        if (executed_target == 0
+            || highway_executed_target_mixed) {
+            return;
+        }
+        if (highway_executed_target == 0) {
+            highway_executed_target = executed_target;
+        } else if (highway_executed_target != executed_target) {
+            highway_executed_target = 0;
+            highway_executed_target_mixed = true;
         }
     }
 };
@@ -3737,9 +3799,7 @@ persisted_shape_v5_coordinate_prospective_stats_valid(
 
 export {
 
-HWY_BEFORE_NAMESPACE();
-
-namespace bioseq::simd::HWY_NAMESPACE::pipe {
+namespace bioseq::simd::pipe {
 
 namespace prefilters = ::bioseq::sequences::prefilters;
 // DOC0279 §9 — bring the relocated index into this namespace so the prior
@@ -3751,11 +3811,11 @@ using bioseq::indexing::MinimizerSeedIndex;
 // Export exception aliases through the pipeline module so PG importers do not
 // redundantly import the Highway-heavy implementation modules.
 using ExactSimdRuntimeError =
-    ::bioseq::simd::HWY_NAMESPACE::ExactSimdRuntimeError;
+    ::bioseq::minimizers::ExactSimdRuntimeError;
 using SimdChainingRuntimeError =
-    ::bioseq::simd::HWY_NAMESPACE::SimdChainingRuntimeError;
+    ::bioseq::chaining::SimdChainingRuntimeError;
 using SimdChainingStatus =
-    ::bioseq::simd::HWY_NAMESPACE::SimdChainingStatus;
+    ::bioseq::chaining::SimdChainingStatus;
 
 /// Fail-closed error for the selected Paper-ntHash route.  PostgreSQL-facing
 /// callers catch this concrete type before entering the longjmp ERROR boundary;
@@ -3856,7 +3916,8 @@ struct ConstexprAlignerParams {
     static constexpr std::size_t sequence_len_log2 = SeqLenLog2;
     static constexpr bool        generic_fallback  = false;
 
-    using minimizer_repr_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<SeqLenLog2, K>;
+    using minimizer_repr_t =
+        ::bioseq::minimizers::MinimizerRepr<SeqLenLog2, K>;
 
     [[nodiscard]] static constexpr std::string_view label() noexcept {
         return "specialised";
@@ -3876,7 +3937,8 @@ struct ConstexprAlignerFallbackParams {
     static constexpr std::size_t sequence_len_log2 = SeqLenLog2;
     static constexpr bool        generic_fallback  = true;
 
-    using minimizer_repr_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<SeqLenLog2, 15u>;
+    using minimizer_repr_t =
+        ::bioseq::minimizers::MinimizerRepr<SeqLenLog2, 15u>;
 
     [[nodiscard]] static constexpr std::string_view label() noexcept {
         return "fallback(generic w/k)";
@@ -4424,7 +4486,7 @@ using kernel_t = typename algorithm_traits<AlgoEnumValue>::kernel_type;
 /// Scalar DP chaining — `chain_anchors_scalar` from
 /// `bioseq_sequences.chaining.scalar`.
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2> {
+struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::SCALAR_MM2> {
     struct kernel_type {
         static constexpr bool emits_scalar_chaining_execution_proof = true;
         static constexpr bool emits_simd_chaining_execution_proof = false;
@@ -4444,8 +4506,8 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SC
             }
         }
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2);
+            return ::bioseq::simd::chaining_algorithm_name(
+                ::bioseq::simd::ChainingAlgorithmType::SCALAR_MM2);
         }
         static void populate_runtime_params(
             const ChainingParams&,
@@ -4462,27 +4524,38 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SC
 };
 
 /// SIMD DP chaining — `chain_anchors_simd` from
-/// `bioseq_sequences.chaining.simd` (lives in `bioseq::simd::HWY_NAMESPACE`).
+/// the selected fixed-target chaining table.
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2> {
+struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::SIMD_MM2> {
     struct kernel_type {
         static constexpr bool emits_scalar_chaining_execution_proof = false;
         static constexpr bool emits_simd_chaining_execution_proof = true;
         static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr auto highway_kernel_id =
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                chaining_chain_anchors_simd;
         [[gnu::always_inline]] inline static void call(
+            const ::bioseq::simd_dispatch::HighwayKernelTable* highway,
             std::span<const Anchor> anchors,
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
             ArenaSlab<Anchor>&      reordered_anchors_out,
             SimdChainingExecutionProof* proof)
         {
-            ::bioseq::simd::HWY_NAMESPACE::chain_anchors_simd(
+            if (highway == nullptr
+                || !highway->contains(highway_kernel_id)) {
+                throw SimdChainingRuntimeError(
+                    SimdChainingStatus::unsupported_simd_target,
+                    "selected Highway table has no chaining kernel");
+            }
+            ::bioseq::chaining::chain_anchors_simd(
+                highway->chaining.chain_anchors_simd,
                 anchors, params, chains_out, reordered_anchors_out,
                 proof, /*aggregate_proof=*/true);
         }
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2);
+            return ::bioseq::simd::chaining_algorithm_name(
+                ::bioseq::simd::ChainingAlgorithmType::SIMD_MM2);
         }
         static void populate_runtime_params(
             const ChainingParams& params,
@@ -4506,7 +4579,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SI
 /// RMQ tree-based chaining — `chain_anchors_rmq` from
 /// `bioseq_sequences.chaining.rmq`.
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ> {
+struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::RMQ> {
     struct kernel_type {
         static constexpr bool emits_scalar_chaining_execution_proof = false;
         static constexpr bool emits_simd_chaining_execution_proof = false;
@@ -4521,8 +4594,8 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
                 anchors, params, chains_out, reordered_anchors_out);
         }
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ);
+            return ::bioseq::simd::chaining_algorithm_name(
+                ::bioseq::simd::ChainingAlgorithmType::RMQ);
         }
         static void populate_runtime_params(
             const ChainingParams&,
@@ -4543,7 +4616,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
 /// Vulkan + bioseq CPU `backtrack_chains`; selected Vulkan execution is
 /// mandatory and failures throw `VulkanRuntimeError`.
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP> {
+struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP> {
     struct kernel_type {
         static constexpr bool emits_scalar_chaining_execution_proof = false;
         static constexpr bool emits_simd_chaining_execution_proof = false;
@@ -4558,8 +4631,8 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VU
                 anchors, params, chains_out, reordered_anchors_out);
         }
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP);
+            return ::bioseq::simd::chaining_algorithm_name(
+                ::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP);
         }
         static void populate_runtime_params(
             const ChainingParams& params,
@@ -4594,31 +4667,218 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VU
 // ---------------------------------------------------------------------------
 enum class MinKernelKind { Scalar, Simd, ExactSimd };
 
-/// Invoke reference-SIMD over the facade's native resident storage width.
-/// This retains the production-supported u64/u32 lane selection and avoids a
-/// whole-query repack solely because the facade erased its source type.
-template <sequence_alphabet Alphabet, class Fn>
-[[gnu::always_inline]] inline bool with_native_resident_packed_range(
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
-    Fn&& fn)
+template <sequence_alphabet Alphabet>
+[[nodiscard]] constexpr std::uint8_t minimizer_alphabet_code() noexcept {
+    if constexpr (std::same_as<Alphabet, ::seq::dna4>) {
+        return static_cast<std::uint8_t>(
+            ::bioseq::minimizers::PackedSequenceAlphabet::dna4);
+    } else if constexpr (std::same_as<Alphabet, ::seq::dna5>) {
+        return static_cast<std::uint8_t>(
+            ::bioseq::minimizers::PackedSequenceAlphabet::dna5);
+    } else {
+        return 0xffu;
+    }
+}
+
+template <sequence_alphabet Alphabet, class Descriptor>
+[[nodiscard]] inline ::bioseq::minimizers::PackedSequenceKernelView
+minimizer_kernel_view(const Descriptor& descriptor)
 {
-    const auto try_width = [&sequence, &fn]<class StorageUnit>() -> bool {
-        auto descriptor = sequence.try_resident_packed(
-            0u, sequence.bp_size(), sizeof(StorageUnit));
-        if (!descriptor.has_value()
-            || descriptor->leading_symbol_offset != 0u) {
-            return false;
-        }
-        ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
-            with_borrowed_compact_range<Alphabet, StorageUnit>(
-                *descriptor,
-                [&fn]<class Range>(Range& range) {
-                    fn(range);
-                });
-        return true;
+    if (descriptor.bp_length > static_cast<sequence_size_t>(
+            (std::numeric_limits<std::size_t>::max)())
+        || descriptor.leading_symbol_offset
+            > (std::numeric_limits<std::size_t>::max)()
+                - static_cast<std::size_t>(descriptor.bp_length)) {
+        throw std::overflow_error(
+            "packed minimizer descriptor exceeds the neutral ABI");
+    }
+    const std::size_t begin = descriptor.leading_symbol_offset;
+    const std::size_t length =
+        static_cast<std::size_t>(descriptor.bp_length);
+    return ::bioseq::minimizers::PackedSequenceKernelView{
+        .storage = static_cast<const std::byte*>(descriptor.units),
+        .storage_units = descriptor.unit_count,
+        .begin_symbol = begin,
+        .end_symbol = begin + length,
+        .alphabet_code = minimizer_alphabet_code<Alphabet>(),
+        .bits_per_symbol = descriptor.bits_per_symbol,
+        .storage_unit_bytes = descriptor.storage_unit_byte_width,
+        .final_segment = true,
     };
-    return try_width.template operator()<std::uint64_t>()
-        || try_width.template operator()<std::uint32_t>();
+}
+
+/**
+ * Batch adapter from the neutral MinimapSketchData ABI to the caller's exact
+ * collector type. Exceptions cannot cross the sink's noexcept commit
+ * callback, so they are captured and rethrown immediately after the one
+ * coarse fixed-target call returns.
+ */
+template <class MinimizerT, class Collector>
+class HighwayMinimizerSinkState final {
+public:
+    explicit HighwayMinimizerSinkState(Collector& collector) noexcept
+        : collector_(&collector) {}
+
+    [[nodiscard]] ::bioseq::minimizers::MinimizerSink sink() noexcept {
+        return {
+            .state = this,
+            .acquire = &acquire,
+            .commit = &commit,
+        };
+    }
+
+    void validate(const ::bioseq::minimizers::MinimizerKernelResult& result) {
+        if (exception_ != nullptr) {
+            std::rethrow_exception(exception_);
+        }
+        if (rejected_ || result.emitted != committed_) {
+            throw std::runtime_error(
+                "selected Highway minimizer sink rejected a committed batch");
+        }
+    }
+
+private:
+    [[nodiscard]] static std::span<::bioseq::minimizers::MinimapSketchData>
+    acquire(void* opaque, std::size_t minimum) {
+        auto& self = *static_cast<HighwayMinimizerSinkState*>(opaque);
+        if (self.rejected_) {
+            return {};
+        }
+        try {
+            self.batch_.resize(minimum);
+            return {self.batch_.data(), self.batch_.size()};
+        } catch (...) {
+            self.exception_ = std::current_exception();
+            self.rejected_ = true;
+            return {};
+        }
+    }
+
+    static void commit(void* opaque, std::size_t initialized) noexcept {
+        auto& self = *static_cast<HighwayMinimizerSinkState*>(opaque);
+        if (self.rejected_ || initialized > self.batch_.size()) {
+            self.rejected_ = true;
+            return;
+        }
+        try {
+            for (std::size_t i = 0; i < initialized; ++i) {
+                const auto& sketch = self.batch_[i];
+                self.collector_->collect(MinimizerT{
+                    sketch.kmer(), sketch.last_pos(), sketch.strand()});
+            }
+            if constexpr (requires (Collector& value) {
+                { value.ok() } -> std::convertible_to<bool>;
+            }) {
+                if (!static_cast<bool>(self.collector_->ok())) {
+                    self.rejected_ = true;
+                    return;
+                }
+            }
+            self.committed_ += initialized;
+        } catch (...) {
+            self.exception_ = std::current_exception();
+            self.rejected_ = true;
+        }
+    }
+
+    Collector* collector_ = nullptr;
+    std::vector<::bioseq::minimizers::MinimapSketchData> batch_{};
+    std::exception_ptr exception_{};
+    std::size_t committed_ = 0u;
+    bool rejected_ = false;
+};
+
+[[nodiscard]] inline ::bioseq::minimizers::MinimizerKernelFunction
+selected_minimizer_kernel(
+    const ::bioseq::simd_dispatch::HighwayKernelTable* table,
+    ::bioseq::simd_dispatch::HighwayKernelId id)
+{
+    if (table == nullptr || !table->contains(id)) {
+        throw std::runtime_error(
+            "selected Highway table does not contain the minimizer kernel");
+    }
+    switch (id) {
+        case ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_reference_minimap_int:
+            return table->minimizers.reference_minimap_int;
+        case ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_two_stack_nthash:
+            return table->minimizers.two_stack_nthash;
+        case ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_paper_nthash:
+            return table->minimizers.paper_nthash;
+        default:
+            break;
+    }
+    throw std::invalid_argument(
+        "requested Highway kernel is not a minimizer kernel");
+}
+
+template <class MinimizerT, class Collector>
+[[nodiscard]] inline ::bioseq::minimizers::MinimizerKernelResult
+invoke_selected_minimizer_kernel(
+    const ::bioseq::simd_dispatch::HighwayKernelTable* table,
+    ::bioseq::simd_dispatch::HighwayKernelId id,
+    ::bioseq::minimizers::MinimizerKernelAlgorithm expected_algorithm,
+    ::bioseq::minimizers::PackedSequenceKernelView sequence,
+    std::size_t window,
+    std::size_t kmer,
+    Collector& collector,
+    ::bioseq::minimizers::TwoStackRoute two_stack_route =
+        ::bioseq::minimizers::TwoStackRoute::chronological_continuation)
+{
+    // The generated table has one stable minimizer record geometry.  Do not
+    // silently reinterpret it as another caller-selected minimizer layout:
+    // wider/custom layouts require an explicit registry record and ABI.
+    if constexpr (!std::same_as<std::remove_cv_t<MinimizerT>,
+                                ::bioseq::minimizers::MinimapSketchData>) {
+        throw std::invalid_argument(
+            "selected Highway minimizer kernels require MinimapSketchData");
+    } else {
+        const auto kernel = selected_minimizer_kernel(table, id);
+        if (kernel == nullptr) {
+            throw std::runtime_error(
+                "selected Highway minimizer table contains a null slot");
+        }
+        HighwayMinimizerSinkState<MinimizerT, Collector> sink_state{collector};
+        ::bioseq::minimizers::MinimizerKernelInvocation invocation{
+            .sequence = sequence,
+            .window = window,
+            .kmer = kmer,
+            .two_stack_route = two_stack_route,
+            .sink = sink_state.sink(),
+        };
+        auto result = kernel(invocation);
+        sink_state.validate(result);
+        if (result.proof.algorithm != expected_algorithm) {
+            throw std::runtime_error(
+                "selected Highway minimizer returned the wrong family proof");
+        }
+        return result;
+    }
+}
+
+[[nodiscard]] constexpr TwoStackContinuationStatus
+two_stack_transport_failure_status(
+    const ::bioseq::minimizers::MinimizerKernelResult& result) noexcept
+{
+    const auto family = static_cast<TwoStackContinuationStatus>(
+        result.family_status);
+    if (family != TwoStackContinuationStatus::ok) {
+        return family;
+    }
+    switch (result.status) {
+        case ::bioseq::minimizers::MinimizerKernelStatus::
+                invalid_sequence_view:
+            return TwoStackContinuationStatus::invalid_range;
+        case ::bioseq::minimizers::MinimizerKernelStatus::
+                invalid_continuation:
+            return TwoStackContinuationStatus::invalid_state;
+        case ::bioseq::minimizers::MinimizerKernelStatus::sink_rejected:
+            return TwoStackContinuationStatus::collector_overflow;
+        default:
+            return TwoStackContinuationStatus::invalid_static_configuration;
+    }
 }
 
 template <MinKernelKind Kind, class MinimizerT,
@@ -4627,7 +4887,8 @@ template <MinKernelKind Kind, class MinimizerT,
     Collector& c,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
     std::size_t w,
-    std::size_t k)
+    std::size_t k,
+    const ::bioseq::simd_dispatch::HighwayKernelTable* highway)
 {
     if constexpr (Kind == MinKernelKind::ExactSimd) {
         if (seq.bp_size() > static_cast<sequence_size_t>(
@@ -4663,22 +4924,36 @@ template <MinKernelKind Kind, class MinimizerT,
                 seq, 0u, seq.bp_size(), 4u, std::move(*permit)));
             descriptor = owner->descriptor();
         }
+        auto route = ::bioseq::minimizers::TwoStackRoute::
+            chronological_continuation;
         if constexpr (std::same_as<Alphabet, ::seq::dna4>
                       && exact_simd_minimizer_representation<MinimizerT>) {
             if (borrowed_resident && w == 10u && k == 15u) [[likely]] {
-                return collect_minimizers_two_stack_nthash_resident_descriptor_or_throw<
-                    MinimizerT, Alphabet>(c, descriptor, w, k);
+                route = ::bioseq::minimizers::TwoStackRoute::resident_report76;
             }
         }
-        return ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
-            with_borrowed_compact_range<Alphabet, std::uint32_t>(
-                descriptor,
-                [&c, w, k]<class Range>(Range& range) {
-                    return collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw<
-                        0u, 0u, MinimizerT>(
-                            c, range, 0u, range.size(), w, k, 0u,
-                            "query minimizer sketch");
-                });
+        const auto result = invoke_selected_minimizer_kernel<MinimizerT>(
+            highway,
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_two_stack_nthash,
+            ::bioseq::minimizers::MinimizerKernelAlgorithm::two_stack_nthash,
+            minimizer_kernel_view<Alphabet>(descriptor),
+            w,
+            k,
+            c,
+            route);
+        if (!result.ok()) {
+            throw ExactSimdRuntimeError{
+                two_stack_transport_failure_status(result),
+                "query minimizer sketch"};
+        }
+        if (!result.proof.two_stack.accepted(
+                /*require_nonempty_vector_work=*/false)) {
+            throw ExactSimdRuntimeError{
+                TwoStackContinuationStatus::invalid_state,
+                "query minimizer sketch proof"};
+        }
+        return result.proof.two_stack;
     } else if constexpr (Kind == MinKernelKind::Simd) {
         if constexpr (bioseq::storage::basic_lazy_sequence_view<Alphabet>::
                           traits::logical_bits_per_symbol != 2u) {
@@ -4687,14 +4962,36 @@ template <MinKernelKind Kind, class MinimizerT,
             collect_minimizers_segment_scalar<MinimizerT>(
                 c, seq, 0u, seq.bp_size(), w, k);
         } else {
-            const bool used_native = with_native_resident_packed_range(
-                seq,
-                [&c, w, k]<class Range>(Range& range) {
-                    collect_minimizers_simd<
-                        minimap_int_hasher, MinimizerT>(
-                            c, range, range.begin(), range.end(), w, k);
-                });
-            if (used_native) {
+            const auto run_reference = [&](const auto& descriptor) {
+                const auto result =
+                    invoke_selected_minimizer_kernel<MinimizerT>(
+                        highway,
+                        ::bioseq::simd_dispatch::HighwayKernelId::
+                            minimizer_reference_minimap_int,
+                        ::bioseq::minimizers::MinimizerKernelAlgorithm::
+                            reference_minimap_int,
+                        minimizer_kernel_view<Alphabet>(descriptor),
+                        w,
+                        k,
+                        c);
+                if (!result.ok()
+                    || result.proof.reference.kernel_calls == 0u) {
+                    throw std::runtime_error(
+                        "selected Highway reference minimizer declined");
+                }
+            };
+            if (auto descriptor = seq.try_resident_packed(
+                    0u, seq.bp_size(), sizeof(std::uint64_t));
+                descriptor.has_value()
+                    && descriptor->leading_symbol_offset == 0u) {
+                run_reference(*descriptor);
+                return {};
+            }
+            if (auto descriptor = seq.try_resident_packed(
+                    0u, seq.bp_size(), sizeof(std::uint32_t));
+                descriptor.has_value()
+                    && descriptor->leading_symbol_offset == 0u) {
+                run_reference(*descriptor);
                 return {};
             }
             const auto access = bioseq::storage::plan_sequence_access(
@@ -4724,14 +5021,7 @@ template <MinKernelKind Kind, class MinimizerT,
                     std::move(*permit)));
                 descriptor = owner->descriptor();
             }
-            ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
-                with_borrowed_compact_range<Alphabet, std::uint32_t>(
-                    descriptor,
-                    [&c, w, k]<class Range>(Range& range) {
-                        collect_minimizers_simd<
-                            minimap_int_hasher, MinimizerT>(
-                                c, range, range.begin(), range.end(), w, k);
-                    });
+            run_reference(descriptor);
         }
     } else {
         collect_minimizers_segment_scalar<MinimizerT>(
@@ -4747,122 +5037,15 @@ minimizer_dispatch_constexpr(
     Collector& c,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
     std::size_t w,
-    std::size_t k)
+    std::size_t k,
+    const ::bioseq::simd_dispatch::HighwayKernelTable* highway)
 {
-    if constexpr (Kind == MinKernelKind::ExactSimd) {
-        if (seq.bp_size() > static_cast<sequence_size_t>(
-                (std::numeric_limits<std::size_t>::max)())) {
-            throw ExactSimdRuntimeError{
-                TwoStackContinuationStatus::arithmetic_overflow,
-                "constexpr query minimizer sketch"};
-        }
-        const auto access = bioseq::storage::plan_sequence_access(
-            seq,
-            bioseq::storage::sequence_access_requirement::contiguous_resident,
-            0u,
-            seq.bp_size(),
-            4u);
-        std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
-        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-            resident_packed_region descriptor{};
-        const bool borrowed_resident = access.route
-                == bioseq::storage::sequence_access_route::borrow_resident
-            && access.resident.has_value();
-        if (borrowed_resident) {
-            descriptor = *access.resident;
-        } else {
-            auto permit =
-                bioseq::parallelism::MemoryAdmissionController::instance()
-                    .try_reserve(access.admission_bytes);
-            if (!permit) {
-                throw ExactSimdRuntimeError{
-                    TwoStackContinuationStatus::non_contiguous_range,
-                    "constexpr query minimizer sketch admission"};
-            }
-            owner.emplace(bioseq::storage::materialize_packed_region(
-                seq, 0u, seq.bp_size(), 4u, std::move(*permit)));
-            descriptor = owner->descriptor();
-        }
-        if constexpr (W == 10u && K == 15u
-                      && std::same_as<Alphabet, ::seq::dna4>
-                      && exact_simd_minimizer_representation<MinimizerT>) {
-            if (borrowed_resident) {
-                return ::bioseq::simd::HWY_NAMESPACE::
-                    resident_descriptor_detail::with_borrowed_compact_range<
-                        Alphabet, std::uint32_t>(
-                            descriptor,
-                            [&c, w, k]<class Range>(Range& range) {
-                                return collect_minimizers_two_stack_nthash_resident_constexpr_or_throw<
-                                    W, K, MinimizerT>(c, range, w, k);
-                            });
-            }
-        }
-        return ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
-            with_borrowed_compact_range<Alphabet, std::uint32_t>(
-                descriptor,
-                [&c, w, k]<class Range>(Range& range) {
-                    return collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw<
-                        W, K, MinimizerT>(
-                            c, range, 0u, range.size(), w, k, 0u,
-                            "constexpr query minimizer sketch");
-                });
-    } else if constexpr (Kind == MinKernelKind::Simd) {
-        if constexpr (bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-                          traits::logical_bits_per_symbol != 2u) {
-            collect_minimizers_segment_scalar<MinimizerT>(
-                c, seq, 0u, seq.bp_size(), w, k);
-        } else {
-            const bool used_native = with_native_resident_packed_range(
-                seq,
-                [&c]<class Range>(Range& range) {
-                    collect_minimizers_simd_constexpr<
-                        W, K, minimap_int_hasher, MinimizerT>(
-                            c, range, range.begin(), range.end());
-                });
-            if (used_native) {
-                return {};
-            }
-            const auto access = bioseq::storage::plan_sequence_access(
-                seq,
-                bioseq::storage::sequence_access_requirement::
-                    contiguous_resident,
-                0u,
-                seq.bp_size(),
-                sizeof(std::uint32_t));
-            std::optional<
-                bioseq::storage::admitted_packed_region<Alphabet>> owner;
-            typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-                resident_packed_region descriptor{};
-            if (access.route
-                    == bioseq::storage::sequence_access_route::borrow_resident
-                && access.resident.has_value()) {
-                descriptor = *access.resident;
-            } else {
-                auto permit = bioseq::parallelism::
-                    MemoryAdmissionController::instance().try_reserve(
-                        access.admission_bytes);
-                if (!permit) {
-                    throw std::bad_alloc{};
-                }
-                owner.emplace(bioseq::storage::materialize_packed_region(
-                    seq, 0u, seq.bp_size(), sizeof(std::uint32_t),
-                    std::move(*permit)));
-                descriptor = owner->descriptor();
-            }
-            ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
-                with_borrowed_compact_range<Alphabet, std::uint32_t>(
-                    descriptor,
-                    [&c]<class Range>(Range& range) {
-                        collect_minimizers_simd_constexpr<
-                            W, K, minimap_int_hasher, MinimizerT>(
-                                c, range, range.begin(), range.end());
-                    });
-        }
-    } else {
-        collect_minimizers_segment_scalar<MinimizerT>(
-            c, seq, 0u, seq.bp_size(), w, k);
+    if (w != W || k != K) {
+        throw std::invalid_argument(
+            "constexpr minimizer dispatch received mismatched W/K");
     }
-    return {};
+    return minimizer_dispatch<Kind, MinimizerT>(
+        c, seq, W, K, highway);
 }
 
 // DOC0276 — SUB-RANGE minimizer collection over storage units `[lo_unit, hi_unit)`.
@@ -5000,7 +5183,8 @@ minimizer_dispatch_range(
     std::size_t kmer_size,
     MinimizerSketchBackend backend,
     ExactSimdRangeRoute exact_simd_route =
-        ExactSimdRangeRoute::require_continuation)
+        ExactSimdRangeRoute::require_continuation,
+    const ::bioseq::simd_dispatch::HighwayKernelTable* highway = nullptr)
 {
     if (lo_bp > hi_bp || hi_bp > seq.bp_size()) {
         throw std::invalid_argument(
@@ -5020,11 +5204,19 @@ minimizer_dispatch_range(
             throw PaperNtHashRuntimeError(
                 "PaperNtHashSimd requires the DNA4 alphabet; fallback is forbidden");
         } else {
-            auto run_paper = [&collector](const auto& descriptor) {
-                return collect_minimizers_packed_paper_nthash_resident_descriptor_checked<
-                    15u, 10u, MinimizerT, Alphabet>(collector, descriptor);
+            auto run_paper = [&](const auto& descriptor) {
+                return invoke_selected_minimizer_kernel<MinimizerT>(
+                    highway,
+                    ::bioseq::simd_dispatch::HighwayKernelId::
+                        minimizer_paper_nthash,
+                    ::bioseq::minimizers::MinimizerKernelAlgorithm::
+                        paper_nthash,
+                    minimizer_kernel_view<Alphabet>(descriptor),
+                    window_size,
+                    kmer_size,
+                    collector);
             };
-            PackedPaperNthashResult result{};
+            ::bioseq::minimizers::MinimizerKernelResult result{};
             const auto access = bioseq::storage::plan_sequence_access(
                 seq,
                 bioseq::storage::sequence_access_requirement::
@@ -5057,7 +5249,7 @@ minimizer_dispatch_range(
                 result = run_paper(owner.descriptor());
             }
             if (!result.ok()
-                || !result.proof.accepted(
+                || !result.proof.paper.accepted(
                     /*require_nonempty_vector_work=*/false)) {
                 throw PaperNtHashRuntimeError(fmt::format(
                     "checked resident kernel declined without fallback: "
@@ -5066,14 +5258,15 @@ minimizer_dispatch_range(
                     lo_bp, hi_bp, window_size, kmer_size));
             }
             return MinimizerRangeExecutionProof{
-                .paper_nthash = result.proof,
+                .paper_nthash = result.proof.paper,
                 .paper_nthash_present = true,
             };
         }
     }
     if (backend == MinimizerSketchBackend::ExactSimd) {
-        if (exact_simd_route
-                == ExactSimdRangeRoute::require_resident_vector_stream) {
+        const bool require_resident = exact_simd_route
+            == ExactSimdRangeRoute::require_resident_vector_stream;
+        if (require_resident) {
             if constexpr (!std::same_as<Alphabet, ::seq::dna4>
                           || !exact_simd_minimizer_representation<MinimizerT>) {
                 throw std::invalid_argument(
@@ -5086,43 +5279,6 @@ minimizer_dispatch_range(
                         "resident ExactSimd vector_stream requires the whole "
                         "W=10/K=15 range");
                 }
-                auto run_resident = [&collector, window_size, kmer_size](
-                        const auto& descriptor) {
-                    return collect_minimizers_two_stack_nthash_resident_descriptor_or_throw<
-                        MinimizerT, Alphabet>(
-                            collector, descriptor, window_size, kmer_size);
-                };
-                TwoStackExecutionProof proof{};
-                const auto access = bioseq::storage::plan_sequence_access(
-                    seq,
-                    bioseq::storage::sequence_access_requirement::
-                        contiguous_resident,
-                    lo_bp,
-                    hi_bp,
-                    sizeof(std::uint32_t));
-                if (access.route
-                        == bioseq::storage::sequence_access_route::
-                            borrow_resident
-                    && access.resident.has_value()) {
-                    proof = run_resident(*access.resident);
-                } else {
-                    auto permit =
-                        bioseq::parallelism::MemoryAdmissionController::instance()
-                            .try_reserve(access.admission_bytes);
-                    if (!permit) {
-                        throw ExactSimdRuntimeError{
-                            TwoStackContinuationStatus::non_contiguous_range,
-                            "resident vector_stream admission"};
-                    }
-                    auto owner = bioseq::storage::materialize_packed_region(
-                        seq, lo_bp, hi_bp, sizeof(std::uint32_t),
-                        std::move(*permit));
-                    proof = run_resident(owner.descriptor());
-                }
-                return MinimizerRangeExecutionProof{
-                    .exact_simd = proof,
-                    .exact_simd_present = true,
-                };
             }
         }
         const sequence_size_t length = hi_bp - lo_bp;
@@ -5132,7 +5288,6 @@ minimizer_dispatch_range(
                 TwoStackContinuationStatus::arithmetic_overflow,
                 "target minimizer range sketch"};
         }
-        TwoStackExecutionProof proof{};
         const auto access = bioseq::storage::plan_sequence_access(
             seq,
             bioseq::storage::sequence_access_requirement::contiguous_resident,
@@ -5159,19 +5314,37 @@ minimizer_dispatch_range(
                 seq, lo_bp, hi_bp, 4u, std::move(*permit)));
             descriptor = owner->descriptor();
         }
-        proof = ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
-            with_borrowed_compact_range<Alphabet, std::uint32_t>(
-                descriptor,
-                [&collector, window_size, kmer_size]<class Range>(
-                        Range& range) {
-                    return collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw<
-                        0u, 0u, MinimizerT>(
-                            collector, range, 0u, range.size(),
-                            window_size, kmer_size, 0u,
-                            "target minimizer range sketch");
-                });
+        const auto route = require_resident
+            ? ::bioseq::minimizers::TwoStackRoute::resident_report76
+            : ::bioseq::minimizers::TwoStackRoute::
+                chronological_continuation;
+        const auto result = invoke_selected_minimizer_kernel<MinimizerT>(
+            highway,
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_two_stack_nthash,
+            ::bioseq::minimizers::MinimizerKernelAlgorithm::two_stack_nthash,
+            minimizer_kernel_view<Alphabet>(descriptor),
+            window_size,
+            kmer_size,
+            collector,
+            route);
+        if (!result.ok()) {
+            throw ExactSimdRuntimeError{
+                two_stack_transport_failure_status(result),
+                require_resident
+                    ? "resident vector_stream minimizer sketch"
+                    : "target minimizer range sketch"};
+        }
+        if (!result.proof.two_stack.accepted(
+                /*require_nonempty_vector_work=*/false)
+            || !exact_simd_proof_matches_range_route(
+                exact_simd_route, result.proof.two_stack)) {
+            throw ExactSimdRuntimeError{
+                TwoStackContinuationStatus::invalid_state,
+                "target minimizer range sketch proof"};
+        }
         return MinimizerRangeExecutionProof{
-            .exact_simd = proof,
+            .exact_simd = result.proof.two_stack,
             .exact_simd_present = true,
         };
     }
@@ -5197,7 +5370,8 @@ minimizer_dispatch_indexed_query_whole(
     bioseq::storage::basic_lazy_sequence_view<Alphabet> query_sequence,
     std::size_t window_size,
     std::size_t kmer_size,
-    MinimizerSketchBackend backend) {
+    MinimizerSketchBackend backend,
+    const ::bioseq::simd_dispatch::HighwayKernelTable* highway = nullptr) {
     return minimizer_dispatch_range<MinimizerT>(
         collector,
         query_sequence,
@@ -5206,7 +5380,8 @@ minimizer_dispatch_indexed_query_whole(
         window_size,
         kmer_size,
         backend,
-        ExactSimdRangeRoute::require_continuation);
+        ExactSimdRangeRoute::require_continuation,
+        highway);
 }
 
 // Resolve the biological target-sketch backend from the minimizer selector
@@ -5431,7 +5606,7 @@ validated_segment_bp_bounds(
 
 /// Scalar minimizer extraction.
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR> {
+struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::SCALAR> {
     struct kernel_type {
         static constexpr bool emits_scalar_minimizer_execution_proof = true;
         static constexpr bool emits_exact_simd_execution_proof = false;
@@ -5439,12 +5614,13 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
         static constexpr bool emits_partial_vulkan_execution_proof = false;
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static ScalarMinimizerExecutionProof call(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
             minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
-                collector, range, window_size, kmer_size);
+                collector, range, window_size, kmer_size,
+                params.highway_kernels);
             ScalarMinimizerExecutionProof proof{};
             proof.record(static_cast<std::uint64_t>(range.bp_size()));
             return proof;
@@ -5453,22 +5629,22 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static ScalarMinimizerExecutionProof call_constexpr(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range)
         {
             minimizer_dispatch_constexpr<MinKernelKind::Scalar, W, K, MinimizerT>(
-                collector, range, W, K);
+                collector, range, W, K, params.highway_kernels);
             ScalarMinimizerExecutionProof proof{};
             proof.record(static_cast<std::uint64_t>(range.bp_size()));
             return proof;
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR);
+            return ::bioseq::simd::minimizer_algorithm_name(
+                ::bioseq::simd::MinimizerAlgorithmType::SCALAR);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ::bioseq::simd::Minimap2Params&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
@@ -5482,38 +5658,42 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
 
 /// Reference SIMD minimizer extraction (single-stack).
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW> {
+struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW> {
     struct kernel_type {
         static constexpr bool emits_scalar_minimizer_execution_proof = false;
         static constexpr bool emits_exact_simd_execution_proof = false;
         static constexpr bool emits_paper_nthash_execution_proof = false;
         static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr auto highway_kernel_id =
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_reference_minimap_int;
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
             minimizer_dispatch<MinKernelKind::Simd, MinimizerT>(
-                collector, range, window_size, kmer_size);
+                collector, range, window_size, kmer_size,
+                params.highway_kernels);
         }
 
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call_constexpr(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range)
         {
             minimizer_dispatch_constexpr<MinKernelKind::Simd, W, K, MinimizerT>(
-                collector, range, W, K);
+                collector, range, W, K, params.highway_kernels);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW);
+            return ::bioseq::simd::minimizer_algorithm_name(
+                ::bioseq::simd::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ::bioseq::simd::Minimap2Params&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
@@ -5527,38 +5707,42 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
 
 /// Two-stack nthash minimizer extraction (current default).
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH> {
+struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::TWO_STACK_NTHASH> {
     struct kernel_type {
         static constexpr bool emits_scalar_minimizer_execution_proof = false;
         static constexpr bool emits_exact_simd_execution_proof = true;
         static constexpr bool emits_paper_nthash_execution_proof = false;
         static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr auto highway_kernel_id =
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_two_stack_nthash;
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static TwoStackExecutionProof call(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
             return minimizer_dispatch<MinKernelKind::ExactSimd, MinimizerT>(
-                collector, range, window_size, kmer_size);
+                collector, range, window_size, kmer_size,
+                params.highway_kernels);
         }
 
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static TwoStackExecutionProof call_constexpr(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range)
         {
             return minimizer_dispatch_constexpr<MinKernelKind::ExactSimd, W, K, MinimizerT>(
-                collector, range, W, K);
+                collector, range, W, K, params.highway_kernels);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH);
+            return ::bioseq::simd::minimizer_algorithm_name(
+                ::bioseq::simd::MinimizerAlgorithmType::TWO_STACK_NTHASH);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ::bioseq::simd::Minimap2Params&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
@@ -5575,16 +5759,19 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
 /// deliberately distinct from TWO_STACK_NTHASH/ExactSimd: both the execution
 /// proof and persisted scheme identity must match this selector.
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::PAPER_NTHASH_SIMD> {
+struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::PAPER_NTHASH_SIMD> {
     struct kernel_type {
         static constexpr bool emits_scalar_minimizer_execution_proof = false;
         static constexpr bool emits_exact_simd_execution_proof = false;
         static constexpr bool emits_paper_nthash_execution_proof = true;
         static constexpr bool emits_partial_vulkan_execution_proof = false;
+        static constexpr auto highway_kernel_id =
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_paper_nthash;
 
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static PackedPaperNthashExecutionProof call(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
@@ -5596,7 +5783,9 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::P
                     static_cast<sequence_size_t>(range.size()),
                     window_size,
                     kmer_size,
-                    MinimizerSketchBackend::PaperNtHashSimd);
+                    MinimizerSketchBackend::PaperNtHashSimd,
+                    ExactSimdRangeRoute::require_continuation,
+                    params.highway_kernels);
             if (!proof.paper_nthash_present) {
                 throw PaperNtHashRuntimeError(
                     "PaperNtHashSimd leaf returned without Paper execution proof");
@@ -5607,18 +5796,18 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::P
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static PackedPaperNthashExecutionProof call_constexpr(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range)
         {
             return call<MinimizerT>(params, collector, range, W, K);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::PAPER_NTHASH_SIMD);
+            return ::bioseq::simd::minimizer_algorithm_name(
+                ::bioseq::simd::MinimizerAlgorithmType::PAPER_NTHASH_SIMD);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ::bioseq::simd::Minimap2Params&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
@@ -5639,7 +5828,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::P
 /// `call_result` exposes the resident device-minimizer buffer so the all-Vulkan
 /// sketch+seed path reuses it without a second upload (`may_emit_device_minimizers`).
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT> {
+struct algorithm_traits<::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT> {
     struct kernel_type {
         static constexpr bool emits_scalar_minimizer_execution_proof = false;
         static constexpr bool emits_exact_simd_execution_proof = false;
@@ -5650,7 +5839,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
         template <class MinimizerT, class Collector, class Range>
         [[nodiscard, gnu::always_inline]] static
         bioseq::gpu::vulkan::VulkanSketchDispatchToken call(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
@@ -5672,7 +5861,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
                   class MinimizerT, class Collector, class Range>
         [[nodiscard, gnu::always_inline]] static
         bioseq::gpu::vulkan::VulkanSketchDispatchToken call_constexpr(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            const ::bioseq::simd::Minimap2Params& params,
             Collector& collector, Range& range)
         {
             return call<MinimizerT>(params, collector, range, W, K);
@@ -5682,7 +5871,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
         [[nodiscard]] static std::optional<
             bioseq::gpu::vulkan::VulkanSketchResult<MinimizerT>>
         call_result(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            const ::bioseq::simd::Minimap2Params& params,
             Range& range, std::size_t window_size, std::size_t kmer_size,
             bioseq::gpu::vulkan::VulkanSketchHostOwnershipRoute
                 host_ownership_route = bioseq::gpu::vulkan::
@@ -5706,11 +5895,11 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
-            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
-                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT);
+            return ::bioseq::simd::minimizer_algorithm_name(
+                ::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            const ::bioseq::simd::Minimap2Params& p,
             std::vector<NamedProperty>& props) noexcept
         {
             props.push_back({"accelerator", "vulkan"});
@@ -5738,10 +5927,56 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
 
 namespace detail {
 
+template <sequence_alphabet Alphabet>
+[[nodiscard]] const ::bioseq::simd::AlignmentKernels<Alphabet>&
+resolve_alignment_kernels(
+    const ::bioseq::simd::Minimap2Params& params)
+{
+    const auto* root = params.highway_kernels;
+    if (root == nullptr || params.alphabet_code == 0xffu) {
+        throw std::logic_error{
+            "alignment dispatch requires a selected Highway table and alphabet"};
+    }
+
+    auto required = ::bioseq::simd_dispatch::highway_kernel_set(
+        ::bioseq::simd_dispatch::HighwayKernelId::alignment_ksw2);
+    required |= ::bioseq::simd_dispatch::highway_kernel_set(
+        ::bioseq::simd_dispatch::HighwayKernelId::alignment_ksw2_batched);
+    required |= ::bioseq::simd_dispatch::highway_kernel_set(
+        ::bioseq::simd_dispatch::HighwayKernelId::alignment_block_aligner);
+    if (!root->contains_all(required)) {
+        throw std::logic_error{
+            "selected Highway table has incomplete alignment availability"};
+    }
+
+    const ::bioseq::simd::AlignmentKernels<Alphabet>* resolved = nullptr;
+    for (const auto& entry : root->alignment_by_alphabet) {
+        if (entry.alphabet_code != params.alphabet_code) continue;
+        if (entry.typed_table == nullptr || resolved != nullptr) {
+            throw std::logic_error{
+                "selected Highway table has an invalid alignment alphabet entry"};
+        }
+        resolved = static_cast<
+            const ::bioseq::simd::AlignmentKernels<Alphabet>*>(
+                entry.typed_table);
+    }
+    if (resolved == nullptr
+        || resolved->ksw2_z2 == nullptr
+        || resolved->ksw2_d2 == nullptr
+        || resolved->ksw2_batched == nullptr
+        || resolved->block_prepare == nullptr
+        || resolved->block_try_certified_gap == nullptr
+        || resolved->block_align == nullptr) {
+        throw std::logic_error{
+            "selected Highway table has no complete typed alignment table"};
+    }
+    return *resolved;
+}
+
 /// Shared helper for KSW2 / Block Aligner / KSW2_BATCHED — pushes the
 /// four affine-scoring parameters that every base aligner consumes.
 [[gnu::always_inline]] inline void push_base_affine_params(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+    const ::bioseq::simd::Minimap2Params& p,
     std::vector<NamedProperty>& out)
 {
     out.push_back({"match_score",  std::to_string(p.match_score)});
@@ -5753,7 +5988,7 @@ namespace detail {
 }  // namespace detail
 
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2> {
+struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::KSW2> {
     struct kernel_type {
         /// DOC0254 R10: the dispatcher consults this constant to route the
         /// cross-query deferred-align scheduling shape instead of an
@@ -5762,6 +5997,8 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
         static constexpr bool emits_block_execution_proof = false;
         static constexpr bool emits_scalar_ksw2_execution_proof = true;
         static constexpr bool emits_ksw2_batched_execution_proof = false;
+        static constexpr auto highway_kernel_id =
+            ::bioseq::simd_dispatch::HighwayKernelId::alignment_ksw2;
 
         template <sequence_alphabet Alphabet>
         [[gnu::always_inline]] static void call(
@@ -5770,16 +6007,18 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
             bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
             const ScoringMatrix<Alphabet>&               scoring_matrix,
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            const ::bioseq::simd::AlignmentKernels<Alphabet>& alignment_kernels,
+            const ::bioseq::simd::Minimap2Params& params,
             BlockAlignerExecutionProof* forbidden_block_proof,
             ScalarPipelineExecutionProof* scalar_execution_proof)
         {
             if (forbidden_block_proof != nullptr) {
                 block_aligner_forbidden_ksw2_fallback(*forbidden_block_proof);
             }
-            ::bioseq::simd::HWY_NAMESPACE::align_regions<
-                ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2>(
-                regions, anchors, query_seq, target_seq, scoring_matrix, params,
+            ::bioseq::simd::align_regions<
+                ::bioseq::simd::BaseAlignmentAlgorithmType::KSW2>(
+                regions, anchors, query_seq, target_seq, scoring_matrix,
+                alignment_kernels, params,
                 /*block_execution_proof=*/nullptr,
                 scalar_execution_proof);
         }
@@ -5789,7 +6028,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
         }
 
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            const ::bioseq::simd::Minimap2Params& p,
             std::vector<NamedProperty>& out)
         {
             detail::push_base_affine_params(p, out);
@@ -5811,12 +6050,15 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
 };
 
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::BLOCK_ALIGNER> {
+struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::BLOCK_ALIGNER> {
     struct kernel_type {
         static constexpr bool supports_cross_query_batched = false;
         static constexpr bool emits_block_execution_proof = true;
         static constexpr bool emits_scalar_ksw2_execution_proof = false;
         static constexpr bool emits_ksw2_batched_execution_proof = false;
+        static constexpr auto highway_kernel_id =
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                alignment_block_aligner;
 
         template <sequence_alphabet Alphabet>
         [[gnu::always_inline]] static void call(
@@ -5825,13 +6067,15 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
             bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
             const ScoringMatrix<Alphabet>&               scoring_matrix,
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            const ::bioseq::simd::AlignmentKernels<Alphabet>& alignment_kernels,
+            const ::bioseq::simd::Minimap2Params& params,
             BlockAlignerExecutionProof* block_execution_proof,
             ScalarPipelineExecutionProof* /*scalar_execution_proof*/)
         {
-            ::bioseq::simd::HWY_NAMESPACE::align_regions<
-                ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::BLOCK_ALIGNER>(
-                regions, anchors, query_seq, target_seq, scoring_matrix, params,
+            ::bioseq::simd::align_regions<
+                ::bioseq::simd::BaseAlignmentAlgorithmType::BLOCK_ALIGNER>(
+                regions, anchors, query_seq, target_seq, scoring_matrix,
+                alignment_kernels, params,
                 block_execution_proof);
         }
 
@@ -5840,7 +6084,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
         }
 
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            const ::bioseq::simd::Minimap2Params& p,
             std::vector<NamedProperty>& out)
         {
             detail::push_base_affine_params(p, out);
@@ -5866,7 +6110,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
 // function `align_regions_batched<QR, TR>(...)` that is declared in this
 // module via the `bioseq_sequences.ksw2_batched` import.
 template <>
-struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2_BATCHED> {
+struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::KSW2_BATCHED> {
     struct kernel_type {
         /// DOC0254 §11.10 — the only kernel whose dispatcher branch
         /// supports cross-query batching.  Setting this constant true on
@@ -5877,6 +6121,9 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
         static constexpr bool emits_block_execution_proof = false;
         static constexpr bool emits_scalar_ksw2_execution_proof = false;
         static constexpr bool emits_ksw2_batched_execution_proof = true;
+        static constexpr auto highway_kernel_id =
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                alignment_ksw2_batched;
 
         template <sequence_alphabet Alphabet>
         [[gnu::always_inline]] static void call(
@@ -5885,7 +6132,8 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
             bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
             const ScoringMatrix<Alphabet>&               scoring_matrix,
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            const ::bioseq::simd::AlignmentKernels<Alphabet>& alignment_kernels,
+            const ::bioseq::simd::Minimap2Params& params,
             BlockAlignerExecutionProof* forbidden_block_proof,
             ScalarPipelineExecutionProof* /*scalar_execution_proof*/,
             Ksw2BatchedExecutionProof* execution_proof = nullptr)
@@ -5893,7 +6141,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
             if (forbidden_block_proof != nullptr) {
                 block_aligner_forbidden_ksw2_fallback(*forbidden_block_proof);
             }
-            ::bioseq::simd::HWY_NAMESPACE::align_regions_batched<Alphabet>(
+            alignment_kernels.ksw2_batched(
                 regions, anchors, query_seq, target_seq, scoring_matrix, params,
                 execution_proof);
         }
@@ -5903,14 +6151,14 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
         }
 
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            const ::bioseq::simd::Minimap2Params& p,
             std::vector<NamedProperty>& out)
         {
             // Same runtime knobs as the intra-sequence KSW2 path; the
             // bucketing/batching is determined by the kernel from
             // params.max_gap, params.zdrop, and the per-fill geometry.
             algorithm_traits<
-                ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2>::
+                ::bioseq::simd::BaseAlignmentAlgorithmType::KSW2>::
                 kernel_type::populate_runtime_params(p, out);
         }
 
@@ -5939,6 +6187,7 @@ struct StageAlgorithmDescription {
     std::vector<NamedProperty> parameters;
     std::vector<NamedProperty> computed_properties;
     std::optional<std::string> extra_description;
+    ::bioseq::simd_dispatch::HighwayKernelSet highway_kernels{};
 };
 
 struct StageDescription {
@@ -6026,7 +6275,7 @@ namespace detail {
 
 [[nodiscard]] constexpr std::size_t estimated_result_count(
     sequence_size_t query_len, sequence_size_t target_len,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     const std::size_t bp_floor = std::max<std::size_t>(1u,
         static_cast<std::size_t>(std::min(query_len, target_len)) / 500u);
@@ -6040,13 +6289,13 @@ namespace detail {
 // =============================================================================
 
 [[nodiscard]] constexpr int32_t sub_diff(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     return params.match_score * 2 + params.mismatch_pen;
 }
 
 [[nodiscard]] constexpr int32_t min_diff(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     return params.kmer_size * 2;
 }
@@ -6061,7 +6310,7 @@ namespace detail {
 template <sequence_alphabet Alphabet>
 [[nodiscard, gnu::always_inline]] inline const ScoringMatrix<Alphabet>&
 thread_local_scoring_matrix(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::Minimap2Params& params)
 {
     thread_local int8_t cached_match    = std::numeric_limits<int8_t>::min();
     thread_local int8_t cached_mismatch = std::numeric_limits<int8_t>::min();
@@ -6089,7 +6338,7 @@ thread_local_scoring_matrix(
 // =============================================================================
 //
 // Each stage's `process*<Cep>(...)` body forwards to the existing kernel
-// function in `bioseq::simd::HWY_NAMESPACE` (or the chaining/cigar modules)
+// function in the target-neutral pipeline or its selected kernel table
 // without renaming the kernel.  Wire-type between stages is `std::span<E>`
 // directly; arena ownership is provided by `ArenaSlab<E>` materialised
 // inside each stage before the downstream call.
@@ -6120,7 +6369,7 @@ struct MinimizerStage
     // DOC0307 §5.1 — runtime flags so the Vulkan kernel can gate on
     // `vulkan_enabled` without touching Runtime when Vulkan is off. CPU kernels
     // ignore it.
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     MatchResultCollection* proof_dst = nullptr;
     MatchResultCollection* host_timing_dst = nullptr;
 
@@ -6302,6 +6551,10 @@ struct MinimizerStage
         algo.name = std::string{Kernel::algorithm_label()};
         Kernel::populate_runtime_params({}, algo.parameters);
         algo.computed_properties = Kernel::template static_properties<Cep>();
+        if constexpr (requires { Kernel::highway_kernel_id; }) {
+            algo.highway_kernels = ::bioseq::simd_dispatch::
+                highway_kernel_set(Kernel::highway_kernel_id);
+        }
         desc.algorithm = std::move(algo);
         // Reserve target for the sketch arena slab (DOC0249 §21.4
         // "estimated_sketch_count").  `query_seq_` is a borrowed pointer; on
@@ -7093,7 +7346,7 @@ struct PostSeedOwnedLifetime {
 struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
     static constexpr std::string_view stage_name = "SeedHitStage";
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     sequence_size_t                               query_len;
     // DOC0307 §5.2 — batch/segment-wave-scoped GPU index cache. The outer
     // wave creates one cache, passes `&cache` here, and clears it at wave end.
@@ -7617,6 +7870,7 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
     sequence_size_t query_len = 0;
     MatchResultCollection* proof_dst = nullptr;
     MatchResultCollection* host_timing_dst = nullptr;
+    const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels = nullptr;
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
@@ -7665,7 +7919,8 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
             }
             SimdChainingExecutionProof proof{};
             Kernel::call(
-                anchors_span, active_cp, chains_slab, reordered_slab, &proof);
+                highway_kernels, anchors_span, active_cp,
+                chains_slab, reordered_slab, &proof);
             if (!proof.accepted(
                     active_cp.simd_policy,
                     /*require_nonempty_vector_work=*/false)) {
@@ -7723,6 +7978,10 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
         // kernels (DOC0304 §7.2).
         Kernel::populate_runtime_params(cp, algo.parameters);
         algo.computed_properties = Kernel::template static_properties<Cep>();
+        if constexpr (requires { Kernel::highway_kernel_id; }) {
+            algo.highway_kernels = ::bioseq::simd_dispatch::
+                highway_kernel_set(Kernel::highway_kernel_id);
+        }
         desc.algorithm = std::move(algo);
         // Chain stage's two arena slabs are sized from the runtime
         // anchor count (which is unknown at describe time), so we leave
@@ -7949,7 +8208,7 @@ struct PrefilterStage
     : StageBase<PrefilterStage<Alphabet>, AlignRegion> {
     static constexpr std::string_view stage_name = "PrefilterStage";
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_;
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_;
     MatchResultCollection* proof_dst_ = nullptr;
@@ -8078,9 +8337,20 @@ struct PrefilterStage
                 results = sneaky_snake_scalar_batch(input);
                 break;
             case Backend::SIMD:
-            case Backend::AUTO:
-                results = sneaky_snake_simd_batch(input);
+            case Backend::AUTO: {
+                if (params.highway_kernels == nullptr
+                    || !params.highway_kernels->contains(
+                        ::bioseq::simd_dispatch::HighwayKernelId::
+                            prefilter_sneaky_snake_simd_batch)
+                    || params.highway_kernels->common
+                            .sneaky_snake_simd_batch == nullptr) {
+                    throw std::logic_error{
+                        "selected Highway table has no SneakySnake kernel"};
+                }
+                results = params.highway_kernels->common
+                    .sneaky_snake_simd_batch(input, {});
                 break;
+            }
             case Backend::VULKAN: {
                 if (algorithm == Algorithm::gatekeeper) {
                     results = prefilters::run_gatekeeper_vulkan_batch(
@@ -8217,6 +8487,13 @@ struct PrefilterStage
                 "survivor_check", "exact post-alignment edit distance"});
             algorithm.computed_properties.push_back({
                 "gatekeeper_auto_domain", "length in {32,64}, E in {2,4}"});
+            if (params.prefilter_backend == Backend::SIMD
+                || params.prefilter_backend == Backend::AUTO) {
+                algorithm.highway_kernels = ::bioseq::simd_dispatch::
+                    highway_kernel_set(
+                        ::bioseq::simd_dispatch::HighwayKernelId::
+                            prefilter_sneaky_snake_simd_batch);
+            }
             desc.algorithm = std::move(algorithm);
         }
         return desc;
@@ -8236,7 +8513,7 @@ struct ExactEditFilterStage
     : StageBase<ExactEditFilterStage, AlignRegion> {
     static constexpr std::string_view stage_name = "ExactEditFilterStage";
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
     EmittedToken<Sink> process_pair(
@@ -8315,8 +8592,9 @@ template <class Kernel,
 struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
     static constexpr std::string_view stage_name = "AlignStage";
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     const ScoringMatrix<Alphabet>*                sm;
+    const ::bioseq::simd::AlignmentKernels<Alphabet>* alignment_kernels_;
     bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_;
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_;
     bool                                          enabled;
@@ -8342,7 +8620,7 @@ struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
                     std::span<AlignRegion>{regions.data(), regions.size()},
                     std::span<const ::bioseq::chaining::Anchor>{
                         anchors.data(), anchors.size()},
-                    query_seq_, target_seq_, *sm, params,
+                    query_seq_, target_seq_, *sm, *alignment_kernels_, params,
                     /*forbidden_block_proof=*/nullptr,
                     &call_proof);
                 proof_dst_->record_scalar_pipeline_execution_proof(
@@ -8359,7 +8637,7 @@ struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
                     std::span<AlignRegion>{regions.data(), regions.size()},
                     std::span<const ::bioseq::chaining::Anchor>{
                         anchors.data(), anchors.size()},
-                    query_seq_, target_seq_, *sm, params,
+                    query_seq_, target_seq_, *sm, *alignment_kernels_, params,
                     /*forbidden_block_proof=*/nullptr,
                     /*scalar_execution_proof=*/nullptr,
                     &call_proof);
@@ -8382,7 +8660,8 @@ struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
                     std::span<AlignRegion>{regions.data(), regions.size()},
                     std::span<const ::bioseq::chaining::Anchor>{
                         anchors.data(), anchors.size()},
-                    query_seq_, target_seq_, *sm, params, &call_proof,
+                    query_seq_, target_seq_, *sm, *alignment_kernels_, params,
+                    &call_proof,
                     /*scalar_execution_proof=*/nullptr);
                 if (!call_proof.accepted()) {
                     bioseq_log<ERR>(
@@ -8396,7 +8675,7 @@ struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
                     std::span<AlignRegion>{regions.data(), regions.size()},
                     std::span<const ::bioseq::chaining::Anchor>{
                         anchors.data(), anchors.size()},
-                    query_seq_, target_seq_, *sm, params,
+                    query_seq_, target_seq_, *sm, *alignment_kernels_, params,
                     /*forbidden_block_proof=*/nullptr,
                     /*scalar_execution_proof=*/nullptr);
             }
@@ -8416,6 +8695,10 @@ struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
             algo.name = std::string{Kernel::algorithm_label()};
             Kernel::populate_runtime_params(params, algo.parameters);
             algo.computed_properties = Kernel::template static_properties<Cep>();
+            if constexpr (requires { Kernel::highway_kernel_id; }) {
+                algo.highway_kernels = ::bioseq::simd_dispatch::
+                    highway_kernel_set(Kernel::highway_kernel_id);
+            }
             desc.algorithm = std::move(algo);
         }
         return desc;
@@ -8431,7 +8714,7 @@ struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
 struct MapqStage : StageBase<MapqStage, AlignRegion> {
     static constexpr std::string_view stage_name = "MapqStage";
 
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    ::bioseq::simd::Minimap2Params params;
     bool                                          enabled;
 
     template <is_constexpr_aligner_params Cep, class RB, class Sink>
@@ -8557,7 +8840,7 @@ template <is_constexpr_aligner_params Cep, class Self, class Sink>
 // =============================================================================
 
 [[nodiscard]] inline bool vulkan_components_requested(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept;
+    const ::bioseq::simd::Minimap2Params& params) noexcept;
 
 /**
  * @brief Build the full minimap pipeline value for one (Cep, BAA, CA, MA, EP).
@@ -8568,9 +8851,9 @@ template <is_constexpr_aligner_params Cep, class Self, class Sink>
  * only this function (DOC0249 §9.4).
  */
 template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
+          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::ChainingAlgorithmType      CA,
+          ::bioseq::simd::MinimizerAlgorithmType     MA,
           EntryPoint                                                EP,
           sequence_alphabet Alphabet,
           class MinimizerT, class IndexT,
@@ -8582,22 +8865,24 @@ template <is_constexpr_aligner_params Cep,
     const IndexT&                     target_index,
     const ScoringMatrix<Alphabet>&    scoring_matrix,
     MatchResultCollection&            output_collection,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    const ::bioseq::simd::Minimap2Params& params,
     sequence_size_t                   query_len,
     sequence_size_t                   target_len,
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     PostSeedOwnedLifetime* post_seed_owned_lifetime = nullptr)
 {
+    const auto& alignment_kernels =
+        detail::resolve_alignment_kernels<Alphabet>(params);
     MatchResultCollection* host_timing_dst =
         vulkan_components_requested(params) ? nullptr : &output_collection;
     MatchResultCollection* chaining_proof_dst = nullptr;
     if constexpr (CA
-            == ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2
+            == ::bioseq::simd::ChainingAlgorithmType::SCALAR_MM2
         || CA
-            == ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2
+            == ::bioseq::simd::ChainingAlgorithmType::SIMD_MM2
         || CA
-            == ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP) {
+            == ::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP) {
         chaining_proof_dst = &output_collection;
     }
     MatchResultCollection* alignment_proof_dst = nullptr;
@@ -8613,7 +8898,7 @@ template <is_constexpr_aligner_params Cep,
                       host_timing_dst },
         ChainStage<kernel_t<CA>>{
             {}, params.to_chaining_params(), query_len,
-            chaining_proof_dst, host_timing_dst },
+            chaining_proof_dst, host_timing_dst, params.highway_kernels },
         RegionStage{ {}, query_len, host_timing_dst },
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
@@ -8623,7 +8908,8 @@ template <is_constexpr_aligner_params Cep,
         PrefilterStage<Alphabet>{
             {}, params, query_seq, target_seq, &output_collection },
         AlignStage<kernel_t<BAA>, Alphabet>{
-            {}, params, &scoring_matrix, query_seq, target_seq,
+            {}, params, &scoring_matrix, &alignment_kernels,
+            query_seq, target_seq,
             params.do_cigar || params.compute_edit_distance,
             alignment_proof_dst, host_timing_dst },
         ExactEditFilterStage{{}, params},
@@ -8664,17 +8950,17 @@ template <is_constexpr_aligner_params Cep,
 /// chaining, or alignment. The cache toggle is likewise only policy for a
 /// selected seed path.
 [[nodiscard]] inline bool vulkan_components_requested(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     return params.vulkan_seed_hits_enabled
         || params.vulkan_fused_frontend_enabled
         || params.vulkan_gpu_index_build_enabled
         || params.vulkan_extend_enabled
         || params.minimizer_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::
+               ::bioseq::simd::MinimizerAlgorithmType::
                    VULKAN_MINIMAP_INT
         || params.chaining_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::
+               ::bioseq::simd::ChainingAlgorithmType::
                    VULKAN_TILED_DP;
 }
 
@@ -8683,7 +8969,7 @@ template <is_constexpr_aligner_params Cep,
 /// admission: a standalone rank prefilter is allowed inside the generic
 /// CPU/SIMD pipeline while `vulkan_components_requested()` remains false.
 [[nodiscard]] inline bool vulkan_accelerator_requested(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     return vulkan_components_requested(params)
         || (params.prefilter_enabled
@@ -8695,20 +8981,20 @@ template <is_constexpr_aligner_params Cep,
 /// execute without entering any generic CPU/SIMD biological stage. A selected
 /// tuple outside this shape must fail before generic pipeline construction.
 [[nodiscard]] inline bool complete_all_gpu_tuple_selected(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     return params.vulkan_enabled
         && params.vulkan_seed_hits_enabled
         && params.vulkan_fused_frontend_enabled
         && params.vulkan_gpu_index_build_enabled
         && params.minimizer_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::
+               ::bioseq::simd::MinimizerAlgorithmType::
                    VULKAN_MINIMAP_INT
         && params.chaining_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::
+               ::bioseq::simd::ChainingAlgorithmType::
                    VULKAN_TILED_DP
         && params.base_alignment_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::
+               ::bioseq::simd::BaseAlignmentAlgorithmType::
                    BLOCK_ALIGNER
         && !params.compute_divergence
         && !params.compute_mapq
@@ -8727,8 +9013,8 @@ template <is_constexpr_aligner_params Cep,
     const std::uint8_t alphabet_code,
     const std::size_t supported_alphabet_count,
     const std::uint8_t storage_unit_byte_width,
-    const ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::minimizers::MinimizerSketchBackend backend,
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     return static_cast<std::size_t>(alphabet_code) < supported_alphabet_count
         && (storage_unit_byte_width == 1u
@@ -8737,7 +9023,7 @@ template <is_constexpr_aligner_params Cep,
             || storage_unit_byte_width == 8u)
         && params.kmer_size == 15
         && params.window_size == 10
-        && backend == ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::
+        && backend == ::bioseq::minimizers::MinimizerSketchBackend::
                VulkanSegment
         && complete_all_gpu_tuple_selected(params);
 }
@@ -8747,27 +9033,27 @@ template <is_constexpr_aligner_params Cep,
 // leaf. Runtime-gated; both flags plus the matching algorithm selectors must be
 // set. The runtime device check is done at the call site.
 [[nodiscard]] inline bool phase_c_index_build_active(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     return params.vulkan_enabled
         && params.vulkan_fused_frontend_enabled
         && params.vulkan_gpu_index_build_enabled
         && params.minimizer_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+               ::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
         && params.chaining_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP;
+               ::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP;
 }
 
 [[nodiscard]] inline bool phase_c_coordinate_only_active(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+    const ::bioseq::simd::Minimap2Params& params) noexcept
 {
     return params.vulkan_enabled
         && params.vulkan_seed_hits_enabled
         && params.vulkan_fused_frontend_enabled
         && params.minimizer_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+               ::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
         && params.chaining_algorithm ==
-               ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP
+               ::bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP
         && !params.do_cigar
         && !params.compute_divergence
         && !params.compute_mapq
@@ -9014,9 +9300,9 @@ inline void bind_verified_gpu_segment_gate_identity(
 // the deletion: every `BAA = KSW2_BATCHED` leaf no longer instantiates a
 // duplicate ~6 KB body. See DOC0271 §4.3 + §5.3 Option B for the rationale.
 template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
+          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::ChainingAlgorithmType      CA,
+          ::bioseq::simd::MinimizerAlgorithmType     MA,
           EntryPoint                                                EP,
           sequence_alphabet Alphabet,
           class MinimizerT, class IndexT>
@@ -9025,7 +9311,7 @@ template <is_constexpr_aligner_params Cep,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
     const IndexT&                               target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    const ::bioseq::simd::Minimap2Params& params,
     bioseq::indexing::GpuMinimizerIndexCache* external_gpu_index_cache = nullptr,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false)
@@ -9302,9 +9588,9 @@ template <is_constexpr_aligner_params Cep,
  * @brief Single-query convenience wrapper around `pipeline_run_impl_batch`.
  */
 template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
+          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::ChainingAlgorithmType      CA,
+          ::bioseq::simd::MinimizerAlgorithmType     MA,
           EntryPoint                                                EP,
           sequence_alphabet Alphabet,
           class MinimizerT, class IndexT,
@@ -9314,7 +9600,7 @@ template <is_constexpr_aligner_params Cep,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    const ::bioseq::simd::Minimap2Params& params,
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false,
@@ -9711,7 +9997,7 @@ template <std::size_t K, std::size_t... Ls>
 [[nodiscard]] consteval auto make_storage_bits_table_impl(
     std::index_sequence<Ls...>) noexcept
 {
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerLayout;
+    using ::bioseq::minimizers::MinimizerLayout;
     return std::array<std::size_t, sizeof...(Ls)>{
         MinimizerLayout<Ls, K>::storage_bits...
     };
@@ -9914,8 +10200,8 @@ template <class Enum>
 struct algorithm_enum_values;
 
 template <>
-struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType> {
-    using target_t = ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+struct algorithm_enum_values<::bioseq::simd::ChainingAlgorithmType> {
+    using target_t = ::bioseq::simd::ChainingAlgorithmType;
     using enum_t   = target_t;  // legacy alias.
     static constexpr target_t default_value = target_t::SCALAR_MM2;
     using value_list = value_sequence<target_t,
@@ -9926,7 +10212,7 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmTyp
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+        const ::bioseq::simd::Minimap2Params& p,
         Args&&...) noexcept
     {
         return p.chaining_algorithm;
@@ -9934,8 +10220,8 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmTyp
 };
 
 template <>
-struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType> {
-    using target_t = ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+struct algorithm_enum_values<::bioseq::simd::BaseAlignmentAlgorithmType> {
+    using target_t = ::bioseq::simd::BaseAlignmentAlgorithmType;
     using enum_t   = target_t;
     static constexpr target_t default_value = target_t::BLOCK_ALIGNER;
     using value_list = value_sequence<target_t,
@@ -9945,7 +10231,7 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorit
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+        const ::bioseq::simd::Minimap2Params& p,
         Args&&...) noexcept
     {
         return p.base_alignment_algorithm;
@@ -9953,8 +10239,8 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorit
 };
 
 template <>
-struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType> {
-    using target_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+struct algorithm_enum_values<::bioseq::simd::MinimizerAlgorithmType> {
+    using target_t = ::bioseq::simd::MinimizerAlgorithmType;
     using enum_t   = target_t;
     static constexpr target_t default_value = target_t::SCALAR;
     using value_list = value_sequence<target_t,
@@ -9966,7 +10252,7 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmTy
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+        const ::bioseq::simd::Minimap2Params& p,
         Args&&...) noexcept
     {
         return p.minimizer_algorithm;
@@ -9990,16 +10276,16 @@ template <class Enum, Enum... Vs>
 } // namespace detail
 
 static_assert(detail::all_traits_specialised_for(
-    algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>::value_list{}),
+    algorithm_enum_values<::bioseq::simd::ChainingAlgorithmType>::value_list{}),
     "algorithm_enum_values<ChainingAlgorithmType>::value_list contains a value "
     "without an algorithm_traits<>::kernel_type specialisation.  Add the trait "
     "specialisation alongside the enum value.");
 static_assert(detail::all_traits_specialised_for(
-    algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>::value_list{}),
+    algorithm_enum_values<::bioseq::simd::BaseAlignmentAlgorithmType>::value_list{}),
     "algorithm_enum_values<BaseAlignmentAlgorithmType>::value_list contains a "
     "value without an algorithm_traits<>::kernel_type specialisation.");
 static_assert(detail::all_traits_specialised_for(
-    algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>::value_list{}),
+    algorithm_enum_values<::bioseq::simd::MinimizerAlgorithmType>::value_list{}),
     "algorithm_enum_values<MinimizerAlgorithmType>::value_list contains a "
     "value without an algorithm_traits<>::kernel_type specialisation.");
 
@@ -10022,7 +10308,7 @@ struct seq_len_log2_registry {
 
     template <has_bp_size QR_arg, has_bp_size TR_arg, class... Rest>
     [[nodiscard, gnu::always_inline]] static std::size_t read_field(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const ::bioseq::simd::Minimap2Params& params,
         const QR_arg& q, const TR_arg& t,
         Rest&&...) noexcept
     {
@@ -10039,7 +10325,7 @@ struct kmer_size_registry {
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr std::size_t read_field(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const ::bioseq::simd::Minimap2Params& params,
         Args&&...) noexcept
     {
         return static_cast<std::size_t>(params.kmer_size);
@@ -10068,7 +10354,7 @@ struct seq_len_log2_registry_per_k {
 
     template <std::size_t /*K_pinned*/, has_bp_size QR_arg, has_bp_size TR_arg, class... Rest>
     [[nodiscard, gnu::always_inline]] static std::size_t read_field_for(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const ::bioseq::simd::Minimap2Params& params,
         const QR_arg& q, const TR_arg& t,
         Rest&&...) noexcept
     {
@@ -10099,11 +10385,11 @@ using ::bioseq::common::templating::bucket_step_pinned;
 using ::bioseq::common::templating::guarded_step;
 
 using baa_step = enum_step<algorithm_enum_values<
-    ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>>;
+    ::bioseq::simd::BaseAlignmentAlgorithmType>>;
 using ca_step  = enum_step<algorithm_enum_values<
-    ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>>;
+    ::bioseq::simd::ChainingAlgorithmType>>;
 using ma_step  = enum_step<algorithm_enum_values<
-    ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>>;
+    ::bioseq::simd::MinimizerAlgorithmType>>;
 using kmer_size_step    = enum_step<kmer_size_registry>;
 using seq_len_log2_step = bucket_step<seq_len_log2_registry>;
 
@@ -10117,7 +10403,7 @@ using seq_len_log2_step_per_k = bucket_step_pinned<seq_len_log2_registry_per_k>;
 /// return types (MatchResultCollection / PipelineDescription / void).
 template <class R, template <auto...> class Leaf, class... Steps>
 using dispatch_chain = ::bioseq::common::templating::dispatch_chain<
-    R, Leaf, ::bioseq::simd::HWY_NAMESPACE::Minimap2Params, Steps...>;
+    R, Leaf, ::bioseq::simd::Minimap2Params, Steps...>;
 
 } // namespace detail
 
@@ -10141,28 +10427,28 @@ template <EntryPoint EP_v,
           sequence_alphabet Alphabet,
           class MinimizerT, class IndexT,
           std::size_t L, std::size_t K,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA>
+          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::ChainingAlgorithmType      CA,
+          ::bioseq::simd::MinimizerAlgorithmType     MA>
 struct pipeline_run_leaf {
     static_assert(std::is_same_v<decltype(L), std::size_t>,
         "pipeline_run_leaf: L must be std::size_t (comes from seq_len_log2_step).");
     static_assert(std::is_same_v<decltype(K), std::size_t>,
         "pipeline_run_leaf: K must be std::size_t (comes from kmer_size_step).");
     static_assert(std::is_same_v<decltype(BAA),
-        ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>,
+        ::bioseq::simd::BaseAlignmentAlgorithmType>,
         "pipeline_run_leaf: BAA must be BaseAlignmentAlgorithmType (from baa_step).");
     static_assert(std::is_same_v<decltype(CA),
-        ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>,
+        ::bioseq::simd::ChainingAlgorithmType>,
         "pipeline_run_leaf: CA must be ChainingAlgorithmType (from ca_step).");
     static_assert(std::is_same_v<decltype(MA),
-        ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>,
+        ::bioseq::simd::MinimizerAlgorithmType>,
         "pipeline_run_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
     template <class QueryMinimizers>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
     static MatchResultCollection call(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const ::bioseq::simd::Minimap2Params& params,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
         const QueryMinimizers&            query_minimizers,
@@ -10218,15 +10504,15 @@ struct pipeline_run_traits {
 /// `describe_leaf` so its unqualified call inside `describe_leaf::call`
 /// resolves at the point of template definition.
 template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
+          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::ChainingAlgorithmType      CA,
+          ::bioseq::simd::MinimizerAlgorithmType     MA,
           EntryPoint                                                EP,
           sequence_alphabet Alphabet>
 [[nodiscard]] PipelineDescription describe_pipeline_leaf(
     bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    const ::bioseq::simd::Minimap2Params& params,
     sequence_size_t query_len, sequence_size_t target_len)
 {
     using MinimizerT = typename Cep::minimizer_repr_t;
@@ -10247,23 +10533,23 @@ template <is_constexpr_aligner_params Cep,
 // EP/MA are pinned constants here instead of chain-dispatched dimensions.
 template <sequence_alphabet Alphabet,
           std::size_t L, std::size_t K,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA>
+          ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::ChainingAlgorithmType      CA>
 struct describe_leaf {
     static_assert(std::is_same_v<decltype(L), std::size_t>,
         "describe_leaf: L must be std::size_t (from seq_len_log2_step).");
     static_assert(std::is_same_v<decltype(K), std::size_t>,
         "describe_leaf: K must be std::size_t (from kmer_size_step).");
     static_assert(std::is_same_v<decltype(BAA),
-        ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>,
+        ::bioseq::simd::BaseAlignmentAlgorithmType>,
         "describe_leaf: BAA must be BaseAlignmentAlgorithmType (from baa_step).");
     static_assert(std::is_same_v<decltype(CA),
-        ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>,
+        ::bioseq::simd::ChainingAlgorithmType>,
         "describe_leaf: CA must be ChainingAlgorithmType (from ca_step).");
 
     BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
     static PipelineDescription call(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const ::bioseq::simd::Minimap2Params& params,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> q,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> t,
         const int32_t& query_len,
@@ -10278,9 +10564,9 @@ struct describe_leaf {
 
         constexpr auto EP_describe = EntryPoint::WithPrebuiltMinimizers;
         constexpr auto MA_describe = algorithm_enum_values<
-            ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>::default_value;
+            ::bioseq::simd::MinimizerAlgorithmType>::default_value;
         static_assert(MA_describe ==
-            ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR,
+            ::bioseq::simd::MinimizerAlgorithmType::SCALAR,
             "describe_leaf relies on MA default = SCALAR.  Update both call "
             "sites if the MA default ever changes.");
 
@@ -10328,7 +10614,7 @@ MatchResultCollection dispatch_pipeline(
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    const ::bioseq::simd::Minimap2Params& params,
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false,
@@ -10364,7 +10650,7 @@ MatchResultCollection dispatch_pipeline(
 template <sequence_alphabet Alphabet>
 BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 PipelineDescription describe_pipeline_for(
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    const ::bioseq::simd::Minimap2Params& params,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_proto,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_proto)
 {
@@ -10384,17 +10670,16 @@ PipelineDescription describe_pipeline_for(
         params, query_seq_proto, target_seq_proto, query_len, target_len);
 }
 
-} // namespace bioseq::simd::HWY_NAMESPACE::pipe
+} // namespace bioseq::simd::pipe
 
 // =============================================================================
 // 9.7 Public entry points (DOC0249 §9.7) — relocated from minimap_port.cppm so
 // they can delegate to `pipe::dispatch_pipeline` without forming a circular
-// import.  Live in `bioseq::simd::HWY_NAMESPACE` so callers' fully-qualified
-// names (`bioseq::simd::active_target::minimap_port(...)`,
-// `bioseq::simd::active_target::minimap2_port_with_index(...)`) are unchanged.
+// import. These scheduler-facing entry points are target-neutral and receive
+// the already-selected Highway table through Minimap2Params.
 // =============================================================================
 
-namespace bioseq::simd::HWY_NAMESPACE {
+namespace bioseq::simd {
 
 // DOC0279 §9 — relocated index name in scope for this namespace's entry points.
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
@@ -10953,8 +11238,8 @@ template <class MinimizerT,
     static const auto* _desc =
         bioseq::instr::register_region_static("minimap2_port_with_index");
     auto _scope = bioseq::instr::region(_desc);
-    return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
-        ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
+    return ::bioseq::simd::pipe::dispatch_pipeline<
+        ::bioseq::simd::pipe::EntryPoint::WithPrebuiltMinimizers,
             Alphabet, MinimizerT, IndexT>(
             query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
             gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
@@ -10966,7 +11251,7 @@ template <class MinimizerT,
 [[nodiscard]] MatchResultCollection minimap2_port_with_index(
     bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
-    const ::bioseq::simd::HWY_NAMESPACE::pipe::MinimizerBatchView<MinimizerT>& query_minimizers,
+    const ::bioseq::simd::pipe::MinimizerBatchView<MinimizerT>& query_minimizers,
     const IndexT& prebuilt_target_index,
     const Minimap2Params& params = Minimap2Params{},
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
@@ -10976,8 +11261,8 @@ template <class MinimizerT,
     static const auto* _desc =
         bioseq::instr::register_region_static("minimap2_port_with_index");
     auto _scope = bioseq::instr::region(_desc);
-    return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
-        ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
+    return ::bioseq::simd::pipe::dispatch_pipeline<
+        ::bioseq::simd::pipe::EntryPoint::WithPrebuiltMinimizers,
             Alphabet, MinimizerT, IndexT>(
             query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
             gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
@@ -11009,7 +11294,7 @@ template <class MinimizerT,
     // device. This is the line that removes the XXL_HIFI
     // `target_index_build` bottleneck from the GPU row.
     const bool phase_c_gpu_index =
-        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
+        ::bioseq::simd::pipe::phase_c_index_build_active(params);
     if (!phase_c_gpu_index) {
         target_index.build_consuming(
             std::move(target_minimizers), target_len);
@@ -11019,12 +11304,12 @@ template <class MinimizerT,
     static const auto* _with_index_desc =
         bioseq::instr::register_region_static("minimap2_port_with_index");
     auto _with_index_scope = bioseq::instr::region(_with_index_desc);
-    return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
-        ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
+    return ::bioseq::simd::pipe::dispatch_pipeline<
+        ::bioseq::simd::pipe::EntryPoint::WithPrebuiltMinimizers,
             Alphabet, MinimizerT, MinimizerHashmapFragmentIndex>(
                 query_seq, target_seq, query_minimizers, target_index, params,
                 nullptr, {}, phase_c_gpu_index,
-                ::bioseq::simd::HWY_NAMESPACE::pipe::
+                ::bioseq::simd::pipe::
                     TransientTargetIndexReleaseAuthority{
                         .index = &target_index});
 }
@@ -11078,7 +11363,7 @@ minimap2_port_with_fixed_vulkan_target_handoff(
     try {
         ledger.phase_c_checked = true;
         ledger.phase_c_compatible =
-            !::bioseq::simd::HWY_NAMESPACE::pipe::
+            !::bioseq::simd::pipe::
                 phase_c_index_build_active(params)
             && params.vulkan_enabled
             && params.vulkan_seed_hits_enabled
@@ -11274,8 +11559,8 @@ minimap2_port_with_fixed_vulkan_target_handoff(
             bioseq::instr::register_region_static(
                 "minimap2_port_with_index");
         auto _with_index_scope = bioseq::instr::region(_with_index_desc);
-        auto result = ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
-            ::bioseq::simd::HWY_NAMESPACE::pipe::
+        auto result = ::bioseq::simd::pipe::dispatch_pipeline<
+            ::bioseq::simd::pipe::
                 EntryPoint::WithPrebuiltMinimizers,
                 Alphabet, MinimizerT, MinimizerHashmapFragmentIndex>(
                     query_seq,
@@ -11287,7 +11572,7 @@ minimap2_port_with_fixed_vulkan_target_handoff(
                         ? &*operation_gpu_cache : nullptr,
                     cache_identity,
                     /*allow_gpu_target_index_build=*/false,
-                    ::bioseq::simd::HWY_NAMESPACE::pipe::
+                    ::bioseq::simd::pipe::
                         TransientTargetIndexReleaseAuthority{
                             .operation_owned_gpu_cache =
                                 operation_gpu_cache
@@ -11628,12 +11913,12 @@ sketch_vulkan_into_adopted_host_vector(
     Range& range,
     const std::size_t& window_len,
     const std::size_t& kmer_len,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::Minimap2Params& params)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("mm_sketch");
     auto _scope = bioseq::instr::region(_desc);
-    using Kernel = typename ::bioseq::simd::HWY_NAMESPACE::pipe::
+    using Kernel = typename ::bioseq::simd::pipe::
         algorithm_traits<MinimizerAlgorithmType::VULKAN_MINIMAP_INT>::
             kernel_type;
     auto source = Kernel::template call_result<MinimizerT>(
@@ -11657,11 +11942,11 @@ sketch_vulkan_into_adopted_host_vector(
 }
 
 [[nodiscard]] inline bool minimizer_sketch_proof_matches_selected_route(
-    ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType selected,
+    ::bioseq::simd::MinimizerAlgorithmType selected,
     const MinimizerSketchExecutionProof& proof) noexcept
 {
     if (selected
-        == ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR) {
+        == ::bioseq::simd::MinimizerAlgorithmType::SCALAR) {
         return proof.scalar_present
             && proof.scalar.accepted()
             && !proof.exact_simd_present
@@ -11671,7 +11956,7 @@ sketch_vulkan_into_adopted_host_vector(
             && proof.partial_vulkan == PartialVulkanExecutionProof{};
     }
     if (selected
-        == ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH) {
+        == ::bioseq::simd::MinimizerAlgorithmType::TWO_STACK_NTHASH) {
         return !proof.scalar_present
             && proof.scalar == ScalarMinimizerExecutionProof{}
             && proof.exact_simd_present
@@ -11682,7 +11967,7 @@ sketch_vulkan_into_adopted_host_vector(
             && proof.partial_vulkan == PartialVulkanExecutionProof{};
     }
     if (selected
-        == ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::PAPER_NTHASH_SIMD) {
+        == ::bioseq::simd::MinimizerAlgorithmType::PAPER_NTHASH_SIMD) {
         return !proof.scalar_present
             && proof.scalar == ScalarMinimizerExecutionProof{}
             && !proof.exact_simd_present
@@ -11693,7 +11978,7 @@ sketch_vulkan_into_adopted_host_vector(
             && proof.partial_vulkan == PartialVulkanExecutionProof{};
     }
     if (selected
-        == ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT) {
+        == ::bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT) {
         return !proof.scalar_present
             && proof.scalar == ScalarMinimizerExecutionProof{}
             && !proof.exact_simd_present
@@ -11761,19 +12046,19 @@ inline void record_minimizer_sketch_execution_proof(
 
 template <class MinimizerT,
           class Collector, class Range,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType MA>
+          ::bioseq::simd::MinimizerAlgorithmType MA>
 struct sketch_leaf {
     static_assert(std::is_same_v<decltype(MA),
-        ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>,
+        ::bioseq::simd::MinimizerAlgorithmType>,
         "sketch_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
     BIOSEQ_PIPELINE_INLINE_ATTR
     static MinimizerSketchExecutionProof call(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const ::bioseq::simd::Minimap2Params& params,
         Collector& collector, Range& range,
         const std::size_t& window_len, const std::size_t& kmer_len)
     {
-        using Kernel = typename ::bioseq::simd::HWY_NAMESPACE::pipe::
+        using Kernel = typename ::bioseq::simd::pipe::
             algorithm_traits<MA>::kernel_type;
         if constexpr (Kernel::emits_scalar_minimizer_execution_proof) {
             return {
@@ -11797,7 +12082,7 @@ struct sketch_leaf {
             const auto token = Kernel::template call<MinimizerT>(
                 params, collector, range, window_len, kmer_len);
             if (!token.accepted()) {
-                ::bioseq::simd::HWY_NAMESPACE::pipe::throw_vulkan_declined(
+                ::bioseq::simd::pipe::throw_vulkan_declined(
                     "Vulkan minimizer sketch execution token");
             }
             MinimizerSketchExecutionProof proof{};
@@ -11826,13 +12111,13 @@ BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
 MinimizerSketchExecutionProof sketch_one(
     Collector& collector, Range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::Minimap2Params& params)
 {
     using Traits = sketch_traits<MinimizerT, Collector, Range>;
-    return ::bioseq::simd::HWY_NAMESPACE::pipe::detail::dispatch_chain<
+    return ::bioseq::simd::pipe::detail::dispatch_chain<
         MinimizerSketchExecutionProof,
         Traits::template leaf,
-        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::ma_step
+        ::bioseq::simd::pipe::detail::ma_step
     >::template run<>(params, collector, range, window_len, kmer_len);
 }
 
@@ -11846,7 +12131,7 @@ MinimizerSketchExecutionProof sketch_into_collector(
     sketch_collector_t<MinimizerT>& collector,
     Range& range,
     const std::size_t& window_len, const std::size_t& kmer_len,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+    const ::bioseq::simd::Minimap2Params& params)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("mm_sketch");
@@ -11899,7 +12184,7 @@ template <class MinimizerT,
     std::optional<FixedVulkanTargetSketch<MinimizerT>> fixed_target_sketch;
     MinimizerSketchExecutionProof target_sketch_proof{};
     const bool phase_c_gpu_index =
-        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
+        ::bioseq::simd::pipe::phase_c_index_build_active(params);
     using TargetAlphabet = Alphabet;
     const bool fixed_target_zero_copy_route =
         fixed_vulkan_target_host_adoption_route_selected<MinimizerT>(
@@ -12008,7 +12293,7 @@ struct minimap_port_repr_leaf {
         bioseq::storage::basic_lazy_sequence_view<Alphabet> q,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> t)
     {
-        using MinimizerT = ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<L, K>;
+        using MinimizerT = ::bioseq::minimizers::MinimizerRepr<L, K>;
         return minimap_port_with_repr<MinimizerT, Alphabet>(
             q, t, params);
     }
@@ -12043,11 +12328,11 @@ MatchResultCollection minimap_port(
 {
     using Traits = pipe_entry_detail::minimap_port_traits<Alphabet>;
     // DOC0271 Phase 1 §5.1 — K-then-L chain order (per-K L step).
-    return ::bioseq::simd::HWY_NAMESPACE::pipe::detail::dispatch_chain<
+    return ::bioseq::simd::pipe::detail::dispatch_chain<
         MatchResultCollection,
         Traits::template leaf,
-        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::kmer_size_step,
-        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::seq_len_log2_step_per_k
+        ::bioseq::simd::pipe::detail::kmer_size_step,
+        ::bioseq::simd::pipe::detail::seq_len_log2_step_per_k
     >::template run<>(params, query_seq, target_seq);
 }
 
@@ -12375,7 +12660,8 @@ template <class MinimizerT, sequence_alphabet Alphabet>
             query_seq,
             w,
             k,
-            cpu_query_backend);
+            cpu_query_backend,
+            params.highway_kernels);
     if (!pipe::minimizer_range_proof_matches_backend(
             cpu_query_backend,
             execution_proof,
@@ -12811,7 +13097,9 @@ template <sequence_alphabet Alphabet,
                         pipe::minimizer_dispatch_range<MinimizerT>(
                         seg_collector, target_seq,
                         segment_lo_bp, segment_hi_bp, w, k,
-                        target_sketch_backend);
+                        target_sketch_backend,
+                        pipe::ExactSimdRangeRoute::require_continuation,
+                        params.highway_kernels);
                     record_target_range_proof(merged_collection, range_proof);
                     const std::vector<MinimizerT>& seg_minimizers =
                         seg_collector.extract_sketches_data();
@@ -12903,7 +13191,9 @@ template <sequence_alphabet Alphabet,
                     pipe::minimizer_dispatch_range<MinimizerT>(
                     seg_collector, target_seq,
                     segment_lo_bp, segment_hi_bp, w, k,
-                    target_sketch_backend);
+                    target_sketch_backend,
+                    pipe::ExactSimdRangeRoute::require_continuation,
+                    params.highway_kernels);
                 record_target_range_proof(merged_collection, range_proof);
                 const std::vector<MinimizerT>& seg_minimizers =
                     seg_collector.extract_sketches_data();
@@ -13282,7 +13572,9 @@ template <sequence_alphabet Alphabet,
                     pipe::minimizer_dispatch_range<MinimizerT>(
                     collector, target_seq,
                     segment_lo_bp, segment_hi_bp, w, k,
-                    target_sketch_backend);
+                    target_sketch_backend,
+                    pipe::ExactSimdRangeRoute::require_continuation,
+                    params.highway_kernels);
                 record_target_range_proof(merged_collection, range_proof);
                 const std::vector<MinimizerT>& minimizers =
                     collector.extract_sketches_data();
@@ -13368,7 +13660,9 @@ template <sequence_alphabet Alphabet,
                                 pipe::minimizer_dispatch_range<MinimizerT>(
                                 collector, target_seq,
                                 segment_lo_bp, segment_hi_bp, w, k,
-                                target_sketch_backend);
+                                target_sketch_backend,
+                                pipe::ExactSimdRangeRoute::require_continuation,
+                                params.highway_kernels);
                             const std::vector<MinimizerT>& minimizers =
                                 collector.extract_sketches_data();
                             wave_frag_out[rel] =
@@ -13440,7 +13734,9 @@ template <sequence_alphabet Alphabet,
             pipe::minimizer_dispatch_range<MinimizerT>(
             collector, target_seq,
             segment_lo_bp, segment_hi_bp, w, k,
-            target_sketch_backend);
+            target_sketch_backend,
+            pipe::ExactSimdRangeRoute::require_continuation,
+            params.highway_kernels);
         const std::vector<MinimizerT>& minimizers =
             collector.extract_sketches_data();
         segment_minimizer_counts[segment_index] = minimizers.size();
@@ -13537,7 +13833,9 @@ template <sequence_alphabet Alphabet,
                         pipe::minimizer_dispatch_range<MinimizerT>(
                         collector, target_seq,
                         segment_lo_bp, segment_hi_bp, w, k,
-                        target_sketch_backend);
+                        target_sketch_backend,
+                        pipe::ExactSimdRangeRoute::require_continuation,
+                        params.highway_kernels);
                     const std::vector<MinimizerT>& minimizers =
                         collector.extract_sketches_data();
                     segment_minimizer_counts[segment_index] = minimizers.size();
@@ -13590,8 +13888,6 @@ template <sequence_alphabet Alphabet,
     return finalize_segmented_proof(std::move(merged_collection));
 }
 
-} // namespace bioseq::simd::HWY_NAMESPACE
-
-HWY_AFTER_NAMESPACE();
+} // namespace bioseq::simd
 
 } // export

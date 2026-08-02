@@ -536,6 +536,12 @@ inline void validate_inventories(
                 "duplicate Highway target token or generated module identity");
         }
     }
+    if (!detail::identifier(targets.static_target_token)
+        || !tokens.contains(targets.static_target_token)) {
+        throw std::runtime_error(
+            "Highway static target is absent from the generated inventory: '"
+            + targets.static_target_token + "'");
+    }
 
     if (!detail::module_name(sources.contract_module)
         || !detail::module_name(sources.dispatch_module)) {

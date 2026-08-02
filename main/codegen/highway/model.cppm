@@ -47,6 +47,7 @@ struct target_manifest {
     std::vector<std::pair<std::string, std::string>> policy_definitions;
     std::string highway_version;
     std::string highway_digest;
+    std::string static_target_token;
     std::vector<target_spec> targets;
 };
 
@@ -117,6 +118,7 @@ enum class artifact_kind : std::uint8_t {
     binder,
     partition,
     dispatch_registry,
+    test_support,
 };
 
 struct generated_artifact {
