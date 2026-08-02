@@ -668,6 +668,7 @@ endif()
 # the returned bioseq_codegen / bioseq_codegen_project targets and never create
 # another ExternalProject.
 include(BioseqCodegen)
+include(BioseqHighwayCodegen)
 set(_bioseq_codegen_components)
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
   list(APPEND _bioseq_codegen_components sql)
@@ -677,6 +678,9 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
 endif()
 if(BIOSEQ_BUILD_WEBSITE)
   list(APPEND _bioseq_codegen_components website)
+endif()
+if(BIOSEQ_BUILD_CORE)
+  list(APPEND _bioseq_codegen_components highway)
 endif()
 if(_bioseq_codegen_components)
   bioseq_add_codegen(

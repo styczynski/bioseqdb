@@ -32,7 +32,7 @@ endfunction()
 #   TARGET bioseq_codegen
 #   PROJECT_TARGET bioseq_codegen_project
 #   BINARY_DIR "<root-build>/codegen"
-#   COMPONENTS external website sql)
+#   COMPONENTS external website sql highway)
 #
 # Provisions ONE isolated host-tool generator as an ExternalProject and an
 # imported executable handle. It prefers GCC 16.1/libstdc++ when that toolchain
@@ -55,6 +55,7 @@ function(bioseq_add_codegen)
   set(_enable_external OFF)
   set(_enable_website OFF)
   set(_enable_sql OFF)
+  set(_enable_highway OFF)
   foreach(_component IN LISTS ARG_COMPONENTS)
     if(_component STREQUAL "external")
       set(_enable_external ON)
@@ -62,6 +63,8 @@ function(bioseq_add_codegen)
       set(_enable_website ON)
     elseif(_component STREQUAL "sql")
       set(_enable_sql ON)
+    elseif(_component STREQUAL "highway")
+      set(_enable_highway ON)
     else()
       message(FATAL_ERROR "bioseq_add_codegen: unknown component '${_component}'")
     endif()
@@ -756,6 +759,7 @@ function(bioseq_add_codegen)
       "-DBIOSEQ_CODEGEN_ENABLE_EXTERNAL:BOOL=${_enable_external}"
       "-DBIOSEQ_CODEGEN_ENABLE_WEBSITE:BOOL=${_enable_website}"
       "-DBIOSEQ_CODEGEN_ENABLE_SQL:BOOL=${_enable_sql}"
+      "-DBIOSEQ_CODEGEN_ENABLE_HIGHWAY:BOOL=${_enable_highway}"
       "-DCLANG_BINARY:FILEPATH=${BIOSEQ_CODEGEN_CLANG_BINARY}"
       "-DLLVM_CONFIG_BINARY:FILEPATH=${BIOSEQ_CODEGEN_LLVM_CONFIG}"
       "-DLLVM_VERSION_EXPLICIT:STRING=${_llvm_version}"

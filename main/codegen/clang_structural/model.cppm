@@ -33,6 +33,20 @@ enum class attribute_placement {
     class_head,
     parameter_prefix,
     enumerator_tail,
+    namespace_head,
+};
+
+/// The syntactic form of a callable whose definition body has a proven
+/// source insertion point.  Consumers use this to apply attributes without
+/// re-parsing C++.
+enum class callable_kind {
+    function,
+    member_function,
+    constructor,
+    destructor,
+    operator_function,
+    conversion_function,
+    lambda,
 };
 
 enum class aggregate_kind {
@@ -73,6 +87,40 @@ struct attribute_record {
         attribute_placement::declaration_prefix};
     source_range range;
     source_range argument_range;
+};
+
+/// A callable definition inside a structurally marked namespace.  All ranges
+/// are half-open byte ranges.  hwy_attr_insertion is the compiler-proven
+/// declaration-prefix position for functions (after any outer template head)
+/// and the byte immediately before the opening brace for lambdas.
+struct callable_insertion_record {
+    callable_kind kind{callable_kind::function};
+    std::string qualified_name;
+    std::string stable_usr;
+    bool templated{};
+    source_range declaration_range;
+    source_range body_range;
+    source_position hwy_attr_insertion;
+};
+
+/// Exact lexical geometry for a namespace selected by a structural marker.
+/// body_range excludes the namespace braces; all other token ranges include
+/// the named token.  The boolean policy facts are reported rather than hidden
+/// so generators can fail closed with a domain-specific diagnostic.
+struct marked_namespace_record {
+    std::string qualified_name;
+    std::string target_usr;
+    attribute_record marker;
+    source_range marker_block_range;
+    source_range declaration_range;
+    source_range keyword_range;
+    source_range name_range;
+    source_range open_brace_range;
+    source_range body_range;
+    source_range close_brace_range;
+    std::vector<callable_insertion_record> callables;
+    bool has_explicit_export{};
+    bool crosses_preprocessor_region{};
 };
 
 struct documented_parameter {
@@ -171,6 +219,7 @@ struct translation_unit {
     std::vector<lexical_token> tokens;
     std::vector<declaration_record> declarations;
     std::vector<aggregate_record> aggregate_records;
+    std::vector<marked_namespace_record> marked_namespaces;
 };
 
 struct module_graph_unit {

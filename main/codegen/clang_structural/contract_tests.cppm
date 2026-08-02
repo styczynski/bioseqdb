@@ -446,6 +446,136 @@ export namespace bioseq::codegen::clang_structural {
 inline void run_preparation_contract_self_tests() {
     using namespace contract_detail;
 
+    constexpr std::string_view simd_marker_source = R"CPP(
+export module fixture.simd_marker;
+export namespace bioseq::fixture {
+namespace [[ bioseq :: simd ]] target {
+template<class Value>
+Value map_value(Value value) { return value; }
+
+struct worker {
+    worker() {}
+    int operator()() const { return 1; }
+    int member() { return 2; }
+};
+
+inline int invoke() {
+    auto local = []() { return 3; };
+    return local();
+}
+}
+namespace [[bioseq::similar]] decoy {}
+}
+)CPP";
+    const translation_unit lexical_simd = scan_translation_unit(
+        "simd_marker_lexical.cppm", simd_marker_source);
+    require(
+        lexical_simd.marked_namespaces.size() == 1,
+        "lexical structural scan accepts only exact bioseq::simd markers");
+    const marked_namespace_record& lexical_namespace =
+        lexical_simd.marked_namespaces.front();
+    const auto source_slice = [&](source_range range) {
+        return simd_marker_source.substr(
+            range.begin.byte_offset,
+            range.end.byte_offset - range.begin.byte_offset);
+    };
+    require(
+        lexical_namespace.qualified_name
+                == "bioseq::fixture::target"
+            && lexical_namespace.marker.qualified_name
+                == "bioseq::simd"
+            && lexical_namespace.marker.vendor_namespace == "bioseq"
+            && lexical_namespace.marker.name == "simd"
+            && lexical_namespace.marker.placement
+                == attribute_placement::namespace_head
+            && source_slice(lexical_namespace.marker_block_range)
+                == "[[ bioseq :: simd ]]",
+        "lexical structural scan retains the exact SIMD marker identity");
+    require(
+        source_slice(lexical_namespace.keyword_range) == "namespace"
+            && source_slice(lexical_namespace.name_range) == "target"
+            && source_slice(lexical_namespace.open_brace_range) == "{"
+            && source_slice(lexical_namespace.close_brace_range) == "}"
+            && lexical_namespace.body_range.begin.byte_offset
+                == lexical_namespace.open_brace_range.end.byte_offset
+            && lexical_namespace.body_range.end.byte_offset
+                == lexical_namespace.close_brace_range.begin.byte_offset,
+        "lexical structural scan proves exact namespace token geometry");
+    require(
+        lexical_namespace.callables.empty()
+            && !lexical_namespace.has_explicit_export
+            && !lexical_namespace.crosses_preprocessor_region,
+        "lexical scan leaves callable proof to Clang and reports policy facts");
+
+    const translation_unit clang_simd = scan_translation_unit_from_code(
+        "simd_marker_ast.cppm",
+        simd_marker_source,
+        {"-std=c++20", "-xc++"},
+        "simd_marker_contract");
+    require(
+        clang_simd.marked_namespaces.size() == 1,
+        "Clang structural scan binds one exact SIMD namespace");
+    const marked_namespace_record& clang_namespace =
+        clang_simd.marked_namespaces.front();
+    require(
+        clang_namespace.qualified_name
+                == "bioseq::fixture::target"
+            && !clang_namespace.target_usr.empty()
+            && clang_namespace.callables.size() == 6,
+        "Clang structural scan binds the marked namespace and all callable "
+        "definitions");
+    require(
+        std::ranges::all_of(
+            clang_namespace.callables,
+            [&](const callable_insertion_record& callable) {
+                const bool lambda =
+                    callable.kind == callable_kind::lambda;
+                return (lambda
+                            ? callable.hwy_attr_insertion.byte_offset
+                                == callable.body_range.begin.byte_offset
+                            : callable.hwy_attr_insertion.byte_offset
+                                    >= callable.declaration_range.begin
+                                           .byte_offset
+                                && callable.hwy_attr_insertion.byte_offset
+                                    < callable.body_range.begin.byte_offset)
+                    && callable.body_range.begin.byte_offset
+                        < callable.body_range.end.byte_offset
+                    && simd_marker_source[
+                           callable.body_range.begin.byte_offset]
+                        == '{';
+            }),
+        "Clang structural scan proves function-prefix and lambda-body "
+        "HWY_ATTR insertion points");
+    require(
+        std::ranges::contains(
+            clang_namespace.callables,
+            callable_kind::function,
+            &callable_insertion_record::kind)
+            && std::ranges::contains(
+                clang_namespace.callables,
+                callable_kind::constructor,
+                &callable_insertion_record::kind)
+            && std::ranges::contains(
+                clang_namespace.callables,
+                callable_kind::operator_function,
+                &callable_insertion_record::kind)
+            && std::ranges::contains(
+                clang_namespace.callables,
+                callable_kind::member_function,
+                &callable_insertion_record::kind)
+            && std::ranges::contains(
+                clang_namespace.callables,
+                callable_kind::lambda,
+                &callable_insertion_record::kind)
+            && std::ranges::any_of(
+                clang_namespace.callables,
+                [](const callable_insertion_record& callable) {
+                    return callable.kind == callable_kind::function
+                        && callable.templated;
+                }),
+        "Clang structural scan classifies templates, members, constructors, "
+        "operators, and lambdas");
+
     const configured_toolchain toolchain;
     assert_toolchain_exists(toolchain);
     temporary_tree temporary;

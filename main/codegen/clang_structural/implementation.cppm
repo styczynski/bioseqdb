@@ -94,6 +94,10 @@ struct comment_record {
     std::string_view source) noexcept {
     return source.contains("bioseq_sql")
         || source.contains("bioseq::sql")
+        // The exact spelling is proven after lexical attribute parsing.  Keep
+        // this cheap front-door tolerant of whitespace/comments between the
+        // qualified-name components.
+        || (source.contains("bioseq") && source.contains("simd"))
         || source.contains(".sql_rows")
         || source.contains("relation_entity_handle")
         || source.contains("guc_registration_access")
@@ -102,6 +106,25 @@ struct comment_record {
         || source.contains("PG_FUNCTION_INFO_V1")
         || source.contains("POSTGRES_FN")
         || source.contains("E_POSTGRES_FN");
+}
+
+[[nodiscard]] inline bool is_sql_attribute(
+    const attribute_record& attribute) noexcept {
+    return attribute.vendor_namespace == "bioseq_sql"
+        || attribute.vendor_namespace == "bioseq::sql";
+}
+
+[[nodiscard]] inline bool is_simd_namespace_marker(
+    const attribute_record& attribute) noexcept {
+    return attribute.qualified_name == "bioseq::simd"
+        && attribute.vendor_namespace == "bioseq"
+        && attribute.name == "simd";
+}
+
+[[nodiscard]] inline bool is_structural_attribute(
+    const attribute_record& attribute) noexcept {
+    return is_sql_attribute(attribute)
+        || is_simd_namespace_marker(attribute);
 }
 
 [[nodiscard]] inline std::string_view trim_view(std::string_view text) noexcept {
@@ -519,6 +542,9 @@ struct subject {
     std::size_t name_token{};
     std::optional<std::size_t> open_parenthesis;
     std::optional<std::size_t> close_parenthesis;
+    std::optional<std::size_t> namespace_keyword;
+    std::optional<std::size_t> namespace_open_brace;
+    std::optional<std::size_t> namespace_close_brace;
 };
 
 [[nodiscard]] inline std::optional<std::size_t> matching_token(
@@ -555,6 +581,14 @@ inline void adjust_angle_depth(
 [[nodiscard]] inline subject find_subject(
     const std::vector<lexical_token>& tokens,
     const attribute_block& block) {
+    const bool has_simd_namespace_marker = std::ranges::any_of(
+        block.attributes, is_simd_namespace_marker);
+    if (has_simd_namespace_marker
+        && (block.token_begin == 0
+            || tokens[block.token_begin - 1].spelling
+                != "namespace")) {
+        return {};
+    }
     const bool has_param = std::ranges::any_of(
         block.attributes,
         [](const attribute_record& attribute) {
@@ -591,6 +625,46 @@ inline void adjust_angle_depth(
             .token_begin = block.token_begin - 2,
             .token_end = block.token_end,
             .name_token = block.token_begin - 1,
+        };
+    }
+
+    // Namespace attributes are required by the grammar to follow the
+    // `namespace` keyword.  Associate the exact bioseq::simd marker only in
+    // that position, and prove both braces before exposing the subject to a
+    // generator.
+    if (has_simd_namespace_marker && block.token_begin > 0
+        && tokens[block.token_begin - 1].spelling == "namespace") {
+        const std::size_t keyword = block.token_begin - 1;
+        const std::size_t name =
+            skip_attribute_blocks(tokens, block.token_end);
+        if (name >= tokens.size() || tokens[name].spelling.empty()
+            || !identifier_begin(tokens[name].spelling.front())) {
+            return {};
+        }
+        std::size_t open = name + 1;
+        while (open < tokens.size()
+               && tokens[open].spelling != "{"
+               && tokens[open].spelling != ";"
+               && tokens[open].spelling != "=") {
+            ++open;
+        }
+        if (open >= tokens.size() || tokens[open].spelling != "{") {
+            return {};
+        }
+        const std::optional<std::size_t> close =
+            matching_token(tokens, open, "{", "}");
+        if (!close) {
+            return {};
+        }
+        return {
+            .kind = declaration_kind::namespace_,
+            .name = tokens[name].spelling,
+            .token_begin = keyword,
+            .token_end = open + 1,
+            .name_token = name,
+            .namespace_keyword = keyword,
+            .namespace_open_brace = open,
+            .namespace_close_brace = close,
         };
     }
 
@@ -848,6 +922,7 @@ struct scope_region {
                     std::string namespace_name;
                     std::size_t name_token = cursor + 1;
                     for (std::size_t part = cursor + 1; part < index; ++part) {
+                        if (in_attribute[part]) continue;
                         if (tokens[part].spelling == "inline") continue;
                         if (tokens[part].spelling == "::"
                             || identifier_begin(
@@ -1294,6 +1369,88 @@ inline void merge_documentation_groups(
     return result;
 }
 
+[[nodiscard]] inline marked_namespace_record make_marked_namespace(
+    std::string_view source,
+    const std::vector<lexical_token>& tokens,
+    const attribute_block& block,
+    const subject& subject,
+    std::string qualified_name,
+    std::string target_usr = {}) {
+    if (subject.kind != declaration_kind::namespace_
+        || !subject.namespace_keyword
+        || !subject.namespace_open_brace
+        || !subject.namespace_close_brace) {
+        throw std::runtime_error(
+            "structural namespace marker has no proven namespace geometry");
+    }
+    const std::size_t keyword = *subject.namespace_keyword;
+    const std::size_t open = *subject.namespace_open_brace;
+    const std::size_t close = *subject.namespace_close_brace;
+    if (keyword >= tokens.size() || subject.name_token >= tokens.size()
+        || open >= tokens.size() || close >= tokens.size()
+        || keyword >= open || open >= close) {
+        throw std::runtime_error(
+            "structural namespace marker has invalid token geometry");
+    }
+    const auto marker = std::ranges::find_if(
+        block.attributes, is_simd_namespace_marker);
+    if (marker == block.attributes.end()) {
+        throw std::runtime_error(
+            "structural namespace subject has no exact bioseq::simd marker");
+    }
+
+    std::size_t header_begin = keyword;
+    while (header_begin > 0) {
+        const std::string_view previous =
+            tokens[header_begin - 1].spelling;
+        if (previous == ";" || previous == "{" || previous == "}") {
+            break;
+        }
+        --header_begin;
+    }
+    const bool explicit_export = std::ranges::any_of(
+        tokens.begin() + static_cast<std::ptrdiff_t>(header_begin),
+        tokens.begin() + static_cast<std::ptrdiff_t>(close),
+        [](const lexical_token& token) {
+            return token.spelling == "export";
+        });
+    const std::string boundary_condition = condition_at(
+        source, tokens[keyword].range.begin.byte_offset);
+    const bool crosses_preprocessor_region =
+        !boundary_condition.empty()
+        || condition_at(source, tokens[open].range.end.byte_offset)
+            != boundary_condition
+        || condition_at(source, tokens[close].range.begin.byte_offset)
+            != boundary_condition
+        || condition_at(source, tokens[close].range.end.byte_offset)
+            != boundary_condition;
+
+    attribute_record recorded_marker = *marker;
+    recorded_marker.target_usr = target_usr;
+    recorded_marker.placement = attribute_placement::namespace_head;
+    return {
+        .qualified_name = std::move(qualified_name),
+        .target_usr = std::move(target_usr),
+        .marker = std::move(recorded_marker),
+        .marker_block_range = block.range,
+        .declaration_range = {
+            .begin = tokens[keyword].range.begin,
+            .end = tokens[close].range.end,
+        },
+        .keyword_range = tokens[keyword].range,
+        .name_range = tokens[subject.name_token].range,
+        .open_brace_range = tokens[open].range,
+        .body_range = {
+            .begin = tokens[open].range.end,
+            .end = tokens[close].range.begin,
+        },
+        .close_brace_range = tokens[close].range,
+        .has_explicit_export = explicit_export,
+        .crosses_preprocessor_region =
+            crosses_preprocessor_region,
+    };
+}
+
 [[nodiscard]] inline std::string source_between(
     std::string_view source,
     const std::vector<lexical_token>& tokens,
@@ -1735,8 +1892,7 @@ inline void merge_documentation_groups(
         const bool relevant = std::ranges::any_of(
             block.attributes,
             [](const attribute_record& attribute) {
-                return attribute.vendor_namespace == "bioseq_sql"
-                    || attribute.vendor_namespace == "bioseq::sql";
+                return detail::is_structural_attribute(attribute);
             });
         if (!relevant) continue;
         const detail::subject subject = detail::find_subject(tokens, block);
@@ -1744,7 +1900,8 @@ inline void merge_documentation_groups(
             throw std::runtime_error(
                 source_path.string() + ":"
                 + std::to_string(block.range.begin.line)
-                + ": cannot associate bioseq SQL attribute with a declaration");
+                + ": cannot associate bioseq structural attribute "
+                  "with a declaration");
         }
         const std::string scope =
             detail::enclosing_scope(scopes, subject.token_begin);
@@ -1774,7 +1931,13 @@ inline void merge_documentation_groups(
                         std::min(subject.token_end, tokens.size()) - 1]
                         .range.end,
                 },
+                .name_range = tokens[subject.name_token].range,
             };
+            if (subject.kind == declaration_kind::namespace_
+                && subject.namespace_close_brace) {
+                declaration.range.end =
+                    tokens[*subject.namespace_close_brace].range.end;
+            }
             if (subject.kind == declaration_kind::function
                 && subject.open_parenthesis && subject.close_parenthesis) {
                 declaration.return_type = detail::source_between(
@@ -1885,8 +2048,7 @@ inline void merge_documentation_groups(
                 declaration.documentation, candidate);
         }
         for (attribute_record attribute : block.attributes) {
-            if (attribute.vendor_namespace == "bioseq_sql"
-                || attribute.vendor_namespace == "bioseq::sql") {
+            if (detail::is_structural_attribute(attribute)) {
                 if (subject.kind == declaration_kind::enumerator
                     && block.token_begin > 0) {
                     attribute.placement =
@@ -1905,9 +2067,27 @@ inline void merge_documentation_groups(
                                    == "enum")) {
                     attribute.placement =
                         attribute_placement::class_head;
+                } else if (subject.kind
+                               == declaration_kind::namespace_
+                           && detail::is_simd_namespace_marker(
+                               attribute)) {
+                    attribute.placement =
+                        attribute_placement::namespace_head;
                 }
                 declaration.attributes.push_back(std::move(attribute));
             }
+        }
+        if (subject.kind == declaration_kind::namespace_
+            && std::ranges::any_of(
+                block.attributes,
+                detail::is_simd_namespace_marker)) {
+            result.marked_namespaces.push_back(
+                detail::make_marked_namespace(
+                    source,
+                    tokens,
+                    block,
+                    subject,
+                    qualified));
         }
     }
 
@@ -2386,6 +2566,26 @@ struct conditional_state {
     return "free";
 }
 
+[[nodiscard]] callable_kind callable_kind_of(
+    const clang::FunctionDecl* function) noexcept {
+    if (llvm::isa<clang::CXXConstructorDecl>(function)) {
+        return callable_kind::constructor;
+    }
+    if (llvm::isa<clang::CXXDestructorDecl>(function)) {
+        return callable_kind::destructor;
+    }
+    if (llvm::isa<clang::CXXConversionDecl>(function)) {
+        return callable_kind::conversion_function;
+    }
+    if (function->isOverloadedOperator()) {
+        return callable_kind::operator_function;
+    }
+    if (llvm::isa<clang::CXXMethodDecl>(function)) {
+        return callable_kind::member_function;
+    }
+    return callable_kind::function;
+}
+
 [[nodiscard]] std::string normalized_function_signature(
     const clang::FunctionDecl* function,
     const clang::PrintingPolicy& policy) {
@@ -2776,6 +2976,11 @@ struct field_location {
     std::size_t field{};
 };
 
+struct callable_candidate {
+    callable_insertion_record record;
+    bool insertion_proven{};
+};
+
 class structural_visitor final
     : public clang::RecursiveASTVisitor<structural_visitor> {
   public:
@@ -2893,6 +3098,45 @@ class structural_visitor final
                     .parameter = ordinal,
                 });
         }
+        record_callable(function);
+        return true;
+    }
+
+    bool VisitLambdaExpr(clang::LambdaExpr* lambda) {
+        if (lambda == nullptr || lambda->getBody() == nullptr) {
+            return true;
+        }
+        const clang::CompoundStmt* body = lambda->getBody();
+        const clang::SourceLocation body_begin =
+            sources_.getSpellingLoc(body->getBeginLoc());
+        const clang::SourceLocation body_end =
+            sources_.getSpellingLoc(body->getEndLoc());
+        if (body_begin.isInvalid() || body_end.isInvalid()
+            || !sources_.isWrittenInMainFile(body_begin)
+            || !sources_.isWrittenInMainFile(body_end)) {
+            return true;
+        }
+        const clang::CXXMethodDecl* call_operator =
+            lambda->getCallOperator();
+        const source_range body_range = source_range_of(
+            body->getSourceRange(), sources_, language_);
+        callable_candidates_.push_back(callable_candidate{
+            .record = {
+                .kind = callable_kind::lambda,
+                .qualified_name = call_operator == nullptr
+                    ? std::string{"<lambda>"}
+                    : call_operator->getQualifiedNameAsString(),
+                .stable_usr = raw_stable_usr(call_operator),
+                .templated = lambda->isGenericLambda(),
+                .declaration_range = source_range_of(
+                    lambda->getSourceRange(), sources_, language_),
+                .body_range = body_range,
+                .hwy_attr_insertion = body_range.begin,
+            },
+            .insertion_proven =
+                body_range.begin.byte_offset
+                    < body_range.end.byte_offset,
+        });
         return true;
     }
 
@@ -2992,9 +3236,7 @@ class structural_visitor final
             const bool relevant = std::ranges::any_of(
                 block.attributes,
                 [](const attribute_record& attribute) {
-                    return attribute.vendor_namespace == "bioseq_sql"
-                        || attribute.vendor_namespace
-                            == "bioseq::sql";
+                    return detail::is_structural_attribute(attribute);
                 });
             if (!relevant) {
                 continue;
@@ -3006,12 +3248,13 @@ class structural_visitor final
                 throw std::runtime_error(
                     output_.source_path.string() + ":"
                     + std::to_string(block.range.begin.line)
-                    + ": Clang token pass cannot associate SQL "
+                    + ": Clang token pass cannot associate structural "
                       "attribute with a declaration");
             }
             const std::size_t offset =
                 tokens[subject.name_token].range.begin.byte_offset;
             bool attached = false;
+            declaration_record* attached_declaration = nullptr;
             if (const auto declaration =
                     declaration_by_name_offset_.find(offset);
                 declaration
@@ -3024,6 +3267,7 @@ class structural_visitor final
                     target.stable_usr,
                     subject,
                     tokens);
+                attached_declaration = &target;
                 attached = true;
             }
             if (const auto parameter =
@@ -3061,14 +3305,149 @@ class structural_visitor final
                 throw std::runtime_error(
                     output_.source_path.string() + ":"
                     + std::to_string(block.range.begin.line)
-                    + ": active SQL attribute has no Clang AST "
+                    + ": active structural attribute has no Clang AST "
                       "declaration target");
             }
+            if (std::ranges::any_of(
+                    block.attributes,
+                    detail::is_simd_namespace_marker)) {
+                if (attached_declaration == nullptr
+                    && skipped_at(conditions_, offset)) {
+                    continue;
+                }
+                if (subject.kind != declaration_kind::namespace_
+                    || attached_declaration == nullptr
+                    || attached_declaration->kind
+                        != declaration_kind::namespace_) {
+                    throw std::runtime_error(
+                        output_.source_path.string() + ":"
+                        + std::to_string(block.range.begin.line)
+                        + ": bioseq::simd must annotate a named "
+                          "namespace head");
+                }
+                marked_namespace_record marked =
+                    detail::make_marked_namespace(
+                        source,
+                        tokens,
+                        block,
+                        subject,
+                        attached_declaration->qualified_name,
+                        attached_declaration->stable_usr);
+                populate_callable_insertions(marked);
+                output_.marked_namespaces.push_back(
+                    std::move(marked));
+            }
         }
-        static_cast<void>(source);
     }
 
   private:
+    void populate_callable_insertions(
+        marked_namespace_record& marked) const {
+        const std::size_t namespace_begin =
+            marked.body_range.begin.byte_offset;
+        const std::size_t namespace_end =
+            marked.body_range.end.byte_offset;
+        for (const callable_candidate& candidate :
+             callable_candidates_) {
+            const std::size_t declaration_begin = candidate.record
+                .declaration_range.begin.byte_offset;
+            if (declaration_begin < namespace_begin
+                || declaration_begin >= namespace_end) {
+                continue;
+            }
+            const std::size_t body_begin =
+                candidate.record.body_range.begin.byte_offset;
+            const std::size_t body_end =
+                candidate.record.body_range.end.byte_offset;
+            const std::size_t insertion = candidate.record
+                .hwy_attr_insertion.byte_offset;
+            const bool lambda_insertion =
+                candidate.record.kind == callable_kind::lambda
+                && insertion == body_begin;
+            const bool function_insertion =
+                candidate.record.kind != callable_kind::lambda
+                && insertion >= declaration_begin
+                && insertion < body_begin;
+            if (!candidate.insertion_proven
+                || (!lambda_insertion && !function_insertion)
+                || body_begin < namespace_begin
+                || body_end > namespace_end
+                || body_begin >= body_end) {
+                throw std::runtime_error(
+                    output_.source_path.string() + ":"
+                    + std::to_string(
+                        candidate.record.declaration_range.begin.line)
+                    + ": callable '"
+                    + candidate.record.qualified_name
+                    + "' in bioseq::simd namespace has no proven "
+                      "compound-body attribute insertion point");
+            }
+            marked.callables.push_back(candidate.record);
+        }
+        std::ranges::sort(
+            marked.callables,
+            {},
+            [](const callable_insertion_record& callable) {
+                return callable.hwy_attr_insertion.byte_offset;
+            });
+        if (std::ranges::adjacent_find(
+                marked.callables,
+                {},
+                [](const callable_insertion_record& callable) {
+                    return callable.hwy_attr_insertion.byte_offset;
+                }) != marked.callables.end()) {
+            throw std::runtime_error(
+                output_.source_path.string()
+                + ": duplicate callable insertion point in bioseq::simd "
+                  "namespace '" + marked.qualified_name + "'");
+        }
+    }
+
+    void record_callable(const clang::FunctionDecl* function) {
+        if (!function->doesThisDeclarationHaveABody()) {
+            return;
+        }
+        const clang::Stmt* body = function->getBody();
+        if (body == nullptr) {
+            return;
+        }
+        const source_range body_range = source_range_of(
+            body->getSourceRange(), sources_, language_);
+        const clang::SourceLocation body_begin =
+            sources_.getSpellingLoc(body->getBeginLoc());
+        const clang::SourceLocation body_end =
+            sources_.getSpellingLoc(body->getEndLoc());
+        const clang::SourceLocation insertion_location =
+            sources_.getSpellingLoc(function->getInnerLocStart());
+        const bool main_file_body = body_begin.isValid()
+            && body_end.isValid()
+            && insertion_location.isValid()
+            && sources_.isWrittenInMainFile(body_begin)
+            && sources_.isWrittenInMainFile(body_end)
+            && sources_.isWrittenInMainFile(insertion_location);
+        const bool compound = llvm::isa<clang::CompoundStmt>(body);
+        const source_position insertion =
+            source_position_of(insertion_location, sources_);
+        callable_candidates_.push_back(callable_candidate{
+            .record = {
+                .kind = callable_kind_of(function),
+                .qualified_name =
+                    function->getQualifiedNameAsString(),
+                .stable_usr = raw_stable_usr(function),
+                .templated = function->getTemplatedKind()
+                    != clang::FunctionDecl::TK_NonTemplate,
+                .declaration_range = source_range_of(
+                    function->getSourceRange(), sources_, language_),
+                .body_range = body_range,
+                .hwy_attr_insertion = insertion,
+            },
+            .insertion_proven = main_file_body && compound
+                && insertion.byte_offset < body_range.begin.byte_offset
+                && body_range.begin.byte_offset
+                    < body_range.end.byte_offset,
+        });
+    }
+
     [[nodiscard]] bool eligible(
         const clang::NamedDecl* declaration) const {
         return !declaration->getName().empty()
@@ -3254,8 +3633,7 @@ class structural_visitor final
                 + "' has no stable Clang USR");
         }
         for (attribute_record attribute : block.attributes) {
-            if (attribute.vendor_namespace != "bioseq_sql"
-                && attribute.vendor_namespace != "bioseq::sql") {
+            if (!detail::is_structural_attribute(attribute)) {
                 continue;
             }
             attribute.target_usr = std::string{target_usr};
@@ -3278,6 +3656,11 @@ class structural_visitor final
                                == "enum")) {
                 attribute.placement =
                     attribute_placement::class_head;
+            } else if (subject.kind == declaration_kind::namespace_
+                       && detail::is_simd_namespace_marker(
+                           attribute)) {
+                attribute.placement =
+                    attribute_placement::namespace_head;
             }
             destination.push_back(std::move(attribute));
         }
@@ -3297,6 +3680,7 @@ class structural_visitor final
         aggregate_field_by_name_offset_;
     std::unordered_map<std::string, const clang::FunctionDecl*>
         fallback_function_owners_;
+    std::vector<callable_candidate> callable_candidates_;
 };
 
 class structural_consumer final : public clang::ASTConsumer {
