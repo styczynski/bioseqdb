@@ -1,9 +1,9 @@
-#include "common_simd.h"
 #include "common_tests.h"
 #include "common.h"
 
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,20 +15,35 @@ import bioseq.alignment;
 import bioseq.alignment.utils;
 import bioseq.alignment.block_aligner;
 import bioseq.alignment.ksw2_batched;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.prefilters.sneaky_snake;
 import bioseq.sequences.chaining.utils;
 import bioseq.common.context;
 import bioseq.storage.lazy;
 
-HWY_BEFORE_NAMESPACE();
-namespace bioseq::simd::HWY_NAMESPACE {
+namespace bioseq::simd {
 using namespace bioseq::sequences::prefilters;
 
 namespace {
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t = compact_sequence_range<dna4_u64>;
+
+[[nodiscard]] const AlignmentKernels<seq::dna4>&
+fixed_alignment_kernels() {
+    const auto& root =
+        ::bioseq::simd_dispatch::highway_test_kernel_table();
+    for (const auto& entry : root.alignment_by_alphabet) {
+        if (entry.alphabet_code == 0u && entry.typed_table != nullptr) {
+            return *static_cast<const AlignmentKernels<seq::dna4>*>(
+                entry.typed_table);
+        }
+    }
+    throw std::logic_error{
+        "generated fixed-target test table lacks DNA4 alignment"};
+}
 
 [[nodiscard]] std::vector<seq::dna4> dna4_from_ascii(
         std::string_view text) {
@@ -63,6 +78,11 @@ using range_t = compact_sequence_range<dna4_u64>;
 
 [[nodiscard]] Minimap2Params exact_alignment_params() {
     Minimap2Params params;
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    params.highway_kernels = binding.kernels;
+    params.highway_executed_target = binding.target;
+    params.alphabet_code = 0u;
     params.match_score = 2;
     params.mismatch_pen = 4;
     params.gap_open1 = 20;
@@ -203,13 +223,15 @@ enum class FixtureKind {
 
     align_regions<BaseAlignmentAlgorithmType::KSW2>(
         std::span<AlignRegion>{&result.ksw2, 1},
-        anchor_span, query_view, target_view, scoring, params);
+        anchor_span, query_view, target_view, scoring,
+        fixed_alignment_kernels(), params);
     align_regions<BaseAlignmentAlgorithmType::BLOCK_ALIGNER>(
         std::span<AlignRegion>{&result.block, 1},
-        anchor_span, query_view, target_view, scoring, params);
-    align_regions_batched(
+        anchor_span, query_view, target_view, scoring,
+        fixed_alignment_kernels(), params);
+    fixed_alignment_kernels().ksw2_batched(
         std::span<AlignRegion>{&result.batched, 1},
-        anchor_span, query_view, target_view, scoring, params);
+        anchor_span, query_view, target_view, scoring, params, nullptr);
     return result;
 }
 
@@ -404,5 +426,4 @@ TEST_CASE("Batched exact CIGAR and coordinates match unbatched KSW2 extensions",
     }
 }
 
-}  // namespace bioseq::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
+}  // namespace bioseq::simd

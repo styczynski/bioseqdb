@@ -1,36 +1,32 @@
 /**
- * @file minimizer_hashmap_index.cpp
+ * @file minimizer_hashmap_index_impl.cppm
  * @brief Boost-backed implementation for MinimizerHashmapFragmentIndex.
  */
 module;
 
 #include "common.h"
 
-#include <hwy/highway.h>
-
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <boost/version.hpp>
 
 #include <algorithm>
-#include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <limits>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 module bioseq.indexing.minimizer_hashmap;
 
 import bioseq.common.radix_sort;
 import bioseq.indexing.type;
-import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.two_stacks;
-import bioseq.sequences.simd;
-import bioseq.simd.utils;
-import bioseq.storage.lazy;
+import bioseq.sequences.kmers.highway_contract;
 
 namespace bioseq::indexing::detail {
 
@@ -149,155 +145,10 @@ static_assert(sizeof(PinnedFoaGroup) == 16u);
 
 namespace bioseq::indexing {
 
-namespace grouped32_hn = hwy::HWY_NAMESPACE;
-namespace grouped32_vs = bioseq::simd::HWY_NAMESPACE;
-
-auto PreparedGrouped32QueryReader::validate_non_scatter_local32_w2(
-        std::span<const std::byte> encoded_bytes,
-        const MinimizerGrouped32Control& control,
-        const MinimizerPositionSegmentCore& core) noexcept
-    -> NonScatterSimdValidationResult {
-    NonScatterSimdValidationResult result{
-        .selected_hwy_target = static_cast<std::uint64_t>(HWY_TARGET),
-    };
-#if HWY_TARGET == HWY_SCALAR
-    (void)encoded_bytes;
-    (void)control;
-    (void)core;
-    return result;
-#else
-    if constexpr (std::endian::native != std::endian::little) {
-        return result;
-    } else {
-        if (static_cast<std::uint64_t>(control.position_offset)
-                > (std::numeric_limits<std::size_t>::max)()
-            || static_cast<std::uint64_t>(control.position_count)
-                > (std::numeric_limits<std::size_t>::max)()) {
-            return result;
-        }
-
-        using D8 = grouped32_hn::ScalableTag<std::uint8_t>;
-        using D32 = grouped32_hn::Repartition<std::uint32_t, D8>;
-        constexpr std::size_t stream_width = 2u;
-        D8 d8;
-        D32 d32;
-        const std::size_t lanes = grouped32_hn::Lanes(d32);
-        const std::size_t count = static_cast<std::size_t>(
-            control.position_count);
-        if (count == 0u
-            || count - 1u < stream_width * lanes
-            || core.begin_bp >= core.end_bp
-            || core.end_bp - core.begin_bp
-                > static_cast<std::uint64_t>(
-                    kMinimizerGrouped32MaxLocalBp) + 1u) {
-            return result;
-        }
-
-        const std::size_t first_element = static_cast<std::size_t>(
-            control.position_offset);
-        const std::size_t available_words = encoded_bytes.size()
-            / kMinimizerGrouped32PositionEncodedBytes;
-        if (first_element > available_words
-            || count > available_words - first_element) {
-            return result;
-        }
-        const std::size_t first_byte = first_element
-            * kMinimizerGrouped32PositionEncodedBytes;
-        const auto segment_width = static_cast<std::uint32_t>(
-            core.end_bp - core.begin_bp);
-        const std::uint32_t first =
-            minimizer_generation_wire_detail::read_le<std::uint32_t>(
-                encoded_bytes, first_byte);
-        if ((first >> 1u) >= segment_width) {
-            result.validation = NonScatterSimdValidation::rejected;
-            return result;
-        }
-
-        const auto* span_bytes = reinterpret_cast<const std::uint8_t*>(
-            encoded_bytes.data() + first_byte);
-        std::size_t position_index = 1u;
-        auto previous_vector = grouped32_hn::Set(d32, first);
-        auto invalid_masks = grouped32_vs::mask_stream<
-            D32, stream_width>::splat_false(d32);
-        const auto widths = grouped32_vs::vec_stream<
-            D32, std::uint32_t, stream_width>::splat(d32, segment_width);
-        const std::size_t words_per_iteration = stream_width * lanes;
-        result.selected_vector_stream_width =
-            static_cast<std::uint8_t>(stream_width);
-        do {
-            const auto loaded_bytes = grouped32_vs::make_vec_stream<
-                D8, std::uint8_t, stream_width>(
-                [d8, span_bytes, position_index, lanes](auto slot_constant)
-                    [[gnu::always_inline]] {
-                    constexpr std::size_t slot =
-                        decltype(slot_constant)::value;
-                    const std::size_t word_offset = position_index
-                        + slot * lanes;
-                    return grouped32_hn::LoadU(
-                        d8,
-                        span_bytes + word_offset
-                            * kMinimizerGrouped32PositionEncodedBytes);
-                });
-            const auto current = grouped32_vs::BitCast(d32, loaded_bytes);
-            const auto predecessors = grouped32_vs::make_vec_stream<
-                D32, std::uint32_t, stream_width>(
-                [d32, &current, previous_vector](auto slot_constant)
-                    [[gnu::always_inline]] {
-                    constexpr std::size_t slot =
-                        decltype(slot_constant)::value;
-                    if constexpr (slot == 0u) {
-                        return grouped32_vs::lanes_shift_left_1_borrow(
-                            d32, current[slot], previous_vector);
-                    } else {
-                        return grouped32_vs::lanes_shift_left_1_borrow(
-                            d32, current[slot], current[slot - 1u]);
-                    }
-                });
-            const auto invalid_order = grouped32_vs::Le(
-                current, predecessors);
-            const auto invalid_range = grouped32_vs::Ge(
-                grouped32_vs::ShiftRight<1>(current), widths);
-            invalid_masks = grouped32_vs::Or(
-                invalid_masks,
-                grouped32_vs::Or(invalid_order, invalid_range));
-            previous_vector = current[stream_width - 1u];
-            position_index += words_per_iteration;
-            result.vectorized_words += words_per_iteration;
-        } while (count - position_index >= words_per_iteration);
-
-        const auto all_clear = grouped32_vs::AllFalsePerStream(
-            d32, invalid_masks);
-        if (!all_clear[0] || !all_clear[1]) {
-            result.validation = NonScatterSimdValidation::rejected;
-            return result;
-        }
-
-        std::uint32_t previous = grouped32_vs::extract_last(
-            d32, previous_vector);
-        while (position_index < count) {
-            const std::uint32_t encoded =
-                minimizer_generation_wire_detail::read_le<std::uint32_t>(
-                    encoded_bytes,
-                    first_byte + position_index
-                        * kMinimizerGrouped32PositionEncodedBytes);
-            if (encoded <= previous
-                || (encoded >> 1u) >= segment_width) {
-                result.validation = NonScatterSimdValidation::rejected;
-                return result;
-            }
-            previous = encoded;
-            ++position_index;
-        }
-        result.validation = NonScatterSimdValidation::accepted;
-        return result;
-    }
-#endif
-}
-
 namespace {
 
-using ExactStatus = bioseq::simd::HWY_NAMESPACE::TwoStackContinuationStatus;
-using ExactProof = bioseq::simd::HWY_NAMESPACE::TwoStackExecutionProof;
+using ExactStatus = bioseq::minimizers::TwoStackContinuationStatus;
+using ExactProof = bioseq::minimizers::TwoStackExecutionProof;
 
 [[nodiscard]] constexpr ExactSimdIndexStatus bridge_status(
         ExactStatus status) noexcept {
@@ -366,187 +217,139 @@ using ExactProof = bioseq::simd::HWY_NAMESPACE::TwoStackExecutionProof;
     };
 }
 
-struct ErasedExactCollector {
-    using minimizer_type = bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+struct KernelSinkAdapter {
+    using sketch_type = bioseq::minimizers::MinimapSketchData;
+    static_assert(sizeof(sketch_type) == sizeof(std::uint64_t));
+    static_assert(std::is_trivially_copyable_v<sketch_type>);
 
-    const ExactSimdIndexBridgeRequest* request = nullptr;
+    void* collector_context = nullptr;
+    ExactSimdIndexAppendRawFn append_raw = nullptr;
+    std::vector<sketch_type> sketches;
+    std::vector<std::uint64_t> raw;
+    bool accepted = true;
 
-    [[nodiscard]] bool append_raw_storage(
-            const std::uint64_t* raw,
-            std::size_t count) {
-        return request->append_raw(
-            request->collector_context, raw, count);
+    [[nodiscard]] static std::span<sketch_type> acquire(
+            void* opaque,
+            std::size_t minimum) {
+        auto& self = *static_cast<KernelSinkAdapter*>(opaque);
+        if (!self.accepted) return {};
+        try {
+            self.sketches.resize(minimum);
+            self.raw.resize(minimum);
+        } catch (...) {
+            self.accepted = false;
+            return {};
+        }
+        return self.sketches;
+    }
+
+    static void commit(void* opaque, std::size_t initialized) noexcept {
+        auto& self = *static_cast<KernelSinkAdapter*>(opaque);
+        if (!self.accepted
+            || self.append_raw == nullptr
+            || initialized > self.sketches.size()
+            || initialized > self.raw.size()) {
+            self.accepted = false;
+            return;
+        }
+        if (initialized != 0u) {
+            std::memcpy(
+                self.raw.data(),
+                self.sketches.data(),
+                initialized * sizeof(std::uint64_t));
+        }
+        try {
+            self.accepted = self.append_raw(
+                self.collector_context, self.raw.data(), initialized);
+        } catch (...) {
+            self.accepted = false;
+        }
+    }
+
+    [[nodiscard]] bioseq::minimizers::MinimizerSink sink() noexcept {
+        return {
+            .state = this,
+            .acquire = acquire,
+            .commit = commit,
+        };
     }
 };
 
-template<std::size_t W, std::size_t K, class Alphabet, class StorageUnit>
-[[nodiscard]] ExactSimdIndexBridgeResult collect_exact_width_impl(
-        const ExactSimdIndexBridgeRequest& request) {
-    using sequence_config = sequence_custom_alphabet<Alphabet, StorageUnit>;
-    using range_type = compact_sequence_range<sequence_config>;
-    using traits = typename range_type::traits;
-    using State = bioseq::simd::HWY_NAMESPACE::
-        TwoStackContinuationState<W, K, traits>;
-    const std::size_t lpu = bioseq::storage::lazy_packed_letters_per_unit(
-        request.storage_unit_bytes,
-        static_cast<std::uint8_t>(
-            seqan3::detail::ceil_log2(seqan3::alphabet_size<Alphabet>)));
+struct ExactFragmentSourceAdapter {
+    const ExactSimdIndexBridgeRequest* request = nullptr;
+    std::size_t letters_per_unit = 0u;
+    std::size_t fragment_bp_capacity = 0u;
+    std::size_t consume_begin_bp = 0u;
+    std::size_t consume_end_bp = 0u;
 
-    if (request.read_fragment == nullptr
-        || request.release_fragment == nullptr
-        || request.append_raw == nullptr
-        || request.sequence_context == nullptr
-        || request.collector_context == nullptr) {
-        return rejected_bridge_result(ExactSimdIndexStatus::invalid_state);
-    }
-    if (lpu == 0u
-        || request.storage_unit_bytes != sizeof(StorageUnit)
-        || request.letters_per_unit != lpu) {
-        return rejected_bridge_result(ExactSimdIndexStatus::unsupported_storage);
-    }
-    if (request.fragment_units == 0
-        || request.lo_unit > request.hi_unit
-        || request.hi_unit > request.total_units
-        || request.lo_unit
-            > (std::numeric_limits<std::size_t>::max)() / lpu
-        || request.hi_unit
-            > (std::numeric_limits<std::size_t>::max)() / lpu
-        || request.total_units
-            > (std::numeric_limits<std::size_t>::max)() / lpu
-        || request.total_bp > request.total_units * lpu) {
-        return rejected_bridge_result(ExactSimdIndexStatus::invalid_range);
-    }
-
-    const std::size_t consume_begin_bp = request.lo_unit * lpu;
-    const std::size_t consume_end_bp = std::min(
-        request.hi_unit * lpu, request.total_bp);
-    State state;
-    const ExactStatus reset =
-        bioseq::simd::HWY_NAMESPACE::reset_two_stack_nthash(
-            state,
-            request.window_size,
-            request.kmer_size,
-            request.emitted_position_base);
-    if (reset != ExactStatus::ok) {
-        return {
-            .status = bridge_status(reset),
-            .proof = bridge_proof(state.proof),
-        };
-    }
-
-    const std::size_t first_fragment =
-        request.lo_unit / request.fragment_units;
-    const std::size_t fragment_end = request.hi_unit == 0
-        ? 0
-        : 1 + (request.hi_unit - 1) / request.fragment_units;
-    if (fragment_end > request.fragment_count
-        || request.fragment_units
-            > (std::numeric_limits<std::size_t>::max)() / lpu) {
-        return rejected_bridge_result(ExactSimdIndexStatus::invalid_range);
-    }
-    const std::size_t fragment_bp_capacity = request.fragment_units * lpu;
-    ErasedExactCollector collector{.request = &request};
-    ExactStatus consume_status = ExactStatus::ok;
-    for (std::size_t fragment_no = first_fragment;
-         fragment_no < fragment_end;
-         ++fragment_no) {
-        if (fragment_no
-                > (std::numeric_limits<std::size_t>::max)()
-                    / fragment_bp_capacity) {
-            return rejected_bridge_result(
-                ExactSimdIndexStatus::arithmetic_overflow);
-        }
+    [[nodiscard]] static bioseq::minimizers::PackedSequenceKernelFragment read(
+            void* opaque,
+            std::size_t fragment_no) {
+        auto& self = *static_cast<ExactFragmentSourceAdapter*>(opaque);
+        const auto& request = *self.request;
         const ExactSimdIndexPackedFragment fragment =
             request.read_fragment(request.sequence_context, fragment_no);
-        if (fragment.storage_units != 0 && fragment.data == nullptr) {
-            request.release_fragment(request.sequence_context, fragment_no);
-            return rejected_bridge_result(ExactSimdIndexStatus::invalid_range);
-        }
         const std::size_t fragment_begin_bp =
-            fragment_no * fragment_bp_capacity;
+            fragment_no * self.fragment_bp_capacity;
         const std::size_t packed_bp_capacity = fragment.storage_units
-                > (std::numeric_limits<std::size_t>::max)() / lpu
+                > (std::numeric_limits<std::size_t>::max)()
+                    / self.letters_per_unit
             ? (std::numeric_limits<std::size_t>::max)()
-            : fragment.storage_units * lpu;
+            : fragment.storage_units * self.letters_per_unit;
         const std::size_t fragment_bp_size = std::min(
             packed_bp_capacity,
             request.total_bp - std::min(request.total_bp, fragment_begin_bp));
-        const std::size_t fragment_consume_begin = std::max(
-            consume_begin_bp, fragment_begin_bp);
-        const std::size_t fragment_consume_end = std::min(
-            consume_end_bp, fragment_begin_bp + fragment_bp_size);
-        try {
-            consume_status = bioseq::simd::HWY_NAMESPACE::
-                consume_two_stack_nthash_packed_fragment<
-                    W, K,
-                    bioseq::simd::HWY_NAMESPACE::MinimapSketchData>(
-                        state,
-                        collector,
-                        std::span<const StorageUnit>{
-                            static_cast<const StorageUnit*>(fragment.data),
-                            fragment.storage_units},
-                        fragment_bp_size,
-                        fragment_begin_bp,
-                        fragment_consume_begin,
-                        fragment_consume_end);
-        } catch (...) {
-            request.release_fragment(request.sequence_context, fragment_no);
-            throw;
-        }
-        request.release_fragment(request.sequence_context, fragment_no);
-        if (consume_status != ExactStatus::ok) break;
-    }
-    if (consume_status != ExactStatus::ok) {
         return {
-            .status = bridge_status(consume_status),
-            .proof = bridge_proof(state.proof),
+            .storage = reinterpret_cast<const std::byte*>(fragment.data),
+            .storage_units = fragment.storage_units,
+            .fragment_bp_size = fragment_bp_size,
+            .fragment_begin_bp = fragment_begin_bp,
+            .consume_begin_bp = std::max(
+                self.consume_begin_bp, fragment_begin_bp),
+            .consume_end_bp = std::min(
+                self.consume_end_bp, fragment_begin_bp + fragment_bp_size),
         };
     }
-    const auto finalized =
-        bioseq::simd::HWY_NAMESPACE::finalize_two_stack_nthash(
-            state, collector);
-    return {
-        .status = bridge_status(finalized.status),
-        .proof = bridge_proof(finalized.proof),
-    };
-}
 
-template<class Alphabet, class StorageUnit>
-[[nodiscard]] ExactSimdIndexBridgeResult collect_exact_width(
-        const ExactSimdIndexBridgeRequest& request) {
-    if (request.window_size == 10 && request.kmer_size == 15) [[likely]] {
-        return collect_exact_width_impl<10, 15, Alphabet, StorageUnit>(request);
+    static void release(void* opaque, std::size_t fragment_no) noexcept {
+        const auto& self = *static_cast<ExactFragmentSourceAdapter*>(opaque);
+        self.request->release_fragment(
+            self.request->sequence_context, fragment_no);
     }
-    return collect_exact_width_impl<0, 0, Alphabet, StorageUnit>(request);
-}
+};
 
-template<class Alphabet>
-[[nodiscard]] ExactSimdIndexBridgeResult collect_exact_alphabet(
-        const ExactSimdIndexBridgeRequest& request) {
-    switch (request.storage_unit_bytes) {
-        case 1:
-            return collect_exact_width<Alphabet, std::uint8_t>(request);
-        case 2:
-            return collect_exact_width<Alphabet, std::uint16_t>(request);
-        case 4:
-            return collect_exact_width<Alphabet, std::uint32_t>(request);
-        case 8:
-            return collect_exact_width<Alphabet, std::uint64_t>(request);
-        default:
-            return rejected_bridge_result(
-                ExactSimdIndexStatus::unsupported_storage);
+[[nodiscard]] constexpr ExactSimdIndexStatus exact_status_from_kernel(
+        const bioseq::minimizers::MinimizerKernelResult& result,
+        bool sink_accepted) noexcept {
+    using KernelStatus = bioseq::minimizers::MinimizerKernelStatus;
+    if (!sink_accepted || result.status == KernelStatus::sink_rejected) {
+        return ExactSimdIndexStatus::collector_overflow;
     }
+    if (result.family_status != static_cast<std::uint32_t>(ExactStatus::ok)) {
+        return bridge_status(static_cast<ExactStatus>(result.family_status));
+    }
+    switch (result.status) {
+        case KernelStatus::ok:
+            return ExactSimdIndexStatus::ok;
+        case KernelStatus::invalid_sequence_view:
+            return ExactSimdIndexStatus::invalid_range;
+        case KernelStatus::invalid_configuration:
+            return ExactSimdIndexStatus::invalid_static_configuration;
+        case KernelStatus::invalid_continuation:
+            return ExactSimdIndexStatus::invalid_state;
+        case KernelStatus::sink_rejected:
+            return ExactSimdIndexStatus::collector_overflow;
+    }
+    return ExactSimdIndexStatus::invalid_state;
 }
 
-using PackedPaperStatus =
-    bioseq::simd::HWY_NAMESPACE::PackedPaperNthashStatus;
-using PackedPaperProof =
-    bioseq::simd::HWY_NAMESPACE::PackedPaperNthashExecutionProof;
+using PackedPaperStatus = bioseq::minimizers::PackedPaperNthashStatus;
+using PackedPaperProof = bioseq::minimizers::PackedPaperNthashExecutionProof;
 
 static_assert(kPackedPaperNthashKernelSchemeId
-    == bioseq::simd::HWY_NAMESPACE::packed_paper_nthash_scheme_id);
+    == bioseq::minimizers::packed_paper_nthash_scheme_id);
 static_assert(kPackedPaperNthashMaximumWindow
-    == bioseq::simd::HWY_NAMESPACE::packed_paper_nthash_max_window);
+    == bioseq::minimizers::packed_paper_nthash_max_window);
 
 [[nodiscard]] constexpr PackedPaperNthashIndexStatus bridge_paper_status(
         PackedPaperStatus status) noexcept {
@@ -621,92 +424,181 @@ bridge_paper_proof(const PackedPaperProof& proof) noexcept {
     };
 }
 
-template<class StorageUnit>
-[[nodiscard]] PackedPaperNthashIndexBridgeResult
-collect_paper_storage_resident_impl(
-        const PackedPaperNthashIndexBridgeRequest& request) {
-    using sequence_config = sequence_custom_alphabet<seq::dna4, StorageUnit>;
-    using range_type = compact_sequence_range<sequence_config>;
-    const std::size_t letters_per_unit =
-        bioseq::storage::lazy_packed_letters_per_unit(
-            request.storage_unit_bytes, 2u);
+[[nodiscard]] bool append_paper_raw(
+        void* opaque,
+        const std::uint64_t* raw,
+        std::size_t count) {
+    return static_cast<bioseq::minimizers::sketch_collector*>(opaque)
+        ->append_raw_storage(raw, count);
+}
 
-    if (letters_per_unit == 0u
-        || request.storage_unit_bytes != sizeof(StorageUnit)
-        || request.letters_per_unit != letters_per_unit) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::unsupported_storage);
+[[nodiscard]] constexpr PackedPaperNthashIndexStatus paper_status_from_kernel(
+        const bioseq::minimizers::MinimizerKernelResult& result,
+        bool sink_accepted) noexcept {
+    using KernelStatus = bioseq::minimizers::MinimizerKernelStatus;
+    if (!sink_accepted || result.status == KernelStatus::sink_rejected) {
+        return PackedPaperNthashIndexStatus::invalid_state;
     }
-    if (request.storage_units
-            > (std::numeric_limits<std::size_t>::max)()
-                / letters_per_unit
-        || request.local_bp_size
-            > request.storage_units * letters_per_unit) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::invalid_range);
+    if (result.family_status
+        != static_cast<std::uint32_t>(PackedPaperStatus::ok)) {
+        return bridge_paper_status(
+            static_cast<PackedPaperStatus>(result.family_status));
     }
-    if (request.local_bp_size
-        > static_cast<std::size_t>(
-            (std::numeric_limits<std::uint32_t>::max)())) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::input_too_large);
+    switch (result.status) {
+        case KernelStatus::ok:
+            return PackedPaperNthashIndexStatus::ok;
+        case KernelStatus::invalid_sequence_view:
+            return PackedPaperNthashIndexStatus::invalid_range;
+        case KernelStatus::invalid_configuration:
+            return PackedPaperNthashIndexStatus::invalid_configuration;
+        case KernelStatus::invalid_continuation:
+        case KernelStatus::sink_rejected:
+            return PackedPaperNthashIndexStatus::invalid_state;
     }
-    if (request.local_bp_size != 0
-        && request.local_bp_size - 1u
-            > static_cast<std::size_t>(
-                bioseq::simd::HWY_NAMESPACE::
-                    MinimapSketchData::pos_field_mask)) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::unsupported_representation);
-    }
-    if (request.sequence_context == nullptr
-        || request.collector_context == nullptr) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::invalid_state);
-    }
-
-    auto& sequence = *static_cast<range_type*>(request.sequence_context);
-    auto& collector = *static_cast<
-        bioseq::simd::HWY_NAMESPACE::sketch_collector*>(
-            request.collector_context);
-    if (static_cast<std::size_t>(sequence.size())
-            != request.storage_units
-        || static_cast<std::size_t>(sequence.bp_size())
-            != request.local_bp_size) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::invalid_range);
-    }
-
-    const auto result = bioseq::simd::HWY_NAMESPACE::
-        collect_minimizers_packed_paper_nthash_simd_checked<
-            15, 10,
-            bioseq::simd::HWY_NAMESPACE::MinimapSketchData>(
-                collector,
-                sequence,
-                sequence.begin(),
-                sequence.end());
-    return {
-        .status = bridge_paper_status(result.status),
-        .proof = bridge_paper_proof(result.proof),
-    };
+    return PackedPaperNthashIndexStatus::invalid_state;
 }
 
 }  // namespace
 
 ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
         const ExactSimdIndexBridgeRequest& request) {
+    if (request.kernels == nullptr
+        || request.kernels->two_stack_nthash == nullptr
+        || request.read_fragment == nullptr
+        || request.release_fragment == nullptr
+        || request.append_raw == nullptr
+        || request.sequence_context == nullptr
+        || request.collector_context == nullptr) {
+        return rejected_bridge_result(ExactSimdIndexStatus::invalid_state);
+    }
+
+    std::uint8_t alphabet_code = 0u;
+    std::size_t bits_per_symbol = 0u;
     switch (request.alphabet) {
         case ExactSimdIndexAlphabet::dna4:
-            return collect_exact_alphabet<seq::dna4>(request);
+            alphabet_code = static_cast<std::uint8_t>(
+                bioseq::minimizers::PackedSequenceAlphabet::dna4);
+            bits_per_symbol = 2u;
+            break;
         case ExactSimdIndexAlphabet::dna5:
-            return collect_exact_alphabet<seq::dna5>(request);
+            alphabet_code = static_cast<std::uint8_t>(
+                bioseq::minimizers::PackedSequenceAlphabet::dna5);
+            bits_per_symbol = 3u;
+            break;
+        default:
+            return rejected_bridge_result(
+                ExactSimdIndexStatus::unsupported_alphabet);
     }
-    return rejected_bridge_result(ExactSimdIndexStatus::unsupported_alphabet);
+    if (request.storage_unit_bytes != 1u
+        && request.storage_unit_bytes != 2u
+        && request.storage_unit_bytes != 4u
+        && request.storage_unit_bytes != 8u) {
+        return rejected_bridge_result(
+            ExactSimdIndexStatus::unsupported_storage);
+    }
+    const std::size_t storage_bits = request.storage_unit_bytes * 8u;
+    const std::size_t letters_per_unit = storage_bits / bits_per_symbol;
+    if (letters_per_unit == 0u
+        || request.letters_per_unit != letters_per_unit) {
+        return rejected_bridge_result(
+            ExactSimdIndexStatus::unsupported_storage);
+    }
+    if (request.fragment_units == 0u
+        || request.lo_unit > request.hi_unit
+        || request.hi_unit > request.total_units
+        || request.lo_unit
+            > (std::numeric_limits<std::size_t>::max)()
+                / letters_per_unit
+        || request.hi_unit
+            > (std::numeric_limits<std::size_t>::max)()
+                / letters_per_unit
+        || request.total_units
+            > (std::numeric_limits<std::size_t>::max)()
+                / letters_per_unit
+        || request.total_bp > request.total_units * letters_per_unit
+        || request.fragment_units
+            > (std::numeric_limits<std::size_t>::max)()
+                / letters_per_unit) {
+        return rejected_bridge_result(ExactSimdIndexStatus::invalid_range);
+    }
+
+    const std::size_t first_fragment =
+        request.lo_unit / request.fragment_units;
+    const std::size_t fragment_end = request.hi_unit == 0u
+        ? 0u
+        : 1u + (request.hi_unit - 1u) / request.fragment_units;
+    const std::size_t fragment_bp_capacity =
+        request.fragment_units * letters_per_unit;
+    if (fragment_end > request.fragment_count) {
+        return rejected_bridge_result(ExactSimdIndexStatus::invalid_range);
+    }
+    if (fragment_end != 0u
+        && fragment_end - 1u
+            > (std::numeric_limits<std::size_t>::max)()
+                / fragment_bp_capacity) {
+        return rejected_bridge_result(
+            ExactSimdIndexStatus::arithmetic_overflow);
+    }
+
+    ExactFragmentSourceAdapter fragments{
+        .request = &request,
+        .letters_per_unit = letters_per_unit,
+        .fragment_bp_capacity = fragment_bp_capacity,
+        .consume_begin_bp = request.lo_unit * letters_per_unit,
+        .consume_end_bp = std::min(
+            request.hi_unit * letters_per_unit, request.total_bp),
+    };
+    KernelSinkAdapter sink{
+        .collector_context = request.collector_context,
+        .append_raw = request.append_raw,
+    };
+    bioseq::minimizers::MinimizerKernelInvocation invocation{
+        .sequence = {
+            .storage = nullptr,
+            .storage_units = request.total_units,
+            .begin_symbol = 0u,
+            .end_symbol = request.total_bp,
+            .alphabet_code = alphabet_code,
+            .bits_per_symbol = static_cast<std::uint8_t>(bits_per_symbol),
+            .storage_unit_bytes = static_cast<std::uint8_t>(
+                request.storage_unit_bytes),
+            .final_segment = true,
+        },
+        .fragments = {
+            .state = &fragments,
+            .first_fragment = first_fragment,
+            .fragment_end = fragment_end,
+            .read = ExactFragmentSourceAdapter::read,
+            .release = ExactFragmentSourceAdapter::release,
+        },
+        .window = request.window_size,
+        .kmer = request.kmer_size,
+        .emitted_position_base = request.emitted_position_base,
+        .two_stack_route = bioseq::minimizers::TwoStackRoute::
+            chronological_continuation,
+        .sink = sink.sink(),
+    };
+    const bioseq::minimizers::MinimizerKernelResult kernel_result =
+        request.kernels->two_stack_nthash(invocation);
+    if (kernel_result.proof.algorithm
+        != bioseq::minimizers::MinimizerKernelAlgorithm::two_stack_nthash) {
+        return rejected_bridge_result(ExactSimdIndexStatus::invalid_state);
+    }
+    return {
+        .status = exact_status_from_kernel(kernel_result, sink.accepted),
+        .proof = bridge_proof(kernel_result.proof.two_stack),
+    };
 }
 
 PackedPaperNthashIndexBridgeResult
 collect_packed_paper_nthash_index_erased(
         const PackedPaperNthashIndexBridgeRequest& request) {
+    if (request.kernels == nullptr
+        || request.kernels->paper_nthash == nullptr
+        || request.collector_context == nullptr) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::invalid_state);
+    }
     if (request.window_size != 10u || request.kmer_size != 15u) {
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::invalid_configuration);
@@ -715,52 +607,67 @@ collect_packed_paper_nthash_index_erased(
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_alphabet);
     }
-    if (request.sequence_context_is_resident_descriptor) {
-        using facade = bioseq::storage::basic_lazy_sequence_view<seq::dna4>;
-        if (request.sequence_context == nullptr
-            || request.collector_context == nullptr
-            || request.storage_unit_bytes != sizeof(std::uint32_t)
-            || request.letters_per_unit != 16u) {
-            return rejected_packed_paper_nthash_index_result(
-                PackedPaperNthashIndexStatus::unsupported_storage);
-        }
-        const auto& descriptor = *static_cast<
-            const facade::resident_packed_region*>(request.sequence_context);
-        if (descriptor.units == nullptr || descriptor.unit_count == 0u
-            || descriptor.unit_count != request.storage_units
-            || descriptor.bp_length != request.local_bp_size
-            || descriptor.storage_unit_byte_width != sizeof(std::uint32_t)
-            || descriptor.bits_per_symbol != 2u
-            || descriptor.leading_symbol_offset != 0u
-            || descriptor.bit_order
-                != facade::packed_bit_order::least_significant_symbol_first) {
-            return rejected_packed_paper_nthash_index_result(
-                PackedPaperNthashIndexStatus::invalid_range);
-        }
-        auto& collector = *static_cast<
-            bioseq::simd::HWY_NAMESPACE::sketch_collector*>(
-                request.collector_context);
-        const auto result = bioseq::simd::HWY_NAMESPACE::
-            collect_minimizers_packed_paper_nthash_resident_descriptor_checked<
-                15u,
-                10u,
-                bioseq::simd::HWY_NAMESPACE::MinimapSketchData,
-                seq::dna4>(
-                    collector, descriptor);
-        return {
-            .status = bridge_paper_status(result.status),
-            .proof = bridge_paper_proof(result.proof),
-        };
+    if (request.storage_unit_bytes != sizeof(std::uint32_t)
+        && request.storage_unit_bytes != sizeof(std::uint64_t)) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::unsupported_storage);
     }
-    switch (request.storage_unit_bytes) {
-        case sizeof(std::uint32_t):
-            return collect_paper_storage_resident_impl<std::uint32_t>(request);
-        case sizeof(std::uint64_t):
-            return collect_paper_storage_resident_impl<std::uint64_t>(request);
-        default:
-            return rejected_packed_paper_nthash_index_result(
-                PackedPaperNthashIndexStatus::unsupported_storage);
+    if (request.local_bp_size
+        > static_cast<std::size_t>(
+            (std::numeric_limits<std::uint32_t>::max)())) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::input_too_large);
     }
+    if (request.local_bp_size == 0u
+        || request.local_bp_size - 1u
+            > static_cast<std::size_t>(
+                bioseq::minimizers::MinimapSketchData::pos_field_mask)) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::unsupported_representation);
+    }
+    const std::size_t letters_per_unit = request.storage_unit_bytes * 4u;
+    if (request.storage_units
+            > (std::numeric_limits<std::size_t>::max)()
+                / letters_per_unit
+        || request.local_bp_size
+            > request.storage_units * letters_per_unit) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::invalid_range);
+    }
+    if (request.sequence.storage_units != request.storage_units
+        || request.sequence.end_symbol != request.local_bp_size
+        || request.sequence.begin_symbol != 0u
+        || request.sequence.alphabet_code != static_cast<std::uint8_t>(
+            bioseq::minimizers::PackedSequenceAlphabet::dna4)
+        || request.sequence.bits_per_symbol != 2u
+        || request.sequence.storage_unit_bytes != request.storage_unit_bytes
+        || request.letters_per_unit != letters_per_unit
+        || !request.sequence.final_segment) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::invalid_range);
+    }
+
+    KernelSinkAdapter sink{
+        .collector_context = request.collector_context,
+        .append_raw = append_paper_raw,
+    };
+    bioseq::minimizers::MinimizerKernelInvocation invocation{
+        .sequence = request.sequence,
+        .window = request.window_size,
+        .kmer = request.kmer_size,
+        .sink = sink.sink(),
+    };
+    const bioseq::minimizers::MinimizerKernelResult kernel_result =
+        request.kernels->paper_nthash(invocation);
+    if (kernel_result.proof.algorithm
+        != bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::invalid_state);
+    }
+    return {
+        .status = paper_status_from_kernel(kernel_result, sink.accepted),
+        .proof = bridge_paper_proof(kernel_result.proof.paper),
+    };
 }
 
 MinimizerHashmapFragmentIndex::MinimizerHashmapFragmentIndex()

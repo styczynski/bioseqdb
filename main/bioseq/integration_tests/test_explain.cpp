@@ -27,7 +27,7 @@ constexpr std::string_view kTable = "test_explain_t";
 std::string explain_target_sql() {
     return fmt::format(
         "SELECT pk, seq0 FROM {} WHERE mmsearch(seq0, "
-        "'AAAA'::bioseq.seq('dna4', 32));",
+        "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32));",
         kTable);
 }
 
@@ -310,6 +310,36 @@ std::vector<materialization_signature> materialization_signatures(
     return result;
 }
 
+// Returns whether one trimmed item in a comma-separated EXPLAIN value exactly
+// matches `expected`.
+[[nodiscard]] bool comma_separated_value_contains(
+    std::string_view values,
+    std::string_view expected)
+{
+    std::size_t begin = 0;
+    while (begin <= values.size()) {
+        const std::size_t separator = values.find(',', begin);
+        const std::size_t end = separator == std::string_view::npos
+            ? values.size()
+            : separator;
+        const std::size_t value_begin = values.find_first_not_of(
+            " \t", begin);
+        const std::size_t value_end = values.find_last_not_of(
+            " \t", end == 0 ? 0 : end - 1u);
+        if (value_begin != std::string_view::npos
+            && value_begin < end
+            && value_end != std::string_view::npos
+            && value_end >= value_begin
+            && values.substr(value_begin, value_end - value_begin + 1u)
+                == expected) {
+            return true;
+        }
+        if (separator == std::string_view::npos) break;
+        begin = separator + 1u;
+    }
+    return false;
+}
+
 }  // namespace
 
 TEST_CASE("EXPLAIN names the custom scan on a USING bioseq table",
@@ -387,8 +417,63 @@ TEST_CASE("EXPLAIN ANALYZE on mmsearch query reports the BioseqScan rows",
     REQUIRE(plan_contains(plan, "actual time"));
 }
 
+TEST_CASE("DOC0398 plain EXPLAIN reports the complete Highway dispatch plan",
+          "[highway][explain][dispatch]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+
+    const auto plan = explain_text<false>(ctx, explain_target_sql());
+    const auto planned = find_explain_property(
+        plan, "Highway Planned Architecture");
+    const auto supported = find_explain_property(
+        plan, "Highway CPU-Supported Architectures");
+    const auto compiled = find_explain_property(
+        plan, "Highway Compiled Architectures");
+    const auto runnable = find_explain_property(
+        plan, "Highway Runnable Architectures");
+
+    REQUIRE(planned.has_value());
+    REQUIRE(supported.has_value());
+    REQUIRE(compiled.has_value());
+    REQUIRE(runnable.has_value());
+    REQUIRE_FALSE(planned->empty());
+    REQUIRE(*planned != "none");
+    REQUIRE(*supported != "none");
+    REQUIRE(*compiled != "none");
+    REQUIRE(*runnable != "none");
+    REQUIRE(comma_separated_value_contains(*runnable, *planned));
+
+    const std::string planned_annotation = fmt::format(
+        "[planned architecture: {}]", *planned);
+    std::size_t highway_functions = 0;
+    for (const std::string& line : plan) {
+        if (line.find("Highway Function:") == std::string::npos) continue;
+        ++highway_functions;
+        REQUIRE(line.find(planned_annotation) != std::string::npos);
+    }
+    REQUIRE(highway_functions > 0u);
+}
+
+TEST_CASE("DOC0398 EXPLAIN ANALYZE reports the executed Highway binding",
+          "[highway][explain][analyze][dispatch]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+
+    const auto plan = explain_text<true>(ctx, explain_target_sql());
+    const auto planned = find_explain_property(
+        plan, "Highway Planned Architecture");
+    const auto executed = find_explain_property(
+        plan, "* Highway Executed Architecture");
+
+    REQUIRE(planned.has_value());
+    REQUIRE(executed.has_value());
+    REQUIRE(*executed != "none");
+    REQUIRE(*executed != "mixed");
+    REQUIRE(*executed == *planned);
+}
+
 TEST_CASE("EXPLAIN FORMAT JSON returns valid-looking JSON",
-          "[explain][json]") {
+          "[explain][json][highway]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
 
@@ -398,6 +483,17 @@ TEST_CASE("EXPLAIN FORMAT JSON returns valid-looking JSON",
     // BioseqScan and the Custom-Scan node-type string must both appear.
     REQUIRE(json.find("BioseqScan") != std::string::npos);
     REQUIRE(json.find("Custom Scan") != std::string::npos);
+    REQUIRE(json.find("\"Highway SIMD Dispatch\"") != std::string::npos);
+    REQUIRE(json.find("\"Planned Architecture\"") != std::string::npos);
+    REQUIRE(json.find("\"CPU-Supported Architectures\"")
+            != std::string::npos);
+    REQUIRE(json.find("\"Compiled Architectures\"")
+            != std::string::npos);
+    REQUIRE(json.find("\"Runnable Architectures\"")
+            != std::string::npos);
+    REQUIRE(json.find("\"Executed Architecture\"")
+            != std::string::npos);
+    REQUIRE(json.find("\"Highway Functions\"") != std::string::npos);
 }
 
 TEST_CASE("DOC0377 plain EXPLAIN reports only materialization boundaries",

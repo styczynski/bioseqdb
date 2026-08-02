@@ -14,7 +14,6 @@
 // the live psql proof in DOC0272 Appendix A); the chunked end-to-end path is
 // proven here.
 
-#include "common_simd.h"
 #include "common_tests.h"
 #include "common.h"
 
@@ -27,18 +26,29 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.minimap_port;   // MatchResult / MatchResultCollection
 import bioseq.sequences.pipe;           // minimap_port entry
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
 
 using namespace seq::literals;
 
-HWY_BEFORE_NAMESPACE();
-namespace bioseq::simd::HWY_NAMESPACE {
+namespace bioseq::simd {
 
 namespace {
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t  = compact_sequence_range<dna4_u64>;
+
+[[nodiscard]] Minimap2Params fixed_highway_params() {
+    Minimap2Params params;
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    params.highway_kernels = binding.kernels;
+    params.highway_executed_target = binding.target;
+    params.alphabet_code = 0u;
+    return params;
+}
 
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
     std::vector<seq::dna4> v(n);
@@ -85,7 +95,7 @@ void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
     const auto base_q_view = bioseq::storage::as_lazy_sequence_view(base_q);
     const auto base_t_view = bioseq::storage::as_lazy_sequence_view(base_t);
     const auto baseline = canon(
-        minimap_port(base_q_view, base_t_view, Minimap2Params{}));
+        minimap_port(base_q_view, base_t_view, fixed_highway_params()));
 
     // Fragmented — exercise the same storage-owned facade callback used by
     // bioseq.test_force_chunked_scanner, including the requested boundaries.
@@ -96,7 +106,7 @@ void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
             REQUIRE_FALSE(lazy_is_worker_shareable(query_view));
             REQUIRE_FALSE(lazy_is_worker_shareable(target_view));
             fragmented = canon(minimap_port(
-                query_view, target_view, Minimap2Params{}));
+                query_view, target_view, fixed_highway_params()));
         });
 
     INFO("qn=" << qn << " tn=" << tn << " frag_units=" << FragUnits
@@ -134,7 +144,7 @@ TEST_CASE("DOC0286 — two_stack_nthash minimap_port handles small fragmented ta
     range_t q_range(q_data);
     range_t t_range(t_data);
 
-    Minimap2Params params{};
+    Minimap2Params params = fixed_highway_params();
     params.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
     params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
     params.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
@@ -150,5 +160,4 @@ TEST_CASE("DOC0286 — two_stack_nthash minimap_port handles small fragmented ta
     REQUIRE_FALSE(matches.empty());
 }
 
-}  // namespace bioseq::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
+}  // namespace bioseq::simd

@@ -1090,6 +1090,7 @@ void append_cpu_prepared_query_sketch_view(
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels,
 		std::vector<DestinationValue>& destination,
 		bioseq::parallelism::MemoryPermit& destination_permit,
 		std::uint64_t& retained_destination_bytes,
@@ -1135,7 +1136,8 @@ void append_cpu_prepared_query_sketch_view(
 			query_view,
 			static_cast<std::size_t>(window_size),
 			static_cast<std::size_t>(kmer_size),
-			sketch_backend);
+			sketch_backend,
+			highway_kernels);
 		if (!collector.hash_width_valid()) {
 			bioseq::pg_utils::invoke_pg_as_cpp([] {
 				ereport(ERROR,
@@ -1188,7 +1190,8 @@ void append_cpu_prepared_query_sketch_view(
 		query_view,
 		static_cast<std::size_t>(window_size),
 		static_cast<std::size_t>(kmer_size),
-		sketch_backend);
+		sketch_backend,
+		highway_kernels);
 	if (!collector.ok()) {
 		fail("BioseqBatchJoin query sketch collector growth cannot be admitted");
 	}
@@ -1269,6 +1272,7 @@ void append_cpu_prepared_query_sketch(
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels,
 		std::vector<DestinationValue>& destination,
 		bioseq::parallelism::MemoryPermit& destination_permit,
 		std::uint64_t& retained_destination_bytes,
@@ -1280,7 +1284,7 @@ void append_cpu_prepared_query_sketch(
 	compact_sequence_range<sequence_t> query{header};
 	append_cpu_prepared_query_sketch_view<Alphabet, DestinationValue>(
 		bioseq::storage::as_lazy_sequence_view(query),
-		query_ordinal, kmer_size, window_size, sketch_backend,
+		query_ordinal, kmer_size, window_size, sketch_backend, highway_kernels,
 		destination, destination_permit, retained_destination_bytes,
 		retained_queries, retained_query_permit, retained_query_bytes);
 }
@@ -1294,6 +1298,7 @@ void dispatch_append_cpu_prepared_query_sketch(
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels,
 		std::vector<DestinationValue>& destination,
 		bioseq::parallelism::MemoryPermit& destination_permit,
 		std::uint64_t& retained_destination_bytes,
@@ -1317,6 +1322,7 @@ void dispatch_append_cpu_prepared_query_sketch(
 	#define BIOSEQ_APPEND_PREPARED(ALPHABET, WIDTH) \
 		append_cpu_prepared_query_sketch<ALPHABET, WIDTH, DestinationValue>( \
 			header, query_ordinal, kmer_size, window_size, sketch_backend, \
+			highway_kernels, \
 			destination, destination_permit, retained_destination_bytes, \
 			retained_queries, retained_query_permit, retained_query_bytes)
 	if (alphabet_code == dna4_code) {
@@ -1363,6 +1369,7 @@ void dispatch_append_cpu_prepared_query_recipe_sketch(
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels,
 		std::vector<DestinationValue>& destination,
 		bioseq::parallelism::MemoryPermit& destination_permit,
 		std::uint64_t& retained_destination_bytes,
@@ -1371,7 +1378,7 @@ void dispatch_append_cpu_prepared_query_recipe_sketch(
 		bioseq::parallelism::MemoryPermit* retained_query_permit = nullptr,
 		std::uint64_t* retained_query_bytes = nullptr) {
 	const auto append = [&session, recipe, descriptor, payload_observer,
-		query_ordinal, kmer_size, window_size, sketch_backend,
+		query_ordinal, kmer_size, window_size, sketch_backend, highway_kernels,
 		&destination, &destination_permit, &retained_destination_bytes,
 		retained_queries, retained_query_permit,
 		retained_query_bytes]<class Alphabet>() {
@@ -1383,7 +1390,8 @@ void dispatch_append_cpu_prepared_query_recipe_sketch(
 		append_cpu_prepared_query_sketch_view<Alphabet, DestinationValue>(
 			owner->view().with_payload_allocation_observer(payload_observer),
 			query_ordinal, kmer_size, window_size,
-			sketch_backend, destination, destination_permit,
+			sketch_backend, highway_kernels,
+			destination, destination_permit,
 			retained_destination_bytes, retained_queries,
 			retained_query_permit, retained_query_bytes);
 	};
@@ -1428,6 +1436,7 @@ prepare_independently_admitted_query_sketch(
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels,
 		BatchProcessor::CpuPreparedQuerySketch& destination) {
 	using sequence_t = compact_sequence_stdc_instance<
 		bioseq::pg_types::seq, Alphabet, Width>;
@@ -1456,7 +1465,8 @@ prepare_independently_admitted_query_sketch(
 		query_view,
 		static_cast<std::size_t>(window_size),
 		static_cast<std::size_t>(kmer_size),
-		sketch_backend);
+		sketch_backend,
+		highway_kernels);
 	if (!collector.ok()) {
 		return ParallelPreparedQuerySketchStatus::collector_growth_failed;
 	}
@@ -1497,6 +1507,7 @@ dispatch_prepare_independently_admitted_query_sketch(
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels,
 		BatchProcessor::CpuPreparedQuerySketch& destination) {
 	constexpr std::uint8_t dna4_code = static_cast<std::uint8_t>(
 		pgseq_supported_alphabets::index_of<seq::dna4>());
@@ -1507,6 +1518,7 @@ dispatch_prepare_independently_admitted_query_sketch(
 	#define BIOSEQ_PREPARE_INDEPENDENT(ALPHABET, WIDTH) \
 		return prepare_independently_admitted_query_sketch<ALPHABET, WIDTH>( \
 			header, query_ordinal, kmer_size, window_size, sketch_backend, \
+			highway_kernels, \
 			destination)
 	if (alphabet_code == dna4_code) {
 		switch (storage_unit_byte_width) {
@@ -2000,6 +2012,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 									group.kmer_size,
 									group.window_size,
 									group.sketch_backend,
+									base_params.highway_kernels,
 									group.retained_query_sketches[
 										query_index]);
 						} catch (...) {
@@ -2160,14 +2173,15 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 						== CpuQueryUnionStorage::
 							canonical_u32_sequential_fallback) {
 				const auto append_canonical =
-					[query_ordinal, &group, &prepared_target](
+					[query_ordinal, &group, &prepared_target, &base_params](
 						auto&& append_function) {
 					append_function(
 						query_ordinal,
-						group.kmer_size,
-						group.window_size,
-						group.sketch_backend,
-						group.canonical_query_hash_union_u32,
+							group.kmer_size,
+							group.window_size,
+							group.sketch_backend,
+							base_params.highway_kernels,
+							group.canonical_query_hash_union_u32,
 						*prepared_target.query_union_permit,
 						prepared_target.query_union_admission_bytes,
 						prepared_target.query_sketch_cache_permit
@@ -2208,14 +2222,15 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 				}
 				} else {
 					const auto append_union =
-						[query_ordinal, &group, &prepared_target](
+						[query_ordinal, &group, &prepared_target, &base_params](
 							auto&& append_function) {
 						append_function(
 						query_ordinal,
-						group.kmer_size,
-						group.window_size,
-						group.sketch_backend,
-						group.query_hash_union,
+							group.kmer_size,
+							group.window_size,
+							group.sketch_backend,
+							base_params.highway_kernels,
+							group.query_hash_union,
 						*prepared_target.query_union_permit,
 						prepared_target.query_union_admission_bytes);
 					};

@@ -178,6 +178,7 @@ function(_bioseq_highway_probe_targets)
     OUTPUT_RECORDS
     OUTPUT_ORDER
     OUTPUT_MASK
+    OUTPUT_STATIC_RECORD
     OUTPUT_POLICY_DIGEST
     OUTPUT_HIGHWAY_DIGEST)
   cmake_parse_arguments(PARSE_ARGV 0 ARG ""
@@ -185,7 +186,7 @@ function(_bioseq_highway_probe_targets)
     "INCLUDE_DIRS;DEFINITIONS;COMPILE_OPTIONS")
   foreach(_required IN ITEMS
       PROBE_DIR PLATFORM OUTPUT_RECORDS OUTPUT_ORDER OUTPUT_MASK
-      OUTPUT_POLICY_DIGEST OUTPUT_HIGHWAY_DIGEST)
+      OUTPUT_STATIC_RECORD OUTPUT_POLICY_DIGEST OUTPUT_HIGHWAY_DIGEST)
     if(NOT ARG_${_required})
       _bioseq_highway_fail("target probe requires ${_required}")
     endif()
@@ -208,6 +209,9 @@ function(_bioseq_highway_probe_targets)
     "  BIOSEQ_HIGHWAY_TARGET_RECORD(#target, \\\n"
     "    BIOSEQ_HIGHWAY_STRING(target_namespace), \\\n"
     "    BIOSEQ_HIGHWAY_STRING(target))\n"
+    "BIOSEQ_HIGHWAY_STATIC_RECORD(\\\n"
+    "  BIOSEQ_HIGHWAY_STRING(HWY_STATIC_NAMESPACE), \\\n"
+    "  BIOSEQ_HIGHWAY_STRING(HWY_STATIC_TARGET))\n"
     "HWY_VISIT_TARGETS(BIOSEQ_HIGHWAY_VISITOR)\n")
   _bioseq_highway_write_if_different("${_probe_source}" "${_probe_contents}")
 
@@ -277,6 +281,38 @@ function(_bioseq_highway_probe_targets)
       "HWY_VISIT_TARGETS probe produced no target records")
   endif()
 
+  string(REGEX MATCHALL
+    "BIOSEQ_HIGHWAY_STATIC_RECORD\\(\"[A-Z0-9_]+\",[ \\t]*\"[^\"]+\"\\)"
+    _raw_static_records "${_probe_output}")
+  list(LENGTH _raw_static_records _raw_static_record_count)
+  if(NOT _raw_static_record_count EQUAL 1)
+    _bioseq_highway_fail(
+      "Highway probe must produce exactly one HWY_STATIC_TARGET record")
+  endif()
+  list(GET _raw_static_records 0 _raw_static_record)
+  if(NOT _raw_static_record MATCHES
+      "^BIOSEQ_HIGHWAY_STATIC_RECORD\\(\"([A-Z0-9_]+)\",[ \\t]*\"([^\"]+)\"\\)$")
+    _bioseq_highway_fail(
+      "malformed static target record '${_raw_static_record}'")
+  endif()
+  set(_static_target_namespace "${CMAKE_MATCH_1}")
+  set(_static_target_expression "${CMAKE_MATCH_2}")
+  if(NOT _static_target_expression MATCHES
+      "^[0-9A-Fa-fxXuUlL ()<>&|+*~/-]+$")
+    _bioseq_highway_fail(
+      "HWY_STATIC_TARGET has a non-numeric bit expression "
+      "'${_static_target_expression}'")
+  endif()
+  string(REGEX REPLACE "([0-9A-Fa-fxX])[uUlL]+" "\\1"
+    _static_target_expression "${_static_target_expression}")
+  math(EXPR _static_target_bit
+    "${_static_target_expression}" OUTPUT_FORMAT DECIMAL)
+  if(_static_target_bit LESS_EQUAL 0)
+    _bioseq_highway_fail(
+      "HWY_STATIC_TARGET has invalid non-positive bit "
+      "${_static_target_bit}")
+  endif()
+
   set(_records_by_bit)
   set(_seen_bits)
   set(_seen_namespaces)
@@ -310,6 +346,18 @@ function(_bioseq_highway_probe_targets)
     if(NOT _power_check EQUAL 0)
       _bioseq_highway_fail(
         "target ${_token} value ${_numeric_bit} is not one bit")
+    endif()
+
+    if(_token STREQUAL "HWY_STATIC_TARGET")
+      if(NOT _static_target_bit STREQUAL ""
+          AND (NOT _static_target_bit STREQUAL "${_numeric_bit}"
+            OR NOT _static_target_namespace STREQUAL
+              "${_target_namespace}"))
+        _bioseq_highway_fail(
+          "HWY_STATIC_TARGET maps to conflicting target records")
+      endif()
+      set(_static_target_bit "${_numeric_bit}")
+      set(_static_target_namespace "${_target_namespace}")
     endif()
 
     list(FIND _seen_namespaces "${_target_namespace}" _namespace_index)
@@ -386,6 +434,7 @@ function(_bioseq_highway_probe_targets)
 
   set(_target_order)
   set(_compiled_mask 0)
+  set(_static_target_record)
   foreach(_record IN LISTS _target_records)
     if(NOT _record MATCHES
         "^([^|]+)\\|([^|]+)\\|([^|]+)\\|([^|]+)\\|([0-9]+)$")
@@ -393,7 +442,14 @@ function(_bioseq_highway_probe_targets)
     endif()
     list(APPEND _target_order "${CMAKE_MATCH_3}")
     math(EXPR _compiled_mask "${_compiled_mask} | ${CMAKE_MATCH_5}")
+    if(CMAKE_MATCH_5 STREQUAL "${_static_target_bit}")
+      set(_static_target_record "${_record}")
+    endif()
   endforeach()
+  if(NOT _static_target_record)
+    _bioseq_highway_fail(
+      "HWY_STATIC_TARGET is absent from the canonical target inventory")
+  endif()
 
   # This exact, sorted block is also rendered by the generator ahead of every
   # Highway include. A bare -DNAME has the preprocessor value 1, so record that
@@ -428,6 +484,7 @@ function(_bioseq_highway_probe_targets)
   set(${ARG_OUTPUT_RECORDS} "${_target_records}" PARENT_SCOPE)
   set(${ARG_OUTPUT_ORDER} "${_target_order}" PARENT_SCOPE)
   set(${ARG_OUTPUT_MASK} "${_compiled_mask}" PARENT_SCOPE)
+  set(${ARG_OUTPUT_STATIC_RECORD} "${_static_target_record}" PARENT_SCOPE)
   set(${ARG_OUTPUT_POLICY_DIGEST} "${_policy_digest}" PARENT_SCOPE)
   set(${ARG_OUTPUT_HIGHWAY_DIGEST} "${_highway_digest}" PARENT_SCOPE)
 endfunction()
@@ -452,6 +509,9 @@ endfunction()
 #   OUTPUT_PRIMARY_MODULES generated_target_primaries
 #   OUTPUT_TARGET_IMPLEMENTATIONS generated_target_implementations
 #   OUTPUT_DISPATCH_REGISTRY generated_dispatch_registry
+#   OUTPUT_TEST_PRIMARY_MODULE generated_static_test_primary
+#   OUTPUT_TEST_IMPLEMENTATIONS generated_static_test_implementations
+#   OUTPUT_TEST_SUPPORT generated_static_test_support
 #   OUTPUT_POLICY_TARGET highway_policy_target
 #   OUTPUT_SCAN_TARGET highway_scan_target
 #   OUTPUT_PREPARE_TARGET highway_prepare_target
@@ -479,6 +539,9 @@ function(bioseq_add_highway_codegen)
     OUTPUT_PRIMARY_MODULES
     OUTPUT_TARGET_IMPLEMENTATIONS
     OUTPUT_DISPATCH_REGISTRY
+    OUTPUT_TEST_PRIMARY_MODULE
+    OUTPUT_TEST_IMPLEMENTATIONS
+    OUTPUT_TEST_SUPPORT
     OUTPUT_POLICY_TARGET
     OUTPUT_SCAN_TARGET
     OUTPUT_PREPARE_TARGET
@@ -638,6 +701,7 @@ function(bioseq_add_highway_codegen)
     OUTPUT_RECORDS _target_records
     OUTPUT_ORDER _target_order
     OUTPUT_MASK _compiled_mask
+    OUTPUT_STATIC_RECORD _static_target_record
     OUTPUT_POLICY_DIGEST _policy_digest
     OUTPUT_HIGHWAY_DIGEST _highway_digest)
 
@@ -656,6 +720,14 @@ function(bioseq_add_highway_codegen)
   endforeach()
   string(APPEND _target_manifest_contents
     "highway\t${ARG_HIGHWAY_VERSION}\t${_highway_digest}\n")
+  if(NOT _static_target_record MATCHES
+      "^([^|]+)\\|([^|]+)\\|([^|]+)\\|([^|]+)\\|([0-9]+)$")
+    _bioseq_highway_fail(
+      "internal malformed static target '${_static_target_record}'")
+  endif()
+  set(_static_target_token "${CMAKE_MATCH_3}")
+  string(APPEND _target_manifest_contents
+    "static-target\t${_static_target_token}\n")
   foreach(_record IN LISTS _target_records)
     string(REPLACE "|" "\t" _tsv_record "${_record}")
     string(APPEND _target_manifest_contents "target\t${_tsv_record}\n")
@@ -1021,6 +1093,8 @@ function(bioseq_add_highway_codegen)
   set(_generated_modules)
   set(_generated_primary_modules)
   set(_generated_target_implementations)
+  set(_generated_test_primary_module)
+  set(_generated_test_implementations)
   foreach(_target_record IN LISTS _target_records)
     if(NOT _target_record MATCHES
         "^([^|]+)\\|([^|]+)\\|([^|]+)\\|([^|]+)\\|([0-9]+)$")
@@ -1031,16 +1105,32 @@ function(bioseq_add_highway_codegen)
     list(APPEND _generated_primary_modules "${_target_dir}/index.cppm")
     list(APPEND _generated_target_implementations
       "${_target_dir}/binder.cppm")
+    if(_target_record STREQUAL _static_target_record)
+      set(_generated_test_primary_module "${_target_dir}/index.cppm")
+      list(APPEND _generated_test_implementations
+        "${_target_dir}/binder.cppm")
+    endif()
     foreach(_partition IN LISTS _partitions)
       list(APPEND _generated_target_implementations
         "${_target_dir}/${_partition}.cppm")
+      if(_target_record STREQUAL _static_target_record)
+        list(APPEND _generated_test_implementations
+          "${_target_dir}/${_partition}.cppm")
+      endif()
     endforeach()
   endforeach()
   set(_dispatch_registry "${_output_root}/dispatch_registry.cppm")
+  set(_test_support "${_output_root}/test_support.cppm")
+  if(NOT _generated_test_primary_module
+      OR NOT _generated_test_implementations)
+    _bioseq_highway_fail(
+      "could not derive the fixed-target test module closure")
+  endif()
   list(APPEND _generated_modules
     ${_generated_primary_modules}
     ${_generated_target_implementations}
-    "${_dispatch_registry}")
+    "${_dispatch_registry}"
+    "${_test_support}")
   list(REMOVE_DUPLICATES _generated_modules)
   set_source_files_properties(${_generated_modules} PROPERTIES GENERATED TRUE)
 
@@ -1158,6 +1248,9 @@ function(bioseq_add_highway_codegen)
       "${ARG_OUTPUT_PRIMARY_MODULES}|${_generated_primary_modules}"
       "${ARG_OUTPUT_TARGET_IMPLEMENTATIONS}|${_generated_target_implementations}"
       "${ARG_OUTPUT_DISPATCH_REGISTRY}|${_dispatch_registry}"
+      "${ARG_OUTPUT_TEST_PRIMARY_MODULE}|${_generated_test_primary_module}"
+      "${ARG_OUTPUT_TEST_IMPLEMENTATIONS}|${_generated_test_implementations}"
+      "${ARG_OUTPUT_TEST_SUPPORT}|${_test_support}"
       "${ARG_OUTPUT_POLICY_TARGET}|${ARG_POLICY_TARGET}"
       "${ARG_OUTPUT_SCAN_TARGET}|${ARG_SCAN_TARGET}"
       "${ARG_OUTPUT_PREPARE_TARGET}|${_prepare_target}"

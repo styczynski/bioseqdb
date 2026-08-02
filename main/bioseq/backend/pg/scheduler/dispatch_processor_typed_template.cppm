@@ -3795,7 +3795,8 @@ template <class S>
                         static_cast<size_t>(idx_params.window_size),
                         static_cast<size_t>(idx_params.kmer_size),
                         backend,
-                        pipe::ExactSimdRangeRoute::require_continuation);
+                        pipe::ExactSimdRangeRoute::require_continuation,
+                        idx_params.highway_kernels);
 					if (!pipe::minimizer_range_proof_matches_backend(
 							backend,
 							proof,

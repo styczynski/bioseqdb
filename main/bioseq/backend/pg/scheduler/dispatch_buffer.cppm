@@ -1833,7 +1833,7 @@ public:
 		bioseq::storage::indexing::add_cold_index_buffer_usage(
 			join_cold_policy_stats, policy_buffer_begin);
 		const bool vulkan_requested =
-			::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_components_requested(
+			::bioseq::simd::pipe::vulkan_components_requested(
 				base_params);
 		std::vector<const bioseq::pg_types::seq*> query_headers;
 		std::vector<Datum> query_recipe_datums;
@@ -2999,9 +2999,9 @@ public:
 				record_physical_target,
 				batch_size,
 				classify_shared_join_target_outcome_topology(
-					::bioseq::simd::HWY_NAMESPACE::pipe::
+					::bioseq::simd::pipe::
 						vulkan_components_requested(base_params),
-					::bioseq::simd::HWY_NAMESPACE::pipe::
+					::bioseq::simd::pipe::
 						complete_all_gpu_tuple_selected(base_params)));
 			const auto prepared_after = prepared_counter_totals();
 			if (prepared_after[0] < prepared_before[0]
@@ -3631,10 +3631,10 @@ public:
                 || bioseq::settings::test_force_chunked_scanner)
             && !batch_has_recipe;
         const bool vulkan_requested =
-            ::bioseq::simd::HWY_NAMESPACE::pipe::
+            ::bioseq::simd::pipe::
                 vulkan_components_requested(base_params);
         if (vulkan_requested
-            && !::bioseq::simd::HWY_NAMESPACE::pipe::
+            && !::bioseq::simd::pipe::
                 complete_all_gpu_tuple_selected(base_params)) {
             ereport(ERROR,
                 (errcode(ERRCODE_INTERNAL_ERROR),

@@ -35,6 +35,20 @@ namespace detail {
     return std::filesystem::path{target.platform} / target.slug;
 }
 
+[[nodiscard]] inline const target_spec& static_target(
+    const target_manifest& inventory) {
+    const auto found = std::ranges::find(
+        inventory.targets,
+        inventory.static_target_token,
+        &target_spec::token);
+    if (found == inventory.targets.end()) {
+        throw std::runtime_error(
+            "renderer cannot resolve the configured Highway static target '"
+            + inventory.static_target_token + "'");
+    }
+    return *found;
+}
+
 [[nodiscard]] inline std::string policy_block(
     const target_manifest& inventory) {
     std::string result;
@@ -111,6 +125,163 @@ namespace detail {
     }
     expression.replace(position, marker.size(), name_space);
     return expression;
+}
+
+inline constexpr std::string_view alignment_family_prefix = "alignment_";
+
+[[nodiscard]] inline bool is_alignment_family(
+    const std::string_view family) noexcept {
+    return family.starts_with(alignment_family_prefix);
+}
+
+[[nodiscard]] inline std::uint8_t alignment_alphabet_code(
+    const std::string_view family) {
+    if (!is_alignment_family(family)
+        || family.size() == alignment_family_prefix.size()) {
+        throw std::runtime_error(
+            "typed alignment slot family must be named alignment_<code>: "
+            + std::string{family});
+    }
+
+    std::uint32_t code = 0u;
+    for (const char character : family.substr(
+             alignment_family_prefix.size())) {
+        if (character < '0' || character > '9') {
+            throw std::runtime_error(
+                "typed alignment slot family has a non-numeric alphabet code: "
+                + std::string{family});
+        }
+        code = code * 10u
+             + static_cast<std::uint32_t>(character - '0');
+        if (code > 255u) {
+            throw std::runtime_error(
+                "typed alignment slot family alphabet code exceeds uint8_t: "
+                + std::string{family});
+        }
+    }
+    return static_cast<std::uint8_t>(code);
+}
+
+/**
+ * Extract the sole simple type argument from a target callable template-id.
+ *
+ * Alignment function pointers are alphabet-specific, so the generated binder
+ * materializes one strongly typed AlignmentKernels<Alphabet> object per
+ * scheduler alphabet. Restricting the registry spelling to a qualified type
+ * name keeps manifest data from becoming arbitrary generated C++.
+ */
+[[nodiscard]] inline std::string alignment_alphabet_type(
+    const slot_spec& slot) {
+    const std::size_t marker =
+        slot.expression.find("{target_namespace}");
+    const std::size_t open = slot.expression.find('<', marker);
+    const std::size_t close = slot.expression.rfind('>');
+    if (marker == std::string::npos
+        || open == std::string::npos
+        || close != slot.expression.size() - 1u
+        || open + 1u == close
+        || slot.expression.find('<', open + 1u) != std::string::npos
+        || slot.expression.find('>', open + 1u) != close) {
+        throw std::runtime_error(
+            "typed alignment slot '" + slot.family_field + "."
+            + slot.slot_field
+            + "' must end in one simple alphabet template argument");
+    }
+
+    std::string alphabet =
+        slot.expression.substr(open + 1u, close - open - 1u);
+    for (const char character : alphabet) {
+        const bool identifier_character =
+            (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9')
+            || character == '_' || character == ':';
+        if (!identifier_character) {
+            throw std::runtime_error(
+                "typed alignment slot '" + slot.family_field + "."
+                + slot.slot_field
+                + "' alphabet must be a qualified type name");
+        }
+    }
+    return alphabet;
+}
+
+struct alignment_family_binding final {
+    std::uint8_t alphabet_code{};
+    std::string alphabet_type;
+    std::map<std::string, const slot_spec*, std::less<>> members;
+};
+
+inline constexpr std::array<std::string_view, 6>
+    alignment_required_members{
+        "ksw2_z2",
+        "ksw2_d2",
+        "ksw2_batched",
+        "block_prepare",
+        "block_try_certified_gap",
+        "block_align",
+    };
+
+[[nodiscard]] inline std::vector<alignment_family_binding>
+collect_alignment_families(
+    const std::map<
+        std::string,
+        std::vector<const slot_spec*>,
+        std::less<>>& families) {
+    std::vector<alignment_family_binding> result;
+    std::set<std::uint8_t> alphabet_codes;
+    for (const auto& [family, slots] : families) {
+        if (!is_alignment_family(family)) continue;
+
+        alignment_family_binding binding{
+            .alphabet_code = alignment_alphabet_code(family),
+        };
+        if (!alphabet_codes.insert(binding.alphabet_code).second) {
+            throw std::runtime_error(
+                "duplicate typed alignment alphabet code "
+                + std::to_string(binding.alphabet_code));
+        }
+
+        for (const slot_spec* slot : slots) {
+            if (slot->slot_field == "@"
+                || !binding.members.emplace(slot->slot_field, slot).second) {
+                throw std::runtime_error(
+                    "typed alignment family '" + family
+                    + "' must use unique member slots");
+            }
+            const std::string alphabet = alignment_alphabet_type(*slot);
+            if (binding.alphabet_type.empty()) {
+                binding.alphabet_type = alphabet;
+            } else if (binding.alphabet_type != alphabet) {
+                throw std::runtime_error(
+                    "typed alignment family '" + family
+                    + "' mixes alphabet template arguments");
+            }
+        }
+
+        if (binding.members.size() != alignment_required_members.size()) {
+            throw std::runtime_error(
+                "typed alignment family '" + family
+                + "' must bind exactly six function slots");
+        }
+        for (const std::string_view member : alignment_required_members) {
+            if (!binding.members.contains(member)) {
+                throw std::runtime_error(
+                    "typed alignment family '" + family
+                    + "' is missing required slot '" + std::string{member}
+                    + "'");
+            }
+        }
+        result.push_back(std::move(binding));
+    }
+
+    std::ranges::sort(
+        result,
+        {},
+        [](const alignment_family_binding& binding) {
+            return binding.alphabet_code;
+        });
+    return result;
 }
 
 [[nodiscard]] inline std::string_view kernel_enumerator_for_owner(
@@ -198,6 +369,12 @@ namespace detail {
            << "// Generated target binding; do not edit.\n"
            << "module " << module << ";\n\n"
            << "import " << plan.source_inventory.contract_module << ";\n";
+    for (const slot_spec& slot : plan.source_inventory.slots) {
+        if (is_alignment_family(slot.family_field)) {
+            output << "import bioseq.sequences;\n";
+            break;
+        }
+    }
     for (const extracted_source& source : plan.extracted_sources) {
         output << "import :" << source.source.partition << ";\n";
     }
@@ -226,7 +403,35 @@ namespace detail {
     for (const slot_spec& slot : plan.source_inventory.slots) {
         families[slot.family_field].push_back(&slot);
     }
+    const std::vector<alignment_family_binding> alignment_families =
+        collect_alignment_families(families);
+    for (const alignment_family_binding& family : alignment_families) {
+        const auto code = static_cast<unsigned int>(family.alphabet_code);
+        output << "    static const ::bioseq::simd::AlignmentKernels<"
+               << family.alphabet_type << "> alignment_" << code << "{\n";
+        for (const std::string_view member : alignment_required_members) {
+            const slot_spec* slot = family.members.find(member)->second;
+            output << "        ." << member << " = "
+                   << replace_target_namespace(
+                          slot->expression, target.name_space)
+                   << ",\n";
+        }
+        output << "    };\n";
+    }
+    if (!alignment_families.empty()) {
+        output << "    static const ::bioseq::simd::AlignmentTableEntry "
+                  "alignment_by_alphabet[]{\n";
+        for (const alignment_family_binding& family : alignment_families) {
+            const auto code = static_cast<unsigned int>(family.alphabet_code);
+            output << "        {.alphabet_code = " << code
+                   << "u, .typed_table = &alignment_" << code << "},\n";
+        }
+        output << "    };\n"
+               << "    table.alignment_by_alphabet = "
+                  "alignment_by_alphabet;\n";
+    }
     for (const auto& [family, slots] : families) {
+        if (is_alignment_family(family)) continue;
         if (slots.size() == 1 && slots.front()->slot_field == "@") {
             output << "    table." << family << " = "
                    << replace_target_namespace(
@@ -289,6 +494,35 @@ namespace detail {
               "\"Highway target binder returned an incomplete table\"};\n"
            << "    }\n"
            << "    return *binding;\n"
+           << "}\n\n"
+           << "}  // namespace bioseq::simd_dispatch\n";
+    return output.str();
+}
+
+[[nodiscard]] inline std::string render_test_support(
+    const generation_plan& plan) {
+    const target_spec& target = static_target(plan.target_inventory);
+    std::ostringstream output;
+    output << "module;\n\n"
+           << "#include <stdexcept>\n\n"
+           << "// Generated fixed-target test binding; do not edit.\n"
+           << "export module bioseq.highway.test_support;\n\n"
+           << "import " << plan.source_inventory.contract_module << ";\n"
+           << "import " << generated_module_name(target) << ";\n\n"
+           << "export namespace bioseq::simd_dispatch {\n\n"
+           << "[[nodiscard]] const HighwayTargetBinding& "
+              "highway_test_target_binding() {\n"
+           << "    const HighwayTargetBinding* binding = "
+           << target.name_space << "::BindHighwayTarget();\n"
+           << "    if (binding == nullptr || binding->kernels == nullptr) {\n"
+           << "        throw std::logic_error{"
+              "\"generated fixed-target test binding is incomplete\"};\n"
+           << "    }\n"
+           << "    return *binding;\n"
+           << "}\n\n"
+           << "[[nodiscard]] const HighwayKernelTable& "
+              "highway_test_kernel_table() {\n"
+           << "    return *highway_test_target_binding().kernels;\n"
            << "}\n\n"
            << "}  // namespace bioseq::simd_dispatch\n";
     return output.str();
@@ -408,6 +642,13 @@ inline void reject_symlink_destination(
         .kind = artifact_kind::dispatch_registry,
         .content = detail::render_dispatch_registry(plan),
     });
+    result.artifacts.push_back(generated_artifact{
+        .relative_path = "test_support.cppm",
+        .module_name = "bioseq.highway.test_support",
+        .target_token = plan.target_inventory.static_target_token,
+        .kind = artifact_kind::test_support,
+        .content = detail::render_test_support(plan),
+    });
     std::ranges::sort(
         result.artifacts,
         {},
@@ -423,7 +664,8 @@ inline void reject_symlink_destination(
                 + artifact.relative_path.string());
         }
         if (artifact.kind == artifact_kind::primary
-            || artifact.kind == artifact_kind::partition) {
+            || artifact.kind == artifact_kind::partition
+            || artifact.kind == artifact_kind::test_support) {
             if (!providers.insert(artifact.module_name).second) {
                 throw std::runtime_error(
                     "duplicate generated Highway module provider: "

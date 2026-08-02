@@ -177,6 +177,7 @@ inline void require_field_count(
         case artifact_kind::binder: return "binder";
         case artifact_kind::partition: return "partition";
         case artifact_kind::dispatch_registry: return "dispatch_registry";
+        case artifact_kind::test_support: return "test_support";
     }
     return "unknown";
 }
@@ -188,6 +189,7 @@ inline void require_field_count(
     target_manifest result;
     bool saw_policy = false;
     bool saw_highway = false;
+    bool saw_static_target = false;
     for (const auto& fields : detail::manifest_lines(
              path, "bioseq-highway-targets-v1")) {
         if (fields.front() == "policy") {
@@ -208,6 +210,14 @@ inline void require_field_count(
             result.highway_version = std::string{fields[1]};
             result.highway_digest = std::string{fields[2]};
             saw_highway = true;
+        } else if (fields.front() == "static-target") {
+            detail::require_field_count(path, fields.front(), fields.size(), 2);
+            if (saw_static_target) {
+                throw std::runtime_error(
+                    path.string() + ": duplicate static-target record");
+            }
+            result.static_target_token = std::string{fields[1]};
+            saw_static_target = true;
         } else if (fields.front() == "target") {
             detail::require_field_count(path, fields.front(), fields.size(), 6);
             target_spec target{
@@ -224,10 +234,12 @@ inline void require_field_count(
                 + std::string{fields.front()} + "'");
         }
     }
-    if (!saw_policy || !saw_highway || result.targets.empty()) {
+    if (!saw_policy || !saw_highway || !saw_static_target
+        || result.targets.empty()) {
         throw std::runtime_error(
             path.string()
-            + ": target manifest requires policy, highway, and target records");
+            + ": target manifest requires policy, highway, static-target, "
+              "and target records");
     }
     std::ranges::sort(
         result.targets,
@@ -350,6 +362,9 @@ inline void require_field_count(
            << detail::json_escape(plan.target_inventory.highway_version) << "\",\n"
            << "  \"highway_digest\": \""
            << detail::json_escape(plan.target_inventory.highway_digest) << "\",\n"
+           << "  \"static_target\": \""
+           << detail::json_escape(
+                  plan.target_inventory.static_target_token) << "\",\n"
            << "  \"clang_version\": \""
            << detail::json_escape(plan.clang_version) << "\",\n"
            << "  \"compilation_signature\": \""

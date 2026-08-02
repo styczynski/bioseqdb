@@ -201,13 +201,15 @@ endforeach()
 set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence_batch_processor.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_impl.inc)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm)
 file(GLOB_RECURSE BIOSEQ_LAZY_FACADE_INDEX_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.cppm
@@ -224,7 +226,7 @@ list(APPEND BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
 list(REMOVE_DUPLICATES BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES)
 
 # Exact forbidden-token exceptions are valid only between balanced named
-# sentinels in the two large minimizer modules.  The state machine rejects
+# sentinels in the owning minimizer modules.  The state machine rejects
 # malformed, nested, duplicate, unknown, mismatched, missing, and unclosed
 # scopes.  An exact line is then checked against both its source and active
 # private resident/admitted scope, so copying an allowed spelling elsewhere is
@@ -233,11 +235,14 @@ function(bioseq_doc0377_private_packed_scope_names
     _bioseq_source _bioseq_result)
   set(_bioseq_scopes)
   if("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm")
     set(_bioseq_scopes
       bounded_u32_dna4_view
       run_packed_kernel
-      collect_minimizers_packed_paper_nthash_simd_checked
+      collect_minimizers_packed_paper_nthash_simd_checked)
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm")
+    set(_bioseq_scopes
       consume_two_stack_nthash_fragment
       collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked)
   elseif("${_bioseq_source}" STREQUAL
@@ -301,7 +306,7 @@ function(bioseq_doc0377_private_packed_line_allowed
     _bioseq_source _bioseq_scope _bioseq_line _bioseq_result)
   set(_bioseq_allowed FALSE)
   if("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm")
     if("${_bioseq_scope}" STREQUAL "bounded_u32_dna4_view"
         AND ("${_bioseq_line}" STREQUAL
           "return local_view_units * traits::letters_per_unit - local_bp_size;"
@@ -317,8 +322,10 @@ function(bioseq_doc0377_private_packed_line_allowed
         AND ("${_bioseq_line}" STREQUAL "traits::letters_per_unit;"
           OR "${_bioseq_line}" STREQUAL "sequence.read_cptr(begin));"))
       set(_bioseq_allowed TRUE)
-    elseif("${_bioseq_scope}" STREQUAL
-        "consume_two_stack_nthash_fragment"
+    endif()
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm")
+    if("${_bioseq_scope}" STREQUAL "consume_two_stack_nthash_fragment"
         AND "${_bioseq_line}" STREQUAL
           ": fragment.read_cptr(fragment.cbegin());")
       set(_bioseq_allowed TRUE)
@@ -480,7 +487,7 @@ if(_bioseq_self_nested STREQUAL "" OR _bioseq_self_mismatch STREQUAL ""
   message(FATAL_ERROR "DOC0377 private-scope guard negative self-check failed")
 endif()
 set(_bioseq_doc0377_self_source
-  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm")
 bioseq_doc0377_private_packed_line_allowed(
   "${_bioseq_doc0377_self_source}" bounded_u32_dna4_view
   "return local_view_units * traits::letters_per_unit - local_bp_size;"
@@ -737,6 +744,156 @@ file(GLOB_RECURSE BIOSEQ_NOPG_MODULES CONFIGURE_DEPENDS
 list(FILTER BIOSEQ_NOPG_MODULES EXCLUDE REGEX "/backend/pg/")
 list(FILTER BIOSEQ_NOPG_MODULES EXCLUDE REGEX "/common/testing\.cppm$")
 
+# DOC0398 generator inputs are authored module interfaces only so Clang can
+# prove their namespace/callable structure. They are never final providers:
+# bioseq_codegen emits one uniquely named production module graph per enabled
+# Highway target. Keep this explicit list out of both ordinary module globs.
+set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_utils.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_vector_stream.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/highway_sequence_ops.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_base_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_lexic_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_minimap_int_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/reference_minimap_int_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/lane_helpers_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm")
+
+# The annotation and generator registry are one exact ownership boundary. Scan
+# only authored source-tree module units (never current or stale build outputs),
+# normalize both sets to deterministic real paths, and fail before either an
+# annotated source becomes an ordinary production provider or an unannotated
+# file is silently treated as a generator input.
+file(GLOB_RECURSE _bioseq_highway_authored_cppm_candidates
+  LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_LIST_DIR}/*.cppm")
+set(_bioseq_highway_marked_modules)
+foreach(_bioseq_highway_candidate IN LISTS
+    _bioseq_highway_authored_cppm_candidates)
+  get_filename_component(_bioseq_highway_candidate
+    "${_bioseq_highway_candidate}" REALPATH)
+  cmake_path(IS_PREFIX CMAKE_BINARY_DIR "${_bioseq_highway_candidate}"
+    NORMALIZE _bioseq_highway_in_root_binary_dir)
+  cmake_path(IS_PREFIX CMAKE_CURRENT_BINARY_DIR "${_bioseq_highway_candidate}"
+    NORMALIZE _bioseq_highway_in_local_binary_dir)
+  file(RELATIVE_PATH _bioseq_highway_relative_candidate
+    "${CMAKE_CURRENT_LIST_DIR}" "${_bioseq_highway_candidate}")
+  if(_bioseq_highway_in_root_binary_dir
+      OR _bioseq_highway_in_local_binary_dir
+      OR _bioseq_highway_relative_candidate MATCHES
+        "(^|/)(build[^/]*|cmake-build[^/]*|generated|CMakeFiles)(/|$)"
+      OR _bioseq_highway_relative_candidate MATCHES
+        "(^|/)(test|tests|integration_tests|bench|benches|benchmarks)(/|$)"
+      OR _bioseq_highway_relative_candidate MATCHES
+        "(^|/)[^/]*_(test|tests)\\.cppm$")
+    continue()
+  endif()
+
+  file(READ "${_bioseq_highway_candidate}"
+    _bioseq_highway_candidate_contents)
+  string(REGEX REPLACE "[ \t\r\n]+" ""
+    _bioseq_highway_compact_contents
+    "${_bioseq_highway_candidate_contents}")
+  string(FIND "${_bioseq_highway_compact_contents}"
+    "namespace[[bioseq::simd]]target"
+    _bioseq_highway_marker_offset)
+  if(NOT _bioseq_highway_marker_offset EQUAL -1)
+    list(APPEND _bioseq_highway_marked_modules
+      "${_bioseq_highway_candidate}")
+  endif()
+endforeach()
+list(REMOVE_DUPLICATES _bioseq_highway_marked_modules)
+list(SORT _bioseq_highway_marked_modules)
+
+set(_bioseq_highway_registered_modules)
+set(_bioseq_highway_unmarked_registered_modules)
+foreach(_bioseq_highway_registered IN LISTS
+    BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES)
+  if(NOT EXISTS "${_bioseq_highway_registered}")
+    message(FATAL_ERROR
+      "DOC0398 Highway generator input does not exist: "
+      "${_bioseq_highway_registered}")
+  endif()
+  get_filename_component(_bioseq_highway_registered
+    "${_bioseq_highway_registered}" REALPATH)
+  cmake_path(IS_PREFIX CMAKE_CURRENT_LIST_DIR "${_bioseq_highway_registered}"
+    NORMALIZE _bioseq_highway_registered_in_source)
+  cmake_path(IS_PREFIX CMAKE_BINARY_DIR "${_bioseq_highway_registered}"
+    NORMALIZE _bioseq_highway_registered_in_binary)
+  if(NOT _bioseq_highway_registered_in_source
+      OR _bioseq_highway_registered_in_binary)
+    message(FATAL_ERROR
+      "DOC0398 Highway generator inputs must be authored beneath "
+      "${CMAKE_CURRENT_LIST_DIR}, not generated/build-tree files: "
+      "${_bioseq_highway_registered}")
+  endif()
+  list(APPEND _bioseq_highway_registered_modules
+    "${_bioseq_highway_registered}")
+  list(FIND _bioseq_highway_marked_modules
+    "${_bioseq_highway_registered}" _bioseq_highway_marked_index)
+  if(_bioseq_highway_marked_index EQUAL -1)
+    list(APPEND _bioseq_highway_unmarked_registered_modules
+      "${_bioseq_highway_registered}")
+  endif()
+endforeach()
+list(REMOVE_DUPLICATES _bioseq_highway_registered_modules)
+list(SORT _bioseq_highway_registered_modules)
+
+set(_bioseq_highway_unregistered_marked_modules
+  ${_bioseq_highway_marked_modules})
+list(REMOVE_ITEM _bioseq_highway_unregistered_marked_modules
+  ${_bioseq_highway_registered_modules})
+if(_bioseq_highway_unregistered_marked_modules
+    OR _bioseq_highway_unmarked_registered_modules
+    OR NOT "${_bioseq_highway_marked_modules}" STREQUAL
+      "${_bioseq_highway_registered_modules}")
+  string(JOIN "\n    " _bioseq_highway_missing_text
+    ${_bioseq_highway_unregistered_marked_modules})
+  string(JOIN "\n    " _bioseq_highway_extra_text
+    ${_bioseq_highway_unmarked_registered_modules})
+  message(FATAL_ERROR
+    "DOC0398 [[bioseq::simd]] ownership registry is not an exact set.\n"
+    "  Marked but unregistered:\n    ${_bioseq_highway_missing_text}\n"
+    "  Registered but unmarked:\n    ${_bioseq_highway_extra_text}")
+endif()
+
+unset(_bioseq_highway_extra_text)
+unset(_bioseq_highway_missing_text)
+unset(_bioseq_highway_unregistered_marked_modules)
+unset(_bioseq_highway_unmarked_registered_modules)
+unset(_bioseq_highway_registered_modules)
+unset(_bioseq_highway_marked_modules)
+unset(_bioseq_highway_marker_offset)
+unset(_bioseq_highway_compact_contents)
+unset(_bioseq_highway_candidate_contents)
+unset(_bioseq_highway_relative_candidate)
+unset(_bioseq_highway_in_local_binary_dir)
+unset(_bioseq_highway_in_root_binary_dir)
+unset(_bioseq_highway_registered_in_binary)
+unset(_bioseq_highway_registered_in_source)
+unset(_bioseq_highway_registered)
+unset(_bioseq_highway_candidate)
+unset(_bioseq_highway_marked_index)
+unset(_bioseq_highway_authored_cppm_candidates)
+
+set(BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_dispatch_contract_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index_impl.cppm")
+list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
+  ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
+  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS})
+list(REMOVE_ITEM SRC_MOD_FILES
+  ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
+  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS})
+
 # DOC0286 §12.1 Edit 1 — the IO reader (FASTA/FASTQ + gzip) + the new
 # file_utils.cppm are NO_POSTGRES and are now consumed by the pg extension
 # (backend/storage/io/load.cppm imports bioseq_io.public_api), so they join the
@@ -875,11 +1032,15 @@ list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
 
 set(BIOSEQ_NOPG_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
+list(APPEND BIOSEQ_NOPG_SOURCES
+  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS})
+set_source_files_properties(
+  ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   list(APPEND BIOSEQ_NOPG_SOURCES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
 endif()
@@ -986,6 +1147,112 @@ target_sources(bioseq_modules_nopg
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_OWNED_MODULES})
+
+# P0 of DOC0398 proves the complete annotation -> prepared Clang closure ->
+# fixed-target module -> one generated binder/registry path with SneakySnake.
+# Further families extend these explicit registries; target discovery itself
+# remains Highway-owned through HWY_VISIT_TARGETS.
+set(BIOSEQ_HIGHWAY_GENERATED_ROOT
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/highway")
+
+# This alphabet registry is the single scheduler/codegen ordering contract.
+# Its zero-based position is the neutral alphabet_code carried by Minimap2Params
+# and by each generated fixed-target alignment table entry.
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET_REGISTRY
+  dna4
+  dna5)
+set(BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS)
+set(BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS)
+set(_bioseq_highway_alignment_alphabet_code 0)
+foreach(_bioseq_highway_alignment_alphabet IN LISTS
+    BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET_REGISTRY)
+  set(_bioseq_highway_alignment_family
+    "alignment_${_bioseq_highway_alignment_alphabet_code}")
+  list(APPEND BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS
+    "ksw2|${_bioseq_highway_alignment_family}|ksw2_z2|&::bioseq::simd::{target_namespace}::ksw2_z2<::seq::${_bioseq_highway_alignment_alphabet}>"
+    "ksw2|${_bioseq_highway_alignment_family}|ksw2_d2|&::bioseq::simd::{target_namespace}::ksw2_d2<::seq::${_bioseq_highway_alignment_alphabet}>"
+    "ksw2_batched|${_bioseq_highway_alignment_family}|ksw2_batched|&::bioseq::simd::{target_namespace}::ksw2_batched<::seq::${_bioseq_highway_alignment_alphabet}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|block_prepare|&::bioseq::simd::{target_namespace}::block_prepare<::seq::${_bioseq_highway_alignment_alphabet}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|block_try_certified_gap|&::bioseq::simd::{target_namespace}::block_try_certified_gap<::seq::${_bioseq_highway_alignment_alphabet}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|block_align|&::bioseq::simd::{target_namespace}::block_align<::seq::${_bioseq_highway_alignment_alphabet}>")
+  list(APPEND BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS
+    "${_bioseq_highway_alignment_family}|ksw2_z2"
+    "${_bioseq_highway_alignment_family}|ksw2_d2"
+    "${_bioseq_highway_alignment_family}|ksw2_batched"
+    "${_bioseq_highway_alignment_family}|block_prepare"
+    "${_bioseq_highway_alignment_family}|block_try_certified_gap"
+    "${_bioseq_highway_alignment_family}|block_align")
+  math(EXPR _bioseq_highway_alignment_alphabet_code
+    "${_bioseq_highway_alignment_alphabet_code} + 1")
+endforeach()
+unset(_bioseq_highway_alignment_family)
+unset(_bioseq_highway_alignment_alphabet)
+unset(_bioseq_highway_alignment_alphabet_code)
+
+bioseq_add_highway_codegen(
+  REQUIRE_COMPLETE_TABLE
+  TARGET bioseq_highway_target_modules
+  SCAN_TARGET bioseq_highway_target_scan_context
+  POLICY_TARGET bioseq_highway_target_policy
+  OUTPUT_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
+  CONTRACT_MODULE bioseq.highway.dispatch_contract
+  DISPATCH_MODULE bioseq.scheduler.dispatch_processor
+  HIGHWAY_VERSION 1.3.0
+  COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"
+  PCM_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}/pcm"
+  SOURCE_RECORDS
+    "simd_utils|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_utils.cppm|bioseq.highway.sources.simd_utils|simd_utils|simd_utils|"
+    "vector_stream|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_vector_stream.cppm|bioseq.highway.sources.vector_stream|vector_stream|vector_stream|simd_utils"
+    "sequence_ops|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/highway_sequence_ops.cppm|bioseq.highway.sources.sequence_ops|sequence_ops|sequence_ops|simd_utils,vector_stream"
+    "hasher_base|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_base_kernel.cppm|bioseq.highway.sources.hasher_base|hasher_base|hasher_base|sequence_ops,simd_utils"
+    "hasher_lexic|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_lexic_kernel.cppm|bioseq.highway.sources.hasher_lexic|hasher_lexic|hasher_lexic|hasher_base,simd_utils"
+    "hasher_minimap_int|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_minimap_int_kernel.cppm|bioseq.highway.sources.hasher_minimap_int|hasher_minimap_int|hasher_minimap_int|hasher_base,hasher_lexic,simd_utils"
+    "minimizer_reference|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/reference_minimap_int_kernel.cppm|bioseq.highway.sources.minimizer_reference|minimizer_reference|minimizers|sequence_ops,hasher_minimap_int,simd_utils,vector_stream"
+    "minimizer_two_stack|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm|bioseq.highway.sources.minimizer_two_stack|minimizer_two_stack|minimizers|sequence_ops,hasher_base,hasher_lexic,hasher_minimap_int,simd_utils,vector_stream"
+    "minimizer_paper|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm|bioseq.highway.sources.minimizer_paper|minimizer_paper|minimizers|sequence_ops,hasher_base,simd_utils,vector_stream"
+    "alignment_utils|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm|bioseq.highway.sources.alignment_utils|alignment_utils|alignment|"
+    "alignment_lanes|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/lane_helpers_kernel.cppm|bioseq.highway.sources.alignment_lanes|alignment_lanes|alignment|alignment_utils"
+    "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils,alignment_lanes"
+    "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|simd_utils,alignment_utils,alignment_lanes"
+    "ksw2_batched|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils,alignment_lanes"
+    "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm|bioseq.highway.sources.prefilter|prefilter|common|"
+    "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|"
+    "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|"
+  SLOT_RECORDS
+    "minimizer_reference|minimizers|reference_minimap_int|&::bioseq::simd::{target_namespace}::reference_minimap_int"
+    "minimizer_two_stack|minimizers|two_stack_nthash|&::bioseq::simd::{target_namespace}::two_stack_nthash"
+    "minimizer_paper|minimizers|paper_nthash|&::bioseq::simd::{target_namespace}::paper_nthash"
+    ${BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS}
+    "prefilter|common|sneaky_snake_simd_batch|&bioseq::sequences::prefilters::{target_namespace}::sneaky_snake_simd_batch"
+    "chaining|chaining|chain_anchors_simd|&::bioseq::simd::{target_namespace}::chain_anchors_simd"
+    "indexing|indexing|validate_non_scatter_local32_w2|&bioseq::indexing::{target_namespace}::validate_non_scatter_local32_w2"
+  REQUIRED_SLOT_RECORDS
+    "minimizers|reference_minimap_int"
+    "minimizers|two_stack_nthash"
+    "minimizers|paper_nthash"
+    ${BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS}
+    "common|sneaky_snake_simd_batch"
+    "chaining|chain_anchors_simd"
+    "indexing|validate_non_scatter_local32_w2"
+  SCAN_LINK_LIBRARIES bioseq_modules_nopg
+  SCAN_COMPILE_DEFINITIONS NO_POSTGRES=1
+  OUTPUT_MODULES BIOSEQ_HIGHWAY_GENERATED_MODULES
+  OUTPUT_PRIMARY_MODULES BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES
+  OUTPUT_TARGET_IMPLEMENTATIONS
+    BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS
+  OUTPUT_DISPATCH_REGISTRY BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY
+  OUTPUT_TEST_PRIMARY_MODULE BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE
+  OUTPUT_TEST_IMPLEMENTATIONS BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS
+  OUTPUT_TEST_SUPPORT BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT
+  OUTPUT_SOURCE_INPUTS BIOSEQ_HIGHWAY_REGISTERED_SOURCE_INPUTS
+  OUTPUT_TARGET_RECORDS BIOSEQ_HIGHWAY_COMPILED_TARGET_RECORDS
+  OUTPUT_COMPILED_MASK BIOSEQ_HIGHWAY_COMPILED_TARGET_MASK)
+
+if(NOT BIOSEQ_HIGHWAY_REGISTERED_SOURCE_INPUTS STREQUAL
+    BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES)
+  message(FATAL_ERROR
+    "DOC0398 Highway source registry and final-provider exclusion diverged")
+endif()
 
 if(APPLE)
   add_executable(bioseq_gpu_archive_builder
@@ -1157,7 +1424,7 @@ endif()
 # runtime dispatch and algorithm selection are unchanged, and non-GCC
 # builds stay on the preset's normal -O3 path.
 set(BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL "O1" CACHE STRING
-  "Optimization level for GCC 16.1 AWS typed dispatch wrapper TUs. \
+  "Optimization level for GCC 16.1 AWS typed dispatch module units. \
 Allowed: O0, O1, O2, O3. O3 preserves the global preset behavior.")
 set_property(CACHE BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL PROPERTY STRINGS O0 O1 O2 O3)
 if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL MATCHES "^O[0123]$")
@@ -1167,7 +1434,7 @@ if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL MATCHES "^O[0123]$")
 endif()
 
 set(BIOSEQ_GCC_TYPED_DISPATCH_JOBS "1" CACHE STRING
-  "Ninja compile-pool width for GCC 16.1 AWS typed dispatch wrapper TUs. \
+  "Ninja compile-pool width for GCC 16.1 AWS typed dispatch module units. \
 0 = inherit the target compile pool.")
 if(NOT BIOSEQ_GCC_TYPED_DISPATCH_JOBS MATCHES "^[0-9]+$")
   message(FATAL_ERROR
@@ -1180,66 +1447,139 @@ set(BIOSEQ_GCC_TEMPLATE_FORCE_INLINE "ON" CACHE BOOL
 for the GCC 16.1 AWS preset. OFF preserves algorithm selection but lets GCC \
 avoid constructing very large inlining graphs while compiling typed dispatch.")
 
-set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_scanner_pg.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_standard.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_chunked.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w1_inmemory_chunked_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_scanner_pg.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_standard.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_chunked.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w2_inmemory_chunked_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_scanner_pg.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_standard.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_chunked.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w4_inmemory_chunked_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_scanner_pg.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_standard.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_chunked.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna4_w8_inmemory_chunked_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_scanner_pg.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_standard.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_chunked.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w1_inmemory_chunked_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_scanner_pg.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_standard.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_chunked.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w2_inmemory_chunked_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_scanner_pg.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_standard.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_chunked.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w4_inmemory_chunked_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_scanner_pg.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_standard.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_segmented.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked_segmented.cpp)
+# The scheduler shape matrix is independent of Highway target generation. Its
+# single authored production source is a .cppm template; configure_file emits
+# deterministic build-tree .cppm implementation units for this exact registry.
+# Keep the three axes explicit and centralized so alphabet, storage-width, and
+# scanner-shape additions cannot silently diverge from optimization filtering.
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm")
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_DIR
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/scheduler/typed")
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_STORAGE_WIDTH_REGISTRY
+  1
+  2
+  4
+  8)
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SHAPE_REGISTRY
+  root
+  scanner_pg
+  inmemory
+  inmemory_standard
+  inmemory_segmented
+  inmemory_chunked
+  inmemory_chunked_segmented)
 
-# The typed dispatch implementation is split into one translation unit per
-# alphabet/storage-width/scan-shape combination. Levels 0 and 1 must prune
+file(MAKE_DIRECTORY "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_DIR}")
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES)
+foreach(_bioseq_typed_alphabet IN LISTS
+    BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET_REGISTRY)
+  foreach(_bioseq_typed_width IN LISTS
+      BIOSEQ_DISPATCH_PROCESSOR_TYPED_STORAGE_WIDTH_REGISTRY)
+    set(_bioseq_typed_stem
+      "${_bioseq_typed_alphabet}_w${_bioseq_typed_width}")
+    foreach(_bioseq_typed_shape IN LISTS
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_SHAPE_REGISTRY)
+      set(BIOSEQ_TYPED_EXTRA_IMPORT "")
+      set(_bioseq_typed_suffix "_${_bioseq_typed_shape}")
+
+      if(_bioseq_typed_shape STREQUAL "root")
+        set(_bioseq_typed_suffix "")
+        set(BIOSEQ_TYPED_EXTRA_IMPORT
+          "import bioseq.parallelism.pipeline_ops;")
+        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION process_sequences_${_bioseq_typed_stem}\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION process_scanner_pg_row_${_bioseq_typed_stem}\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION process_inmemory_row_${_bioseq_typed_stem}\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER 1\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER 1")
+      elseif(_bioseq_typed_shape STREQUAL "scanner_pg")
+        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY 1\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION process_scanner_pg_row_${_bioseq_typed_stem}")
+      elseif(_bioseq_typed_shape STREQUAL "inmemory")
+        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY 1\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION process_inmemory_row_${_bioseq_typed_stem}\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION process_inmemory_standard_row_${_bioseq_typed_stem}\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION process_inmemory_segmented_row_${_bioseq_typed_stem}\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION process_inmemory_chunked_row_${_bioseq_typed_stem}\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION process_inmemory_chunked_segmented_row_${_bioseq_typed_stem}\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_LEAF_HELPERS 1")
+      elseif(_bioseq_typed_shape STREQUAL "inmemory_standard")
+        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY 1\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION process_inmemory_standard_row_${_bioseq_typed_stem}")
+      elseif(_bioseq_typed_shape STREQUAL "inmemory_segmented")
+        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY 1\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION process_inmemory_segmented_row_${_bioseq_typed_stem}")
+      elseif(_bioseq_typed_shape STREQUAL "inmemory_chunked")
+        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY 1\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION process_inmemory_chunked_row_${_bioseq_typed_stem}")
+      elseif(_bioseq_typed_shape STREQUAL "inmemory_chunked_segmented")
+        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY 1\n"
+          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION process_inmemory_chunked_segmented_row_${_bioseq_typed_stem}")
+      else()
+        message(FATAL_ERROR
+          "Unknown typed dispatch shape '${_bioseq_typed_shape}'")
+      endif()
+
+      string(APPEND BIOSEQ_TYPED_SHAPE_DEFINES
+        "\n#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET seq::${_bioseq_typed_alphabet}"
+        "\n#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH ${_bioseq_typed_width}")
+      set(_bioseq_typed_output
+        "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_DIR}/dispatch_processor_impl_${_bioseq_typed_stem}${_bioseq_typed_suffix}.cppm")
+      configure_file(
+        "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
+        "${_bioseq_typed_output}"
+        @ONLY)
+      list(APPEND BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
+        "${_bioseq_typed_output}")
+    endforeach()
+  endforeach()
+endforeach()
+
+list(LENGTH BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
+  BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_SOURCE_COUNT)
+if(NOT BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_SOURCE_COUNT EQUAL 56)
+  message(FATAL_ERROR
+    "Typed dispatch registry must generate exactly 56 implementation units; "
+    "generated ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_SOURCE_COUNT}")
+endif()
+
+set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer_api_impl.cppm")
+list(REMOVE_ITEM SRC_MOD_FILES
+  "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
+  ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS})
+list(APPEND SRC_FILES
+  ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS})
+set_source_files_properties(
+  ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS}
+  ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
+set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+  PROPERTIES GENERATED TRUE)
+
+# Remove only stale artifacts owned by this exact registry. configure_file
+# already writes each live output only when its bytes change.
+file(GLOB _bioseq_typed_existing_outputs
+  "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_DIR}/dispatch_processor_impl_*.cppm")
+foreach(_bioseq_typed_existing_output IN LISTS
+    _bioseq_typed_existing_outputs)
+  list(FIND BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
+    "${_bioseq_typed_existing_output}" _bioseq_typed_live_output_index)
+  if(_bioseq_typed_live_output_index EQUAL -1)
+    file(REMOVE "${_bioseq_typed_existing_output}")
+  endif()
+endforeach()
+
+# The typed dispatch implementation is generated as one module implementation
+# unit per alphabet/storage-width/scan-shape combination. Levels 0 and 1 prune
 # those files from the target itself; leaving them in SRC_FILES would still
 # pay the module-import and template parsing cost even if their bodies were
 # preprocessor-disabled.
@@ -1247,18 +1587,17 @@ set(BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
   ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES})
 if(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "0")
   list(FILTER BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
-    INCLUDE REGEX "_dna4_w8(_|\\.cpp$)")
+    INCLUDE REGEX "_dna4_w8(_|\\.cppm$)")
 elseif(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "1")
   list(FILTER BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
-    INCLUDE REGEX "_dna[45]_w8(_|\\.cpp$)")
+    INCLUDE REGEX "_dna[45]_w8(_|\\.cppm$)")
 endif()
-list(REMOVE_ITEM SRC_FILES ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES})
 list(APPEND SRC_FILES ${BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES})
 list(LENGTH BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
   BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT)
 message(STATUS
   "bioseq: enabled ${BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT} "
-  "typed dispatch processor translation units")
+  "typed dispatch processor module implementation units")
 
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   if(NOT BIOSEQ_GCC_TEMPLATE_FORCE_INLINE)
@@ -1273,11 +1612,12 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
       PROPERTIES JOB_POOL_COMPILE gcc_typed_dispatch_compile)
   endif()
   if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
-    set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
-      PROPERTIES COMPILE_OPTIONS "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
+    set_property(SOURCE ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+      APPEND PROPERTY COMPILE_OPTIONS
+        "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
   endif()
   message(STATUS
-    "bioseq: GCC typed dispatch wrapper TUs use "
+    "bioseq: GCC typed dispatch module units use "
     "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}, compile jobs="
     "${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}, template force-inline="
     "${BIOSEQ_GCC_TEMPLATE_FORCE_INLINE}; set "
@@ -1343,6 +1683,32 @@ AddCommonTargetX(
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
+
+# Unit tests use one generator-proven fixed target, chosen from the compiler's
+# HWY_STATIC_TARGET record. The test provider imports the same generated
+# canonical partitions as production and never performs runtime dispatch.
+if(TARGET bioseq_aligner_tests_exec)
+  set_source_files_properties(
+    "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
+    "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
+    ${BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS}
+    PROPERTIES GENERATED TRUE)
+  set_source_files_properties(
+    ${BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS}
+    PROPERTIES COMPILE_OPTIONS "-x;c++")
+  target_sources(bioseq_aligner_tests_exec
+    PRIVATE ${BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS}
+    PRIVATE FILE_SET bioseq_highway_fixed_target_test_modules
+      TYPE CXX_MODULES
+      BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
+      FILES
+        "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
+        "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}")
+  target_link_libraries(bioseq_aligner_tests_exec PRIVATE
+    bioseq_highway_target_policy)
+  add_dependencies(
+    bioseq_aligner_tests_exec bioseq_highway_target_modules)
+endif()
 
 # Test-only backend DSO used by the DOC0388 native alter-function integration
 # matrix.  Keep it outside the integration source glob (the .cc suffix) and
@@ -3649,6 +4015,30 @@ AddCommonTargetX(
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
+
+# Generated target primaries are the only exported providers. Their private
+# binder/algorithm partitions and the dispatch-processor registry are ordinary
+# module implementation units, all owned exactly once by the extension DSO.
+set_source_files_properties(
+  ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES}
+  ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
+  "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
+  PROPERTIES GENERATED TRUE)
+set_source_files_properties(
+  ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
+  "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
+target_sources(postgresql_bioseq
+  PRIVATE
+    ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
+    "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
+  PRIVATE FILE_SET bioseq_highway_generated_primaries
+    TYPE CXX_MODULES
+    BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
+    FILES ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES})
+target_link_libraries(postgresql_bioseq PRIVATE
+  bioseq_highway_target_policy)
+add_dependencies(postgresql_bioseq bioseq_highway_target_modules)
 
 set_source_files_properties(
   ${BIOSEQ_SQL_ENTITY_HANDLE_MODULES}

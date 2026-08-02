@@ -1,12 +1,4 @@
-module;
-
-#include <hwy/highway.h>
-#include <hwy/aligned_allocator.h>
-
-#include "common.h"
-#include <string>
-#include <functional>
-
+/** Target-neutral scalar minimizer hasher facade. */
 export module bioseq.sequences.kmers.hashers;
 
 export import bioseq.sequences.kmers.hashers.base;
