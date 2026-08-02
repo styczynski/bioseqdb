@@ -30322,9 +30322,6 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			HighwayTargetNames(highway_plan.compiled_targets);
 		const std::string highway_runnable_architectures =
 			HighwayTargetNames(highway_plan.runnable_targets);
-		const auto planned_query_highway_kernels =
-			PlannedQueryMinimizerHighwayKernels(&params);
-
 		/*
 		 * Renderer driven by the structured `PipelineDescription` populated at
 		 * `BeginCustomScan` (DOC0249 §12.3).  The renderer no longer hardcodes
@@ -30339,6 +30336,26 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		 */
 			const bool has_pipeline_desc =
 				aligner_snapshot->pipeline_desc.has_value();
+			const std::size_t query_sketch_stage_owners =
+				has_pipeline_desc
+				? bioseq::simd::pipe::query_sketch_stage_owner_count(
+					*aligner_snapshot->pipeline_desc)
+				: 0u;
+			if (query_sketch_stage_owners > 1u) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Highway EXPLAIN has duplicate query-sketch stage owners"),
+					 errdetail("owners=%zu", query_sketch_stage_owners)));
+			}
+			/*
+			 * A structured QuerySketchStage owns its exact function set. The
+			 * top-level list is solely the cold/legacy fallback for descriptions
+			 * that could not represent that semantic stage.
+			 */
+			const auto top_level_query_highway_kernels =
+				query_sketch_stage_owners == 1u
+				? bioseq::simd_dispatch::HighwayKernelSet{}
+				: PlannedQueryMinimizerHighwayKernels(&params);
 			const auto pipeline_scheduler =
 				bioseq::parallelism::pg::snapshot();
 			const auto pipeline_mode =
@@ -30410,7 +30427,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				for (std::size_t kernel_index = 0;
 					 kernel_index < bioseq::simd_dispatch::highway_kernel_count;
 					 ++kernel_index) {
-					if (!planned_query_highway_kernels[kernel_index]) continue;
+					if (!top_level_query_highway_kernels[kernel_index]) continue;
 					const auto kernel = static_cast<
 						bioseq::simd_dispatch::HighwayKernelId>(kernel_index);
 					const std::string_view function =
@@ -30622,7 +30639,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				highway_compiled_architectures.c_str(), es);
 			ExplainPropertyText("Runnable Architectures",
 				highway_runnable_architectures.c_str(), es);
-			if (planned_query_highway_kernels.any()) {
+			if (top_level_query_highway_kernels.any()) {
 				ExplainOpenGroup(
 					"Planned Highway Functions",
 					"Planned Highway Functions", false, es);
@@ -30630,7 +30647,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 					 kernel_index
 						< bioseq::simd_dispatch::highway_kernel_count;
 					 ++kernel_index) {
-					if (!planned_query_highway_kernels[kernel_index]) continue;
+					if (!top_level_query_highway_kernels[kernel_index]) continue;
 					const auto kernel = static_cast<
 						bioseq::simd_dispatch::HighwayKernelId>(kernel_index);
 					const std::string_view function =

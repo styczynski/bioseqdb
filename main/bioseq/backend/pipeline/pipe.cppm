@@ -6347,6 +6347,9 @@ struct PipelineDescription {
     std::vector<StageDescription> stages;
 };
 
+inline constexpr std::string_view query_sketch_stage_name =
+    "QuerySketchStage";
+
 /**
  * Resolve the query-sketch Highway function without adding the minimizer
  * algorithm as another describe-template dimension.  Scalar and Vulkan
@@ -6375,6 +6378,41 @@ planned_query_minimizer_highway_kernels(
                 Kernel::minimizer_paper_nthash);
     }
     return std::nullopt;
+}
+
+/**
+ * The describe cascade intentionally pins the executable pipeline at the
+ * prebuilt-minimizer entry point, so its stage chain has no MinimizerStage.
+ * Represent the query sketch as a neutral plan-only stage instead of making
+ * the minimizer enum a describe-template axis. This stage is the canonical
+ * owner of the query-sketch Highway functions whenever a description exists.
+ */
+[[nodiscard]] inline std::optional<StageDescription>
+describe_query_sketch_stage(
+        const ::bioseq::simd::Minimap2Params& params) {
+    const auto kernels = planned_query_minimizer_highway_kernels(
+        params.minimizer_algorithm);
+    if (!kernels.has_value()) return std::nullopt;
+
+    StageDescription stage;
+    stage.stage_name = std::string{query_sketch_stage_name};
+    StageAlgorithmDescription algorithm;
+    algorithm.name = ::bioseq::simd::minimizer_algorithm_name(
+        params.minimizer_algorithm);
+    algorithm.highway_kernels = *kernels;
+    stage.algorithm = std::move(algorithm);
+    return stage;
+}
+
+/** Number of semantic query-sketch owners in a structured description. */
+[[nodiscard]] inline std::size_t query_sketch_stage_owner_count(
+        const PipelineDescription& description) noexcept {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        description.stages,
+        [](const StageDescription& stage) noexcept {
+            return stage.stage_name == query_sketch_stage_name
+                && stage.algorithm.has_value();
+        }));
 }
 
 // =============================================================================
@@ -10705,14 +10743,18 @@ template <is_constexpr_aligner_params Cep,
                               MinimizerHashmapFragmentIndex>(
         query_seq, target_seq, empty_minimizers, empty_index, sm,
         alignment_kernels, ignored_out, params, query_len, target_len);
-    return describe_with_params<Cep>(pipeline);
+    auto description = describe_with_params<Cep>(pipeline);
+    if (auto query_sketch = describe_query_sketch_stage(params)) {
+        description.stages.insert(
+            description.stages.begin(), std::move(*query_sketch));
+    }
+    return description;
 }
 
 // Describe-side leaf — EP/MA remain pinned so the structural stage skeleton
 // does not multiply describe instantiations.  The exact query-minimizer
-// Highway function is resolved neutrally from the frozen runtime enum by
-// planned_query_minimizer_highway_kernels() and rendered with the plan-owned
-// dispatch metadata.
+// Highway function is resolved neutrally from the frozen runtime enum and
+// attached to the plan-only QuerySketchStage above.
 template <sequence_alphabet Alphabet,
           std::size_t L, std::size_t K,
           ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
