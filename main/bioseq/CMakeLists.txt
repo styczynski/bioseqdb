@@ -1160,26 +1160,50 @@ target_sources(bioseq_modules_nopg
 set(BIOSEQ_HIGHWAY_GENERATED_ROOT
   "${CMAKE_CURRENT_BINARY_DIR}/generated/highway")
 
-# This alphabet registry is the single scheduler/codegen ordering contract.
-# Its zero-based position is the neutral alphabet_code carried by Minimap2Params
-# and by each generated fixed-target alignment table entry.
-set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET_REGISTRY
-  dna4
-  dna5)
+# Probe the unattached scheduler source as raw tokens before constructing any
+# Highway alignment slots. The topology manifest is the single alphabet/width/
+# shard authority shared by both generators; neither frontend may rediscover
+# or multiply the other's domain.
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm")
+set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/template_flatten/dispatch_processor_typed")
+bioseq_template_flatten_probe(
+  NAME dispatch_processor_typed
+  SOURCE "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
+  OUTPUT_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}"
+  OUTPUT_MODULE bioseq.scheduler.dispatch_processor
+  PROFILE "${BIOSEQ_OPTTIMIZATION_LEVEL}"
+  OUT_CONFIGURE_TOPOLOGY_MANIFEST BIOSEQ_TYPED_CONFIGURE_TOPOLOGY
+  OUT_TOPOLOGY_DIGEST BIOSEQ_TYPED_TOPOLOGY_DIGEST
+  OUT_ENABLED_ORDINALS BIOSEQ_TYPED_ENABLED_ORDINALS
+  OUT_ENABLED_SOURCES BIOSEQ_TYPED_PROBED_ENABLED_SOURCES)
+bioseq_template_flatten_read_group(
+  TOPOLOGY_MANIFEST "${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
+  ROLE identity
+  GROUP alphabet
+  OUT_LABELS BIOSEQ_TYPED_ALPHABET_LABELS
+  OUT_REPLACEMENTS BIOSEQ_TYPED_ALPHABET_REPLACEMENTS
+  OUT_ORDINALS BIOSEQ_TYPED_ALPHABET_ORDINALS)
+
 set(BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS)
 set(BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS)
-set(_bioseq_highway_alignment_alphabet_code 0)
-foreach(_bioseq_highway_alignment_alphabet IN LISTS
-    BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET_REGISTRY)
+foreach(_bioseq_highway_alignment_alphabet_label
+    _bioseq_highway_alignment_alphabet_replacement
+    _bioseq_highway_alignment_alphabet_ordinal
+    IN ZIP_LISTS
+      BIOSEQ_TYPED_ALPHABET_LABELS
+      BIOSEQ_TYPED_ALPHABET_REPLACEMENTS
+      BIOSEQ_TYPED_ALPHABET_ORDINALS)
   set(_bioseq_highway_alignment_family
-    "alignment_${_bioseq_highway_alignment_alphabet_code}")
+    "alignment_${_bioseq_highway_alignment_alphabet_ordinal}")
   list(APPEND BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS
-    "ksw2|${_bioseq_highway_alignment_family}|ksw2_z2|&::bioseq::simd::{target_namespace}::ksw2_z2<::seq::${_bioseq_highway_alignment_alphabet}>"
-    "ksw2|${_bioseq_highway_alignment_family}|ksw2_d2|&::bioseq::simd::{target_namespace}::ksw2_d2<::seq::${_bioseq_highway_alignment_alphabet}>"
-    "ksw2_batched|${_bioseq_highway_alignment_family}|ksw2_batched|&::bioseq::simd::{target_namespace}::ksw2_batched<::seq::${_bioseq_highway_alignment_alphabet}>"
-    "block_aligner|${_bioseq_highway_alignment_family}|block_prepare|&::bioseq::simd::{target_namespace}::block_prepare<::seq::${_bioseq_highway_alignment_alphabet}>"
-    "block_aligner|${_bioseq_highway_alignment_family}|block_try_certified_gap|&::bioseq::simd::{target_namespace}::block_try_certified_gap<::seq::${_bioseq_highway_alignment_alphabet}>"
-    "block_aligner|${_bioseq_highway_alignment_family}|block_align|&::bioseq::simd::{target_namespace}::block_align<::seq::${_bioseq_highway_alignment_alphabet}>")
+    "ksw2|${_bioseq_highway_alignment_family}|ksw2_z2|&::bioseq::simd::{target_namespace}::ksw2_z2<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "ksw2|${_bioseq_highway_alignment_family}|ksw2_d2|&::bioseq::simd::{target_namespace}::ksw2_d2<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "ksw2_batched|${_bioseq_highway_alignment_family}|ksw2_batched|&::bioseq::simd::{target_namespace}::ksw2_batched<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|block_prepare|&::bioseq::simd::{target_namespace}::block_prepare<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|block_try_certified_gap|&::bioseq::simd::{target_namespace}::block_try_certified_gap<${_bioseq_highway_alignment_alphabet_replacement}>"
+    "block_aligner|${_bioseq_highway_alignment_family}|block_align|&::bioseq::simd::{target_namespace}::block_align<${_bioseq_highway_alignment_alphabet_replacement}>")
   list(APPEND BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS
     "${_bioseq_highway_alignment_family}|ksw2_z2"
     "${_bioseq_highway_alignment_family}|ksw2_d2"
@@ -1187,12 +1211,11 @@ foreach(_bioseq_highway_alignment_alphabet IN LISTS
     "${_bioseq_highway_alignment_family}|block_prepare"
     "${_bioseq_highway_alignment_family}|block_try_certified_gap"
     "${_bioseq_highway_alignment_family}|block_align")
-  math(EXPR _bioseq_highway_alignment_alphabet_code
-    "${_bioseq_highway_alignment_alphabet_code} + 1")
 endforeach()
 unset(_bioseq_highway_alignment_family)
-unset(_bioseq_highway_alignment_alphabet)
-unset(_bioseq_highway_alignment_alphabet_code)
+unset(_bioseq_highway_alignment_alphabet_label)
+unset(_bioseq_highway_alignment_alphabet_replacement)
+unset(_bioseq_highway_alignment_alphabet_ordinal)
 
 bioseq_add_highway_codegen(
   REQUIRE_COMPLETE_TABLE
@@ -1208,6 +1231,8 @@ bioseq_add_highway_codegen(
   POLICY_DEFINITIONS
     HWY_COMPILE_ALL_ATTAINABLE=1
     HWY_DISABLED_TARGETS=HWY_SCALAR
+  DOMAIN_TOPOLOGY_MANIFESTS
+    "typed_scheduler=${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
   COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"
   PCM_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}/pcm"
   SOURCE_RECORDS
@@ -1458,108 +1483,49 @@ set(BIOSEQ_GCC_TEMPLATE_FORCE_INLINE "ON" CACHE BOOL
 for the GCC 16.1 AWS preset. OFF preserves algorithm selection but lets GCC \
 avoid constructing very large inlining graphs while compiling typed dispatch.")
 
-# The scheduler shape matrix is independent of Highway target generation. Its
-# single authored production source is a .cppm template; configure_file emits
-# deterministic build-tree .cppm implementation units for this exact registry.
-# Keep the three axes explicit and centralized so alphabet, storage-width, and
-# scanner-shape additions cannot silently diverge from optimization filtering.
-set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm")
-set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_DIR
-  "${CMAKE_CURRENT_BINARY_DIR}/generated/scheduler/typed")
-set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_STORAGE_WIDTH_REGISTRY
-  1
-  2
-  4
-  8)
-set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SHAPE_REGISTRY
-  root
-  scanner_pg
-  inmemory
-  inmemory_standard
-  inmemory_segmented
-  inmemory_chunked
-  inmemory_chunked_segmented)
+# Materialize only the profile-enabled scheduler coordinates. The canonical
+# body remains an unattached raw-token input; dependency BMIs use the authored
+# primary as their compilation-signature donor.
+bioseq_add_template_flatten_codegen(
+  NAME dispatch_processor_typed
+  SOURCE "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
+  OUTPUT_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}"
+  OUTPUT_MODULE bioseq.scheduler.dispatch_processor
+  CONFIGURE_TOPOLOGY_MANIFEST "${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
+  EXPECTED_TOPOLOGY_DIGEST "${BIOSEQ_TYPED_TOPOLOGY_DIGEST}"
+  ENABLED_ORDINALS ${BIOSEQ_TYPED_ENABLED_ORDINALS}
+  COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"
+  SIGNATURE_SOURCE
+    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor.cppm"
+  PCM_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}/pcm"
+  OUT_API_PARTITION BIOSEQ_TYPED_API_PARTITION
+  OUT_SELECTOR_PARTITION BIOSEQ_TYPED_SELECTOR_PARTITION
+  OUT_IMPLEMENTATION_UNITS BIOSEQ_TYPED_IMPLEMENTATION_UNITS
+  OUT_GENERATION_TARGET BIOSEQ_TYPED_GENERATION_TARGET
+  OUT_ARTIFACT_MANIFEST BIOSEQ_TYPED_ARTIFACT_MANIFEST)
 
-file(MAKE_DIRECTORY "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_DIR}")
-set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES)
-foreach(_bioseq_typed_alphabet IN LISTS
-    BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET_REGISTRY)
-  foreach(_bioseq_typed_width IN LISTS
-      BIOSEQ_DISPATCH_PROCESSOR_TYPED_STORAGE_WIDTH_REGISTRY)
-    set(_bioseq_typed_stem
-      "${_bioseq_typed_alphabet}_w${_bioseq_typed_width}")
-    foreach(_bioseq_typed_shape IN LISTS
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_SHAPE_REGISTRY)
-      set(BIOSEQ_TYPED_EXTRA_IMPORT "")
-      set(_bioseq_typed_suffix "_${_bioseq_typed_shape}")
-
-      if(_bioseq_typed_shape STREQUAL "root")
-        set(_bioseq_typed_suffix "")
-        set(BIOSEQ_TYPED_EXTRA_IMPORT
-          "import bioseq.parallelism.pipeline_ops;")
-        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION process_sequences_${_bioseq_typed_stem}\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION process_scanner_pg_row_${_bioseq_typed_stem}\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION process_inmemory_row_${_bioseq_typed_stem}\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER 1\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER 1")
-      elseif(_bioseq_typed_shape STREQUAL "scanner_pg")
-        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_ONLY 1\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION process_scanner_pg_row_${_bioseq_typed_stem}")
-      elseif(_bioseq_typed_shape STREQUAL "inmemory")
-        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY 1\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION process_inmemory_row_${_bioseq_typed_stem}\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION process_inmemory_standard_row_${_bioseq_typed_stem}\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION process_inmemory_segmented_row_${_bioseq_typed_stem}\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION process_inmemory_chunked_row_${_bioseq_typed_stem}\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION process_inmemory_chunked_segmented_row_${_bioseq_typed_stem}\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_LEAF_HELPERS 1")
-      elseif(_bioseq_typed_shape STREQUAL "inmemory_standard")
-        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY 1\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION process_inmemory_standard_row_${_bioseq_typed_stem}")
-      elseif(_bioseq_typed_shape STREQUAL "inmemory_segmented")
-        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY 1\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION process_inmemory_segmented_row_${_bioseq_typed_stem}")
-      elseif(_bioseq_typed_shape STREQUAL "inmemory_chunked")
-        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY 1\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION process_inmemory_chunked_row_${_bioseq_typed_stem}")
-      elseif(_bioseq_typed_shape STREQUAL "inmemory_chunked_segmented")
-        string(CONCAT BIOSEQ_TYPED_SHAPE_DEFINES
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY 1\n"
-          "#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION process_inmemory_chunked_segmented_row_${_bioseq_typed_stem}")
-      else()
-        message(FATAL_ERROR
-          "Unknown typed dispatch shape '${_bioseq_typed_shape}'")
-      endif()
-
-      string(APPEND BIOSEQ_TYPED_SHAPE_DEFINES
-        "\n#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET seq::${_bioseq_typed_alphabet}"
-        "\n#define BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH ${_bioseq_typed_width}")
-      set(_bioseq_typed_output
-        "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_DIR}/dispatch_processor_impl_${_bioseq_typed_stem}${_bioseq_typed_suffix}.cppm")
-      configure_file(
-        "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
-        "${_bioseq_typed_output}"
-        @ONLY)
-      list(APPEND BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
-        "${_bioseq_typed_output}")
-    endforeach()
-  endforeach()
-endforeach()
-
-list(LENGTH BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
-  BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_SOURCE_COUNT)
-if(NOT BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_SOURCE_COUNT EQUAL 56)
+if(NOT "${BIOSEQ_TYPED_PROBED_ENABLED_SOURCES}" STREQUAL
+    "${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}")
   message(FATAL_ERROR
-    "Typed dispatch registry must generate exactly 56 implementation units; "
-    "generated ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_SOURCE_COUNT}")
+    "Template-flatten probe and generator disagree on enabled scheduler units")
 endif()
+if(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "0")
+  set(_bioseq_typed_expected_count 7)
+elseif(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "1")
+  set(_bioseq_typed_expected_count 14)
+else()
+  set(_bioseq_typed_expected_count 56)
+endif()
+list(LENGTH BIOSEQ_TYPED_IMPLEMENTATION_UNITS
+  BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT)
+if(NOT BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT EQUAL
+    _bioseq_typed_expected_count)
+  message(FATAL_ERROR
+    "Template-flatten profile ${BIOSEQ_OPTTIMIZATION_LEVEL} requires "
+    "${_bioseq_typed_expected_count} scheduler units, generated "
+    "${BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT}")
+endif()
+unset(_bioseq_typed_expected_count)
 
 set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl.cppm"
@@ -1568,62 +1534,40 @@ list(REMOVE_ITEM SRC_MOD_FILES
   "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
   ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS})
 list(APPEND SRC_FILES
-  ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS})
+  ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS}
+  "${BIOSEQ_TYPED_API_PARTITION}"
+  "${BIOSEQ_TYPED_SELECTOR_PARTITION}"
+  ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS})
 set_source_files_properties(
   ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS}
-  ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+  "${BIOSEQ_TYPED_API_PARTITION}"
+  "${BIOSEQ_TYPED_SELECTOR_PARTITION}"
+  ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
   PROPERTIES COMPILE_OPTIONS "-x;c++")
-set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+set_source_files_properties(
+  "${BIOSEQ_TYPED_API_PARTITION}"
+  "${BIOSEQ_TYPED_SELECTOR_PARTITION}"
+  ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
   PROPERTIES GENERATED TRUE)
-
-# Remove only stale artifacts owned by this exact registry. configure_file
-# already writes each live output only when its bytes change.
-file(GLOB _bioseq_typed_existing_outputs
-  "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_DIR}/dispatch_processor_impl_*.cppm")
-foreach(_bioseq_typed_existing_output IN LISTS
-    _bioseq_typed_existing_outputs)
-  list(FIND BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
-    "${_bioseq_typed_existing_output}" _bioseq_typed_live_output_index)
-  if(_bioseq_typed_live_output_index EQUAL -1)
-    file(REMOVE "${_bioseq_typed_existing_output}")
-  endif()
-endforeach()
-
-# The typed dispatch implementation is generated as one module implementation
-# unit per alphabet/storage-width/scan-shape combination. Levels 0 and 1 prune
-# those files from the target itself; leaving them in SRC_FILES would still
-# pay the module-import and template parsing cost even if their bodies were
-# preprocessor-disabled.
-set(BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
-  ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES})
-if(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "0")
-  list(FILTER BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
-    INCLUDE REGEX "_dna4_w8(_|\\.cppm$)")
-elseif(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "1")
-  list(FILTER BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
-    INCLUDE REGEX "_dna[45]_w8(_|\\.cppm$)")
-endif()
-list(APPEND SRC_FILES ${BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES})
-list(LENGTH BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
-  BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT)
 message(STATUS
   "bioseq: enabled ${BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT} "
   "typed dispatch processor module implementation units")
 
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   if(NOT BIOSEQ_GCC_TEMPLATE_FORCE_INLINE)
-    target_compile_definitions(bioseq_modules_nopg PRIVATE
-      BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0
-      BIOSEQ_PIPELINE_FORCE_INLINE=0)
+    set_property(SOURCE ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
+      APPEND PROPERTY COMPILE_DEFINITIONS
+        BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0
+        BIOSEQ_PIPELINE_FORCE_INLINE=0)
   endif()
   if(BIOSEQ_GCC_TYPED_DISPATCH_JOBS GREATER 0)
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS
       gcc_typed_dispatch_compile=${BIOSEQ_GCC_TYPED_DISPATCH_JOBS})
-    set_source_files_properties(${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+    set_source_files_properties(${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
       PROPERTIES JOB_POOL_COMPILE gcc_typed_dispatch_compile)
   endif()
   if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
-    set_property(SOURCE ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES}
+    set_property(SOURCE ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
       APPEND PROPERTY COMPILE_OPTIONS
         "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
   endif()
@@ -4026,6 +3970,8 @@ AddCommonTargetX(
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
+add_dependencies(postgresql_bioseq
+  "${BIOSEQ_TYPED_GENERATION_TARGET}")
 
 # Generated target primaries are the only exported providers. Their private
 # binder/algorithm partitions and the dispatch-processor registry are ordinary
