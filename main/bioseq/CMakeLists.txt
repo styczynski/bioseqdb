@@ -1220,7 +1220,6 @@ unset(_bioseq_highway_alignment_alphabet_ordinal)
 bioseq_add_highway_codegen(
   REQUIRE_COMPLETE_TABLE
   TARGET bioseq_highway_target_modules
-  SCAN_TARGET bioseq_highway_target_scan_context
   POLICY_TARGET bioseq_highway_target_policy
   OUTPUT_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
   CONTRACT_MODULE bioseq.highway.dispatch_contract
@@ -1234,6 +1233,8 @@ bioseq_add_highway_codegen(
   DOMAIN_TOPOLOGY_MANIFESTS
     "typed_scheduler=${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
   COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"
+  SIGNATURE_SOURCE
+    "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_dispatch_contract.cppm"
   PCM_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}/pcm"
   SOURCE_RECORDS
     "simd_utils|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_utils.cppm|bioseq.highway.sources.simd_utils|simd_utils|simd_utils|"
@@ -1269,8 +1270,6 @@ bioseq_add_highway_codegen(
     "common|sneaky_snake_simd_batch"
     "chaining|chain_anchors_simd"
     "indexing|validate_non_scatter_local32_w2"
-  SCAN_LINK_LIBRARIES bioseq_modules_nopg
-  SCAN_COMPILE_DEFINITIONS NO_POSTGRES=1
   OUTPUT_MODULES BIOSEQ_HIGHWAY_GENERATED_MODULES
   OUTPUT_PRIMARY_MODULES BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES
   OUTPUT_TARGET_IMPLEMENTATIONS

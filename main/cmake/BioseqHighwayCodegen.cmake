@@ -491,13 +491,13 @@ endfunction()
 
 # bioseq_add_highway_codegen(
 #   TARGET bioseq_highway_codegen
-#   SCAN_TARGET bioseq_highway_scan_context
 #   POLICY_TARGET bioseq_highway_policy
 #   OUTPUT_ROOT <build>/generated/highway
 #   CONTRACT_MODULE bioseq.highway.dispatch_contract
 #   DISPATCH_MODULE bioseq.scheduler.dispatch_processor
 #   HIGHWAY_VERSION 1.3.0
 #   COMPILE_DATABASE <build>/compile_commands.json
+#   SIGNATURE_SOURCE /absolute/attached/neutral_primary.cppm
 #   PCM_ROOT <build>/generated/highway/pcm
 #   SOURCE_RECORDS
 #     "key|/absolute/template.cppm|authored.module|partition|family|dep_a,dep_b"
@@ -514,7 +514,6 @@ endfunction()
 #   OUTPUT_TEST_IMPLEMENTATIONS generated_static_test_implementations
 #   OUTPUT_TEST_SUPPORT generated_static_test_support
 #   OUTPUT_POLICY_TARGET highway_policy_target
-#   OUTPUT_SCAN_TARGET highway_scan_target
 #   OUTPUT_PREPARE_TARGET highway_prepare_target
 #   OUTPUT_PREPARED_COMPILE_DATABASE highway_owned_compile_database
 #   OUTPUT_PCM_MANIFEST highway_pcm_manifest
@@ -528,13 +527,13 @@ endfunction()
 function(bioseq_add_highway_codegen)
   set(_one_value_arguments
     TARGET
-    SCAN_TARGET
     POLICY_TARGET
     OUTPUT_ROOT
     CONTRACT_MODULE
     DISPATCH_MODULE
     HIGHWAY_VERSION
     COMPILE_DATABASE
+    SIGNATURE_SOURCE
     PCM_ROOT
     OUTPUT_MODULES
     OUTPUT_PRIMARY_MODULES
@@ -545,7 +544,6 @@ function(bioseq_add_highway_codegen)
     OUTPUT_TEST_IMPLEMENTATIONS
     OUTPUT_TEST_SUPPORT
     OUTPUT_POLICY_TARGET
-    OUTPUT_SCAN_TARGET
     OUTPUT_PREPARE_TARGET
     OUTPUT_PREPARED_COMPILE_DATABASE
     OUTPUT_PCM_MANIFEST
@@ -560,18 +558,15 @@ function(bioseq_add_highway_codegen)
     SOURCE_RECORDS
     SLOT_RECORDS
     REQUIRED_SLOT_RECORDS
+    DOMAIN_TOPOLOGY_MANIFESTS
     POLICY_DEFINITIONS
-    POLICY_COMPILE_OPTIONS
-    SCAN_LINK_LIBRARIES
-    SCAN_INCLUDE_DIRECTORIES
-    SCAN_COMPILE_DEFINITIONS
-    SCAN_COMPILE_OPTIONS)
+    POLICY_COMPILE_OPTIONS)
   cmake_parse_arguments(PARSE_ARGV 0 ARG "REQUIRE_COMPLETE_TABLE"
     "${_one_value_arguments}"
     "${_multi_value_arguments}")
   foreach(_required IN ITEMS
       TARGET OUTPUT_ROOT CONTRACT_MODULE DISPATCH_MODULE HIGHWAY_VERSION
-      COMPILE_DATABASE PCM_ROOT SOURCE_RECORDS)
+      COMPILE_DATABASE SIGNATURE_SOURCE PCM_ROOT SOURCE_RECORDS)
     if(NOT ARG_${_required})
       _bioseq_highway_fail("bioseq_add_highway_codegen requires ${_required}")
     endif()
@@ -637,6 +632,13 @@ function(bioseq_add_highway_codegen)
       "${_output_root}")
   endif()
   get_filename_component(_compile_database "${ARG_COMPILE_DATABASE}" ABSOLUTE)
+  get_filename_component(_signature_source "${ARG_SIGNATURE_SOURCE}" ABSOLUTE)
+  if(NOT EXISTS "${_signature_source}"
+      OR NOT _signature_source MATCHES "\\.cppm$")
+    _bioseq_highway_fail(
+      "SIGNATURE_SOURCE must be an existing attached .cppm primary: "
+      "${_signature_source}")
+  endif()
   get_filename_component(_pcm_root "${ARG_PCM_ROOT}" ABSOLUTE)
   cmake_path(IS_PREFIX _output_root "${_pcm_root}"
     NORMALIZE _pcm_in_output_root)
@@ -668,14 +670,8 @@ function(bioseq_add_highway_codegen)
   if(NOT ARG_POLICY_TARGET)
     set(ARG_POLICY_TARGET "${ARG_TARGET}_policy")
   endif()
-  if(NOT ARG_SCAN_TARGET)
-    set(ARG_SCAN_TARGET "${ARG_TARGET}_scan_context")
-  endif()
   if(TARGET "${ARG_POLICY_TARGET}")
     _bioseq_highway_fail("policy target ${ARG_POLICY_TARGET} already exists")
-  endif()
-  if(TARGET "${ARG_SCAN_TARGET}")
-    _bioseq_highway_fail("scan target ${ARG_SCAN_TARGET} already exists")
   endif()
   add_library("${ARG_POLICY_TARGET}" INTERFACE)
   target_link_libraries("${ARG_POLICY_TARGET}" INTERFACE hwy::hwy)
@@ -686,6 +682,67 @@ function(bioseq_add_highway_codegen)
   if(_policy_compile_options)
     target_compile_options(
       "${ARG_POLICY_TARGET}" INTERFACE ${_policy_compile_options})
+  endif()
+
+  set(_domain_topology_names)
+  set(_domain_topology_paths)
+  set(_domain_topology_records)
+  set(_domain_topology_cli_arguments)
+  set(_domain_topology_ordinal 0)
+  foreach(_domain_topology IN LISTS ARG_DOMAIN_TOPOLOGY_MANIFESTS)
+    _bioseq_highway_reject_control_characters(
+      "domain topology manifest" "${_domain_topology}")
+    if(NOT _domain_topology MATCHES "^([a-z][a-z0-9_]*)=(.+)$")
+      _bioseq_highway_fail(
+        "DOMAIN_TOPOLOGY_MANIFESTS entries must be "
+        "name=/absolute/topology.configure.json; got ${_domain_topology}")
+    endif()
+    set(_domain_name "${CMAKE_MATCH_1}")
+    set(_domain_path "${CMAKE_MATCH_2}")
+    if(NOT IS_ABSOLUTE "${_domain_path}" OR NOT EXISTS "${_domain_path}")
+      _bioseq_highway_fail(
+        "domain topology ${_domain_name} must name an existing absolute "
+        "manifest: ${_domain_path}")
+    endif()
+    file(REAL_PATH "${_domain_path}" _domain_path)
+    list(FIND _domain_topology_names "${_domain_name}" _domain_name_index)
+    list(FIND _domain_topology_paths "${_domain_path}" _domain_path_index)
+    if(NOT _domain_name_index EQUAL -1)
+      _bioseq_highway_fail("duplicate domain topology name ${_domain_name}")
+    elseif(NOT _domain_path_index EQUAL -1)
+      _bioseq_highway_fail("duplicate domain topology path ${_domain_path}")
+    endif()
+    file(READ "${_domain_path}" _domain_document)
+    string(REGEX MATCHALL
+      "\"topology_digest\"[ \\t\\r\\n]*:[ \\t\\r\\n]*\"[0-9a-f]+\""
+      _domain_digest_records "${_domain_document}")
+    list(LENGTH _domain_digest_records _domain_digest_record_count)
+    if(NOT _domain_digest_record_count EQUAL 1)
+      _bioseq_highway_fail(
+        "domain topology ${_domain_name} must contain exactly one "
+        "topology_digest")
+    endif()
+    list(GET _domain_digest_records 0 _domain_digest_record)
+    string(REGEX REPLACE
+      ".*\"([0-9a-f]+)\"$" "\\1"
+      _domain_declared_digest "${_domain_digest_record}")
+    string(LENGTH "${_domain_declared_digest}" _domain_digest_length)
+    if(NOT _domain_digest_length EQUAL 64)
+      _bioseq_highway_fail(
+        "domain topology ${_domain_name} has a malformed topology_digest")
+    endif()
+    file(SHA256 "${_domain_path}" _domain_file_digest)
+    list(APPEND _domain_topology_names "${_domain_name}")
+    list(APPEND _domain_topology_paths "${_domain_path}")
+    list(APPEND _domain_topology_records
+      "domain-topology\t${_domain_topology_ordinal}\t${_domain_name}\t${_domain_path}\t${_domain_declared_digest}\t${_domain_file_digest}")
+    list(APPEND _domain_topology_cli_arguments
+      --domain-topology-manifest "${_domain_name}=${_domain_path}")
+    math(EXPR _domain_topology_ordinal "${_domain_topology_ordinal} + 1")
+  endforeach()
+  if(_domain_topology_paths)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      ${_domain_topology_paths})
   endif()
 
   _bioseq_highway_resolve_platform(_platform)
@@ -733,6 +790,10 @@ function(bioseq_add_highway_codegen)
   foreach(_record IN LISTS _target_records)
     string(REPLACE "|" "\t" _tsv_record "${_record}")
     string(APPEND _target_manifest_contents "target\t${_tsv_record}\n")
+  endforeach()
+  foreach(_domain_topology_record IN LISTS _domain_topology_records)
+    string(APPEND _target_manifest_contents
+      "${_domain_topology_record}\n")
   endforeach()
   _bioseq_highway_write_if_different(
     "${_target_manifest}" "${_target_manifest_contents}")
@@ -999,6 +1060,10 @@ function(bioseq_add_highway_codegen)
     "contract\t${ARG_CONTRACT_MODULE}\n"
     "dispatch\t${ARG_DISPATCH_MODULE}\n"
     "require-complete-table\t${_require_complete_table}\n")
+  foreach(_domain_topology_record IN LISTS _domain_topology_records)
+    string(APPEND _source_manifest_contents
+      "${_domain_topology_record}\n")
+  endforeach()
   foreach(_record IN LISTS _normalized_source_records)
     string(REPLACE "|" "\t" _tsv_record "${_record}")
     string(APPEND _source_manifest_contents "source\t${_tsv_record}\n")
@@ -1015,11 +1080,6 @@ function(bioseq_add_highway_codegen)
   _bioseq_highway_write_if_different(
     "${_source_manifest}" "${_source_manifest_contents}")
 
-  # This target exists solely so CMake publishes exact, configured commands
-  # for the marked generator inputs in the raw compile database. EXCLUDE_FROM_ALL
-  # and the absence of any dependency edge ensure it is never compiled, linked,
-  # or installed as a production module provider. The preparation command below
-  # retargets these commands into its separately owned content-keyed PCM root.
   foreach(_source IN LISTS _source_paths)
     cmake_path(IS_PREFIX CMAKE_SOURCE_DIR "${_source}"
       NORMALIZE _source_in_main_tree)
@@ -1029,68 +1089,10 @@ function(bioseq_add_highway_codegen)
         "${_source}")
     endif()
     set_source_files_properties("${_source}" PROPERTIES
-      BIOSEQ_HIGHWAY_GENERATOR_INPUT TRUE
-      # The structural PREPARE phase performs its own authoritative module
-      # scan. Disabling CMake's scan here keeps the raw compile command free of
-      # a build-time .modmap response file that would not exist because this
-      # EXCLUDE_FROM_ALL target is deliberately never built.
-      CXX_SCAN_FOR_MODULES OFF)
+      BIOSEQ_HIGHWAY_GENERATOR_INPUT TRUE)
   endforeach()
-  foreach(_scan_link IN LISTS ARG_SCAN_LINK_LIBRARIES)
-    if(NOT TARGET "${_scan_link}")
-      _bioseq_highway_fail(
-        "SCAN_LINK_LIBRARIES entry '${_scan_link}' is not a CMake target")
-    endif()
-  endforeach()
-  foreach(_scan_include_dir IN LISTS ARG_SCAN_INCLUDE_DIRECTORIES)
-    get_filename_component(_scan_include_dir
-      "${_scan_include_dir}" ABSOLUTE)
-    if(NOT IS_DIRECTORY "${_scan_include_dir}")
-      _bioseq_highway_fail(
-        "SCAN_INCLUDE_DIRECTORIES entry does not exist: "
-        "${_scan_include_dir}")
-    endif()
-  endforeach()
-  foreach(_scan_definition IN LISTS ARG_SCAN_COMPILE_DEFINITIONS)
-    _bioseq_highway_reject_control_characters(
-      "scan compile definition" "${_scan_definition}")
-    if(_scan_definition MATCHES
-        "^-?D?(BIOSEQ_TEST_INDEXES|BIOSEQ_CACHE_TESTING)(=|$)")
-      _bioseq_highway_fail(
-        "scan-only Highway commands must use the production profile; "
-        "remove ${_scan_definition}")
-    endif()
-  endforeach()
-  foreach(_scan_option IN LISTS ARG_SCAN_COMPILE_OPTIONS)
-    _bioseq_highway_reject_control_characters(
-      "scan compile option" "${_scan_option}")
-  endforeach()
-
-  add_library("${ARG_SCAN_TARGET}" OBJECT EXCLUDE_FROM_ALL)
-  set_target_properties("${ARG_SCAN_TARGET}" PROPERTIES
-    CXX_STANDARD 26
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS ON
-    CXX_MODULE_STD ON
-    POSITION_INDEPENDENT_CODE ON
-    INTERPROCEDURAL_OPTIMIZATION FALSE
-    EXPORT_COMPILE_COMMANDS ON
-    EXCLUDE_FROM_ALL TRUE)
-  target_sources("${ARG_SCAN_TARGET}" PRIVATE ${_source_paths})
-  target_link_libraries("${ARG_SCAN_TARGET}" PRIVATE
-    "${ARG_POLICY_TARGET}" ${ARG_SCAN_LINK_LIBRARIES})
-  if(ARG_SCAN_INCLUDE_DIRECTORIES)
-    target_include_directories("${ARG_SCAN_TARGET}" PRIVATE
-      ${ARG_SCAN_INCLUDE_DIRECTORIES})
-  endif()
-  if(ARG_SCAN_COMPILE_DEFINITIONS)
-    target_compile_definitions("${ARG_SCAN_TARGET}" PRIVATE
-      ${ARG_SCAN_COMPILE_DEFINITIONS})
-  endif()
-  target_compile_options("${ARG_SCAN_TARGET}" PRIVATE
-    "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq::>"
-    "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>"
-    ${ARG_SCAN_COMPILE_OPTIONS})
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_source_paths})
 
   set(_generated_modules)
   set(_generated_primary_modules)
@@ -1158,6 +1160,8 @@ function(bioseq_add_highway_codegen)
       "${_pcm_metadata_dir}"
     COMMAND "$<TARGET_FILE:bioseq_codegen>" highway prepare
       --source-manifest "${_source_manifest}"
+      --signature-source "${_signature_source}"
+      ${_domain_topology_cli_arguments}
       --raw-compile-database "${_compile_database}"
       --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
       --clang-scan-deps "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
@@ -1184,6 +1188,8 @@ function(bioseq_add_highway_codegen)
       "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
       "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
       "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
+      "${_signature_source}"
+      ${_domain_topology_paths}
       ${_source_paths}
     DEPFILE "${_prepare_depfile}"
     COMMENT
@@ -1203,6 +1209,7 @@ function(bioseq_add_highway_codegen)
     COMMAND "$<TARGET_FILE:bioseq_codegen>" highway generate
       --target-manifest "${_target_manifest}"
       --source-manifest "${_source_manifest}"
+      ${_domain_topology_cli_arguments}
       --compile-database "${_owned_compile_database}"
       --pcm-root "${_pcm_root}"
       --pcm-manifest "${_pcm_manifest}"
@@ -1232,6 +1239,8 @@ function(bioseq_add_highway_codegen)
       "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
       "${BIOSEQ_CODEGEN_LLVM_CONFIG}"
       "${BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON}"
+      "${_signature_source}"
+      ${_domain_topology_paths}
       ${_source_paths}
     COMMENT
       "Generating ${_platform} Highway target module graph "
@@ -1257,7 +1266,6 @@ function(bioseq_add_highway_codegen)
       "${ARG_OUTPUT_TEST_IMPLEMENTATIONS}|${_generated_test_implementations}"
       "${ARG_OUTPUT_TEST_SUPPORT}|${_test_support}"
       "${ARG_OUTPUT_POLICY_TARGET}|${ARG_POLICY_TARGET}"
-      "${ARG_OUTPUT_SCAN_TARGET}|${ARG_SCAN_TARGET}"
       "${ARG_OUTPUT_PREPARE_TARGET}|${_prepare_target}"
       "${ARG_OUTPUT_PREPARED_COMPILE_DATABASE}|${_owned_compile_database}"
       "${ARG_OUTPUT_PCM_MANIFEST}|${_pcm_manifest}"
