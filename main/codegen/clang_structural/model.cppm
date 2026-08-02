@@ -12,7 +12,55 @@ export namespace bioseq::codegen::clang_structural {
 
 /// Wire contract shared by the GCC/Clang host generator and the Clang tooling
 /// implementation. Increment this when a field is removed or changes meaning.
-inline constexpr std::uint32_t model_schema_version = 1;
+inline constexpr std::uint32_t model_schema_version = 2;
+
+/// Identifies how a translation-unit record was collected.  The token-slice
+/// mode is intentionally syntax-only; declaration probes are body-free inputs
+/// whose semantic facts come from Clang.
+enum class collection_mode : std::uint8_t {
+    legacy_lexical,
+    full_translation_unit,
+    token_slice,
+    declaration_probe,
+};
+
+/// Linkage of an entity after Clang has applied named-module rules.
+enum class entity_linkage : std::uint8_t {
+    none,
+    internal,
+    module,
+    external,
+};
+
+/// Whether a declaration belongs to the global or named-module purview.
+enum class module_attachment : std::uint8_t {
+    global_module,
+    named_module,
+};
+
+/// The source payload retained by a declaration record.
+enum class declaration_payload_kind : std::uint8_t {
+    none,
+    function_body,
+    variable_initializer,
+    alias_rhs,
+};
+
+enum class preprocessor_directive_kind : std::uint8_t {
+    other,
+    if_,
+    ifdef,
+    ifndef,
+    elif,
+    else_,
+    endif,
+    define,
+    undef,
+    include,
+    pragma,
+    error,
+    line,
+};
 
 enum class declaration_kind {
     unknown,
@@ -87,6 +135,34 @@ struct attribute_record {
         attribute_placement::declaration_prefix};
     source_range range;
     source_range argument_range;
+    /// Complete attribute segment range. `range` remains as the legacy alias.
+    source_range complete_range;
+};
+
+/// Compiler- and token-derived declaration properties used by generic source
+/// materializers.  Policy components compose this record instead of mirroring
+/// individual booleans.
+struct declaration_specifier_facts {
+    bool direct_namespace_member{};
+    bool is_definition{};
+    bool is_using_alias{};
+    bool is_variable{};
+    bool is_function{};
+    bool is_static{};
+    bool is_constexpr{};
+    bool is_inline{};
+    bool is_consteval{};
+    bool is_extern{};
+    bool is_thread_local{};
+    bool has_explicit_type{};
+    bool has_deduced_type{};
+    bool has_default_arguments{};
+    bool is_template{};
+    bool is_overloaded{};
+    bool is_operator{};
+    bool has_c_language_linkage{};
+    bool multiple_declarators{};
+    bool range_contains_macro_expansion{};
 };
 
 /// A callable definition inside a structurally marked namespace.  All ranges
@@ -172,6 +248,23 @@ struct declaration_record {
     source_range name_range;
     aggregate_kind record_kind{aggregate_kind::struct_};
     bool exported{};
+
+    /// Stable association key emitted into declaration probes.  Unlike a USR,
+    /// it identifies the original source declaration and coordinate.
+    std::string provenance_id;
+    std::string provenance_coordinate;
+    std::string immediate_namespace_provenance_id;
+    std::string immediate_namespace_stable_usr;
+    std::string explicit_declared_type;
+    std::vector<std::string> referenced_declaration_provenance_ids;
+    source_range declaration_range;
+    source_range declaration_head_range;
+    source_range body_or_initializer_range;
+    entity_linkage linkage{entity_linkage::none};
+    module_attachment attachment{module_attachment::global_module};
+    declaration_payload_kind payload_kind{
+        declaration_payload_kind::none};
+    declaration_specifier_facts specifiers;
 };
 
 struct aggregate_field_record {
@@ -209,6 +302,49 @@ struct aggregate_record {
     bool has_virtual_members{};
 };
 
+/// Module declaration and import facts recovered without compiling the source.
+struct module_record {
+    std::filesystem::path source_path;
+    source_range declaration_range;
+    std::string provided_module;
+    std::vector<std::string> imported_modules;
+    bool is_interface{};
+    bool is_partition{};
+};
+
+/// Exact source geometry and semantic identity of one namespace declaration.
+struct namespace_record {
+    source_range declaration_range;
+    source_range body_range;
+    source_range keyword_range;
+    source_range name_range;
+    source_range open_brace_range;
+    source_range close_brace_range;
+    std::string provenance_id;
+    std::string stable_usr;
+    std::string qualified_name;
+    std::vector<attribute_record> attributes;
+    bool is_inline{};
+    bool is_anonymous{};
+    bool is_reopened{};
+    bool is_nested_namespace_definition{};
+    bool has_explicit_export{};
+    bool is_in_export_context{};
+};
+
+/// Raw preprocessor geometry intersecting a token slice.  No condition is
+/// evaluated in token-slice mode; `active` is populated only by a semantic
+/// collection mode.
+struct preprocessor_directive_record {
+    preprocessor_directive_kind kind{
+        preprocessor_directive_kind::other};
+    source_range complete_range;
+    source_range argument_range;
+    std::string spelling;
+    std::size_t nesting_depth{};
+    bool active{};
+};
+
 struct translation_unit {
     std::uint32_t schema_version{model_schema_version};
     std::filesystem::path source_path;
@@ -220,6 +356,10 @@ struct translation_unit {
     std::vector<declaration_record> declarations;
     std::vector<aggregate_record> aggregate_records;
     std::vector<marked_namespace_record> marked_namespaces;
+    collection_mode mode{collection_mode::legacy_lexical};
+    module_record source_module;
+    std::vector<namespace_record> namespaces;
+    std::vector<preprocessor_directive_record> preprocessor_directives;
 };
 
 struct module_graph_unit {
@@ -250,6 +390,16 @@ struct prepared_compilation_environment {
     std::string relocatable_compile_database_sha256;
     std::string relocatable_pcm_manifest_sha256;
     std::vector<std::filesystem::path> dependencies;
+    std::vector<std::filesystem::path> dependency_root_sources;
+    std::string canonical_token_import_sha256;
+};
+
+/// Canonical raw-token authority for dependency-only preparation. Root paths
+/// are the distinct attached donor plus providers of every canonical import;
+/// canonical body-bearing sources themselves are never roots.
+struct dependency_compilation_authority {
+    std::vector<std::filesystem::path> root_source_paths;
+    std::string canonical_token_import_sha256;
 };
 
 struct prepared_compilation_validation {

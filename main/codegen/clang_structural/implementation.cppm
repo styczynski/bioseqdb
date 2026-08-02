@@ -11,6 +11,12 @@ module;
 #include <clang/AST/PrettyPrinter.h>
 #include <clang/AST/RawCommentList.h>
 #include <clang/AST/RecursiveASTVisitor.h>
+#include <clang/Basic/Diagnostic.h>
+#include <clang/Basic/DiagnosticIDs.h>
+#include <clang/Basic/DiagnosticOptions.h>
+#include <clang/Basic/FileManager.h>
+#include <clang/Basic/LangOptions.h>
+#include <clang/Basic/Linkage.h>
 #include <clang/Basic/Module.h>
 #include <clang/Basic/SourceManager.h>
 #include <clang/Basic/Specifiers.h>
@@ -28,13 +34,16 @@ module;
 #include <llvm/ADT/SmallString.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
+#include <llvm/ADT/IntrusiveRefCntPtr.h>
 #include <llvm/Support/Allocator.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/JSON.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/Program.h>
 #include <llvm/Support/StringSaver.h>
+#include <llvm/Support/VirtualFileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
@@ -56,6 +65,7 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -125,6 +135,20 @@ struct comment_record {
     const attribute_record& attribute) noexcept {
     return is_sql_attribute(attribute)
         || is_simd_namespace_marker(attribute);
+}
+
+[[nodiscard]] inline bool is_materialization_attribute(
+    const attribute_record& attribute) noexcept {
+    return attribute.vendor_namespace == "bioseq"
+        && (attribute.name == "template_flatten"
+            || attribute.name == "template_flatten_when"
+            || attribute.name == "template_flatten_entry");
+}
+
+[[nodiscard]] inline bool is_probe_provenance_attribute(
+    const attribute_record& attribute) noexcept {
+    return attribute.qualified_name
+        == "bioseq::template_flatten_provenance";
 }
 
 [[nodiscard]] inline std::string_view trim_view(std::string_view text) noexcept {
@@ -336,6 +360,78 @@ lex_source(std::string_view source) {
     return {std::move(tokens), std::move(comments)};
 }
 
+/// Tokenizes a source buffer with Clang's raw lexer only.  This deliberately
+/// constructs no CompilerInstance or Preprocessor, so callers cannot
+/// accidentally run Sema or compile a body-bearing generator input.
+[[nodiscard]] inline std::vector<lexical_token> clang_raw_tokens(
+    const std::filesystem::path& source_path,
+    std::string_view source) {
+    auto diagnostic_ids =
+        llvm::makeIntrusiveRefCnt<clang::DiagnosticIDs>();
+    clang::DiagnosticOptions diagnostic_options;
+    clang::IgnoringDiagConsumer diagnostic_consumer;
+    clang::DiagnosticsEngine diagnostics{
+        std::move(diagnostic_ids),
+        diagnostic_options,
+        &diagnostic_consumer,
+        false};
+    clang::FileSystemOptions file_system_options;
+    clang::FileManager file_manager{file_system_options};
+    clang::SourceManager sources{diagnostics, file_manager};
+    const clang::FileID file_id = sources.createFileID(
+        llvm::MemoryBuffer::getMemBufferCopy(
+            llvm::StringRef{source.data(), source.size()},
+            source_path.string()));
+    const llvm::MemoryBufferRef buffer =
+        sources.getBufferOrFake(file_id);
+    clang::LangOptions language;
+    language.CPlusPlus = true;
+    language.CPlusPlus11 = true;
+    language.CPlusPlus14 = true;
+    language.CPlusPlus17 = true;
+    language.CPlusPlus20 = true;
+    language.CPlusPlus23 = true;
+    language.CPlusPlus26 = true;
+    language.CPlusPlusModules = true;
+    language.LineComment = true;
+    clang::Lexer lexer{file_id, buffer, sources, language};
+    lexer.SetCommentRetentionState(false);
+
+    const source_positions positions{source};
+    std::vector<lexical_token> result;
+    clang::Token token;
+    while (true) {
+        const bool end = lexer.LexFromRawLexer(token);
+        if (end || token.is(clang::tok::eof)) {
+            break;
+        }
+        if (token.is(clang::tok::comment)) {
+            continue;
+        }
+        bool invalid = false;
+        const std::string spelling = clang::Lexer::getSpelling(
+            token, sources, language, &invalid);
+        if (invalid || token.getLocation().isInvalid()) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": Clang raw lexer produced an invalid token");
+        }
+        const std::size_t begin =
+            sources.getFileOffset(token.getLocation());
+        const std::size_t end_offset = begin + token.getLength();
+        if (end_offset > source.size()) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": Clang raw token escapes its source buffer");
+        }
+        result.push_back({
+            .spelling = spelling,
+            .range = positions.range(begin, end_offset),
+        });
+    }
+    return result;
+}
+
 [[nodiscard]] inline bool adjacent(
     const lexical_token& left,
     const lexical_token& right) noexcept {
@@ -393,7 +489,10 @@ struct attribute_block {
     segments.emplace_back(segment_begin, end);
 
     std::vector<attribute_record> result;
-    for (const auto [first, last] : segments) {
+    for (std::size_t segment_index = 0;
+         segment_index < segments.size();
+         ++segment_index) {
+        const auto [first, last] = segments[segment_index];
         if (first >= last) {
             continue;
         }
@@ -432,6 +531,26 @@ struct attribute_block {
                 };
             }
         }
+        source_range complete_range = block_range;
+        if (segments.size() != 1) {
+            // A segment in a shared attribute-specifier is removable only
+            // together with one adjacent comma. The first segment owns the
+            // following comma; all later segments own the preceding comma.
+            // Policy modes still reject multiple bioseq materialization
+            // markers in one block so independently planned removals cannot
+            // overlap on that separator.
+            if (segment_index == 0) {
+                complete_range = {
+                    .begin = tokens[first].range.begin,
+                    .end = tokens[last].range.end,
+                };
+            } else {
+                complete_range = {
+                    .begin = tokens[first - 1].range.begin,
+                    .end = tokens[last - 1].range.end,
+                };
+            }
+        }
         result.push_back(attribute_record{
             .qualified_name = std::move(qualified),
             .vendor_namespace = vendor,
@@ -442,6 +561,7 @@ struct attribute_block {
                 .end = tokens[last - 1].range.end,
             },
             .argument_range = argument_range,
+            .complete_range = complete_range,
         });
     }
     return result;
@@ -489,6 +609,62 @@ struct attribute_block {
         index = cursor + 1;
     }
     return result;
+}
+
+[[nodiscard]] inline std::string decode_ordinary_narrow_string(
+    std::string_view token) {
+    if (token.size() < 2 || token.front() != '"'
+        || token.back() != '"') {
+        throw std::runtime_error(
+            "probe provenance arguments must be ordinary narrow string literals");
+    }
+    std::string result;
+    for (std::size_t index = 1; index + 1 < token.size(); ++index) {
+        const char value = token[index];
+        if (value == '\0' || value == '\n' || value == '\r') {
+            throw std::runtime_error(
+                "probe provenance string contains a forbidden character");
+        }
+        if (value != '\\') {
+            result.push_back(value);
+            continue;
+        }
+        if (++index + 1 >= token.size()) {
+            throw std::runtime_error(
+                "probe provenance string ends in an escape");
+        }
+        switch (token[index]) {
+            case '\\': result.push_back('\\'); break;
+            case '"': result.push_back('"'); break;
+            case '\'': result.push_back('\''); break;
+            case '?': result.push_back('?'); break;
+            case 'a': result.push_back('\a'); break;
+            case 'b': result.push_back('\b'); break;
+            case 'f': result.push_back('\f'); break;
+            case 'n': result.push_back('\n'); break;
+            case 'r': result.push_back('\r'); break;
+            case 't': result.push_back('\t'); break;
+            case 'v': result.push_back('\v'); break;
+            default:
+                throw std::runtime_error(
+                    "probe provenance string uses an unsupported escape");
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::pair<std::string, std::string>
+parse_probe_provenance_arguments(std::string_view argument_text) {
+    const auto [tokens, comments] = lex_source(argument_text);
+    if (!comments.empty() || tokens.size() != 3
+        || tokens[1].spelling != ",") {
+        throw std::runtime_error(
+            "template_flatten_provenance requires exactly two ordinary narrow strings");
+    }
+    return {
+        decode_ordinary_narrow_string(tokens[0].spelling),
+        decode_ordinary_narrow_string(tokens[2].spelling),
+    };
 }
 
 [[nodiscard]] inline std::size_t token_at_or_after(
@@ -1486,19 +1662,107 @@ inline void merge_documentation_groups(
             break;
         }
     }
-    std::size_t name_token = equals;
-    while (name_token > begin) {
-        --name_token;
-        if (!tokens[name_token].spelling.empty()
-            && identifier_begin(tokens[name_token].spelling.front())) {
-            result.name = tokens[name_token].spelling;
-            break;
-        }
-    }
     const std::size_t type_begin =
         skip_attribute_blocks(tokens, begin);
-    result.cpp_type =
-        source_between(source, tokens, type_begin, name_token);
+    std::vector<bool> in_attribute(tokens.size());
+    for (const attribute_block& block : blocks) {
+        if (block.token_begin < begin || block.token_end > equals) continue;
+        for (std::size_t index = block.token_begin;
+             index < block.token_end;
+             ++index) {
+            in_attribute[index] = true;
+        }
+    }
+    const auto non_name_keyword = [](std::string_view spelling) {
+        static constexpr std::array keywords{
+            std::string_view{"alignas"}, std::string_view{"auto"},
+            std::string_view{"bool"}, std::string_view{"char"},
+            std::string_view{"char8_t"}, std::string_view{"char16_t"},
+            std::string_view{"char32_t"}, std::string_view{"class"},
+            std::string_view{"const"}, std::string_view{"consteval"},
+            std::string_view{"constexpr"}, std::string_view{"constinit"},
+            std::string_view{"decltype"}, std::string_view{"double"},
+            std::string_view{"enum"}, std::string_view{"explicit"},
+            std::string_view{"extern"}, std::string_view{"float"},
+            std::string_view{"friend"}, std::string_view{"inline"},
+            std::string_view{"int"}, std::string_view{"long"},
+            std::string_view{"mutable"}, std::string_view{"noexcept"},
+            std::string_view{"register"}, std::string_view{"requires"},
+            std::string_view{"short"}, std::string_view{"signed"},
+            std::string_view{"static"}, std::string_view{"struct"},
+            std::string_view{"template"}, std::string_view{"thread_local"},
+            std::string_view{"typename"}, std::string_view{"union"},
+            std::string_view{"unsigned"}, std::string_view{"virtual"},
+            std::string_view{"void"}, std::string_view{"volatile"},
+            std::string_view{"wchar_t"},
+        };
+        return std::ranges::contains(keywords, spelling);
+    };
+    std::optional<std::size_t> candidate_name;
+    int parentheses = 0;
+    int brackets = 0;
+    int angles = 0;
+    for (std::size_t index = type_begin; index < equals; ++index) {
+        if (in_attribute[index]) continue;
+        const std::string_view spelling = tokens[index].spelling;
+        if (spelling == "(") ++parentheses;
+        else if (spelling == ")") --parentheses;
+        else if (spelling == "[") ++brackets;
+        else if (spelling == "]") --brackets;
+        else if (spelling == "<") ++angles;
+        else if (spelling == ">" && angles != 0) --angles;
+        else if (spelling == ">>" && angles >= 2) angles -= 2;
+        else if (parentheses == 0 && brackets == 0 && angles == 0
+                 && !spelling.empty()
+                 && identifier_begin(spelling.front())
+                 && std::ranges::all_of(spelling, identifier_continue)
+                 && !non_name_keyword(spelling)) {
+            candidate_name = index;
+        }
+    }
+    bool has_prior_type = false;
+    if (candidate_name
+        && (*candidate_name == type_begin
+            || tokens[*candidate_name - 1].spelling == "::")) {
+        candidate_name.reset();
+    }
+    if (candidate_name) {
+        for (std::size_t index = type_begin;
+             index < *candidate_name;
+             ++index) {
+            if (in_attribute[index]) continue;
+            const std::string_view spelling = tokens[index].spelling;
+            const bool type_keyword = spelling == "auto"
+                || spelling == "bool" || spelling == "char"
+                || spelling == "char8_t" || spelling == "char16_t"
+                || spelling == "char32_t" || spelling == "decltype"
+                || spelling == "double" || spelling == "float"
+                || spelling == "int" || spelling == "long"
+                || spelling == "short" || spelling == "signed"
+                || spelling == "unsigned" || spelling == "void"
+                || spelling == "wchar_t" || spelling == "typename"
+                || spelling == "class" || spelling == "struct"
+                || spelling == "enum";
+            const bool user_type = !spelling.empty()
+                && identifier_begin(spelling.front())
+                && std::ranges::all_of(spelling, identifier_continue)
+                && !non_name_keyword(spelling);
+            if (type_keyword || user_type) {
+                has_prior_type = true;
+                break;
+            }
+        }
+        if (!has_prior_type) candidate_name.reset();
+    }
+    if (candidate_name) {
+        result.name = tokens[*candidate_name].spelling;
+        result.name_range = tokens[*candidate_name].range;
+    }
+    result.cpp_type = source_between(
+        source,
+        tokens,
+        type_begin,
+        candidate_name.value_or(equals));
     result.has_default = equals < end;
     if (result.has_default) {
         result.default_expression =
@@ -1548,7 +1812,10 @@ inline void merge_documentation_groups(
                 && brackets == 0 && angles == 0)) {
             parameter_record parameter =
                 parse_parameter(source, tokens, begin, index, blocks);
-            if (!parameter.name.empty() && parameter.cpp_type != "void") {
+            if (!parameter.cpp_type.empty()
+                && !(parameter.name.empty()
+                     && trim_view(parameter.cpp_type) == "void")) {
+                parameter.ordinal = result.size();
                 result.push_back(std::move(parameter));
             }
             begin = index + 1;
@@ -1825,7 +2092,1549 @@ inline void merge_documentation_groups(
     return result;
 }
 
+[[nodiscard]] inline std::string source_provenance_id(
+    const std::filesystem::path& source_path,
+    std::string_view entity,
+    std::size_t byte_offset) {
+    return source_path.generic_string() + "#" + std::string{entity}
+        + ":" + std::to_string(byte_offset);
+}
+
+[[nodiscard]] inline preprocessor_directive_kind directive_kind_of(
+    std::string_view spelling) noexcept {
+    if (spelling == "if") return preprocessor_directive_kind::if_;
+    if (spelling == "ifdef") return preprocessor_directive_kind::ifdef;
+    if (spelling == "ifndef") return preprocessor_directive_kind::ifndef;
+    if (spelling == "elif") return preprocessor_directive_kind::elif;
+    if (spelling == "else") return preprocessor_directive_kind::else_;
+    if (spelling == "endif") return preprocessor_directive_kind::endif;
+    if (spelling == "define") return preprocessor_directive_kind::define;
+    if (spelling == "undef") return preprocessor_directive_kind::undef;
+    if (spelling == "include") return preprocessor_directive_kind::include;
+    if (spelling == "pragma") return preprocessor_directive_kind::pragma;
+    if (spelling == "error") return preprocessor_directive_kind::error;
+    if (spelling == "line") return preprocessor_directive_kind::line;
+    return preprocessor_directive_kind::other;
+}
+
+[[nodiscard]] inline bool preprocessing_space(
+    std::string_view source) noexcept {
+    std::size_t cursor = 0;
+    while (cursor < source.size()) {
+        if (ascii_space(source[cursor])) {
+            ++cursor;
+            continue;
+        }
+        if (cursor + 1 < source.size()
+            && source[cursor] == '/'
+            && source[cursor + 1] == '*') {
+            const std::size_t close = source.find("*/", cursor + 2);
+            if (close == std::string_view::npos) return false;
+            cursor = close + 2;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] inline std::vector<preprocessor_directive_record>
+collect_preprocessor_directives(
+    std::string_view source,
+    const std::vector<lexical_token>& tokens,
+    const source_positions& positions) {
+    std::vector<preprocessor_directive_record> result;
+    std::size_t nesting_depth = 0;
+    for (const lexical_token& token : tokens) {
+        if (token.spelling != "#") continue;
+        const std::size_t hash = token.range.begin.byte_offset;
+        if (std::ranges::any_of(
+                result,
+                [hash](const preprocessor_directive_record& directive) {
+                    return hash
+                            >= directive.complete_range.begin.byte_offset
+                        && hash
+                            < directive.complete_range.end.byte_offset;
+                })) {
+            continue;
+        }
+        const std::size_t line_begin = hash == 0
+            ? 0
+            : source.rfind('\n', hash - 1) == std::string_view::npos
+            ? 0
+            : source.rfind('\n', hash - 1) + 1;
+        if (!preprocessing_space(
+                source.substr(line_begin, hash - line_begin))) {
+            continue;
+        }
+
+        std::size_t logical_end = line_begin;
+        while (logical_end < source.size()) {
+            const std::size_t newline = source.find('\n', logical_end);
+            const std::size_t physical_end = newline == std::string_view::npos
+                ? source.size()
+                : newline;
+            std::size_t continuation = physical_end;
+            if (continuation > logical_end
+                && source[continuation - 1] == '\r') {
+                --continuation;
+            }
+            const bool continued = continuation > logical_end
+                && source[continuation - 1] == '\\';
+            logical_end = newline == std::string_view::npos
+                ? source.size()
+                : newline + 1;
+            if (!continued || newline == std::string_view::npos) break;
+        }
+
+        std::size_t name_begin = hash + 1;
+        while (name_begin < logical_end
+               && ascii_space(source[name_begin])) {
+            ++name_begin;
+        }
+        std::size_t name_end = name_begin;
+        while (name_end < logical_end
+               && identifier_continue(source[name_end])) {
+            ++name_end;
+        }
+        const std::string_view name = source.substr(
+            name_begin, name_end - name_begin);
+        const preprocessor_directive_kind kind =
+            directive_kind_of(name);
+        if (kind == preprocessor_directive_kind::endif
+            && nesting_depth != 0) {
+            --nesting_depth;
+        }
+        const std::size_t record_depth =
+            (kind == preprocessor_directive_kind::elif
+             || kind == preprocessor_directive_kind::else_)
+                && nesting_depth != 0
+            ? nesting_depth - 1
+            : nesting_depth;
+        std::size_t argument_begin = name_end;
+        while (argument_begin < logical_end
+               && ascii_space(source[argument_begin])) {
+            ++argument_begin;
+        }
+        std::size_t argument_end = logical_end;
+        while (argument_end > argument_begin
+               && ascii_space(source[argument_end - 1])) {
+            --argument_end;
+        }
+        result.push_back({
+            .kind = kind,
+            .complete_range = positions.range(line_begin, logical_end),
+            .argument_range =
+                positions.range(argument_begin, argument_end),
+            .spelling = std::string{
+                source.substr(line_begin, logical_end - line_begin)},
+            .nesting_depth = record_depth,
+        });
+        if (kind == preprocessor_directive_kind::if_
+            || kind == preprocessor_directive_kind::ifdef
+            || kind == preprocessor_directive_kind::ifndef) {
+            ++nesting_depth;
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] inline bool offset_in_directive(
+    std::size_t offset,
+    const std::vector<preprocessor_directive_record>& directives) noexcept {
+    return std::ranges::any_of(
+        directives,
+        [offset](const preprocessor_directive_record& directive) {
+            return offset >= directive.complete_range.begin.byte_offset
+                && offset < directive.complete_range.end.byte_offset;
+        });
+}
+
+[[nodiscard]] inline std::string joined_token_spelling(
+    const std::vector<lexical_token>& tokens,
+    std::size_t begin,
+    std::size_t end) {
+    std::string result;
+    for (std::size_t index = begin; index < end; ++index) {
+        result += tokens[index].spelling;
+    }
+    return result;
+}
+
+[[nodiscard]] inline module_record collect_module_record(
+    const std::filesystem::path& source_path,
+    const std::vector<lexical_token>& tokens,
+    const std::vector<preprocessor_directive_record>& directives) {
+    module_record result{.source_path = source_path};
+    int braces = 0;
+    int parentheses = 0;
+    int brackets = 0;
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        const std::string_view token = tokens[index].spelling;
+        if (offset_in_directive(
+                tokens[index].range.begin.byte_offset, directives)) {
+            continue;
+        }
+        if (token == "{") {
+            ++braces;
+            continue;
+        }
+        if (token == "}") {
+            if (braces == 0) {
+                throw std::runtime_error(
+                    source_path.string()
+                    + ": token slice has an unmatched closing brace");
+            }
+            --braces;
+            continue;
+        }
+        if (token == "(") ++parentheses;
+        else if (token == ")") --parentheses;
+        else if (token == "[") ++brackets;
+        else if (token == "]") --brackets;
+        if (parentheses < 0 || brackets < 0) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": token slice has unbalanced top-level delimiters");
+        }
+        if (braces != 0 || parentheses != 0 || brackets != 0) continue;
+        const bool declaration_start = index == 0
+            || tokens[index - 1].spelling == ";"
+            || tokens[index - 1].spelling == "}";
+        if (!declaration_start) continue;
+        bool exported = false;
+        std::size_t keyword = index;
+        if (token == "export" && index + 1 < tokens.size()
+            && (tokens[index + 1].spelling == "module"
+                || tokens[index + 1].spelling == "import")) {
+            exported = true;
+            keyword = ++index;
+        }
+        const bool module_declaration =
+            tokens[keyword].spelling == "module";
+        const bool import_declaration =
+            tokens[keyword].spelling == "import";
+        if (!module_declaration && !import_declaration) continue;
+        std::size_t semicolon = keyword + 1;
+        while (semicolon < tokens.size()
+               && tokens[semicolon].spelling != ";") {
+            ++semicolon;
+        }
+        if (semicolon == tokens.size()) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": unterminated module/import declaration in token slice");
+        }
+        const std::string name = joined_token_spelling(
+            tokens, keyword + 1, semicolon);
+        const bool module_fragment = name.empty()
+            || name == ":private";
+        if (module_declaration && !module_fragment) {
+            if (!result.provided_module.empty()) {
+                throw std::runtime_error(
+                    source_path.string()
+                    + ": token slice contains multiple named-module declarations");
+            }
+            const std::size_t declaration_begin = exported
+                ? tokens[keyword - 1].range.begin.byte_offset
+                : tokens[keyword].range.begin.byte_offset;
+            result.declaration_range = {
+                .begin = source_position{
+                    .byte_offset = declaration_begin,
+                    .line = exported
+                        ? tokens[keyword - 1].range.begin.line
+                        : tokens[keyword].range.begin.line,
+                    .column = exported
+                        ? tokens[keyword - 1].range.begin.column
+                        : tokens[keyword].range.begin.column,
+                },
+                .end = tokens[semicolon].range.end,
+            };
+            result.provided_module = name;
+            result.is_interface = exported;
+            result.is_partition = name.contains(':');
+        } else if (import_declaration && !name.empty()) {
+            result.imported_modules.push_back(name);
+        }
+        index = semicolon;
+    }
+    if (braces != 0 || parentheses != 0 || brackets != 0) {
+        throw std::runtime_error(
+            source_path.string()
+            + ": token slice has unbalanced top-level delimiters");
+    }
+    std::set<std::string, std::less<>> seen_imports;
+    result.imported_modules.erase(
+        std::remove_if(
+            result.imported_modules.begin(),
+            result.imported_modules.end(),
+            [&](const std::string& imported) {
+                return !seen_imports.insert(imported).second;
+            }),
+        result.imported_modules.end());
+    return result;
+}
+
+[[nodiscard]] inline std::vector<namespace_record>
+collect_namespace_records(
+    const std::filesystem::path& source_path,
+    const std::vector<lexical_token>& tokens,
+    const std::vector<attribute_block>& blocks) {
+    struct open_namespace {
+        std::size_t declaration_begin{};
+        std::size_t keyword{};
+        std::size_t name_begin{};
+        std::size_t name_end{};
+        std::size_t open_brace{};
+        std::string name;
+        std::string qualified_name;
+        std::string provenance_id;
+        std::vector<attribute_record> attributes;
+        bool is_inline{};
+        bool is_anonymous{};
+        bool has_explicit_export{};
+        bool is_in_export_context{};
+    };
+    struct brace_frame {
+        std::optional<open_namespace> name_space;
+        bool pushed_component{};
+        bool opens_export_context{};
+    };
+
+    std::vector<bool> in_attribute(tokens.size());
+    for (const attribute_block& block : blocks) {
+        for (std::size_t index = block.token_begin;
+             index < std::min(block.token_end, tokens.size());
+             ++index) {
+            in_attribute[index] = true;
+        }
+    }
+    std::vector<brace_frame> braces;
+    std::vector<std::string> named_stack;
+    std::vector<namespace_record> result;
+    std::size_t export_context_depth = 0;
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        if (in_attribute[index]) continue;
+        if (tokens[index].spelling == "{") {
+            std::size_t boundary = index;
+            while (boundary > 0) {
+                if (in_attribute[boundary - 1]) {
+                    --boundary;
+                    continue;
+                }
+                const std::string_view previous =
+                    tokens[boundary - 1].spelling;
+                if (previous == ";" || previous == "{"
+                    || previous == "}") {
+                    break;
+                }
+                --boundary;
+            }
+            std::optional<std::size_t> namespace_keyword;
+            for (std::size_t cursor = boundary; cursor < index; ++cursor) {
+                if (!in_attribute[cursor]
+                    && tokens[cursor].spelling == "namespace") {
+                    namespace_keyword = cursor;
+                    break;
+                }
+            }
+            if (!namespace_keyword) {
+                const bool opens_export_context = std::ranges::any_of(
+                    tokens.begin()
+                        + static_cast<std::ptrdiff_t>(boundary),
+                    tokens.begin()
+                        + static_cast<std::ptrdiff_t>(index),
+                    [](const lexical_token& candidate) {
+                        return candidate.spelling == "export";
+                    });
+                braces.push_back({
+                    .opens_export_context = opens_export_context,
+                });
+                if (opens_export_context) ++export_context_depth;
+                continue;
+            }
+            const std::size_t keyword = *namespace_keyword;
+            std::size_t name_begin = index;
+            std::size_t name_end = index;
+            std::string name;
+            for (std::size_t cursor = keyword + 1;
+                 cursor < index;
+                 ++cursor) {
+                if (in_attribute[cursor]
+                    || tokens[cursor].spelling == "inline") {
+                    continue;
+                }
+                const std::string_view spelling =
+                    tokens[cursor].spelling;
+                if (spelling == "::"
+                    || (!spelling.empty()
+                        && identifier_begin(spelling.front())
+                        && std::ranges::all_of(
+                            spelling, identifier_continue))) {
+                    if (name.empty() && spelling != "::") {
+                        name_begin = cursor;
+                    }
+                    if (spelling != "::") name_end = cursor + 1;
+                    name += spelling;
+                }
+            }
+            std::string qualified;
+            for (const std::string& parent : named_stack) {
+                if (!qualified.empty()) qualified += "::";
+                qualified += parent;
+            }
+            if (!name.empty()) {
+                if (!qualified.empty()) qualified += "::";
+                qualified += name;
+            } else {
+                if (!qualified.empty()) qualified += "::";
+                qualified += "<anonymous>";
+            }
+            std::vector<attribute_record> attributes;
+            for (const attribute_block& block : blocks) {
+                if (block.token_begin > keyword
+                    && block.token_end <= index) {
+                    attributes.insert(
+                        attributes.end(),
+                        block.attributes.begin(),
+                        block.attributes.end());
+                }
+            }
+            for (attribute_record& attribute : attributes) {
+                attribute.placement = attribute_placement::namespace_head;
+            }
+            const bool is_inline = std::ranges::any_of(
+                tokens.begin() + static_cast<std::ptrdiff_t>(boundary),
+                tokens.begin() + static_cast<std::ptrdiff_t>(keyword),
+                [](const lexical_token& candidate) {
+                    return candidate.spelling == "inline";
+                });
+            const bool has_explicit_export = std::ranges::any_of(
+                tokens.begin()
+                    + static_cast<std::ptrdiff_t>(boundary),
+                tokens.begin()
+                    + static_cast<std::ptrdiff_t>(keyword),
+                [](const lexical_token& candidate) {
+                    return candidate.spelling == "export";
+                });
+            open_namespace opened{
+                .declaration_begin = boundary,
+                .keyword = keyword,
+                .name_begin = name_begin,
+                .name_end = name_end,
+                .open_brace = index,
+                .name = name,
+                .qualified_name = std::move(qualified),
+                .provenance_id = source_provenance_id(
+                    source_path,
+                    "namespace",
+                    tokens[keyword].range.begin.byte_offset),
+                .attributes = std::move(attributes),
+                .is_inline = is_inline,
+                .is_anonymous = name.empty(),
+                .has_explicit_export = has_explicit_export,
+                .is_in_export_context = has_explicit_export
+                    || export_context_depth != 0,
+            };
+            const bool pushed_component = true;
+            named_stack.push_back(
+                name.empty() ? std::string{"<anonymous>"} : name);
+            braces.push_back({
+                .name_space = std::move(opened),
+                .pushed_component = pushed_component,
+                .opens_export_context = has_explicit_export,
+            });
+            if (has_explicit_export) ++export_context_depth;
+            continue;
+        }
+        if (tokens[index].spelling != "}") continue;
+        if (braces.empty()) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": token slice has an unmatched closing brace");
+        }
+        brace_frame frame = std::move(braces.back());
+        braces.pop_back();
+        if (frame.opens_export_context) {
+            if (export_context_depth == 0) {
+                throw std::runtime_error(
+                    source_path.string()
+                    + ": token slice export-context stack underflow");
+            }
+            --export_context_depth;
+        }
+        if (!frame.name_space) continue;
+        const open_namespace& opened = *frame.name_space;
+        namespace_record record{
+            .declaration_range = {
+                .begin = tokens[opened.declaration_begin].range.begin,
+                .end = tokens[index].range.end,
+            },
+            .body_range = {
+                .begin = tokens[opened.open_brace].range.end,
+                .end = tokens[index].range.begin,
+            },
+            .keyword_range = tokens[opened.keyword].range,
+            .name_range = opened.is_anonymous
+                ? source_range{}
+                : source_range{
+                      .begin = tokens[opened.name_begin].range.begin,
+                      .end = tokens[opened.name_end - 1].range.end,
+                  },
+            .open_brace_range = tokens[opened.open_brace].range,
+            .close_brace_range = tokens[index].range,
+            .provenance_id = opened.provenance_id,
+            .qualified_name = opened.qualified_name,
+            .attributes = opened.attributes,
+            .is_inline = opened.is_inline,
+            .is_anonymous = opened.is_anonymous,
+            .is_nested_namespace_definition =
+                opened.name.contains("::"),
+            .has_explicit_export = opened.has_explicit_export,
+            .is_in_export_context = opened.is_in_export_context,
+        };
+        result.push_back(std::move(record));
+        if (frame.pushed_component) named_stack.pop_back();
+    }
+    if (!braces.empty()) {
+        throw std::runtime_error(
+            source_path.string()
+            + ": token slice has unbalanced source braces");
+    }
+    std::ranges::sort(
+        result,
+        {},
+        [](const namespace_record& record) {
+            return record.declaration_range.begin.byte_offset;
+        });
+    std::map<std::string, std::size_t, std::less<>> occurrences;
+    for (const namespace_record& record : result) {
+        ++occurrences[record.qualified_name];
+    }
+    for (namespace_record& record : result) {
+        record.is_reopened = occurrences[record.qualified_name] > 1;
+    }
+    return result;
+}
+
+struct sliced_declaration_bounds {
+    std::size_t token_end{};
+    std::optional<std::size_t> semicolon;
+    std::optional<std::size_t> body_open;
+    std::optional<std::size_t> body_close;
+    std::optional<std::size_t> initializer;
+    std::optional<std::size_t> first_parenthesis;
+    std::optional<std::size_t> parameter_close;
+    bool function_special_definition{};
+    bool multiple_declarators{};
+};
+
+[[nodiscard]] inline std::vector<std::size_t> attribute_end_by_begin(
+    std::size_t token_count,
+    const std::vector<attribute_block>& blocks) {
+    std::vector<std::size_t> result(token_count);
+    for (const attribute_block& block : blocks) {
+        if (block.token_begin < result.size()) {
+            result[block.token_begin] = block.token_end;
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::optional<std::size_t> directive_end_at(
+    const lexical_token& token,
+    const std::vector<preprocessor_directive_record>& directives) {
+    for (const preprocessor_directive_record& directive : directives) {
+        if (token.range.begin.byte_offset
+                >= directive.complete_range.begin.byte_offset
+            && token.range.begin.byte_offset
+                < directive.complete_range.end.byte_offset) {
+            return directive.complete_range.end.byte_offset;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline sliced_declaration_bounds
+slice_direct_declaration_bounds(
+    const std::filesystem::path& source_path,
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    const std::vector<preprocessor_directive_record>& directives,
+    std::size_t begin,
+    std::size_t limit) {
+    sliced_declaration_bounds result;
+    int parentheses = 0;
+    int brackets = 0;
+    int angles = 0;
+    bool saw_initializer = false;
+    bool declaration_scope = false;
+    bool constructor_initializer = false;
+    bool constructor_component_complete = false;
+    bool skipped_requires_body = false;
+    for (std::size_t cursor = begin; cursor < limit; ++cursor) {
+        if (attribute_ends[cursor] > cursor) {
+            cursor = attribute_ends[cursor] - 1;
+            continue;
+        }
+        if (const auto directive_end =
+                directive_end_at(tokens[cursor], directives)) {
+            cursor = token_at_or_after(tokens, *directive_end);
+            if (cursor != 0) --cursor;
+            continue;
+        }
+        const std::string_view spelling = tokens[cursor].spelling;
+        const bool delimiter_top_level = parentheses == 0
+            && brackets == 0;
+        const bool type_top_level = delimiter_top_level
+            && angles == 0;
+        if (type_top_level && spelling == "=") {
+            const bool after_function_parameters =
+                result.parameter_close
+                && cursor > *result.parameter_close;
+            const bool special_function_definition =
+                after_function_parameters
+                && cursor + 1 < limit
+                && (tokens[cursor + 1].spelling == "default"
+                    || tokens[cursor + 1].spelling == "delete"
+                    || tokens[cursor + 1].spelling == "0");
+            if (special_function_definition) {
+                result.function_special_definition = true;
+            } else {
+                if (!result.initializer) result.initializer = cursor;
+                saw_initializer = true;
+            }
+        } else if (type_top_level && spelling == ",") {
+            result.multiple_declarators = true;
+            if (constructor_initializer) {
+                constructor_component_complete = false;
+            }
+        } else if (delimiter_top_level && spelling == ";") {
+            result.semicolon = cursor;
+            result.token_end = cursor + 1;
+            return result;
+        } else if (delimiter_top_level && spelling == ":"
+                   && result.parameter_close
+                   && cursor > *result.parameter_close
+                   && !saw_initializer) {
+            constructor_initializer = true;
+            constructor_component_complete = false;
+        } else if (delimiter_top_level && spelling == "{") {
+            if (!result.body_open && !saw_initializer) {
+                const bool has_scope_keyword = std::ranges::any_of(
+                    tokens.begin() + static_cast<std::ptrdiff_t>(begin),
+                    tokens.begin() + static_cast<std::ptrdiff_t>(cursor),
+                    [](const lexical_token& token) {
+                        return token.spelling == "namespace"
+                            || token.spelling == "struct"
+                            || token.spelling == "class"
+                            || token.spelling == "union"
+                            || token.spelling == "enum";
+                    });
+                declaration_scope = has_scope_keyword
+                    || result.first_parenthesis.has_value();
+            }
+            const std::optional<std::size_t> close =
+                matching_token(tokens, cursor, "{", "}");
+            if (!close || *close >= limit) {
+                throw std::runtime_error(
+                    source_path.string() + ":"
+                    + std::to_string(tokens[cursor].range.begin.line)
+                    + ": direct declaration has unbalanced braces");
+            }
+            const bool constructor_braced_initializer =
+                declaration_scope && constructor_initializer
+                && !constructor_component_complete
+                && cursor > begin
+                && tokens[cursor - 1].spelling != ")"
+                && tokens[cursor - 1].spelling != "}";
+            bool requires_expression_body = false;
+            if (declaration_scope && !skipped_requires_body
+                && result.parameter_close
+                && cursor > *result.parameter_close) {
+                const auto requires_token = std::ranges::find_if(
+                    tokens.begin()
+                        + static_cast<std::ptrdiff_t>(
+                            *result.parameter_close + 1),
+                    tokens.begin()
+                        + static_cast<std::ptrdiff_t>(cursor),
+                    [](const lexical_token& token) {
+                        return token.spelling == "requires";
+                    });
+                if (requires_token
+                    != tokens.begin()
+                        + static_cast<std::ptrdiff_t>(cursor)) {
+                    const std::string_view previous =
+                        tokens[cursor - 1].spelling;
+                    requires_expression_body = previous == "requires"
+                        || (previous == ")"
+                            && std::ranges::count_if(
+                                requires_token,
+                                tokens.begin()
+                                    + static_cast<std::ptrdiff_t>(cursor),
+                                [](const lexical_token& token) {
+                                    return token.spelling == "requires";
+                                }) >= 2);
+                }
+            }
+            if (constructor_braced_initializer
+                || requires_expression_body) {
+                cursor = *close;
+                constructor_component_complete =
+                    constructor_braced_initializer;
+                skipped_requires_body = requires_expression_body;
+                continue;
+            }
+            if (declaration_scope && !saw_initializer) {
+                result.body_open = cursor;
+                result.body_close = *close;
+                result.token_end = *close + 1;
+                if (result.token_end < limit
+                    && tokens[result.token_end].spelling == ";") {
+                    result.semicolon = result.token_end;
+                    ++result.token_end;
+                }
+                return result;
+            }
+            if (!result.initializer) result.initializer = cursor;
+            saw_initializer = true;
+            cursor = *close;
+            continue;
+        }
+
+        if (spelling == "(") {
+            if (type_top_level && !saw_initializer
+                && !result.first_parenthesis) {
+                result.first_parenthesis = cursor;
+            }
+            ++parentheses;
+        } else if (spelling == ")") {
+            --parentheses;
+            if (parentheses == 0 && result.first_parenthesis) {
+                if (!result.parameter_close) {
+                    result.parameter_close = cursor;
+                } else if (constructor_initializer
+                           && cursor > *result.parameter_close) {
+                    constructor_component_complete = true;
+                }
+            }
+        } else if (spelling == "[") {
+            ++brackets;
+        } else if (spelling == "]") {
+            --brackets;
+        } else if (spelling == "<" && !saw_initializer
+                   && (cursor == begin
+                       || tokens[cursor - 1].spelling != "operator")) {
+            ++angles;
+        } else if (spelling == ">" && angles != 0) {
+            --angles;
+        } else if (spelling == ">>" && angles >= 2) {
+            angles -= 2;
+        }
+        if (parentheses < 0 || brackets < 0 || angles < 0) {
+            throw std::runtime_error(
+                source_path.string() + ":"
+                + std::to_string(tokens[cursor].range.begin.line)
+                + ": direct declaration has unbalanced tokens");
+        }
+    }
+    throw std::runtime_error(
+        source_path.string() + ":"
+        + std::to_string(tokens[begin].range.begin.line)
+        + ": cannot prove the end of a direct namespace declaration");
+}
+
+[[nodiscard]] inline bool declaration_keyword(
+    std::string_view spelling) noexcept {
+    return spelling == "export" || spelling == "static"
+        || spelling == "constexpr" || spelling == "inline"
+        || spelling == "consteval" || spelling == "extern"
+        || spelling == "thread_local" || spelling == "constinit"
+        || spelling == "const" || spelling == "volatile"
+        || spelling == "mutable" || spelling == "typename"
+        || spelling == "template" || spelling == "friend";
+}
+
+[[nodiscard]] inline bool type_prefix_specifier(
+    std::string_view spelling) noexcept {
+    return spelling == "export" || spelling == "static"
+        || spelling == "constexpr" || spelling == "inline"
+        || spelling == "consteval" || spelling == "extern"
+        || spelling == "thread_local" || spelling == "constinit"
+        || spelling == "mutable" || spelling == "friend";
+}
+
+[[nodiscard]] inline std::optional<std::size_t>
+previous_identifier_token(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t begin,
+    std::size_t before) {
+    std::vector<bool> in_attribute(tokens.size());
+    for (std::size_t block_begin = 0;
+         block_begin < attribute_ends.size();
+         ++block_begin) {
+        for (std::size_t index = block_begin;
+             attribute_ends[block_begin] > block_begin
+                 && index < attribute_ends[block_begin];
+             ++index) {
+            in_attribute[index] = true;
+        }
+    }
+    while (before > begin) {
+        --before;
+        const std::string_view spelling = tokens[before].spelling;
+        if (!in_attribute[before] && !spelling.empty()
+            && identifier_begin(spelling.front())
+            && std::ranges::all_of(spelling, identifier_continue)
+            && !declaration_keyword(spelling)) {
+            return before;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::string explicit_type_before_name(
+    std::string_view source,
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t begin,
+    std::size_t name_token) {
+    std::size_t type_begin = begin;
+    while (type_begin < name_token) {
+        if (attribute_ends[type_begin] > type_begin) {
+            type_begin = attribute_ends[type_begin];
+            continue;
+        }
+        if (tokens[type_begin].spelling == "template"
+            && type_begin + 1 < name_token
+            && tokens[type_begin + 1].spelling == "<") {
+            int depth = 0;
+            std::size_t cursor = type_begin + 1;
+            for (; cursor < name_token; ++cursor) {
+                if (tokens[cursor].spelling == "<") ++depth;
+                else if (tokens[cursor].spelling == ">") --depth;
+                else if (tokens[cursor].spelling == ">>") depth -= 2;
+                if (depth == 0) {
+                    ++cursor;
+                    break;
+                }
+            }
+            type_begin = cursor;
+            continue;
+        }
+        if (type_prefix_specifier(tokens[type_begin].spelling)) {
+            ++type_begin;
+            continue;
+        }
+        break;
+    }
+    if (type_begin >= name_token) return {};
+    const std::size_t byte_begin =
+        tokens[type_begin].range.begin.byte_offset;
+    const std::size_t byte_end =
+        tokens[name_token].range.begin.byte_offset;
+    return std::string{trim_view(
+        source.substr(byte_begin, byte_end - byte_begin))};
+}
+
+[[nodiscard]] inline declaration_record make_sliced_declaration(
+    const std::filesystem::path& source_path,
+    std::string_view source,
+    const std::vector<lexical_token>& tokens,
+    const std::vector<attribute_block>& blocks,
+    const std::vector<std::size_t>& attribute_ends,
+    const namespace_record& owner,
+    const module_record& source_module,
+    std::size_t begin,
+    const sliced_declaration_bounds& bounds) {
+    const std::size_t end = bounds.token_end;
+    const std::size_t head_end = bounds.body_open.value_or(
+        bounds.initializer.value_or(
+            bounds.semicolon.value_or(end)));
+    if (begin >= end || end > tokens.size()
+        || head_end >= tokens.size() || head_end < begin) {
+        throw std::runtime_error(
+            source_path.string()
+            + ": token slicer produced invalid declaration bounds");
+    }
+    std::optional<std::size_t> using_keyword;
+    std::optional<std::size_t> record_keyword;
+    std::optional<std::size_t> namespace_keyword;
+    for (std::size_t cursor = begin; cursor < head_end; ++cursor) {
+        if (attribute_ends[cursor] > cursor) {
+            cursor = attribute_ends[cursor] - 1;
+            continue;
+        }
+        const std::string_view spelling = tokens[cursor].spelling;
+        if (spelling == "using" && !using_keyword) {
+            using_keyword = cursor;
+        } else if ((spelling == "struct" || spelling == "class"
+                    || spelling == "union" || spelling == "enum")
+                   && !record_keyword) {
+            record_keyword = cursor;
+        } else if (spelling == "namespace" && !namespace_keyword) {
+            namespace_keyword = cursor;
+        }
+    }
+
+    declaration_kind kind = declaration_kind::variable;
+    std::optional<std::size_t> name_token;
+    if (namespace_keyword) {
+        kind = declaration_kind::namespace_;
+        for (std::size_t cursor = *namespace_keyword + 1;
+             cursor < head_end;
+             ++cursor) {
+            const std::string_view spelling = tokens[cursor].spelling;
+            if (attribute_ends[cursor] > cursor) {
+                cursor = attribute_ends[cursor] - 1;
+            } else if (!spelling.empty()
+                       && identifier_begin(spelling.front())
+                       && spelling != "inline") {
+                name_token = cursor;
+                break;
+            }
+        }
+    } else if (record_keyword) {
+        kind = tokens[*record_keyword].spelling == "enum"
+            ? declaration_kind::enum_
+            : declaration_kind::record;
+        std::size_t cursor = *record_keyword + 1;
+        if (cursor < head_end
+            && (tokens[cursor].spelling == "class"
+                || tokens[cursor].spelling == "struct")) {
+            ++cursor;
+        }
+        for (; cursor < head_end; ++cursor) {
+            const std::string_view spelling = tokens[cursor].spelling;
+            if (attribute_ends[cursor] > cursor) {
+                cursor = attribute_ends[cursor] - 1;
+            } else if (!spelling.empty()
+                       && identifier_begin(spelling.front())) {
+                name_token = cursor;
+                break;
+            }
+        }
+    } else if (using_keyword && bounds.initializer) {
+        kind = declaration_kind::alias;
+        for (std::size_t cursor = *using_keyword + 1;
+             cursor < *bounds.initializer;
+             ++cursor) {
+            if (attribute_ends[cursor] > cursor) {
+                cursor = attribute_ends[cursor] - 1;
+            } else if (!tokens[cursor].spelling.empty()
+                && identifier_begin(tokens[cursor].spelling.front())) {
+                name_token = cursor;
+                break;
+            }
+        }
+    } else if (bounds.first_parenthesis
+               && (!bounds.initializer
+                   || *bounds.first_parenthesis < *bounds.initializer)) {
+        kind = declaration_kind::function;
+        name_token = previous_identifier_token(
+            tokens,
+            attribute_ends,
+            begin,
+            *bounds.first_parenthesis);
+    } else {
+        kind = declaration_kind::variable;
+        const std::size_t before = bounds.initializer.value_or(
+            bounds.semicolon.value_or(head_end));
+        name_token = previous_identifier_token(
+            tokens, attribute_ends, begin, before);
+    }
+    std::string name = name_token
+        ? tokens[*name_token].spelling
+        : kind == declaration_kind::namespace_
+        ? std::string{"<anonymous>"}
+        : std::string{};
+    std::optional<std::size_t> namespace_name_end;
+    if (kind == declaration_kind::namespace_ && name_token) {
+        name.clear();
+        for (std::size_t cursor = *name_token;
+             cursor < head_end;
+             ++cursor) {
+            if (attribute_ends[cursor] > cursor) {
+                cursor = attribute_ends[cursor] - 1;
+                continue;
+            }
+            const std::string_view spelling = tokens[cursor].spelling;
+            if (spelling == "::") continue;
+            if (spelling.empty()
+                || !identifier_begin(spelling.front())
+                || spelling == "inline") {
+                break;
+            }
+            if (!name.empty()) name += "::";
+            name += spelling;
+            namespace_name_end = cursor + 1;
+        }
+    }
+    const std::string qualified_name = owner.qualified_name.empty()
+        ? name
+        : owner.qualified_name + "::" + name;
+    const std::size_t declaration_byte_begin =
+        tokens[begin].range.begin.byte_offset;
+    const source_range declaration_range{
+        .begin = tokens[begin].range.begin,
+        .end = tokens[end - 1].range.end,
+    };
+    const source_range declaration_head_range{
+        .begin = tokens[begin].range.begin,
+        .end = tokens[head_end].range.begin,
+    };
+
+    declaration_payload_kind payload_kind =
+        declaration_payload_kind::none;
+    source_range payload_range;
+    if (bounds.body_open && bounds.body_close) {
+        if (kind == declaration_kind::function) {
+            payload_kind = declaration_payload_kind::function_body;
+            payload_range = {
+                .begin = tokens[*bounds.body_open].range.begin,
+                .end = tokens[*bounds.body_close].range.end,
+            };
+        }
+    } else if (bounds.initializer) {
+        const bool direct_list =
+            tokens[*bounds.initializer].spelling == "{";
+        const std::size_t payload_begin = *bounds.initializer
+            + (direct_list ? 0 : 1);
+        const std::size_t payload_end =
+            bounds.semicolon.value_or(end);
+        if (payload_begin < payload_end) {
+            payload_range = {
+                .begin = tokens[payload_begin].range.begin,
+                .end = tokens[payload_end - 1].range.end,
+            };
+        }
+        payload_kind = kind == declaration_kind::alias
+            ? declaration_payload_kind::alias_rhs
+            : declaration_payload_kind::variable_initializer;
+    }
+    std::vector<attribute_record> attributes;
+    for (const attribute_block& block : blocks) {
+        if (block.token_begin >= begin
+            && block.token_end <= head_end) {
+            attributes.insert(
+                attributes.end(),
+                block.attributes.begin(),
+                block.attributes.end());
+        }
+    }
+    const auto has_token = [&](std::string_view expected) {
+        return std::ranges::any_of(
+            tokens.begin() + static_cast<std::ptrdiff_t>(begin),
+            tokens.begin() + static_cast<std::ptrdiff_t>(head_end),
+            [expected](const lexical_token& token) {
+                return token.spelling == expected;
+            });
+    };
+    std::string explicit_type;
+    if (kind == declaration_kind::alias && payload_range.end.byte_offset
+        > payload_range.begin.byte_offset) {
+        explicit_type = std::string{trim_view(source.substr(
+            payload_range.begin.byte_offset,
+            payload_range.end.byte_offset
+                - payload_range.begin.byte_offset))};
+    } else if (name_token) {
+        explicit_type = explicit_type_before_name(
+            source, tokens, attribute_ends, begin, *name_token);
+    }
+    const bool has_deduced_type = explicit_type == "auto"
+        || explicit_type.contains("decltype(auto)");
+    const bool has_default_arguments =
+        kind == declaration_kind::function
+        && bounds.first_parenthesis
+        && bounds.parameter_close
+        && std::ranges::any_of(
+            tokens.begin()
+                + static_cast<std::ptrdiff_t>(*bounds.first_parenthesis + 1),
+            tokens.begin()
+                + static_cast<std::ptrdiff_t>(*bounds.parameter_close),
+            [](const lexical_token& token) {
+                return token.spelling == "=";
+            });
+    std::vector<parameter_record> parameters;
+    if (kind == declaration_kind::function
+        && bounds.first_parenthesis && bounds.parameter_close) {
+        parameters = parse_parameters(
+            source,
+            tokens,
+            *bounds.first_parenthesis,
+            *bounds.parameter_close,
+            blocks);
+    }
+    const module_attachment attachment =
+        !source_module.provided_module.empty()
+            && declaration_byte_begin
+                >= source_module.declaration_range.end.byte_offset
+        ? module_attachment::named_module
+        : module_attachment::global_module;
+    const bool anonymous_owner = owner.is_anonymous
+        || owner.qualified_name.contains("<anonymous>");
+    const entity_linkage linkage = anonymous_owner || has_token("static")
+        ? entity_linkage::internal
+        : attachment == module_attachment::named_module
+        ? (has_token("export")
+               ? entity_linkage::external
+               : entity_linkage::module)
+        : entity_linkage::external;
+    declaration_record result{
+        .kind = kind,
+        .name = name,
+        .qualified_name = qualified_name,
+        .enclosing_qualified_name = owner.qualified_name,
+        .signature_text = std::string{trim_view(source.substr(
+            declaration_byte_begin,
+            tokens[head_end].range.begin.byte_offset
+                - declaration_byte_begin))},
+        .return_type = explicit_type,
+        .initializer_text = payload_range.end.byte_offset
+                > payload_range.begin.byte_offset
+            ? std::string{source.substr(
+                  payload_range.begin.byte_offset,
+                  payload_range.end.byte_offset
+                      - payload_range.begin.byte_offset)}
+            : std::string{},
+        .parameters = std::move(parameters),
+        .attributes = std::move(attributes),
+        .range = declaration_range,
+        .name_range = name_token
+            ? source_range{
+                  .begin = tokens[*name_token].range.begin,
+                  .end = namespace_name_end
+                      ? tokens[*namespace_name_end - 1].range.end
+                      : tokens[*name_token].range.end,
+              }
+            : source_range{},
+        .exported = has_token("export"),
+        .provenance_id = source_provenance_id(
+            source_path, "declaration", declaration_byte_begin),
+        .immediate_namespace_provenance_id = owner.provenance_id,
+        .explicit_declared_type = explicit_type,
+        .declaration_range = declaration_range,
+        .declaration_head_range = declaration_head_range,
+        .body_or_initializer_range = payload_range,
+        .linkage = linkage,
+        .attachment = attachment,
+        .payload_kind = payload_kind,
+        .specifiers = {
+            .direct_namespace_member = true,
+            .is_definition = bounds.body_open.has_value()
+                || bounds.initializer.has_value()
+                || bounds.function_special_definition
+                || kind == declaration_kind::alias
+                || kind == declaration_kind::namespace_,
+            .is_using_alias = kind == declaration_kind::alias,
+            .is_variable = kind == declaration_kind::variable,
+            .is_function = kind == declaration_kind::function,
+            .is_static = has_token("static"),
+            .is_constexpr = has_token("constexpr"),
+            .is_inline = has_token("inline"),
+            .is_consteval = has_token("consteval"),
+            .is_extern = has_token("extern"),
+            .is_thread_local = has_token("thread_local"),
+            .has_explicit_type = !explicit_type.empty()
+                && !has_deduced_type,
+            .has_deduced_type = has_deduced_type,
+            .has_default_arguments = has_default_arguments,
+            .is_template = has_token("template"),
+            .is_operator = has_token("operator"),
+            .has_c_language_linkage = has_token("extern")
+                && std::ranges::any_of(
+                    tokens.begin() + static_cast<std::ptrdiff_t>(begin),
+                    tokens.begin() + static_cast<std::ptrdiff_t>(head_end),
+                    [](const lexical_token& token) {
+                        return token.spelling == "\"C\"";
+                    }),
+            .multiple_declarators = bounds.multiple_declarators,
+        },
+    };
+    return result;
+}
+
+[[nodiscard]] inline std::vector<declaration_record>
+collect_direct_declarations(
+    const std::filesystem::path& source_path,
+    std::string_view source,
+    const std::vector<lexical_token>& tokens,
+    const std::vector<attribute_block>& blocks,
+    const std::vector<preprocessor_directive_record>& directives,
+    const module_record& source_module,
+    const std::vector<namespace_record>& namespaces) {
+    const std::vector<std::size_t> attribute_ends =
+        attribute_end_by_begin(tokens.size(), blocks);
+    std::vector<declaration_record> result;
+    for (const namespace_record& name_space : namespaces) {
+        std::size_t cursor = token_at_or_after(
+            tokens, name_space.body_range.begin.byte_offset);
+        const std::size_t limit = token_at_or_after(
+            tokens, name_space.body_range.end.byte_offset);
+        while (cursor < limit) {
+            if (tokens[cursor].spelling == ";") {
+                ++cursor;
+                continue;
+            }
+            if (const auto directive_end =
+                    directive_end_at(tokens[cursor], directives)) {
+                cursor = token_at_or_after(tokens, *directive_end);
+                continue;
+            }
+            const sliced_declaration_bounds bounds =
+                slice_direct_declaration_bounds(
+                    source_path,
+                    tokens,
+                    attribute_ends,
+                    directives,
+                    cursor,
+                    limit);
+            if (bounds.token_end <= cursor) {
+                throw std::runtime_error(
+                    source_path.string()
+                    + ": token slicer did not advance a declaration boundary");
+            }
+            result.push_back(make_sliced_declaration(
+                source_path,
+                source,
+                tokens,
+                blocks,
+                attribute_ends,
+                name_space,
+                source_module,
+                cursor,
+                bounds));
+            cursor = bounds.token_end;
+        }
+    }
+    std::ranges::sort(
+        result,
+        {},
+        [](const declaration_record& declaration) {
+            return declaration.declaration_range.begin.byte_offset;
+        });
+    result.erase(
+        std::ranges::unique(
+            result,
+            {},
+            [](const declaration_record& declaration) {
+                return declaration.provenance_id;
+            }).begin(),
+        result.end());
+    return result;
+}
+
+inline void populate_slice_overloads_and_references(
+    const std::vector<lexical_token>& tokens,
+    std::vector<declaration_record>& declarations) {
+    std::map<std::string, std::size_t, std::less<>> function_counts;
+    for (const declaration_record& declaration : declarations) {
+        if (declaration.kind == declaration_kind::function) {
+            ++function_counts[declaration.qualified_name];
+        }
+    }
+    for (declaration_record& declaration : declarations) {
+        if (declaration.kind == declaration_kind::function) {
+            declaration.specifiers.is_overloaded =
+                function_counts[declaration.qualified_name] > 1;
+        }
+        if (declaration.declaration_head_range.end.byte_offset
+            <= declaration.declaration_head_range.begin.byte_offset) {
+            continue;
+        }
+        for (const declaration_record& referenced : declarations) {
+            if (&referenced == &declaration || referenced.name.empty()
+                || referenced.name.contains("::")
+                || referenced.enclosing_qualified_name
+                    != declaration.enclosing_qualified_name) {
+                continue;
+            }
+            const bool appears = std::ranges::any_of(
+                tokens,
+                [&](const lexical_token& token) {
+                    return token.range.begin.byte_offset
+                            >= declaration.declaration_head_range
+                                   .begin.byte_offset
+                        && token.range.end.byte_offset
+                            <= declaration.declaration_head_range
+                                   .end.byte_offset
+                        && token.spelling == referenced.name;
+                });
+            if (appears) {
+                declaration.referenced_declaration_provenance_ids
+                    .push_back(referenced.provenance_id);
+            }
+        }
+        std::ranges::sort(
+            declaration.referenced_declaration_provenance_ids);
+        declaration.referenced_declaration_provenance_ids.erase(
+            std::ranges::unique(
+                declaration.referenced_declaration_provenance_ids).begin(),
+            declaration.referenced_declaration_provenance_ids.end());
+    }
+}
+
+[[nodiscard]] inline translation_unit scan_token_slice_impl(
+    const std::filesystem::path& source_path,
+    std::string_view source,
+    bool allow_probe_provenance) {
+    const source_positions positions{source};
+    std::vector<lexical_token> raw_tokens =
+        clang_raw_tokens(source_path, source);
+    std::vector<preprocessor_directive_record> directives =
+        collect_preprocessor_directives(source, raw_tokens, positions);
+    std::vector<lexical_token> structural_tokens;
+    structural_tokens.reserve(raw_tokens.size());
+    std::ranges::copy_if(
+        raw_tokens,
+        std::back_inserter(structural_tokens),
+        [&](const lexical_token& token) {
+            return !offset_in_directive(
+                token.range.begin.byte_offset, directives);
+        });
+    const std::vector<attribute_block> blocks =
+        collect_attribute_blocks(source, structural_tokens);
+    for (const attribute_block& block : blocks) {
+        const std::size_t materialization_marker_count =
+            std::ranges::count_if(
+                block.attributes,
+                [](const attribute_record& attribute) {
+                    return is_materialization_attribute(attribute)
+                        || is_probe_provenance_attribute(attribute);
+                });
+        if (materialization_marker_count > 1) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": an attribute specifier cannot contain multiple bioseq materialization markers");
+        }
+        if (!allow_probe_provenance
+            && std::ranges::any_of(
+                block.attributes,
+                is_probe_provenance_attribute)) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": template_flatten_provenance is reserved for generated declaration probes");
+        }
+    }
+
+    module_record source_module = collect_module_record(
+        source_path, structural_tokens, directives);
+    std::vector<namespace_record> namespaces =
+        collect_namespace_records(
+            source_path, structural_tokens, blocks);
+    std::vector<declaration_record> declarations =
+        collect_direct_declarations(
+            source_path,
+            source,
+            structural_tokens,
+            blocks,
+            directives,
+            source_module,
+            namespaces);
+    std::set<std::size_t> bound_provenance_attributes;
+    for (declaration_record& declaration : declarations) {
+        auto marker = std::ranges::find_if(
+            declaration.attributes,
+            is_probe_provenance_attribute);
+        if (marker == declaration.attributes.end()) continue;
+        if (!allow_probe_provenance) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": authored token slices cannot carry probe provenance");
+        }
+        if (std::ranges::find_if(
+                std::next(marker),
+                declaration.attributes.end(),
+                is_probe_provenance_attribute)
+            != declaration.attributes.end()) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": a declaration probe declaration has multiple provenance markers");
+        }
+        const auto [original_provenance, coordinate_ordinal] =
+            parse_probe_provenance_arguments(marker->argument_text);
+        if (original_provenance.empty() || coordinate_ordinal.empty()
+            || !std::ranges::all_of(
+                coordinate_ordinal,
+                [](char value) { return value >= '0' && value <= '9'; })) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": declaration probe provenance ID/coordinate is invalid");
+        }
+        declaration.provenance_id = original_provenance;
+        declaration.provenance_coordinate = coordinate_ordinal;
+        bound_provenance_attributes.insert(
+            marker->complete_range.begin.byte_offset);
+        declaration.attributes.erase(marker);
+    }
+    if (allow_probe_provenance) {
+        for (const attribute_block& block : blocks) {
+            for (const attribute_record& attribute : block.attributes) {
+                if (is_probe_provenance_attribute(attribute)
+                    && !bound_provenance_attributes.contains(
+                        attribute.complete_range.begin.byte_offset)) {
+                    throw std::runtime_error(
+                        source_path.string()
+                        + ": declaration probe provenance marker has no declaration target");
+                }
+            }
+        }
+    }
+    populate_slice_overloads_and_references(
+        structural_tokens, declarations);
+
+    translation_unit result{
+        .source_path = source_path,
+        .module_name = source_module.provided_module,
+        .source_sha256 = sha256_hex(source),
+        .tokens = std::move(raw_tokens),
+        .declarations = std::move(declarations),
+        .mode = collection_mode::token_slice,
+        .source_module = std::move(source_module),
+        .namespaces = std::move(namespaces),
+        .preprocessor_directives = std::move(directives),
+    };
+    for (const attribute_block& block : blocks) {
+        if (!std::ranges::any_of(
+                block.attributes,
+                is_simd_namespace_marker)) {
+            continue;
+        }
+        const subject target = find_subject(structural_tokens, block);
+        if (target.kind != declaration_kind::namespace_
+            || !target.namespace_close_brace) {
+            throw std::runtime_error(
+                source_path.string()
+                + ": bioseq::simd must annotate a balanced named namespace");
+        }
+        std::string qualified_name = target.name;
+        const auto semantic_namespace = std::ranges::find_if(
+            result.namespaces,
+            [&](const namespace_record& candidate) {
+                return candidate.name_range.begin.byte_offset
+                        == structural_tokens[target.name_token]
+                               .range.begin.byte_offset
+                    || candidate.qualified_name.ends_with(
+                        "::" + target.name)
+                    || candidate.qualified_name == target.name;
+            });
+        if (semantic_namespace != result.namespaces.end()) {
+            qualified_name = semantic_namespace->qualified_name;
+        }
+        result.marked_namespaces.push_back(make_marked_namespace(
+            source,
+            structural_tokens,
+            block,
+            target,
+            qualified_name));
+    }
+    return result;
+}
+
+[[nodiscard]] inline bool record_has_default_member_initializer(
+    const declaration_record& declaration,
+    const std::vector<lexical_token>& tokens) {
+    int braces = 0;
+    int parentheses = 0;
+    int brackets = 0;
+    bool member_has_using = false;
+    bool member_has_parenthesis = false;
+    for (const lexical_token& token : tokens) {
+        if (token.range.begin.byte_offset
+                < declaration.declaration_range.begin.byte_offset
+            || token.range.end.byte_offset
+                > declaration.declaration_range.end.byte_offset) {
+            continue;
+        }
+        if (token.spelling == "{") {
+            ++braces;
+            continue;
+        }
+        if (token.spelling == "}") {
+            --braces;
+            continue;
+        }
+        if (braces != 1) continue;
+        if (token.spelling == "(") {
+            ++parentheses;
+            member_has_parenthesis = true;
+        } else if (token.spelling == ")") {
+            --parentheses;
+        } else if (token.spelling == "[") {
+            ++brackets;
+        } else if (token.spelling == "]") {
+            --brackets;
+        } else if (token.spelling == ";") {
+            member_has_using = false;
+            member_has_parenthesis = false;
+        } else if (token.spelling == "using") {
+            member_has_using = true;
+        } else if (token.spelling == "=" && parentheses == 0
+                   && brackets == 0 && !member_has_using
+                   && !member_has_parenthesis) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline void validate_body_free_probe_syntax(
+    const translation_unit& probe) {
+    for (const declaration_record& declaration : probe.declarations) {
+        if (declaration.kind == declaration_kind::function
+            && declaration.payload_kind
+                == declaration_payload_kind::function_body) {
+            throw std::runtime_error(
+                probe.source_path.string()
+                + ": declaration probe contains a function body");
+        }
+        if ((declaration.kind == declaration_kind::record
+             || declaration.kind == declaration_kind::enum_)
+            && declaration.specifiers.is_definition) {
+            if (record_has_default_member_initializer(
+                    declaration, probe.tokens)) {
+                throw std::runtime_error(
+                    probe.source_path.string()
+                    + ": declaration probe contains a default member initializer");
+            }
+            throw std::runtime_error(
+                probe.source_path.string()
+                + ": declaration probe contains a record or enum definition");
+        }
+        if (declaration.payload_kind
+                == declaration_payload_kind::variable_initializer
+            && std::ranges::any_of(
+                probe.tokens,
+                [&](const lexical_token& token) {
+                    return token.spelling == "{"
+                        && token.range.begin.byte_offset
+                            >= declaration.body_or_initializer_range
+                                   .begin.byte_offset
+                        && token.range.end.byte_offset
+                            <= declaration.body_or_initializer_range
+                                   .end.byte_offset;
+                })) {
+            throw std::runtime_error(
+                probe.source_path.string()
+                + ": declaration probe contains a body-bearing initializer");
+        }
+    }
+}
+
 }  // namespace detail
+
+[[nodiscard]] translation_unit scan_token_slice(
+    const std::filesystem::path& source_path,
+    std::string_view source) {
+    return detail::scan_token_slice_impl(
+        source_path, source, false);
+}
+
+[[nodiscard]] translation_unit scan_token_slice(
+    const std::filesystem::path& source_path) {
+    return scan_token_slice(source_path, read_file(source_path));
+}
 
 /// Performs a compiler-independent structural source scan. The resulting POD
 /// model is deliberately the same front door consumed by the SQL collector;
@@ -2981,6 +4790,74 @@ struct callable_candidate {
     bool insertion_proven{};
 };
 
+[[nodiscard]] entity_linkage entity_linkage_of(
+    const clang::NamedDecl* declaration) {
+    switch (declaration->getLinkageInternal()) {
+        case clang::Linkage::Invalid:
+            throw std::runtime_error(
+                "Clang returned invalid linkage for declaration '"
+                + declaration->getQualifiedNameAsString() + "'");
+        case clang::Linkage::None:
+        case clang::Linkage::VisibleNone:
+            return entity_linkage::none;
+        case clang::Linkage::Internal:
+        case clang::Linkage::UniqueExternal:
+            return entity_linkage::internal;
+        case clang::Linkage::Module:
+            return entity_linkage::module;
+        case clang::Linkage::External:
+            return entity_linkage::external;
+    }
+    return entity_linkage::none;
+}
+
+[[nodiscard]] bool direct_namespace_member(
+    const clang::NamedDecl* declaration) noexcept {
+    const clang::DeclContext* context =
+        declaration->getLexicalDeclContext();
+    return context != nullptr && context->isNamespace();
+}
+
+[[nodiscard]] bool declaration_range_contains_macro(
+    const clang::Decl* declaration) noexcept {
+    return declaration->getBeginLoc().isMacroID()
+        || declaration->getEndLoc().isMacroID()
+        || declaration->getLocation().isMacroID();
+}
+
+[[nodiscard]] const clang::NamespaceDecl* immediate_namespace_of(
+    const clang::Decl* declaration) noexcept {
+    const clang::DeclContext* context = declaration->getDeclContext();
+    while (context != nullptr) {
+        if (const auto* name_space =
+                llvm::dyn_cast<clang::NamespaceDecl>(context)) {
+            return name_space;
+        }
+        context = context->getParent();
+    }
+    return nullptr;
+}
+
+[[nodiscard]] std::string namespace_qualified_name(
+    const clang::NamespaceDecl* declaration) {
+    if (declaration == nullptr) return {};
+    const clang::DeclContext* parent = declaration->getParent();
+    while (parent != nullptr
+           && !llvm::isa<clang::NamespaceDecl>(parent)) {
+        parent = parent->getParent();
+    }
+    const auto* parent_namespace =
+        llvm::dyn_cast_or_null<clang::NamespaceDecl>(parent);
+    const std::string parent_name =
+        namespace_qualified_name(parent_namespace);
+    const std::string component = declaration->isAnonymousNamespace()
+        ? std::string{"<anonymous>"}
+        : declaration->getNameAsString();
+    return parent_name.empty()
+        ? component
+        : parent_name + "::" + component;
+}
+
 class structural_visitor final
     : public clang::RecursiveASTVisitor<structural_visitor> {
   public:
@@ -2997,6 +4874,7 @@ class structural_visitor final
     }
 
     bool VisitNamespaceDecl(clang::NamespaceDecl* declaration) {
+        bind_namespace_semantics(declaration);
         if (eligible(declaration)
             && !declaration->isAnonymousNamespace()) {
             static_cast<void>(
@@ -3005,9 +4883,24 @@ class structural_visitor final
         return true;
     }
 
+    void finalize_semantic_facts() {
+        std::map<std::string, std::size_t, std::less<>> functions;
+        for (const declaration_record& declaration :
+             output_.declarations) {
+            if (declaration.kind == declaration_kind::function) {
+                ++functions[declaration.qualified_name];
+            }
+        }
+        for (declaration_record& declaration : output_.declarations) {
+            if (declaration.kind == declaration_kind::function) {
+                declaration.specifiers.is_overloaded =
+                    functions[declaration.qualified_name] > 1;
+            }
+        }
+    }
+
     bool VisitCXXRecordDecl(clang::CXXRecordDecl* declaration) {
         if (!eligible(declaration)
-            || !declaration->isThisDeclarationADefinition()
             || declaration->isInjectedClassName()) {
             return true;
         }
@@ -3015,7 +4908,9 @@ class structural_visitor final
             add_named(declaration, declaration_kind::record);
         output_.declarations[declaration_index].record_kind =
             record_kind_of(declaration);
-        add_aggregate(declaration);
+        if (declaration->isThisDeclarationADefinition()) {
+            add_aggregate(declaration);
+        }
         return true;
     }
 
@@ -3033,6 +4928,12 @@ class structural_visitor final
         record.member_kind = member_kind_of(function);
         if (function->doesThisDeclarationHaveABody()) {
             if (const clang::Stmt* body = function->getBody()) {
+                record.body_or_initializer_range = source_range_of(
+                    body->getSourceRange(), sources_, language_);
+                record.declaration_head_range.end =
+                    record.body_or_initializer_range.begin;
+                record.payload_kind =
+                    declaration_payload_kind::function_body;
                 record.initializer_text = source_text(
                     body->getSourceRange(), sources_, language_);
                 if (record.initializer_text.size() >= 2
@@ -3047,6 +4948,44 @@ class structural_visitor final
                 }
             }
         }
+        record.explicit_declared_type = record.return_type;
+        record.specifiers.is_definition =
+            function->doesThisDeclarationHaveABody()
+            || function->isDeleted()
+            || function->isDefaulted();
+        record.specifiers.is_function = true;
+        record.specifiers.is_static =
+            function->getStorageClass() == clang::SC_Static;
+        record.specifiers.is_constexpr =
+            function->isConstexprSpecified();
+        record.specifiers.is_inline =
+            function->isInlineSpecified();
+        record.specifiers.is_consteval = function->isConsteval();
+        record.specifiers.is_extern =
+            function->getStorageClass() == clang::SC_Extern
+            || function->getStorageClass() == clang::SC_PrivateExtern;
+        record.specifiers.has_deduced_type =
+            function->getReturnType()->getContainedAutoType() != nullptr;
+        record.specifiers.has_explicit_type =
+            !record.specifiers.has_deduced_type
+            && !llvm::isa<clang::CXXConstructorDecl>(function)
+            && !llvm::isa<clang::CXXDestructorDecl>(function)
+            && !llvm::isa<clang::CXXConversionDecl>(function);
+        record.specifiers.has_default_arguments =
+            std::ranges::any_of(
+                function->parameters(),
+                [](const clang::ParmVarDecl* parameter) {
+                    return parameter->hasDefaultArg();
+                });
+        record.specifiers.is_template =
+            function->getTemplatedKind()
+            != clang::FunctionDecl::TK_NonTemplate;
+        record.specifiers.is_operator =
+            function->isOverloadedOperator()
+            || llvm::isa<clang::CXXConversionDecl>(function);
+        record.specifiers.has_c_language_linkage =
+            function->getLanguageLinkage()
+            == clang::CLanguageLinkage;
         record.parameters.reserve(function->getNumParams());
         for (std::size_t ordinal = 0;
              ordinal < function->getNumParams();
@@ -3106,7 +5045,11 @@ class structural_visitor final
         if (lambda == nullptr || lambda->getBody() == nullptr) {
             return true;
         }
-        const clang::CompoundStmt* body = lambda->getBody();
+        const auto* body = llvm::dyn_cast<clang::CompoundStmt>(
+            lambda->getBody());
+        if (body == nullptr) {
+            return true;
+        }
         const clang::SourceLocation body_begin =
             sources_.getSpellingLoc(body->getBeginLoc());
         const clang::SourceLocation body_end =
@@ -3172,6 +5115,19 @@ class structural_visitor final
                 add_named(declaration, declaration_kind::alias);
             output_.declarations[index].return_type =
                 declaration->getUnderlyingType().getAsString(policy_);
+            declaration_record& record = output_.declarations[index];
+            record.explicit_declared_type = record.return_type;
+            record.specifiers.is_using_alias = true;
+            record.specifiers.is_definition = true;
+            if (const clang::TypeSourceInfo* type_source =
+                    declaration->getTypeSourceInfo()) {
+                record.body_or_initializer_range = source_range_of(
+                    type_source->getTypeLoc().getSourceRange(),
+                    sources_,
+                    language_);
+                record.payload_kind =
+                    declaration_payload_kind::alias_rhs;
+            }
         }
         return true;
     }
@@ -3182,6 +5138,9 @@ class structural_visitor final
                 add_named(declaration, declaration_kind::alias);
             output_.declarations[index].return_type =
                 declaration->getUnderlyingType().getAsString(policy_);
+            declaration_record& record = output_.declarations[index];
+            record.explicit_declared_type = record.return_type;
+            record.specifiers.is_definition = true;
         }
         return true;
     }
@@ -3204,7 +5163,32 @@ class structural_visitor final
         declaration_record& record = output_.declarations[index];
         record.return_type =
             declaration->getType().getAsString(policy_);
+        record.explicit_declared_type = record.return_type;
+        record.specifiers.is_variable = true;
+        record.specifiers.is_definition =
+            declaration->isThisDeclarationADefinition()
+            != clang::VarDecl::DeclarationOnly;
+        record.specifiers.is_static =
+            declaration->getStorageClass() == clang::SC_Static;
+        record.specifiers.is_constexpr = declaration->isConstexpr();
+        record.specifiers.is_inline =
+            declaration->isInlineSpecified();
+        record.specifiers.is_extern =
+            declaration->getStorageClass() == clang::SC_Extern
+            || declaration->getStorageClass() == clang::SC_PrivateExtern;
+        record.specifiers.is_thread_local =
+            declaration->getTSCSpec() != clang::TSCS_unspecified;
+        record.specifiers.has_deduced_type =
+            declaration->getType()->getContainedAutoType() != nullptr;
+        record.specifiers.has_explicit_type =
+            !record.specifiers.has_deduced_type;
         if (const clang::Expr* initializer = declaration->getInit()) {
+            record.body_or_initializer_range = source_range_of(
+                initializer->getSourceRange(), sources_, language_);
+            record.declaration_head_range.end =
+                record.body_or_initializer_range.begin;
+            record.payload_kind =
+                declaration_payload_kind::variable_initializer;
             record.initializer_text = source_text(
                 initializer->getSourceRange(), sources_, language_);
         }
@@ -3220,8 +5204,20 @@ class structural_visitor final
         declaration_record& record = output_.declarations[index];
         record.return_type =
             declaration->getType().getAsString(policy_);
+        record.explicit_declared_type = record.return_type;
+        record.specifiers.is_definition = true;
+        record.specifiers.has_deduced_type =
+            declaration->getType()->getContainedAutoType() != nullptr;
+        record.specifiers.has_explicit_type =
+            !record.specifiers.has_deduced_type;
         if (const clang::Expr* initializer =
                 declaration->getInClassInitializer()) {
+            record.body_or_initializer_range = source_range_of(
+                initializer->getSourceRange(), sources_, language_);
+            record.declaration_head_range.end =
+                record.body_or_initializer_range.begin;
+            record.payload_kind =
+                declaration_payload_kind::variable_initializer;
             record.initializer_text = source_text(
                 initializer->getSourceRange(), sources_, language_);
         }
@@ -3341,6 +5337,46 @@ class structural_visitor final
     }
 
   private:
+    void bind_namespace_semantics(
+        const clang::NamespaceDecl* declaration) {
+        if (!is_main_file_declaration(declaration, sources_)) return;
+        const std::string qualified =
+            namespace_qualified_name(declaration);
+        const source_position begin = source_position_of(
+            declaration->getBeginLoc(), sources_);
+        const source_position name = source_position_of(
+            declaration->getLocation(), sources_);
+        namespace_record* match = nullptr;
+        for (namespace_record& candidate : output_.namespaces) {
+            if (candidate.qualified_name != qualified) continue;
+            const bool exact_begin =
+                candidate.keyword_range.begin.byte_offset
+                == begin.byte_offset;
+            const bool contains_name =
+                !candidate.is_anonymous
+                && name.byte_offset
+                    >= candidate.name_range.begin.byte_offset
+                && name.byte_offset
+                    < candidate.name_range.end.byte_offset;
+            if (exact_begin || contains_name) {
+                match = &candidate;
+                if (exact_begin) break;
+            }
+        }
+        if (match == nullptr) return;
+        match->stable_usr = raw_stable_usr(declaration);
+        match->is_inline = declaration->isInline();
+        match->is_anonymous = declaration->isAnonymousNamespace();
+        match->is_reopened = match->is_reopened
+            || declaration->getCanonicalDecl() != declaration;
+        match->is_nested_namespace_definition =
+            match->is_nested_namespace_definition
+            || declaration->isNested();
+        match->is_in_export_context =
+            match->is_in_export_context
+            || declaration->isInExportDeclContext();
+    }
+
     void populate_callable_insertions(
         marked_namespace_record& marked) const {
         const std::size_t namespace_begin =
@@ -3404,6 +5440,14 @@ class structural_visitor final
     }
 
     void record_callable(const clang::FunctionDecl* function) {
+        if (const auto* method =
+                llvm::dyn_cast<clang::CXXMethodDecl>(function);
+            method != nullptr && method->getParent()->isLambda()) {
+            // Lambda bodies need HWY_ATTR immediately before the body. The
+            // LambdaExpr visitor owns that insertion; treating the synthetic
+            // call operator as a normal member would record the body twice.
+            return;
+        }
         if (!function->doesThisDeclarationHaveABody()) {
             return;
         }
@@ -3519,6 +5563,60 @@ class structural_visitor final
                 declaration->getLocation(), sources_, language_),
             .exported = declaration->isInExportDeclContext(),
         };
+        record.provenance_id = detail::source_provenance_id(
+            output_.source_path,
+            "declaration",
+            record.range.begin.byte_offset);
+        record.declaration_range = record.range;
+        record.declaration_head_range = record.range;
+        record.linkage = entity_linkage_of(declaration);
+        record.attachment = declaration->isInNamedModule()
+            ? module_attachment::named_module
+            : module_attachment::global_module;
+        record.specifiers.direct_namespace_member =
+            direct_namespace_member(declaration);
+        record.specifiers.range_contains_macro_expansion =
+            declaration_range_contains_macro(declaration);
+        record.specifiers.is_using_alias =
+            kind == declaration_kind::alias
+            && llvm::isa<clang::TypeAliasDecl>(declaration);
+        record.specifiers.is_variable =
+            kind == declaration_kind::variable;
+        record.specifiers.is_function =
+            kind == declaration_kind::function;
+        if (kind == declaration_kind::namespace_
+            || kind == declaration_kind::alias
+            || kind == declaration_kind::concept_) {
+            record.specifiers.is_definition = true;
+        } else if (const auto* tag =
+                       llvm::dyn_cast<clang::TagDecl>(declaration)) {
+            record.specifiers.is_definition =
+                tag->isThisDeclarationADefinition();
+        }
+        if (const clang::NamespaceDecl* immediate_namespace =
+                immediate_namespace_of(declaration)) {
+            const std::string immediate_qualified =
+                namespace_qualified_name(immediate_namespace);
+            const auto namespace_fact = std::ranges::find_if(
+                output_.namespaces,
+                [&](const namespace_record& candidate) {
+                    return candidate.qualified_name
+                            == immediate_qualified
+                        && record.range.begin.byte_offset
+                            >= candidate.body_range.begin.byte_offset
+                        && record.range.begin.byte_offset
+                            < candidate.body_range.end.byte_offset;
+                });
+            if (namespace_fact != output_.namespaces.end()) {
+                record.immediate_namespace_provenance_id =
+                    namespace_fact->provenance_id;
+                record.immediate_namespace_stable_usr =
+                    namespace_fact->stable_usr;
+            } else {
+                record.immediate_namespace_stable_usr =
+                    raw_stable_usr(immediate_namespace);
+            }
+        }
         const std::size_t index = output_.declarations.size();
         output_.declarations.push_back(std::move(record));
         declaration_by_name_offset_.emplace(
@@ -3714,10 +5812,46 @@ class structural_consumer final : public clang::ASTConsumer {
             .clang_version = CLANG_VERSION_STRING,
             .tokens = clang_tokens(
                 sources, context.getLangOpts()),
+            .mode = collection_mode::full_translation_unit,
         };
+        const std::string_view source_view{
+            source.data(), source.size()};
+        const detail::source_positions source_positions{source_view};
+        const std::vector<lexical_token> raw_tokens =
+            detail::clang_raw_tokens(source_path_, source_view);
+        unit.preprocessor_directives =
+            detail::collect_preprocessor_directives(
+                source_view, raw_tokens, source_positions);
+        for (preprocessor_directive_record& directive :
+             unit.preprocessor_directives) {
+            directive.active = !skipped_at(
+                *conditions_,
+                directive.complete_range.begin.byte_offset);
+        }
+        std::vector<lexical_token> structural_tokens;
+        structural_tokens.reserve(raw_tokens.size());
+        std::ranges::copy_if(
+            raw_tokens,
+            std::back_inserter(structural_tokens),
+            [&](const lexical_token& token) {
+                return !detail::offset_in_directive(
+                    token.range.begin.byte_offset,
+                    unit.preprocessor_directives);
+            });
+        const std::vector<detail::attribute_block> raw_blocks =
+            detail::collect_attribute_blocks(
+                source_view, structural_tokens);
+        unit.source_module = detail::collect_module_record(
+            source_path_,
+            structural_tokens,
+            unit.preprocessor_directives);
+        unit.namespaces = detail::collect_namespace_records(
+            source_path_, structural_tokens, raw_blocks);
         if (const clang::Module* module =
                 context.getCurrentNamedModule()) {
             unit.module_name = module->getFullModuleName();
+        } else {
+            unit.module_name = unit.source_module.provided_module;
         }
         const std::vector<detail::attribute_block> blocks =
             detail::collect_attribute_blocks(
@@ -3726,12 +5860,11 @@ class structural_consumer final : public clang::ASTConsumer {
         structural_visitor visitor{
             context, unit, *conditions_};
         visitor.TraverseDecl(context.getTranslationUnitDecl());
+        visitor.finalize_semantic_facts();
         visitor.bind_attributes(
             std::string_view{source.data(), source.size()},
             blocks,
             unit.tokens);
-        const std::string_view source_view{
-            source.data(), source.size()};
         const auto lexical = detail::lex_source(source_view);
         const std::vector<detail::comment_record>& comments =
             lexical.second;
@@ -6084,6 +8217,250 @@ load_compile_database(const std::filesystem::path& path) {
     return std::move(units.front());
 }
 
+[[nodiscard]] translation_unit merge_declaration_probe(
+    translation_unit syntax,
+    translation_unit semantics) {
+    for (const declaration_record& declaration :
+         semantics.declarations) {
+        if (declaration.payload_kind
+            == declaration_payload_kind::function_body) {
+            throw std::runtime_error(
+                semantics.source_path.string()
+                + ": declaration probe contains a function body");
+        }
+        if (declaration.kind == declaration_kind::field
+            && declaration.payload_kind
+                == declaration_payload_kind::variable_initializer) {
+            throw std::runtime_error(
+                semantics.source_path.string()
+                + ": declaration probe contains a default member initializer");
+        }
+    }
+
+    std::vector<declaration_record> associated;
+    std::set<std::pair<std::string, std::string>> associations;
+    for (const declaration_record& source_declaration :
+         syntax.declarations) {
+        if (source_declaration.provenance_coordinate.empty()) continue;
+        const auto association = std::pair{
+            source_declaration.provenance_id,
+            source_declaration.provenance_coordinate};
+        if (!associations.insert(association).second) {
+            throw std::runtime_error(
+                syntax.source_path.string()
+                + ": declaration probe duplicates provenance/coordinate association");
+        }
+        std::vector<declaration_record*> matches;
+        for (declaration_record& semantic : semantics.declarations) {
+            if (semantic.kind == source_declaration.kind
+                && semantic.name_range.begin.byte_offset
+                    == source_declaration.name_range.begin.byte_offset) {
+                matches.push_back(&semantic);
+            }
+        }
+        if (matches.size() != 1
+            || matches.front()->qualified_name
+                != source_declaration.qualified_name
+            || matches.front()->name != source_declaration.name) {
+            throw std::runtime_error(
+                syntax.source_path.string()
+                + ": declaration probe provenance cannot be associated by declaration identity");
+        }
+        declaration_record merged = *matches.front();
+        if (merged.stable_usr.empty()) {
+            throw std::runtime_error(
+                syntax.source_path.string()
+                + ": declaration probe declaration has no stable Clang USR");
+        }
+        merged.provenance_id = source_declaration.provenance_id;
+        merged.provenance_coordinate =
+            source_declaration.provenance_coordinate;
+        merged.immediate_namespace_provenance_id =
+            source_declaration.immediate_namespace_provenance_id;
+        merged.explicit_declared_type =
+            source_declaration.explicit_declared_type.empty()
+            ? merged.explicit_declared_type
+            : source_declaration.explicit_declared_type;
+        merged.referenced_declaration_provenance_ids =
+            source_declaration
+                .referenced_declaration_provenance_ids;
+        merged.declaration_range =
+            source_declaration.declaration_range;
+        merged.declaration_head_range =
+            source_declaration.declaration_head_range;
+        merged.body_or_initializer_range =
+            source_declaration.body_or_initializer_range;
+        merged.range = source_declaration.range;
+        merged.name_range = source_declaration.name_range;
+        merged.attributes = source_declaration.attributes;
+        merged.payload_kind = source_declaration.payload_kind;
+        merged.specifiers.multiple_declarators =
+            source_declaration.specifiers.multiple_declarators;
+        associated.push_back(std::move(merged));
+    }
+    if (associated.empty()) {
+        throw std::runtime_error(
+            syntax.source_path.string()
+            + ": declaration probe contains no provenance-labelled declarations");
+    }
+    std::ranges::sort(
+        associated,
+        {},
+        [](const declaration_record& declaration) {
+            return declaration.declaration_range.begin.byte_offset;
+        });
+    semantics.declarations = std::move(associated);
+    semantics.mode = collection_mode::declaration_probe;
+    semantics.module_name = syntax.module_name;
+    semantics.source_module = std::move(syntax.source_module);
+    semantics.tokens = std::move(syntax.tokens);
+    semantics.preprocessor_directives =
+        std::move(syntax.preprocessor_directives);
+    return semantics;
+}
+
+[[nodiscard]] translation_unit scan_declaration_probe_from_code(
+    const std::filesystem::path& source_path,
+    std::string_view body_free_source,
+    const std::vector<std::string>& compiler_arguments,
+    std::string_view compiler_profile) {
+    translation_unit syntax = detail::scan_token_slice_impl(
+        source_path, body_free_source, true);
+    detail::validate_body_free_probe_syntax(syntax);
+    translation_unit semantics = scan_translation_unit_from_code(
+        source_path,
+        body_free_source,
+        compiler_arguments,
+        compiler_profile);
+    return merge_declaration_probe(
+        std::move(syntax), std::move(semantics));
+}
+
+[[nodiscard]] translation_unit scan_declaration_probe_from_database(
+    const std::filesystem::path& probe_source_path,
+    const std::filesystem::path& signature_source_path,
+    const std::filesystem::path& compile_database,
+    std::string_view compiler_profile,
+    const std::filesystem::path& pcm_root) {
+    return scan_declaration_probe_from_database(
+        probe_source_path,
+        read_file(probe_source_path),
+        signature_source_path,
+        compile_database,
+        compiler_profile,
+        pcm_root);
+}
+
+[[nodiscard]] translation_unit scan_declaration_probe_from_database(
+    const std::filesystem::path& probe_source_path,
+    std::string_view body_free_source,
+    const std::filesystem::path& signature_source_path,
+    const std::filesystem::path& compile_database,
+    std::string_view compiler_profile,
+    const std::filesystem::path& pcm_root) {
+    const std::filesystem::path probe_identity =
+        clang_backend::weakly_canonical_path(probe_source_path);
+    const std::filesystem::path signature_identity =
+        clang_backend::weakly_canonical_path(signature_source_path);
+    if (probe_identity == signature_identity) {
+        throw std::runtime_error(
+            "declaration probe and signature donor must be distinct");
+    }
+    if (!std::filesystem::is_regular_file(signature_identity)) {
+        throw std::runtime_error(
+            "declaration-probe signature donor source does not exist");
+    }
+    const translation_unit signature =
+        scan_token_slice(signature_identity);
+    if (!signature.source_module.is_interface
+        || signature.source_module.is_partition
+        || signature.source_module.provided_module.empty()) {
+        throw std::runtime_error(
+            signature_identity.string()
+            + ": declaration-probe signature donor must be an exported primary interface");
+    }
+    translation_unit syntax = detail::scan_token_slice_impl(
+        probe_identity, body_free_source, true);
+    detail::validate_body_free_probe_syntax(syntax);
+    if (!std::ranges::contains(
+            syntax.source_module.imported_modules,
+            signature.source_module.provided_module)) {
+        throw std::runtime_error(
+            probe_identity.string()
+            + ": declaration probe must import its signature-donor module");
+    }
+
+    std::unique_ptr<clang::tooling::CompilationDatabase> database =
+        clang_backend::load_compile_database(compile_database);
+    const std::string effective_profile = compiler_profile.empty()
+        ? std::string{"production"}
+        : std::string{compiler_profile};
+    clang_backend::validate_owned_compile_database(
+        *database,
+        {signature_identity},
+        effective_profile,
+        pcm_root);
+    const std::vector<clang::tooling::CompileCommand> donor_commands =
+        database->getCompileCommands(signature_identity.string());
+    const auto donor = std::ranges::find_if(
+        donor_commands,
+        clang_backend::command_is_satisfiable);
+    if (donor == donor_commands.end()) {
+        throw std::runtime_error(
+            signature_identity.string()
+            + ": owned compile database has no satisfiable signature-donor command");
+    }
+    std::optional<std::filesystem::path> donor_pcm;
+    for (const std::string& argument : donor->CommandLine) {
+        if (argument.starts_with("-fmodule-output=")) {
+            if (donor_pcm) {
+                throw std::runtime_error(
+                    "signature-donor command has multiple PCM outputs");
+            }
+            donor_pcm = argument.substr(
+                std::string_view{"-fmodule-output="}.size());
+        }
+    }
+    if (!donor_pcm) {
+        throw std::runtime_error(
+            "signature-donor command has no prepared PCM output");
+    }
+    clang::tooling::CompileCommand probe_command =
+        clang_backend::retarget_compile_command(
+            *donor, signature_identity, probe_identity);
+    probe_command.CommandLine.push_back(
+        "-fmodule-file=" + signature.source_module.provided_module
+        + "=" + donor_pcm->string());
+    const clang_backend::scoped_compile_database_cwd cwd{
+        compile_database};
+    const clang::tooling::CommandLineArguments adjusted =
+        clang_backend::structural_arguments_adjuster()(
+            probe_command.CommandLine,
+            probe_identity.string());
+    const std::size_t compiler_index =
+        clang_backend::compiler_argument_index(adjusted);
+    std::vector<std::string> probe_arguments;
+    for (std::size_t index = compiler_index + 1;
+         index < adjusted.size();
+         ++index) {
+        const std::string& argument = adjusted[index];
+        if (!argument.empty() && argument.front() != '-'
+            && clang_backend::absolute_command_path(
+                   probe_command.Directory, argument)
+                == probe_identity) {
+            continue;
+        }
+        probe_arguments.push_back(argument);
+    }
+    translation_unit semantics = scan_translation_unit_from_code(
+        probe_identity,
+        body_free_source,
+        probe_arguments,
+        effective_profile);
+    return merge_declaration_probe(
+        std::move(syntax), std::move(semantics));
+}
+
 [[nodiscard]] structural_index scan_translation_units_from_database(
     const std::vector<std::filesystem::path>& source_paths,
     const std::filesystem::path& compile_database,
@@ -7310,6 +9687,764 @@ prepare_compilation_environment(
                 + relocatable_owned_compile_database_sha256 + "\n"),
         .dependencies = std::move(dependencies),
     };
+}
+
+[[nodiscard]] prepared_compilation_environment
+prepare_compilation_environment(
+    const std::vector<std::filesystem::path>& source_paths,
+    const std::filesystem::path& signature_source_path,
+    const std::filesystem::path& raw_compile_database,
+    const std::filesystem::path& clang_binary,
+    const std::filesystem::path& clang_scan_deps,
+    const std::filesystem::path& llvm_config,
+    const std::filesystem::path& compiler_module_inventory,
+    std::string_view expected_clang_sha256,
+    std::string_view expected_clang_scan_deps_sha256,
+    std::string_view expected_llvm_config_sha256,
+    std::string_view expected_compiler_module_inventory_sha256,
+    const std::filesystem::path& configured_pcm_root,
+    std::string_view compiler_profile,
+    std::string_view authority) {
+    if (source_paths.empty()) {
+        throw std::runtime_error(
+            "Clang donor-retarget preparation requires at least one source");
+    }
+
+    const std::filesystem::path signature_source =
+        clang_backend::absolute_normalized_path(signature_source_path);
+    if (!std::filesystem::is_regular_file(signature_source)) {
+        throw std::runtime_error(
+            "Clang donor-retarget signature source does not exist: "
+            + signature_source.string());
+    }
+    const translation_unit signature = scan_token_slice(signature_source);
+    if (!signature.source_module.is_interface
+        || signature.source_module.is_partition
+        || signature.source_module.provided_module.empty()) {
+        throw std::runtime_error(
+            "Clang donor-retarget signature source must be an attached "
+            "primary interface: " + signature_source.string());
+    }
+
+    std::vector<std::filesystem::path> normalized_sources;
+    normalized_sources.reserve(source_paths.size());
+    for (const std::filesystem::path& requested : source_paths) {
+        const std::filesystem::path source =
+            clang_backend::absolute_normalized_path(requested);
+        if (source == signature_source) {
+            throw std::runtime_error(
+                "Clang donor-retarget signature source must be distinct "
+                "from every prepared source");
+        }
+        if (!std::filesystem::is_regular_file(source)) {
+            throw std::runtime_error(
+                "Clang donor-retarget source does not exist: "
+                + source.string());
+        }
+        normalized_sources.push_back(source);
+    }
+    std::ranges::sort(normalized_sources);
+    if (std::ranges::adjacent_find(normalized_sources)
+        != normalized_sources.end()) {
+        throw std::runtime_error(
+            "Clang donor-retarget source list contains duplicate identities");
+    }
+    const std::set<std::filesystem::path> source_identities{
+        normalized_sources.begin(), normalized_sources.end()};
+
+    std::unique_ptr<clang::tooling::CompilationDatabase> raw_database =
+        clang_backend::load_compile_database(raw_compile_database);
+    const std::vector<clang::tooling::CompileCommand> raw_commands =
+        raw_database->getAllCompileCommands();
+    std::vector<clang::tooling::CompileCommand> donor_commands;
+    std::vector<clang::tooling::CompileCommand> synthetic_commands;
+    synthetic_commands.reserve(
+        raw_commands.size() + normalized_sources.size());
+    for (const clang::tooling::CompileCommand& command : raw_commands) {
+        const std::filesystem::path command_source =
+            clang_backend::absolute_normalized_path(
+                clang_backend::absolute_command_path(
+                    command.Directory, command.Filename));
+        if (command_source == signature_source) {
+            donor_commands.push_back(command);
+        }
+        if (!source_identities.contains(command_source)) {
+            synthetic_commands.push_back(command);
+        }
+    }
+    if (donor_commands.empty()) {
+        throw std::runtime_error(
+            "raw compile database has no command for donor-retarget "
+            "signature source: " + signature_source.string());
+    }
+
+    std::vector<std::filesystem::path> donor_command_inputs;
+    for (const clang::tooling::CompileCommand& donor_command :
+         donor_commands) {
+        const std::filesystem::path donor_command_source =
+            clang_backend::absolute_command_path(
+                donor_command.Directory, donor_command.Filename);
+        clang::tooling::CompileCommand expanded = donor_command;
+        expanded.CommandLine = clang_backend::expanded_command_line(
+            donor_command, donor_command_inputs);
+        expanded.Output.clear();
+        for (const std::filesystem::path& source :
+             normalized_sources) {
+            clang::tooling::CompileCommand retargeted =
+                clang_backend::retarget_compile_command(
+                    expanded, donor_command_source, source);
+            retargeted.Filename = source.string();
+            const bool has_retargeted_source = std::ranges::any_of(
+                retargeted.CommandLine,
+                [&](const std::string& argument) {
+                    return !argument.empty()
+                        && argument.front() != '-'
+                        && clang_backend::absolute_normalized_path(
+                               clang_backend::absolute_command_path(
+                                   retargeted.Directory, argument))
+                            == source;
+                });
+            if (!has_retargeted_source) {
+                throw std::runtime_error(
+                    "donor compile command has no retargetable source "
+                    "argument: " + signature_source.string());
+            }
+            synthetic_commands.push_back(std::move(retargeted));
+        }
+    }
+
+    const auto command_less =
+        [](const clang::tooling::CompileCommand& left,
+           const clang::tooling::CompileCommand& right) {
+            const auto left_key = std::tie(
+                left.Directory,
+                left.Filename,
+                left.CommandLine);
+            const auto right_key = std::tie(
+                right.Directory,
+                right.Filename,
+                right.CommandLine);
+            return left_key < right_key;
+        };
+    std::ranges::sort(synthetic_commands, command_less);
+    synthetic_commands.erase(
+        std::ranges::unique(
+            synthetic_commands,
+            [](const clang::tooling::CompileCommand& left,
+               const clang::tooling::CompileCommand& right) {
+                return left.Directory == right.Directory
+                    && left.Filename == right.Filename
+                    && left.CommandLine == right.CommandLine;
+            }).begin(),
+        synthetic_commands.end());
+
+    std::ostringstream synthetic_database_document;
+    synthetic_database_document << "[\n";
+    for (std::size_t command_index = 0;
+         command_index < synthetic_commands.size();
+         ++command_index) {
+        const clang::tooling::CompileCommand& command =
+            synthetic_commands[command_index];
+        if (command_index != 0) {
+            synthetic_database_document << ",\n";
+        }
+        synthetic_database_document
+            << "  {\n    \"directory\": \""
+            << clang_backend::json_escape(command.Directory)
+            << "\",\n    \"file\": \""
+            << clang_backend::json_escape(command.Filename)
+            << "\",\n    \"arguments\": [";
+        for (std::size_t argument_index = 0;
+             argument_index < command.CommandLine.size();
+             ++argument_index) {
+            if (argument_index != 0) {
+                synthetic_database_document << ", ";
+            }
+            synthetic_database_document
+                << "\""
+                << clang_backend::json_escape(
+                       command.CommandLine[argument_index])
+                << "\"";
+        }
+        synthetic_database_document << "]\n  }";
+    }
+    synthetic_database_document << "\n]\n";
+
+    const std::filesystem::path synthetic_database_root =
+        configured_pcm_root / ".donor-retarget";
+    std::filesystem::create_directories(synthetic_database_root);
+    const std::filesystem::path synthetic_database =
+        synthetic_database_root / "compile_commands.json";
+    write_if_different(
+        synthetic_database, synthetic_database_document.str());
+
+    prepared_compilation_environment prepared =
+        prepare_compilation_environment(
+            normalized_sources,
+            synthetic_database,
+            clang_binary,
+            clang_scan_deps,
+            llvm_config,
+            compiler_module_inventory,
+            expected_clang_sha256,
+            expected_clang_scan_deps_sha256,
+            expected_llvm_config_sha256,
+            expected_compiler_module_inventory_sha256,
+            configured_pcm_root,
+            compiler_profile,
+            authority);
+    prepared.dependencies.push_back(
+        clang_backend::absolute_normalized_path(
+            raw_compile_database));
+    prepared.dependencies.push_back(signature_source);
+    prepared.dependencies.insert(
+        prepared.dependencies.end(),
+        donor_command_inputs.begin(),
+        donor_command_inputs.end());
+    std::ranges::sort(prepared.dependencies);
+    prepared.dependencies.erase(
+        std::ranges::unique(prepared.dependencies).begin(),
+        prepared.dependencies.end());
+    return prepared;
+}
+
+namespace {
+
+inline constexpr std::string_view
+    dependency_authority_definition_prefix{
+        "-DBIOSEQ_CODEGEN_DEPENDENCY_AUTHORITY_SHA256="};
+
+// The reserved definition is intentionally part of every prepared provider's
+// normalized base arguments. Existing v1 manifest argument hashes, PCM
+// content keys, owned-database hashes, and physical/relocatable compilation
+// signatures therefore seal canonical raw-token/import evidence without
+// weakening or adding an alternate manifest-validation mode.
+
+[[nodiscard]] std::string normalized_dependency_import(
+    std::string_view imported,
+    std::string_view provided_module,
+    const std::filesystem::path& source) {
+    std::string result{imported};
+    if (result.starts_with(':')) {
+        const std::size_t partition = provided_module.find(':');
+        result = std::string{provided_module.substr(0, partition)}
+            + result;
+    }
+    if (result.empty()
+        || !detail::identifier_begin(result.front())
+        || !std::ranges::all_of(
+            result,
+            [](const char value) {
+                return detail::identifier_continue(value)
+                    || value == '.' || value == ':';
+            })) {
+        throw std::runtime_error(
+            source.string()
+            + ": dependency-only preparation supports named-module "
+              "imports only; got '" + result + "'");
+    }
+    return result;
+}
+
+}  // namespace
+
+[[nodiscard]] dependency_compilation_authority
+derive_dependency_compilation_authority(
+    const std::vector<std::filesystem::path>& canonical_source_paths,
+    const std::filesystem::path& signature_source_path,
+    const std::filesystem::path& compile_database,
+    std::string_view compiler_profile) {
+    if (canonical_source_paths.empty()) {
+        throw std::runtime_error(
+            "dependency-only preparation requires at least one canonical source");
+    }
+    if (compiler_profile != "production"
+        && compiler_profile != "test_indexes"
+        && compiler_profile != "test_support") {
+        throw std::runtime_error(
+            "dependency-only root derivation received an unknown profile");
+    }
+
+    struct canonical_input final {
+        std::filesystem::path source;
+        std::string source_sha256;
+        std::string provided_module;
+        std::vector<std::string> imports;
+    };
+
+    const std::filesystem::path signature_source =
+        clang_backend::absolute_normalized_path(signature_source_path);
+    if (!std::filesystem::is_regular_file(signature_source)) {
+        throw std::runtime_error(
+            "dependency-only signature donor does not exist: "
+            + signature_source.string());
+    }
+    const translation_unit signature = scan_token_slice(signature_source);
+    if (!signature.source_module.is_interface
+        || signature.source_module.is_partition
+        || signature.source_module.provided_module.empty()) {
+        throw std::runtime_error(
+            "dependency-only signature donor must be an attached primary interface: "
+            + signature_source.string());
+    }
+
+    std::vector<canonical_input> canonical_inputs;
+    canonical_inputs.reserve(canonical_source_paths.size());
+    std::map<std::string, std::size_t, std::less<>> canonical_by_module;
+    std::set<std::filesystem::path> canonical_identities;
+    for (const std::filesystem::path& requested :
+         canonical_source_paths) {
+        const std::filesystem::path source =
+            clang_backend::absolute_normalized_path(requested);
+        if (source == signature_source) {
+            throw std::runtime_error(
+                "canonical source and signature donor must be distinct");
+        }
+        if (!canonical_identities.insert(source).second) {
+            throw std::runtime_error(
+                "dependency-only canonical source list contains duplicate identities");
+        }
+        if (!std::filesystem::is_regular_file(source)) {
+            throw std::runtime_error(
+                "dependency-only canonical source does not exist: "
+                + source.string());
+        }
+        const translation_unit unit = scan_token_slice(source);
+        if (!unit.source_module.is_interface
+            || unit.source_module.is_partition
+            || unit.source_module.provided_module.empty()) {
+            throw std::runtime_error(
+                "dependency-only canonical source must be an attached primary interface: "
+                + source.string());
+        }
+        if (unit.source_module.provided_module
+            == signature.source_module.provided_module) {
+            throw std::runtime_error(
+                "dependency-only canonical source and signature donor "
+                "provide the same module '"
+                + unit.source_module.provided_module + "'");
+        }
+        canonical_input input{
+            .source = source,
+            .source_sha256 = unit.source_sha256,
+            .provided_module = unit.source_module.provided_module,
+        };
+        input.imports.reserve(
+            unit.source_module.imported_modules.size());
+        for (const std::string& imported :
+             unit.source_module.imported_modules) {
+            input.imports.push_back(normalized_dependency_import(
+                imported, input.provided_module, source));
+        }
+        std::ranges::sort(input.imports);
+        input.imports.erase(
+            std::ranges::unique(input.imports).begin(),
+            input.imports.end());
+        const std::size_t index = canonical_inputs.size();
+        if (!canonical_by_module.emplace(
+                input.provided_module, index).second) {
+            throw std::runtime_error(
+                "dependency-only canonical sources provide duplicate module '"
+                + input.provided_module + "'");
+        }
+        canonical_inputs.push_back(std::move(input));
+    }
+
+    std::unique_ptr<clang::tooling::CompilationDatabase> database =
+        clang_backend::load_compile_database(compile_database);
+    const std::vector<clang::tooling::CompileCommand> commands =
+        database->getAllCompileCommands();
+    std::set<std::filesystem::path> raw_source_paths;
+    for (const clang::tooling::CompileCommand& command : commands) {
+        const std::filesystem::path source =
+            clang_backend::absolute_normalized_path(
+                clang_backend::absolute_command_path(
+                    command.Directory, command.Filename));
+        if (source.extension() == ".cppm") {
+            raw_source_paths.insert(source);
+        }
+    }
+
+    std::set<std::filesystem::path> selected_source_paths;
+    for (const std::filesystem::path& source : raw_source_paths) {
+        const std::vector<std::filesystem::path> alternates =
+            clang_backend::profile_alternate_paths(source);
+        const bool generated_profile_variant =
+            !alternates.empty()
+            && (std::ranges::any_of(
+                    alternates,
+                    [&](const std::filesystem::path& alternate) {
+                        return raw_source_paths.contains(
+                                   clang_backend::absolute_normalized_path(
+                                       alternate))
+                            || std::filesystem::is_regular_file(alternate);
+                    })
+                || clang_backend::known_generated_sql_profile_path(source));
+        const std::filesystem::path selected = generated_profile_variant
+            ? clang_backend::absolute_normalized_path(
+                  clang_backend::path_for_profile(
+                      source, compiler_profile))
+            : source;
+        if (std::filesystem::is_regular_file(selected)) {
+            selected_source_paths.insert(selected);
+        }
+    }
+
+    std::map<
+        std::string,
+        std::set<std::filesystem::path>,
+        std::less<>> providers_by_module;
+    for (const std::filesystem::path& source : selected_source_paths) {
+        const clang_backend::lexical_module_description provider =
+            clang_backend::describe_module_provider(source);
+        if (!provider.provided_module.empty()) {
+            providers_by_module[provider.provided_module].insert(source);
+        }
+    }
+    const auto donor_provider = providers_by_module.find(
+        signature.source_module.provided_module);
+    if (donor_provider == providers_by_module.end()
+        || donor_provider->second.size() != 1
+        || *donor_provider->second.begin() != signature_source) {
+        throw std::runtime_error(
+            "dependency-only signature donor has no unique raw compile-database provider: "
+            + signature.source_module.provided_module);
+    }
+
+    std::set<std::filesystem::path> roots{signature_source};
+    std::set<std::string, std::less<>> visited_canonical_modules;
+    std::function<void(std::string_view)> visit_canonical =
+        [&](const std::string_view canonical_module) {
+            if (!visited_canonical_modules.emplace(
+                    canonical_module).second) {
+                return;
+            }
+            const auto current = canonical_by_module.find(
+                canonical_module);
+            if (current == canonical_by_module.end()) {
+                throw std::runtime_error(
+                    "dependency-only canonical import graph is corrupt");
+            }
+            const canonical_input& input =
+                canonical_inputs.at(current->second);
+            for (const std::string& imported : input.imports) {
+                if (const auto peer = canonical_by_module.find(imported);
+                    peer != canonical_by_module.end()) {
+                    visit_canonical(peer->first);
+                    continue;
+                }
+                const auto providers = providers_by_module.find(imported);
+                if (providers == providers_by_module.end()) {
+                    throw std::runtime_error(
+                        input.source.string()
+                        + ": dependency-only import has no raw "
+                          "compile-database provider: " + imported);
+                }
+                if (providers->second.size() != 1) {
+                    throw std::runtime_error(
+                        input.source.string()
+                        + ": dependency-only import has ambiguous raw "
+                          "compile-database providers: " + imported);
+                }
+                roots.insert(*providers->second.begin());
+            }
+        };
+    for (const canonical_input& input : canonical_inputs) {
+        visit_canonical(input.provided_module);
+    }
+
+    std::ranges::sort(
+        canonical_inputs,
+        {},
+        &canonical_input::provided_module);
+    std::string canonical_material =
+        "bioseq_dependency_canonical_token_imports/v1\n";
+    for (const canonical_input& input : canonical_inputs) {
+        canonical_material +=
+            "module=" + input.provided_module
+            + "\nsource_sha256=" + input.source_sha256 + "\n";
+        for (const std::string& imported : input.imports) {
+            canonical_material += "import=" + imported + "\n";
+        }
+        canonical_material += "--\n";
+    }
+    return dependency_compilation_authority{
+        .root_source_paths =
+            std::vector<std::filesystem::path>(
+                roots.begin(), roots.end()),
+        .canonical_token_import_sha256 =
+            sha256_hex(canonical_material),
+    };
+}
+
+void validate_dependency_compilation_authority_seal(
+    const dependency_compilation_authority& authority,
+    const std::filesystem::path& compile_database) {
+    if (authority.root_source_paths.empty()
+        || authority.canonical_token_import_sha256.size() != 64) {
+        throw std::runtime_error(
+            "dependency-only compilation authority is incomplete");
+    }
+    const std::string expected_definition =
+        std::string{dependency_authority_definition_prefix}
+        + authority.canonical_token_import_sha256;
+    std::unique_ptr<clang::tooling::CompilationDatabase> database =
+        clang_backend::load_compile_database(compile_database);
+    const std::vector<clang::tooling::CompileCommand> all_commands =
+        database->getAllCompileCommands();
+    if (all_commands.size() != authority.root_source_paths.size()) {
+        throw std::runtime_error(
+            "dependency-only owned compile database root count is stale");
+    }
+    std::set<std::filesystem::path> actual_roots;
+    for (const clang::tooling::CompileCommand& command : all_commands) {
+        const std::filesystem::path source =
+            clang_backend::absolute_normalized_path(
+                clang_backend::absolute_command_path(
+                    command.Directory, command.Filename));
+        if (!actual_roots.insert(source).second) {
+            throw std::runtime_error(
+                "dependency-only owned compile database duplicates a root command");
+        }
+        std::size_t matching_definitions = 0;
+        for (const std::string& argument : command.CommandLine) {
+            if (argument.starts_with(
+                    dependency_authority_definition_prefix)) {
+                if (argument != expected_definition) {
+                    throw std::runtime_error(
+                        "dependency-only canonical token/import authority is stale");
+                }
+                ++matching_definitions;
+            }
+        }
+        if (matching_definitions != 1) {
+            throw std::runtime_error(
+                "dependency-only root command has no unique canonical "
+                "token/import authority seal: " + source.string());
+        }
+    }
+    const std::set<std::filesystem::path> expected_roots{
+        authority.root_source_paths.begin(),
+        authority.root_source_paths.end()};
+    if (actual_roots != expected_roots) {
+        throw std::runtime_error(
+            "dependency-only owned compile database root authority is stale");
+    }
+}
+
+[[nodiscard]] prepared_compilation_environment
+prepare_dependency_compilation_environment(
+    const std::filesystem::path& canonical_source_path,
+    const std::filesystem::path& signature_source_path,
+    const std::filesystem::path& raw_compile_database,
+    const std::filesystem::path& clang_binary,
+    const std::filesystem::path& clang_scan_deps,
+    const std::filesystem::path& llvm_config,
+    const std::filesystem::path& compiler_module_inventory,
+    std::string_view expected_clang_sha256,
+    std::string_view expected_clang_scan_deps_sha256,
+    std::string_view expected_llvm_config_sha256,
+    std::string_view expected_compiler_module_inventory_sha256,
+    const std::filesystem::path& pcm_root,
+    std::string_view compiler_profile,
+    std::string_view authority) {
+    return prepare_dependency_compilation_environment(
+        std::vector<std::filesystem::path>{canonical_source_path},
+        signature_source_path,
+        raw_compile_database,
+        clang_binary,
+        clang_scan_deps,
+        llvm_config,
+        compiler_module_inventory,
+        expected_clang_sha256,
+        expected_clang_scan_deps_sha256,
+        expected_llvm_config_sha256,
+        expected_compiler_module_inventory_sha256,
+        pcm_root,
+        compiler_profile,
+        authority);
+}
+
+[[nodiscard]] prepared_compilation_environment
+prepare_dependency_compilation_environment(
+    const std::vector<std::filesystem::path>& canonical_source_paths,
+    const std::filesystem::path& signature_source_path,
+    const std::filesystem::path& raw_compile_database,
+    const std::filesystem::path& clang_binary,
+    const std::filesystem::path& clang_scan_deps,
+    const std::filesystem::path& llvm_config,
+    const std::filesystem::path& compiler_module_inventory,
+    std::string_view expected_clang_sha256,
+    std::string_view expected_clang_scan_deps_sha256,
+    std::string_view expected_llvm_config_sha256,
+    std::string_view expected_compiler_module_inventory_sha256,
+    const std::filesystem::path& pcm_root,
+    std::string_view compiler_profile,
+    std::string_view authority) {
+    if (canonical_source_paths.empty()) {
+        throw std::runtime_error(
+            "dependency-only preparation requires at least one canonical source");
+    }
+
+    const std::filesystem::path signature_source =
+        clang_backend::absolute_normalized_path(signature_source_path);
+    std::vector<std::filesystem::path> canonical_sources;
+    canonical_sources.reserve(canonical_source_paths.size());
+    for (const std::filesystem::path& requested :
+         canonical_source_paths) {
+        const std::filesystem::path canonical_source =
+            clang_backend::absolute_normalized_path(requested);
+        if (canonical_source == signature_source) {
+            throw std::runtime_error(
+                "canonical source and signature donor must be distinct");
+        }
+        canonical_sources.push_back(canonical_source);
+    }
+    std::ranges::sort(canonical_sources);
+    if (std::ranges::adjacent_find(canonical_sources)
+        != canonical_sources.end()) {
+        throw std::runtime_error(
+            "dependency-only canonical source list contains duplicate identities");
+    }
+
+    const dependency_compilation_authority dependency_authority =
+        derive_dependency_compilation_authority(
+            canonical_sources,
+            signature_source,
+            raw_compile_database,
+            compiler_profile);
+    const std::string authority_definition =
+        std::string{dependency_authority_definition_prefix}
+        + dependency_authority.canonical_token_import_sha256;
+
+    std::unique_ptr<clang::tooling::CompilationDatabase> raw_database =
+        clang_backend::load_compile_database(raw_compile_database);
+    std::vector<clang::tooling::CompileCommand> sealed_commands;
+    for (clang::tooling::CompileCommand command :
+         raw_database->getAllCompileCommands()) {
+        const std::filesystem::path command_source =
+            clang_backend::absolute_normalized_path(
+                clang_backend::absolute_command_path(
+                    command.Directory, command.Filename));
+        if (std::ranges::binary_search(
+                canonical_sources, command_source)) {
+            continue;
+        }
+        for (std::size_t index = 0;
+             index < command.CommandLine.size();
+             ++index) {
+            const std::string_view argument = command.CommandLine[index];
+            if (argument.starts_with(
+                    dependency_authority_definition_prefix)
+                || (argument == "-D"
+                    && index + 1 < command.CommandLine.size()
+                    && std::string_view{command.CommandLine[index + 1]}
+                           .starts_with(
+                               "BIOSEQ_CODEGEN_DEPENDENCY_AUTHORITY_SHA256="))) {
+                throw std::runtime_error(
+                    "raw compile database uses the reserved dependency-only authority definition");
+            }
+        }
+        command.CommandLine.push_back(authority_definition);
+        sealed_commands.push_back(std::move(command));
+    }
+    const auto command_less =
+        [](const clang::tooling::CompileCommand& left,
+           const clang::tooling::CompileCommand& right) {
+            return std::tie(
+                       left.Directory,
+                       left.Filename,
+                       left.CommandLine)
+                < std::tie(
+                       right.Directory,
+                       right.Filename,
+                       right.CommandLine);
+        };
+    std::ranges::sort(sealed_commands, command_less);
+    sealed_commands.erase(
+        std::ranges::unique(
+            sealed_commands,
+            [](const clang::tooling::CompileCommand& left,
+               const clang::tooling::CompileCommand& right) {
+                return left.Directory == right.Directory
+                    && left.Filename == right.Filename
+                    && left.CommandLine == right.CommandLine;
+            }).begin(),
+        sealed_commands.end());
+
+    std::ostringstream sealed_database_document;
+    sealed_database_document << "[\n";
+    for (std::size_t command_index = 0;
+         command_index < sealed_commands.size();
+         ++command_index) {
+        const clang::tooling::CompileCommand& command =
+            sealed_commands[command_index];
+        if (command_index != 0) sealed_database_document << ",\n";
+        sealed_database_document
+            << "  {\n    \"directory\": \""
+            << clang_backend::json_escape(command.Directory)
+            << "\",\n    \"file\": \""
+            << clang_backend::json_escape(command.Filename)
+            << "\",\n    \"arguments\": [";
+        for (std::size_t argument_index = 0;
+             argument_index < command.CommandLine.size();
+             ++argument_index) {
+            if (argument_index != 0) sealed_database_document << ", ";
+            sealed_database_document
+                << "\""
+                << clang_backend::json_escape(
+                       command.CommandLine[argument_index])
+                << "\"";
+        }
+        sealed_database_document << "]\n  }";
+    }
+    sealed_database_document << "\n]\n";
+
+    const std::filesystem::path sealed_database_root =
+        pcm_root / ".dependency-only";
+    std::filesystem::create_directories(sealed_database_root);
+    const std::filesystem::path sealed_database =
+        sealed_database_root / "compile_commands.json";
+    write_if_different(
+        sealed_database, sealed_database_document.str());
+
+    prepared_compilation_environment prepared =
+        prepare_compilation_environment(
+            dependency_authority.root_source_paths,
+            sealed_database,
+            clang_binary,
+            clang_scan_deps,
+            llvm_config,
+            compiler_module_inventory,
+            expected_clang_sha256,
+            expected_clang_scan_deps_sha256,
+            expected_llvm_config_sha256,
+            expected_compiler_module_inventory_sha256,
+            pcm_root,
+            compiler_profile,
+            authority);
+    prepared.dependencies.push_back(
+        clang_backend::absolute_normalized_path(
+            raw_compile_database));
+    prepared.dependencies.insert(
+        prepared.dependencies.end(),
+        canonical_sources.begin(),
+        canonical_sources.end());
+    std::ranges::sort(prepared.dependencies);
+    prepared.dependencies.erase(
+        std::ranges::unique(prepared.dependencies).begin(),
+        prepared.dependencies.end());
+    std::ostringstream dependency_lines;
+    for (const std::filesystem::path& dependency :
+         prepared.dependencies) {
+        dependency_lines << dependency.string() << "\n";
+    }
+    prepared.depfile_text = dependency_lines.str();
+    prepared.dependency_root_sources =
+        dependency_authority.root_source_paths;
+    prepared.canonical_token_import_sha256 =
+        dependency_authority.canonical_token_import_sha256;
+    return prepared;
 }
 
 [[nodiscard]] prepared_compilation_validation
