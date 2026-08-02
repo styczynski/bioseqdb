@@ -22,6 +22,8 @@ export bool bioseq_customscan_has_valid_semantic_payload(
 export const CustomScanMethods* bioseq_batch_join_customscan_methods(void);
 export bool bioseq_batch_join_customscan_has_valid_semantic_payload(
     const CustomScan* scan) noexcept;
+export List* bioseq_batch_join_cache_plan_payload(
+    const CustomScan* scan);
 export List* bioseq_batch_join_cache_semantic_snapshot(
     const CustomScan* scan);
 export bool bioseq_expr_uses_bioseq_projection(Node* node);

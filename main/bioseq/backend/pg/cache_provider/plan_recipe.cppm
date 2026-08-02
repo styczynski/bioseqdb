@@ -42,7 +42,7 @@ inline constexpr std::int32_t kBatchJoinRecipeMagic = 0x42534a31;
 inline constexpr std::int32_t kBatchJoinRecipeFieldCount = 2;
 inline constexpr int kBatchJoinRecipeNodeCount = 6;
 inline constexpr int kBatchJoinRecipePlanNodeId = 3;
-inline constexpr int kBatchJoinRecipeFinalizedScan = 4;
+inline constexpr int kBatchJoinRecipePlanPayload = 4;
 inline constexpr int kBatchJoinRecipeSemanticSnapshot = 5;
 inline constexpr std::size_t kMaximumPlanWalkNodes = 4'096;
 inline constexpr std::uint32_t kMaximumPlanWalkDepth = 256;
@@ -200,12 +200,14 @@ void mix_digest_byte(
         const CustomScan& scan,
         List* semantic_snapshot) {
     if (semantic_snapshot == NIL) return NIL;
+    List* plan_payload = bioseq_batch_join_cache_plan_payload(&scan);
+    if (plan_payload == NIL) return NIL;
     List* recipe = list_make5(
         makeInteger(kBatchJoinRecipeMagic),
         makeInteger(static_cast<int>(kBioseqBatchJoinRecipeVersion)),
         makeInteger(kBatchJoinRecipeFieldCount),
         makeInteger(scan.scan.plan.plan_node_id),
-        copyObject(const_cast<CustomScan*>(&scan)));
+        plan_payload);
     recipe = lappend(recipe, copyObject(semantic_snapshot));
     Assert(list_length(recipe) == kBatchJoinRecipeNodeCount);
     return recipe;
@@ -383,13 +385,13 @@ struct PlanFinder {
 
 [[nodiscard]] bool parse_batch_join_recipe_header(
         const List* recipe,
-        std::int32_t* plan_node_id,
-        const CustomScan** finalized_scan,
-        const List** semantic_snapshot) noexcept {
+        std::int32_t* plan_node_id) noexcept {
     std::int32_t magic = 0;
     std::int32_t version = 0;
     std::int32_t field_count = 0;
     std::int32_t raw_plan_node_id = -1;
+    const List* plan_payload = nullptr;
+    const List* semantic_snapshot = nullptr;
     if (recipe == nullptr
         || list_length(recipe) != kBatchJoinRecipeNodeCount
         || !integer_node_value(recipe, 0, &magic)
@@ -397,32 +399,38 @@ struct PlanFinder {
         || !integer_node_value(recipe, 2, &field_count)
         || !integer_node_value(
             recipe, kBatchJoinRecipePlanNodeId, &raw_plan_node_id)
+        || !list_or_nil_node(
+            recipe, kBatchJoinRecipePlanPayload, &plan_payload)
+        || !list_or_nil_node(
+            recipe, kBatchJoinRecipeSemanticSnapshot, &semantic_snapshot)
         || magic != kBatchJoinRecipeMagic
         || version != static_cast<std::int32_t>(
             kBioseqBatchJoinRecipeVersion)
         || field_count != kBatchJoinRecipeFieldCount
         || raw_plan_node_id < 0
         || plan_node_id == nullptr
-        || finalized_scan == nullptr
+        || plan_payload == nullptr
         || semantic_snapshot == nullptr) {
         return false;
     }
-    const Node* scan_node = reinterpret_cast<const Node*>(list_nth(
-        recipe, kBatchJoinRecipeFinalizedScan));
-    const Node* snapshot_node = reinterpret_cast<const Node*>(list_nth(
-        recipe, kBatchJoinRecipeSemanticSnapshot));
-    if (scan_node == nullptr || !IsA(scan_node, CustomScan)
-        || snapshot_node == nullptr || !IsA(snapshot_node, List)) {
+    std::int32_t flags = 0;
+    const List* custom_private = nullptr;
+    const List* target_list = nullptr;
+    const List* qual = nullptr;
+    const List* custom_scan_tlist = nullptr;
+    if (list_length(plan_payload) != 5
+        || !integer_node_value(plan_payload, 0, &flags)
+        || !list_or_nil_node(plan_payload, 1, &custom_private)
+        || !list_or_nil_node(plan_payload, 2, &target_list)
+        || !list_or_nil_node(plan_payload, 3, &qual)
+        || !list_or_nil_node(plan_payload, 4, &custom_scan_tlist)
+        || custom_private == nullptr || target_list == nullptr
+        || custom_scan_tlist == nullptr) {
         return false;
     }
-    const auto* scan = reinterpret_cast<const CustomScan*>(scan_node);
-    if (scan->scan.plan.plan_node_id != raw_plan_node_id
-        || !bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
-        return false;
-    }
+    static_cast<void>(flags);
+    static_cast<void>(qual);
     *plan_node_id = raw_plan_node_id;
-    *finalized_scan = scan;
-    *semantic_snapshot = reinterpret_cast<const List*>(snapshot_node);
     return true;
 }
 
@@ -566,14 +574,9 @@ bioseq_batch_join_append_runtime_generation_digest(
         EState* estate,
         BioseqCacheDigestSinkV2* sink) {
     std::int32_t plan_node_id = -1;
-    const CustomScan* finalized_scan = nullptr;
-    const List* planned_semantics = nullptr;
     if (!detail::parse_batch_join_recipe_header(
             plan_domain_nodes,
-            &plan_node_id,
-            &finalized_scan,
-            &planned_semantics)
-        || finalized_scan == nullptr || planned_semantics == nullptr
+            &plan_node_id)
         || estate == nullptr || estate->es_plannedstmt == nullptr) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }

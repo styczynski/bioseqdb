@@ -3595,6 +3595,27 @@ bioseq_batch_join_customscan_has_valid_semantic_payload(
 }
 
 export List*
+bioseq_batch_join_cache_plan_payload(const CustomScan* scan)
+{
+	if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
+		return NIL;
+	}
+	/* The token pairs one BatchJoin with its locator child only inside one
+	 * planned statement.  It is deliberately monotonic and therefore cannot
+	 * participate in a cross-planning cache identity.  Child plan semantics
+	 * are covered independently by the exact-plan provider walk. */
+	auto* private_payload = static_cast<List*>(copyObject(
+		scan->custom_private));
+	lfirst(list_nth_cell(private_payload, kBatchJoinToken)) = makeInteger(0);
+	return list_make5(
+		makeInteger(static_cast<int>(scan->flags)),
+		private_payload,
+		copyObject(scan->scan.plan.targetlist),
+		copyObject(scan->scan.plan.qual),
+		copyObject(scan->custom_scan_tlist));
+}
+
+export List*
 bioseq_batch_join_cache_semantic_snapshot(const CustomScan* scan)
 {
 	if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
