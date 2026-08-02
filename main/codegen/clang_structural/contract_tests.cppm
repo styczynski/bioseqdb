@@ -834,8 +834,8 @@ constexpr int indirect = 9;
     constexpr std::string_view probe_source = R"CPP(
 export module fixture.declaration_probe;
 export namespace bioseq::fixture {
-[[bioseq::template_flatten_provenance("canonical.cppm#declaration:101", "0")]]
-struct scalar_type;
+struct [[bioseq::template_flatten_provenance(
+    "canonical.cppm#declaration:101", "0")]] scalar_type;
 [[bioseq::template_flatten_provenance("canonical.cppm#declaration:202", "1")]]
 scalar_type map_value(scalar_type value);
 }
@@ -940,8 +940,10 @@ int invalid_body() { return 3; }
             constexpr std::string_view source = R"CPP(
 export module fixture.invalid_initializer_probe;
 export namespace bioseq::fixture {
-[[bioseq::template_flatten_provenance("canonical.cppm#declaration:404", "0")]]
-struct invalid_record { int initialized_member = 4; };
+struct [[bioseq::template_flatten_provenance(
+    "canonical.cppm#declaration:404", "0")]] invalid_record {
+    int initialized_member = 4;
+};
 }
 )CPP";
             static_cast<void>(scan_declaration_probe_from_code(

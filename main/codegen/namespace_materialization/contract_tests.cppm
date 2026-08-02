@@ -238,6 +238,34 @@ inline void verify_exact_edits() {
         "out-of-bounds exact edits fail closed");
 }
 
+inline void verify_record_probe_provenance_placement() {
+    constexpr std::string_view source =
+        "namespace probe { struct scalar_type; }";
+    const clang_structural::translation_unit sliced =
+        clang_structural::scan_token_slice(
+            "record_probe_contract.cppm", source);
+    require(
+        sliced.declarations.size() == 1u
+            && sliced.declarations.front().kind
+                == clang_structural::declaration_kind::record,
+        "record probe fixture has one structural record declaration");
+    generation_plan plan{.source_text = std::string{source}};
+    owned_declaration entry{
+        .declaration = sliced.declarations.front(),
+    };
+    const materialization_coordinate coordinate{.ordinal = 7u};
+    const std::string rendered = render_entry_head(
+        plan, entry, coordinate, true);
+    const std::string expected =
+        "struct [[bioseq::template_flatten_provenance(\""
+        + entry.declaration.provenance_id
+        + "\", \"7\")]] scalar_type";
+    require(
+        rendered == expected && !rendered.starts_with("[["),
+        "record declaration probes place provenance after the record "
+        "keyword rather than before the declaration");
+}
+
 inline void verify_generated_topology() {
     const generation_result generated = render_generation(fixture_plan(), false);
     require(
@@ -338,6 +366,7 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_zip_product_and_digest();
     detail::verify_scheduler_profile_policy();
     detail::verify_exact_edits();
+    detail::verify_record_probe_provenance_placement();
     detail::verify_generated_topology();
     detail::verify_policy_neutral_publication_envelope();
 }

@@ -170,12 +170,42 @@ inline void render_imports(
     output << '\n';
 }
 
-[[nodiscard]] inline std::string provenance_marker(
+[[nodiscard]] inline std::string provenance_attribute(
     const clang_structural::declaration_record& declaration,
     const materialization_coordinate& coordinate) {
     return "[[bioseq::template_flatten_provenance(\""
         + cpp_escape(declaration.provenance_id) + "\", \""
-        + std::to_string(coordinate.ordinal) + "\")]]\n";
+        + std::to_string(coordinate.ordinal) + "\")]]";
+}
+
+[[nodiscard]] inline std::string provenance_marker(
+    const clang_structural::declaration_record& declaration,
+    const materialization_coordinate& coordinate) {
+    return provenance_attribute(declaration, coordinate) + "\n";
+}
+
+[[nodiscard]] inline bool append_inline_provenance(
+    std::vector<source_edit>& edits,
+    const clang_structural::declaration_record& declaration,
+    const clang_structural::source_range& containing_range,
+    const materialization_coordinate& coordinate) {
+    if (declaration.kind != clang_structural::declaration_kind::record
+        && declaration.kind != clang_structural::declaration_kind::enum_) {
+        return false;
+    }
+    if (!nonempty_range(declaration.name_range)
+        || !contains(containing_range, declaration.name_range)) {
+        throw std::runtime_error(
+            "record/enum probe name range is outside its declaration head");
+    }
+    edits.push_back(source_edit{
+        .begin_byte = declaration.name_range.begin.byte_offset,
+        .end_byte = declaration.name_range.begin.byte_offset,
+        .replacement = provenance_attribute(declaration, coordinate) + " ",
+        .provenance_id = declaration.provenance_id,
+        .purpose = "place record/enum probe provenance",
+    });
+    return true;
 }
 
 [[nodiscard]] inline std::string render_binding_declaration(
@@ -187,6 +217,9 @@ inline void render_imports(
         declaration_range(binding.declaration);
     std::vector<source_edit> edits =
         policy_attribute_edits(binding.declaration, range);
+    const bool inline_provenance = synthetic_provenance
+        && append_inline_provenance(
+            edits, binding.declaration, range, coordinate);
     edits.push_back(source_edit{
         .begin_byte = binding.declaration.body_or_initializer_range.begin.byte_offset,
         .end_byte = binding.declaration.body_or_initializer_range.end.byte_offset,
@@ -198,7 +231,7 @@ inline void render_imports(
         slice(plan.source_text, range, "binding declaration"),
         std::move(edits),
         range.begin.byte_offset);
-    if (synthetic_provenance) {
+    if (synthetic_provenance && !inline_provenance) {
         rendered = provenance_marker(binding.declaration, coordinate) + rendered;
     }
     if (!rendered.empty() && rendered.back() != '\n') rendered.push_back('\n');
@@ -215,6 +248,9 @@ inline void render_imports(
         entry.declaration.declaration_head_range;
     std::vector<source_edit> edits =
         policy_attribute_edits(entry.declaration, range);
+    const bool inline_provenance = synthetic_provenance
+        && append_inline_provenance(
+            edits, entry.declaration, range, coordinate);
     if (!replacement_name.empty()) {
         if (!contains(range, entry.declaration.name_range)) {
             throw std::runtime_error(
@@ -232,7 +268,7 @@ inline void render_imports(
         slice(plan.source_text, range, "entry declaration head"),
         std::move(edits),
         range.begin.byte_offset);
-    if (synthetic_provenance) {
+    if (synthetic_provenance && !inline_provenance) {
         rendered = provenance_marker(entry.declaration, coordinate) + rendered;
     }
     return rendered;
