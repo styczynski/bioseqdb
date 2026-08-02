@@ -517,8 +517,11 @@ inline void verify_generated_closure() {
                             "registered_highway_dispatch_info() noexcept")
                         && artifact.content.contains(
                             "static_cast<std::int64_t>(3ULL)")
-                        && !artifact.content.contains("import ")
+                        && !artifact.content.contains("import")
                         && !artifact.content.contains("BindHighwayTarget")
+                        && !artifact.content.contains(
+                            "registered_highway_target_binding")
+                        && !artifact.content.contains("hwy::")
                         && !artifact.content.contains("HWY_EXPORT(")
                         && !artifact.content.contains(
                             "HWY_DYNAMIC_DISPATCH("),

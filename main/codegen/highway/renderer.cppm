@@ -581,7 +581,9 @@ collect_alignment_families(
     return count;
 }
 
-inline void validate_rendered_artifact(const generated_artifact& artifact) {
+inline void validate_rendered_artifact(
+    const generated_artifact& artifact,
+    const generation_plan& plan) {
     if (artifact.relative_path.extension() != ".cppm") {
         throw std::runtime_error(
             "Highway generator attempted non-.cppm production output: "
@@ -618,16 +620,31 @@ inline void validate_rendered_artifact(const generated_artifact& artifact) {
             + ": dispatch macros escaped the single generated registry");
     }
     if (artifact.kind
-            == artifact_kind::dispatch_inventory_implementation
-        && (!artifact.content.contains(
-                "registered_highway_dispatch_info() noexcept")
-            || artifact.content.contains("import ")
-            || artifact.content.contains("select_highway_target_once")
-            || artifact.content.contains("HWY_EXPORT(")
-            || artifact.content.contains("HWY_DYNAMIC_DISPATCH(")
-            || artifact.content.contains("HWY_STATIC_DISPATCH("))) {
-        throw std::runtime_error(
-            "generated dispatch inventory must contain only cold metadata");
+        == artifact_kind::dispatch_inventory_implementation) {
+        // This intentionally duplicates the renderer's tiny allowed grammar.
+        // A future renderer edit must satisfy this independent fail-closed
+        // contract: one module attachment, one literal-mask metadata call,
+        // and no imports, binders, selectors, or other declarations.
+        std::ostringstream expected;
+        expected << "module;\n\n"
+                 << "#include <cstdint>\n\n"
+                 << "// Generated cold Highway inventory; do not edit.\n"
+                 << "module " << plan.source_inventory.contract_module
+                 << ";\n\n"
+                 << "namespace bioseq::simd_dispatch {\n\n"
+                 << "HighwayDispatchInfo "
+                    "registered_highway_dispatch_info() noexcept {\n"
+                 << "    return highway_dispatch_info("
+                    "static_cast<std::int64_t>("
+                 << compiled_target_mask(plan.target_inventory)
+                 << "ULL));\n"
+                 << "}\n\n"
+                 << "}  // namespace bioseq::simd_dispatch\n";
+        if (artifact.content != expected.str()) {
+            throw std::runtime_error(
+                "generated dispatch inventory must contain exactly one "
+                "literal-mask cold metadata definition");
+        }
     }
     if (artifact.kind == artifact_kind::primary
         && (artifact.content.contains("#include <hwy/")
@@ -723,7 +740,7 @@ inline void validate_rendered_artifact(const generated_artifact& artifact) {
                     + artifact.module_name);
             }
         }
-        detail::validate_rendered_artifact(artifact);
+        detail::validate_rendered_artifact(artifact, plan);
     }
     result.policy_evidence_json =
         render_policy_evidence(plan, result.artifacts);
