@@ -8,9 +8,9 @@
  * forgotten import into a diagnosed error). NO_POSTGRES.
  */
 module;
-#include <hwy/highway.h>  // DOC0345 Patch G — defines the HWY_NAMESPACE macro used to name MinimizerSketchBackend
 #include <array>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -22,7 +22,7 @@ import bioseq.indexing.storage;
 import bioseq.indexing.traits;          // the index_descriptor PRIMARY (declared-undefined)
 import bioseq.sequences;
 import bioseq.storage.lazy;             // canonical basic_lazy_sequence_view
-import bioseq.sequences.kmers;          // DOC0345 Patch G — MinimizerSketchBackend
+import bioseq.sequences.kmers.highway_contract;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
@@ -89,6 +89,22 @@ struct supported_indexes {
     std::array<bool, kIndexCount>              enabled{};
     std::array<IndexUpdatePolicy, kIndexCount> policy{};
 
+    static void require_selected_minimizer_kernel_(
+            bioseq::minimizers::MinimizerSketchBackend backend,
+            const bioseq::minimizers::MinimizerKernels* kernels) {
+        if (backend == bioseq::minimizers::MinimizerSketchBackend::ExactSimd
+            && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
+            throw std::invalid_argument(
+                "ExactSimd index build requires a selected two-stack kernel");
+        }
+        if (backend
+                == bioseq::minimizers::MinimizerSketchBackend::PaperNtHashSimd
+            && (kernels == nullptr || kernels->paper_nthash == nullptr)) {
+            throw std::invalid_argument(
+                "PaperNtHashSimd index build requires a selected paper kernel");
+        }
+    }
+
     /// Default a fresh table.
     [[gnu::always_inline]] constexpr void apply_table_defaults() noexcept {
         for (std::size_t i = 0; i < kIndexCount; ++i) { enabled[i] = true; policy[i] = IndexUpdatePolicy::UPDATE_MANUALLY; }
@@ -131,32 +147,36 @@ struct supported_indexes {
     }
 
     // ---- build / rebuild drivers (fold over the index pack) -------------
-    // DOC0345 Patch G — fragmented build/rebuild driver threads an explicit
-    // MinimizerSketchBackend to B::build / B::rebuild (their 3-arg overloads).
+    // Fragmented build/rebuild receives the one already-selected minimizer
+    // table and forwards it unchanged to every selected index implementation.
     template <bool Rebuild, bool OnlyOnInsert, class OpenFragment,
               sequence_alphabet Alphabet>
     [[gnu::always_inline]] void run_fragmented_(OpenFragment&& open_for,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
-            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+            bioseq::minimizers::MinimizerSketchBackend backend,
+            const bioseq::minimizers::MinimizerKernels* kernels) {
         std::size_t i = 0;
         // DOC0321 — explicit minimal capture (no `[&]` capture-all): `this` for
         // the enabled[]/policy[] members, the fold counter, the open callback,
         // the sequence, and the backend enum (by value).
-        ([this, &i, &open_for, seq, backend]{
+        ([this, &i, &open_for, seq, backend, kernels]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT &&
                           (!OnlyOnInsert || index_descriptor<Indexes>::allows_update_on_insert)) {
                 static_assert(index_provides_build_fragmented<B, Alphabet>);
+                static_assert(index_provides_backend_build_fragmented<
+                    B, Alphabet>);
                 const std::size_t idx = i;
                 const bool want = enabled[idx] &&
                     (!OnlyOnInsert || policy[idx] == IndexUpdatePolicy::UPDATE_ON_INSERT);
                 if (want) {
+                    require_selected_minimizer_kernel_(backend, kernels);
                     StorageFragment& storage =
                         open_for(index_descriptor<Indexes>::index_name);
                     if constexpr (Rebuild) {
-                        B::rebuild(storage, seq, backend);
+                        B::rebuild(storage, seq, backend, kernels);
                     } else {
-                        B::build(storage, seq, backend);
+                        B::build(storage, seq, backend, kernels);
                     }
                 }
             }
@@ -202,8 +222,10 @@ struct supported_indexes {
     void build_fragmented(
         OpenFragment&& open_for,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
-        run_fragmented_<false, OnlyOnInsert>(open_for, seq, backend);
+        bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels) {
+        run_fragmented_<false, OnlyOnInsert>(
+            open_for, seq, backend, kernels);
     }
     template <bool OnlyOnInsert = false, class OpenFragment,
               sequence_alphabet Alphabet>
@@ -213,7 +235,8 @@ struct supported_indexes {
         run_fragmented_<false, OnlyOnInsert>(
             open_for,
             seq,
-            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
+            bioseq::minimizers::MinimizerSketchBackend::Scalar,
+            nullptr);
     }
     template <bool OnlyOnInsert=false, class OpenInline,
               sequence_alphabet Alphabet>
@@ -227,8 +250,9 @@ struct supported_indexes {
     void rebuild_fragmented(
         OpenFragment&& open_for,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
-        run_fragmented_<true, false>(open_for, seq, backend);
+        bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels) {
+        run_fragmented_<true, false>(open_for, seq, backend, kernels);
     }
     template <class OpenFragment, sequence_alphabet Alphabet>
     void rebuild_fragmented(
@@ -237,7 +261,8 @@ struct supported_indexes {
         run_fragmented_<true, false>(
             open_for,
             seq,
-            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
+            bioseq::minimizers::MinimizerSketchBackend::Scalar,
+            nullptr);
     }
     template <class OpenInline, sequence_alphabet Alphabet>
     void rebuild_sequence(
@@ -259,14 +284,16 @@ struct supported_indexes {
     void rebuild_one_fragmented(
         std::string_view name,
         StorageFragment& storage,
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+            bioseq::minimizers::MinimizerSketchBackend backend,
+            const bioseq::minimizers::MinimizerKernels* kernels) {
         // DOC0321 — explicit minimal capture (no `[&]` capture-all).
-        ([&storage, seq, &name, backend]{
+        ([&storage, seq, &name, backend, kernels]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT) {
                 if (index_descriptor<Indexes>::index_name == name) {
-                    B::rebuild(storage, seq, backend);
+                    require_selected_minimizer_kernel_(backend, kernels);
+                    B::rebuild(storage, seq, backend, kernels);
                 }
             }
         }(), ...);
@@ -280,7 +307,8 @@ struct supported_indexes {
             name,
             storage,
             seq,
-            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
+            bioseq::minimizers::MinimizerSketchBackend::Scalar,
+            nullptr);
     }
     template <sequence_alphabet Alphabet>
     void rebuild_one_inline(

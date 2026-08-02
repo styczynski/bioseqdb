@@ -10,7 +10,6 @@
  */
 module;
 #include "common.h"                       // DEBUG_ASSERT, bioseq_log<DBG>*
-#include <hwy/highway.h>                   // ONLY for the HWY_NAMESPACE macro
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -41,6 +40,7 @@ import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_index;
+export import bioseq.indexing.grouped32_contract;
 export import bioseq.indexing.minimizer_direct_inverted_index;
 export import bioseq.indexing.minimizer_hashmap_format6;
 import bioseq.sequences;                             // sequence_custom_alphabet, compact_sequence_range for bounded Paper windows
@@ -65,11 +65,11 @@ struct MinimizerHashmapFragmentIndexTable;
 }
 
 export namespace bioseq::indexing {
-using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
-using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
-using bioseq::simd::HWY_NAMESPACE::collect_minimizers_view;
-using bioseq::simd::HWY_NAMESPACE::sketch_collector;
-using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;   // DOC0345 Patch F
+using bioseq::minimizers::MinimapSketchData;
+using bioseq::simd::minimap_int_hasher;
+using bioseq::simd::collect_minimizers_view;
+using bioseq::minimizers::sketch_collector;
+using bioseq::minimizers::MinimizerSketchBackend;
 using bioseq::storage::sequence_size_t;
 
 // Target-neutral ABI between indexing interfaces and the selected generated
@@ -863,8 +863,6 @@ inline constexpr std::uint16_t kMinimizerShapeV5ExtensionBytes = 32u;
 /// not the alphabet cardinality.
 inline constexpr std::uint16_t kMinimizerPersistedDna4AlphabetCode = 0u;
 inline constexpr std::size_t kMinimizerGrouped32ControlEncodedBytes = 12u;
-inline constexpr std::size_t kMinimizerGrouped32PositionEncodedBytes = 4u;
-inline constexpr std::uint32_t kMinimizerGrouped32MaxLocalBp = 0x7fffffffu;
 inline constexpr std::uint32_t kLegacyMinimapK15MaxHash = 0x3fffffffu;
 
 // Persisted minimizer scheme identities are frozen wire values. The legacy
@@ -1895,14 +1893,6 @@ minimizer_generation_payload_profile(
     }
     return profile;
 }
-
-/// Half-open base-pair core owned by one persisted position-segment ordinal.
-struct MinimizerPositionSegmentCore {
-    std::uint64_t begin_bp = 0;
-    std::uint64_t end_bp = 0;
-
-    [[nodiscard]] bool operator==(const MinimizerPositionSegmentCore&) const = default;
-};
 
 /// Half-open ordinal interval covering a requested base-pair range.
 struct MinimizerPositionSegmentOrdinalRange {
@@ -4004,16 +3994,6 @@ decode_minimizer_serialized_bucket(
             input, 12),
     };
 }
-
-/// Logical representation of one 12-byte grouped-u32 control.
-struct MinimizerGrouped32Control {
-    std::uint32_t hash = 0;
-    std::uint32_t position_offset = 0;
-    std::uint32_t position_count = 0;
-
-    [[nodiscard]] bool operator==(
-        const MinimizerGrouped32Control&) const = default;
-};
 
 /// Reconstructed global position; keeping strand separate avoids overflowing
 /// a `(global_bp << 1) | strand` intermediate for large 64-bit references.
@@ -13887,7 +13867,7 @@ public:
             std::uint64_t total_query_minimizers = 0u;
             std::uint64_t largest_query_minimizer_count = 0u;
             for (const FragmentSeedQuery& query : queries) {
-                if (!bioseq::simd::HWY_NAMESPACE::
+                if (!bioseq::minimizers::
                         minimizer_query_length_is_representable<
                             MinimapSketchData>(
                                 query.query_length)
@@ -16036,50 +16016,6 @@ struct PreparedGrouped32QueryLookup {
     bool positions_complete = true;
     std::span<const std::uint64_t> positions{};
 };
-
-/// Per-reader proof emitted by the production grouped32 validation operation.
-/// Counters are reader-owned, never global, and therefore preserve isolation
-/// between concurrent cold-index loads.
-struct PreparedGrouped32QueryReaderSimdRouteEvidence {
-    std::uint64_t attempted_spans = 0;
-    std::uint64_t accepted_spans = 0;
-    std::uint64_t rejected_spans = 0;
-    std::uint64_t scalar_required_spans = 0;
-    std::uint64_t vectorized_words = 0;
-    std::uint64_t selected_hwy_target = 0;
-    std::uint8_t selected_vector_stream_width = 0;
-    bool saturated = false;
-};
-
-/// Target-neutral outcome of the grouped32 non-scatter validation kernel.
-/// The selected fixed-target implementation may decline short or unsupported
-/// spans; the reader then executes its unchanged scalar validation loop.
-enum class MinimizerGrouped32NonScatterValidation : std::uint8_t {
-    scalar_required,
-    accepted,
-    rejected,
-};
-
-/// Target-neutral evidence returned by one grouped32 validation attempt.
-/// No Highway descriptor, vector, or target-local type crosses this ABI.
-struct MinimizerGrouped32NonScatterValidationResult {
-    MinimizerGrouped32NonScatterValidation validation =
-        MinimizerGrouped32NonScatterValidation::scalar_required;
-    std::uint64_t vectorized_words = 0;
-    std::uint64_t selected_hwy_target = 0;
-    std::uint8_t selected_vector_stream_width = 0;
-};
-
-using MinimizerGrouped32ValidateNonScatterLocal32W2Kernel =
-    MinimizerGrouped32NonScatterValidationResult (*)(
-        std::span<const std::byte>,
-        const MinimizerGrouped32Control&,
-        const MinimizerPositionSegmentCore&) noexcept;
-
-static_assert(std::is_standard_layout_v<
-    MinimizerGrouped32NonScatterValidationResult>);
-static_assert(std::is_trivially_copyable_v<
-    MinimizerGrouped32NonScatterValidationResult>);
 
 /// Inactive two-phase query reader for the grouped-u32/segment-local32 wire.
 /// It owns every byte and identity field used after `begin`: callers first
@@ -21956,7 +21892,7 @@ private:
                 }
             } else if (backend_ == MinimizerSketchBackend::Scalar) {
                 increment_route_counter_(scalar_core_runs_);
-                bioseq::simd::HWY_NAMESPACE::collect_minimizers_segment_scalar<
+                bioseq::simd::collect_minimizers_segment_scalar<
                     MinimapSketchData>(
                         collector, sequence_, collect_lo, collect_hi,
                         window_size_, kmer_size_);
@@ -22257,6 +22193,15 @@ struct MinimizersPerFragmentIndex {
             return std::unexpected(
                 MinimizerGenerationWireError::compatibility_mismatch);
         }
+        if ((backend == MinimizerSketchBackend::ExactSimd
+                && (kernels == nullptr
+                    || kernels->two_stack_nthash == nullptr))
+            || (backend == MinimizerSketchBackend::PaperNtHashSimd
+                && (kernels == nullptr
+                    || kernels->paper_nthash == nullptr))) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
         auto producer = make_generation_replay_producer(
             sequence, backend, kernels);
         auto encoded = encode_minimizer_generation(
@@ -22513,7 +22458,7 @@ struct MinimizersPerFragmentIndex {
                         if (execution_evidence_out != nullptr) {
                             ++execution_evidence_out->scalar_core_runs;
                         }
-                        bioseq::simd::HWY_NAMESPACE::
+                        bioseq::simd::
                             collect_minimizers_segment_scalar<MinimapSketchData>(
                                 collector, seq, coll_lo, coll_hi, w, k);
                     } else {
@@ -22637,6 +22582,18 @@ struct MinimizersPerFragmentIndex {
         MinimizerSketchBackend backend,
         const bioseq::minimizers::MinimizerKernels* kernels)
     {
+        if (backend == MinimizerSketchBackend::ExactSimd
+            && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
+            throw ExactSimdIndexRuntimeError{
+                ExactSimdIndexStatus::invalid_state,
+                "minimizers_per_fragment rebuild"};
+        }
+        if (backend == MinimizerSketchBackend::PaperNtHashSimd
+            && (kernels == nullptr || kernels->paper_nthash == nullptr)) {
+            throw PackedPaperNthashIndexRuntimeError{
+                PackedPaperNthashIndexStatus::invalid_state,
+                "minimizers_per_fragment rebuild"};
+        }
         storage.clear_entity();
         build(storage, seq, backend, kernels);
     }

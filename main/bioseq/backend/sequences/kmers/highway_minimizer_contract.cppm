@@ -1623,6 +1623,14 @@ static_assert(std::is_standard_layout_v<PackedSequenceKernelFragment>);
 static_assert(std::is_trivially_copyable_v<PackedSequenceKernelFragment>);
 static_assert(std::is_standard_layout_v<PackedSequenceFragmentSource>);
 static_assert(std::is_trivially_copyable_v<PackedSequenceFragmentSource>);
+static_assert(std::is_standard_layout_v<MinimizerKernelInvocation>);
+static_assert(std::is_trivially_copyable_v<MinimizerKernelInvocation>);
+static_assert(std::is_standard_layout_v<ReferenceMinimizerExecutionProof>);
+static_assert(std::is_trivially_copyable_v<ReferenceMinimizerExecutionProof>);
+static_assert(std::is_standard_layout_v<MinimizerExecutionProof>);
+static_assert(std::is_trivially_copyable_v<MinimizerExecutionProof>);
+static_assert(std::is_standard_layout_v<MinimizerKernelResult>);
+static_assert(std::is_trivially_copyable_v<MinimizerKernelResult>);
 static_assert(std::is_standard_layout_v<MinimizerKernels>);
 static_assert(std::is_trivially_copyable_v<MinimizerKernels>);
 

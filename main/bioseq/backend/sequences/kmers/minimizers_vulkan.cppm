@@ -22,7 +22,6 @@ module;
 #include <cstdio>
 
 #include "common.h"
-#include <hwy/highway.h>  // ONLY for the HWY_NAMESPACE macro (nt4_normalize lives there)
 
 #include <cstring>
 #include <algorithm>
@@ -537,7 +536,7 @@ template <class Seq>
         std::uint32_t code = 4u;
         std::uint32_t rc_code = 4u;
         if constexpr (seqan3::nucleotide_alphabet<alphabet_t>) {
-            code = bioseq::simd::HWY_NAMESPACE::nt4_normalize<alphabet_t>(
+            code = bioseq::simd::nt4_normalize<alphabet_t>(
                 static_cast<std::uint8_t>(rank));
             rc_code = code < 4u ? (code ^ 3u) : 4u;
         } else {
@@ -2627,7 +2626,7 @@ collect_minimizers_vulkan_batch_result(
     std::size_t kmer_size) = delete;
 
 [[nodiscard]] std::optional<
-    VulkanBatchSketchResult<::bioseq::simd::HWY_NAMESPACE::MinimapSketchData>>
+    VulkanBatchSketchResult<::bioseq::minimizers::MinimapSketchData>>
 collect_minimap_sketch_data_vulkan_upload_batch_result(
     std::span<const SequenceUploadView> uploads,
     const VulkanRankLut& rank_lut,
@@ -2635,7 +2634,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
     std::size_t kmer_size,
     VulkanSketchHostMaterialization materialization)
 {
-    using MinimizerT = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using MinimizerT = ::bioseq::minimizers::MinimapSketchData;
     using bioseq::parallelism::MemoryAdmissionController;
     using bioseq::parallelism::saturating_mul;
 
@@ -3394,7 +3393,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
     VulkanSegmentPairExecutionProof* execution_proof_out = nullptr)
 {
     using bare = std::remove_cvref_t<Seq>;
-    using MinimizerT = bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using MinimizerT = bioseq::minimizers::MinimapSketchData;
     VulkanSegmentPairExecutionProof execution_proof{};
     if (execution_proof_out != nullptr) {
         *execution_proof_out = {};
@@ -3872,7 +3871,7 @@ void collect_minimizers_vulkan_segment_resident_impl_or_throw(
             "Vulkan segment minimizer sketch", path_decline);
     } else {
         using traits = typename bare::traits;
-        using MinimizerLimit = bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+        using MinimizerLimit = bioseq::minimizers::MinimapSketchData;
 
         if constexpr (!vulkan_minimizer_alphabet_shape_supported<traits>()) {
             path_decline.reason = VulkanSketchDeclineReason::alphabet_unsupported;

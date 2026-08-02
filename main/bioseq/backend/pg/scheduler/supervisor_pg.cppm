@@ -47,6 +47,7 @@ void AbortCurrentTransaction(void);
 #include <optional>
 #include <span>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -67,8 +68,9 @@ import bioseq.gpu.vulkan.runtime;
 import bioseq.gpu.vulkan.shader_cache;
 import bioseq.gpu.vulkan.shader_variants;
 import bioseq.pg_utils;
+import bioseq.highway.dispatch_contract;
 import bioseq.indexing.type;
-import bioseq.indexing.minimizer_sequence;   // DOC0345 Patch K — re-exports MinimizerSketchBackend + minimizer_sketch_backend_name (no HWY_NAMESPACE macro needed here)
+import bioseq.indexing.minimizer_sequence;   // MPS builder and neutral minimizer model
 import bioseq.storage.manager;
 import bioseq.storage.lazy;
 import bioseq.storage.scanner;
@@ -185,13 +187,15 @@ struct IndexBuildMpsDsmHeader {
     std::int32_t pipeline_mode;
     std::int32_t max_concurrency;
     std::int32_t index_memory_cap_mb;
-    std::int32_t index_sketch_backend;  // DOC0345 Patch K — repurposed from `reserved` (keeps 72-byte size)
+    std::int32_t index_sketch_backend;
     std::int32_t requested_provider;
+    std::int64_t highway_executed_target;
     bioseq::storage::seq_locator locator;
 };
-static_assert(sizeof(IndexBuildMpsDsmHeader) == 80);
+static_assert(sizeof(IndexBuildMpsDsmHeader) == 88);
 static_assert(offsetof(IndexBuildMpsDsmHeader, requested_provider) == 36);
-static_assert(offsetof(IndexBuildMpsDsmHeader, locator) == 40);
+static_assert(offsetof(IndexBuildMpsDsmHeader, highway_executed_target) == 40);
+static_assert(offsetof(IndexBuildMpsDsmHeader, locator) == 48);
 static_assert(std::is_trivially_copyable_v<IndexBuildMpsDsmHeader>);
 
 struct PersistFileChunkHeader {
@@ -206,7 +210,51 @@ inline constexpr std::uint32_t kIndexPersistDsmVersion = 1;
 inline constexpr std::uint32_t kIndexPersistFileDsmMagic = 0xB1051D59u;
 inline constexpr std::uint32_t kIndexPersistFileDsmVersion = 1;
 inline constexpr std::uint32_t kIndexBuildMpsDsmMagic = 0xB1051D5Au;
-inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 4;
+inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 5;
+
+[[nodiscard]] constexpr bool valid_minimizer_sketch_backend_wire_value(
+        std::int32_t backend_value) noexcept {
+    using bioseq::minimizers::MinimizerSketchBackend;
+    switch (static_cast<MinimizerSketchBackend>(backend_value)) {
+        case MinimizerSketchBackend::Scalar:
+        case MinimizerSketchBackend::VulkanSegment:
+        case MinimizerSketchBackend::ExactSimd:
+        case MinimizerSketchBackend::PaperNtHashSimd:
+            return true;
+    }
+    return false;
+}
+
+[[nodiscard]] constexpr bool minimizer_backend_requires_highway_target(
+        std::int32_t backend_value) noexcept {
+    using bioseq::minimizers::MinimizerSketchBackend;
+    const auto backend = static_cast<MinimizerSketchBackend>(backend_value);
+    return backend == MinimizerSketchBackend::ExactSimd
+        || backend == MinimizerSketchBackend::PaperNtHashSimd;
+}
+
+[[nodiscard]] const bioseq::minimizers::MinimizerKernels*
+rebind_minimizer_kernels_for_backend(
+        std::int32_t backend_value,
+        std::int64_t highway_executed_target) {
+    using bioseq::minimizers::MinimizerSketchBackend;
+    const auto backend = static_cast<MinimizerSketchBackend>(backend_value);
+    if (backend == MinimizerSketchBackend::Scalar
+        || backend == MinimizerSketchBackend::VulkanSegment) {
+        return nullptr;
+    }
+    const auto& binding = bioseq::simd_dispatch::
+        registered_highway_target_binding(highway_executed_target);
+    const auto* kernels = &binding.kernels->minimizers;
+    if ((backend == MinimizerSketchBackend::ExactSimd
+            && kernels->two_stack_nthash == nullptr)
+        || (backend == MinimizerSketchBackend::PaperNtHashSimd
+            && kernels->paper_nthash == nullptr)) {
+        throw std::logic_error{
+            "selected Highway target lacks the requested minimizer kernel"};
+    }
+    return kernels;
+}
 
 struct PgMpsBuildStats {
     pg_atomic_uint64 generation;
@@ -809,7 +857,8 @@ struct MpsBuildMetadata {
     std::int32_t pipeline_mode = 0;
     std::int32_t max_concurrency = 0;
     std::int32_t index_memory_cap_mb = 0;
-    std::int32_t index_sketch_backend = 0;  // DOC0345 Patch K
+    std::int32_t index_sketch_backend = 0;
+    std::int64_t highway_executed_target = 0;
     IndexPayloadStorageBackend requested_provider =
         IndexPayloadStorageBackend::postgres_relation;
 };
@@ -853,6 +902,11 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     if (header.magic != kIndexBuildMpsDsmMagic
         || header.version != kIndexBuildMpsDsmVersion
         || header.index_name_len == 0
+        || !valid_minimizer_sketch_backend_wire_value(
+            header.index_sketch_backend)
+        || (minimizer_backend_requires_highway_target(
+                header.index_sketch_backend)
+            && header.highway_executed_target == 0)
         || !is_valid_index_payload_storage_backend_wire_value(
             header.requested_provider)
         || header.locator.version != bioseq::storage::kLocatorVersion
@@ -874,7 +928,8 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     meta.pipeline_mode = header.pipeline_mode;
     meta.max_concurrency = header.max_concurrency;
     meta.index_memory_cap_mb = header.index_memory_cap_mb;
-    meta.index_sketch_backend = header.index_sketch_backend;  // DOC0345 Patch K
+    meta.index_sketch_backend = header.index_sketch_backend;
+    meta.highway_executed_target = header.highway_executed_target;
     meta.requested_provider =
         *decode_index_payload_storage_backend(header.requested_provider);
     return meta;
@@ -1199,6 +1254,7 @@ void ensure_persist_xact_callback_registered() {
         std::int32_t max_concurrency,
         std::int32_t index_memory_cap_mb,
         std::int32_t index_sketch_backend,
+        std::int64_t highway_executed_target,
         int requested_provider_wire_value) {  // DOC0345 Patch K / DOC0383 P5
     const auto requested_provider =
         decode_index_payload_storage_backend(
@@ -1227,6 +1283,22 @@ void ensure_persist_xact_callback_registered() {
         });
         pg_unreachable();
     }
+    if (!valid_minimizer_sketch_backend_wire_value(index_sketch_backend)
+        || (minimizer_backend_requires_highway_target(index_sketch_backend)
+            && highway_executed_target == 0)) {
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [index_sketch_backend, highway_executed_target] {
+                ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("asynchronous MPS build has no selected Highway target"),
+                     errdetail("backend=%d target=%lld; the queued worker cannot redispatch or change algorithms",
+                        index_sketch_backend,
+                        static_cast<long long>(highway_executed_target))));
+            });
+        pg_unreachable();
+    }
+    (void)rebind_minimizer_kernels_for_backend(
+        index_sketch_backend, highway_executed_target);
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
     if (!bioseq::settings::index_async_persist
@@ -1312,8 +1384,8 @@ void ensure_persist_xact_callback_registered() {
         }
 
         // This DSM is metadata-only: locator/source identity, selected build
-        // policy and the identifier. It never contains sequence, minimizer,
-        // anchor, alignment or persisted-index bytes.
+        // policy, and the already-selected Highway target bit. Function/table
+        // pointers are process-local and never cross this boundary.
         char* base = static_cast<char*>(
             dsm_segment_address(dsm.attached));
         const IndexBuildMpsDsmHeader header{
@@ -1332,6 +1404,7 @@ void ensure_persist_xact_callback_registered() {
             .requested_provider =
                 index_payload_storage_backend_wire_value(
                     *requested_provider),
+            .highway_executed_target = highway_executed_target,
             .locator = locator,
         };
         std::memcpy(base, &header, sizeof(header));
@@ -3259,6 +3332,14 @@ void process_mps_build_claim_cpp(
         return;
     }
 
+    const auto worker_backend =
+        static_cast<bioseq::minimizers::MinimizerSketchBackend>(
+            meta->index_sketch_backend);
+    const bioseq::minimizers::MinimizerKernels* const worker_kernels =
+        rebind_minimizer_kernels_for_backend(
+            meta->index_sketch_backend,
+            meta->highway_executed_target);
+
     MemoryContext work = nullptr;
     bioseq::storage::seq_caches* caches = nullptr;
 
@@ -3284,15 +3365,9 @@ void process_mps_build_claim_cpp(
             static_cast<unsigned long long>(worker_concurrency),
             meta->index_memory_cap_mb,
             meta->pair_sort_impl);
-    // DOC0345 Patch K — the foreground recompute path chose the backend; the
-    // async worker's (pre-existing) storage-dispatch carries it into the
-    // per-storage `build`/`rebuild` call below.
-    const auto worker_backend =
-        static_cast<bioseq::indexing::MinimizerSketchBackend>(
-            meta->index_sketch_backend);
     bioseq_log<DBG>(
         "[bioseq] index: async mps build worker backend={}",
-        bioseq::indexing::minimizer_sketch_backend_name(worker_backend));
+        bioseq::minimizers::minimizer_sketch_backend_name(worker_backend));
     const auto abandon_pg_resources_noexcept = [&]() noexcept {
         if (caches != nullptr) {
             // PostgreSQL owns every relation/read-state after an ERROR. Null
@@ -3343,7 +3418,7 @@ void process_mps_build_claim_cpp(
             .set_index_memory_cap_bytes(worker_index_cap_bytes);
 
         if (worker_backend
-            == bioseq::indexing::MinimizerSketchBackend::PaperNtHashSimd) {
+            == bioseq::minimizers::MinimizerSketchBackend::PaperNtHashSimd) {
             bioseq::pg_utils::invoke_pg_as_cpp([] {
                 ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -3376,7 +3451,7 @@ void process_mps_build_claim_cpp(
                     bioseq::storage::with_lazy_postgres<S>(
                         source_binding,
                         [&lazy_worker_shareable, meta, &target, &store,
-                         worker_backend](auto source_view) {
+                         worker_backend, worker_kernels](auto source_view) {
                             const bool pg_lazy_worker_shareable =
                                 bioseq::storage::lazy_is_worker_shareable(
                                     source_view);
@@ -3405,7 +3480,8 @@ void process_mps_build_claim_cpp(
                                             lazy_worker_shareable);
                                     bioseq::indexing::MinimizerSequenceMergedIndex<
                                         bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
-                                            store, resident_view, worker_backend);
+                                            store, resident_view, worker_backend,
+                                            worker_kernels);
                                     return;
                                 }
                             }
@@ -3417,7 +3493,8 @@ void process_mps_build_claim_cpp(
                                     lazy_worker_shareable);
                             bioseq::indexing::MinimizerSequenceMergedIndex<
                                 bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
-                                    store, source_view, worker_backend);
+                                    store, source_view, worker_backend,
+                                    worker_kernels);
                         });
                     store.close_checked();
                 } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {

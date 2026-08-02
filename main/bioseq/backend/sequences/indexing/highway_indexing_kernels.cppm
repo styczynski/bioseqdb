@@ -20,7 +20,7 @@ module;
 export module bioseq.highway.sources.indexing;
 
 import std;
-import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.grouped32_contract;
 
 export namespace bioseq::indexing {
 namespace [[bioseq::simd]] target {

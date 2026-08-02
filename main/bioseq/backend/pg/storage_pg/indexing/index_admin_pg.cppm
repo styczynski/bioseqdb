@@ -337,6 +337,30 @@ inline void ensure_vulkan_index_build_runtime_ready(
     (void)bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
 }
 
+/**
+ * Validate the immutable minimizer family selected by an owning scheduler.
+ * Independent PostgreSQL maintenance roots pass null explicitly and therefore
+ * reject SIMD-only producers instead of redispatching or changing algorithms.
+ */
+inline void require_selected_minimizer_kernels(
+        bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
+        std::string_view operation) {
+    if (backend == bioseq::minimizers::MinimizerSketchBackend::ExactSimd
+        && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
+        throw bioseq::indexing::ExactSimdIndexRuntimeError{
+            bioseq::indexing::ExactSimdIndexStatus::invalid_state,
+            operation};
+    }
+    if (backend
+            == bioseq::minimizers::MinimizerSketchBackend::PaperNtHashSimd
+        && (kernels == nullptr || kernels->paper_nthash == nullptr)) {
+        throw bioseq::indexing::PackedPaperNthashIndexRuntimeError{
+            bioseq::indexing::PackedPaperNthashIndexStatus::invalid_state,
+            operation};
+    }
+}
+
 /// Legacy MPF/MPS rows do not carry a minimizer-scheme identity. Persisting
 /// Paper ntHash into the inline-only legacy rebuild route would let a later
 /// Exact reader (or the reverse) accept incompatible hashes under the same
@@ -409,6 +433,8 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
         }
     }
     const auto backend = resolve_index_sketch_backend_from_gucs();  // DOC0345 Patch I
+    const bioseq::minimizers::MinimizerKernels* const minimizer_kernels =
+        nullptr;
     if (backend
         == bioseq::minimizers::MinimizerSketchBackend::
             PaperNtHashSimd) {
@@ -427,7 +453,7 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
         hdr->alphabet_code,
         hdr->storage_unit_byte_width,
         [hdr, rid, attno, user_relid, loc, rowno, mctx, &idx,
-         backend]<class S>() {
+         backend, minimizer_kernels]<class S>() {
         compact_sequence_range<S> rng{*hdr};
         auto lazy = bioseq::storage::make_lazy_in_memory(rng);
         const auto lazy_view =
@@ -445,7 +471,8 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
             return qcache.emplace(name, open_sequence_storage(user_relid, rid.db_oid, rid.tablespace_oid, rid.relfilenode,
                                      attno, name, loc, rowno, nullptr, mctx)).first->second; };
         try {
-            idx.build_fragmented<true>(open_frag, lazy_view, backend);
+            idx.build_fragmented<true>(
+                open_frag, lazy_view, backend, minimizer_kernels);
             idx.build_sequence<true>(open_inl, lazy_view);
             for (auto& [name, storage] : fcache) {
                 (void)name;
@@ -676,7 +703,8 @@ inline void rebuild_one_fragmented_maybe_resident(
         bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
         std::uint8_t requested_width,
         std::uint64_t rowno,
-        bioseq::minimizers::MinimizerSketchBackend backend) {
+        bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels) {
     if (backend == bioseq::minimizers::MinimizerSketchBackend::Scalar
         && name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
         if (auto resident =
@@ -684,11 +712,11 @@ inline void rebuild_one_fragmented_maybe_resident(
                     sequence, requested_width, rowno, name);
             resident.has_value()) {
             idx.rebuild_one_fragmented(
-                name, store, resident->owner.view(), backend);
+                name, store, resident->owner.view(), backend, kernels);
             return;
         }
     }
-    idx.rebuild_one_fragmented(name, store, sequence, backend);
+    idx.rebuild_one_fragmented(name, store, sequence, backend, kernels);
 }
 
 /**
@@ -751,6 +779,7 @@ inline void build_and_verify_minimizer_format6_generation_pg(
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         IndexPayloadStorageBackend requested_provider);
 
 template <class R>
@@ -765,6 +794,7 @@ inline void build_and_verify_grouped32_minimizer_generation_pg(
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         IndexPayloadStorageBackend requested_provider);
 
 [[noreturn]] inline void reject_grouped32_nonlocator_source_as_cpp(
@@ -988,6 +1018,12 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     const bool is_minimizer_index =
         name == bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME
         || name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+    const bioseq::minimizers::MinimizerKernels* const minimizer_kernels =
+        nullptr;
+    if (is_minimizer_index) {
+        require_selected_minimizer_kernels(
+            backend, minimizer_kernels, "bioseq.update_index");
+    }
     const bool use_grouped32_generation = is_minimizer_index
         && bioseq::aligner::settings::grouped32_persisted_generation_enabled;
     if (is_minimizer_index
@@ -1309,7 +1345,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     [rid, seq_attno, loc, rs, caches, inner,
                      promoted_datum, layout, rel_oid, name, rowno, work,
                      &idx, use_grouped32_generation, backend,
-                     requested_provider, bw]<class S>() {
+                     minimizer_kernels, requested_provider, bw]<class S>() {
                     using SourceBinding =
                         bioseq::storage::postgres_lazy_sequence_binding<S>;
                     const SourceBinding source_binding{
@@ -1321,13 +1357,14 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         promoted_datum, inner, layout, rel_oid, rid,
                         seq_attno, &name, loc, rowno, caches, work, &idx,
                         use_grouped32_generation, source_binding, backend,
-                        requested_provider, bw] {
+                        minimizer_kernels, requested_provider, bw] {
                       with_promoted_pg_sequence_view<
                           typename SourceBinding::alphabet_type>(
                           promoted_datum, inner,
                           [layout, rel_oid, rid, seq_attno, &name, loc, rowno,
                            caches, work, &idx, use_grouped32_generation,
-                           source_binding, backend, requested_provider,
+                           source_binding, backend, minimizer_kernels,
+                           requested_provider,
                            bw](auto lazy_view){
                             if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                                 auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
@@ -1340,13 +1377,14 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                 build_and_verify_minimizer_format6_generation_pg(
                                     rel_oid, seq_attno, name, rowno, store,
                                     lazy_view, source_binding, backend,
+                                    minimizer_kernels,
                                     requested_provider);
                             } else {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, rowno, backend] {
+                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, rowno, backend, minimizer_kernels] {
                                     rebuild_one_fragmented_maybe_resident(
                                         idx, name, store, lazy_view, bw,
-                                        rowno, backend);
+                                        rowno, backend, minimizer_kernels);
                                 });
                             }
                           });
@@ -1360,7 +1398,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     alpha,
                     hdr->storage_unit_byte_width,
                     [hdr, layout, rel_oid, rid, seq_attno, name, rowno,
-                     caches, work, &idx, bw, backend]<class S>() {
+                     caches, work, &idx, bw, backend,
+                     minimizer_kernels]<class S>() {
                     compact_sequence_range<S> rng{*hdr};
                     auto lazy = bioseq::storage::make_lazy_in_memory(rng);
                     const auto lazy_view =
@@ -1376,10 +1415,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         });
                     } else {
                         auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, rowno, backend] {
+                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, rowno, backend, minimizer_kernels] {
                             rebuild_one_fragmented_maybe_resident(
                                 idx, name, store, lazy_view, bw,
-                                rowno, backend);
+                                rowno, backend, minimizer_kernels);
                         });
                     }
                 });
@@ -2012,6 +2051,7 @@ private:
                 alphabet_type>,
         bioseq::storage::postgres_lazy_sequence_binding<R>,
         bioseq::minimizers::MinimizerSketchBackend,
+        const bioseq::minimizers::MinimizerKernels*,
         IndexPayloadStorageBackend);
 
     ReadyMinimizerGenerationIndexKindPg index_kind_ =
@@ -2583,6 +2623,7 @@ build_and_publish_minimizer_format6_generation_pg(
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         IndexPayloadStorageBackend requested_provider) {
     using SourceBinding =
         bioseq::storage::postgres_lazy_sequence_binding<R>;
@@ -2590,6 +2631,8 @@ build_and_publish_minimizer_format6_generation_pg(
         bioseq::minimizers::MinimizerSketchBackend;
     using MpsIndex =
         bioseq::indexing::MinimizerSequenceMergedIndex<IndexStorageFragmentPg>;
+    require_selected_minimizer_kernels(
+        backend, kernels, "Format-6 minimizer generation");
     using Traits = typename compact_sequence_range<R>::traits;
     using CanonicalSequenceConfig = sequence_custom_alphabet<
         typename Traits::alphabet_type,
@@ -2780,6 +2823,7 @@ build_and_publish_minimizer_format6_generation_pg(
             storage,
             sequence,
             backend,
+            kernels,
             /*core_span_bp=*/0u,
             /*position_segment_span_bp=*/locator.total_bp_size,
             &state->execution);
@@ -3053,6 +3097,7 @@ inline void build_and_verify_minimizer_format6_generation_pg(
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         IndexPayloadStorageBackend requested_provider) {
     using SourceBinding =
         bioseq::storage::postgres_lazy_sequence_binding<R>;
@@ -3066,7 +3111,7 @@ inline void build_and_verify_minimizer_format6_generation_pg(
         // route it through the target-wide Format-6 spill/merge publisher.
         build_and_verify_grouped32_minimizer_generation_pg(
             user_relid, column_attno, index_name, sequence_rowno, storage,
-            sequence, source_binding, backend, requested_provider);
+            sequence, source_binding, backend, kernels, requested_provider);
         return;
     }
     if constexpr (kAlphabetCode != 0u) {
@@ -3074,7 +3119,7 @@ inline void build_and_verify_minimizer_format6_generation_pg(
         // specializations which are statically outside its registry.
         build_and_verify_grouped32_minimizer_generation_pg(
             user_relid, column_attno, index_name, sequence_rowno, storage,
-            sequence, source_binding, backend, requested_provider);
+            sequence, source_binding, backend, kernels, requested_provider);
         return;
     } else {
         const auto compatibility = bioseq::indexing::
@@ -3089,14 +3134,14 @@ inline void build_and_verify_minimizer_format6_generation_pg(
             // registry continue on the frozen Format-5 route.
             build_and_verify_grouped32_minimizer_generation_pg(
                 user_relid, column_attno, index_name, sequence_rowno,
-                storage, sequence, source_binding, backend,
+                storage, sequence, source_binding, backend, kernels,
                 requested_provider);
             return;
         }
         const ReadyMinimizerFormat6PublicationPg publication =
             build_and_publish_minimizer_format6_generation_pg(
                 user_relid, column_attno, index_name, sequence_rowno,
-                storage, sequence, source_binding, backend,
+                storage, sequence, source_binding, backend, kernels,
                 requested_provider);
         if (!publication.published
             || publication.generation_id == 0u
@@ -3150,6 +3195,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         IndexPayloadStorageBackend requested_provider) {
     using SourceBinding =
         bioseq::storage::postgres_lazy_sequence_binding<R>;
@@ -3159,6 +3205,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
         bioseq::indexing::MinimizersPerFragmentIndex<IndexStorageFragmentPg>;
     using MpsIndex =
         bioseq::indexing::MinimizerSequenceMergedIndex<IndexStorageFragmentPg>;
+    require_selected_minimizer_kernels(
+        backend, kernels, "grouped32 minimizer generation");
     using Traits = typename compact_sequence_range<R>::traits;
     using CanonicalSequenceConfig = sequence_custom_alphabet<
         typename Traits::alphabet_type,
@@ -3421,7 +3469,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
             };
             if (is_mpf) {
                 auto encoded = MpfIndex::encode_persisted_generation(
-                    sequence, backend, *state->writer, options,
+                    sequence, backend, kernels, *state->writer, options,
                     bioseq::indexing::MinimizerGenerationFixedWidthLimits{},
                     &state->mpf_execution);
                 if (encoded) {
@@ -3433,7 +3481,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
             } else {
                 state->mps_spill_started = true;
                 auto spill = MpsIndex::spill_generation_replay_runs_serial(
-                    storage, sequence, backend,
+                    storage, sequence, backend, kernels,
                     /*core_span_bp=*/0,
                     bioseq::indexing::kMinimizerPreferredSegmentSpanBp,
                     &state->mps_execution);
@@ -3766,11 +3814,12 @@ inline void build_and_verify_grouped32_minimizer_generation_pg(
                 alphabet_type> sequence,
         bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         IndexPayloadStorageBackend requested_provider) {
     const ReadyMinimizerGenerationPublicationPg publication =
         build_and_publish_grouped32_minimizer_generation_pg(
             user_relid, column_attno, index_name, sequence_rowno, storage,
-            sequence, source_binding, backend, requested_provider);
+            sequence, source_binding, backend, kernels, requested_provider);
     const bool evidence_kind_matches =
         index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME
             ? std::holds_alternative<
@@ -3823,6 +3872,7 @@ build_and_publish_grouped32_minimizer_generation_pg<
         ready_minimizer_generation_compile_contract_detail::sequence_view,
         ready_minimizer_generation_compile_contract_detail::source_binding,
         bioseq::minimizers::MinimizerSketchBackend,
+        const bioseq::minimizers::MinimizerKernels*,
         IndexPayloadStorageBackend);
 
 /// Result of the test seam that instantiates the production coordinator
@@ -4355,6 +4405,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
                                     rel_oid, seq_attno, index_name,
                                     sequence_rowno, *state->storage,
                                     lazy_view, source_binding, backend,
+                                    nullptr,
                                     IndexPayloadStorageBackend::
                                         postgres_relation));
                             disarm_ready_minimizer_fixture_failures();

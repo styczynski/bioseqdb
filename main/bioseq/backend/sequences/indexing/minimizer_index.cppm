@@ -7,7 +7,6 @@
  * Highway intrinsics). NO_POSTGRES.
  */
 module;
-#include <hwy/highway.h>            // ONLY for the HWY_NAMESPACE macro (cf. sidecar.cppm)
 #include <span>
 #include <cstddef>
 #include <cstdint>
@@ -16,14 +15,14 @@ module;
 #include <stdexcept>
 #include <vector>
 export module bioseq.indexing.minimizer_index;
-import bioseq.sequences.kmers;     // MinimapSketchData (POD), via the HWY_NAMESPACE using below
+import bioseq.sequences.kmers.highway_contract;
 import bioseq.sequences.chaining.utils; // prepared fragment-anchor query view
 import bioseq.storage.size;        // sequence_size_t
 import bioseq.parallelism.memory_admission;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
-using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+using bioseq::minimizers::MinimapSketchData;
 
 /// Fail-closed error raised when an authenticated persisted lookup cannot
 /// provide a complete, internally consistent position result.  PostgreSQL

@@ -6,7 +6,7 @@
  */
 module;
 #include "common.h"                       // DEBUG_ASSERT
-#include <hwy/highway.h>                   // ONLY for the HWY_NAMESPACE macro
+#include <hwy/base.h>                      // hwy::uint128_t sort-sidecar ABI
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -57,12 +57,12 @@ extern "C" void bioseq_sort_pair_run_u128_keys(
     int sort_impl) noexcept;
 
 export namespace bioseq::indexing {
-using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
-using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
-using bioseq::simd::HWY_NAMESPACE::collect_minimizers_view;
-using bioseq::simd::HWY_NAMESPACE::sketch_collector;
-using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;          // DOC0345 Patch E
-using bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name;   // DOC0345 Patch E — re-export so PG modules avoid the HWY_NAMESPACE macro
+using bioseq::minimizers::MinimapSketchData;
+using bioseq::simd::minimap_int_hasher;
+using bioseq::simd::collect_minimizers_view;
+using bioseq::minimizers::sketch_collector;
+using bioseq::minimizers::MinimizerSketchBackend;
+using bioseq::minimizers::minimizer_sketch_backend_name;
 using bioseq::storage::sequence_size_t;
 using bioseq::storage::lazy_compact_sequence;
 
@@ -1981,6 +1981,7 @@ struct MinimizerSequenceMergedIndex {
     collect_generation_core_run(
             bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             MinimizerSketchBackend backend,
+            const bioseq::minimizers::MinimizerKernels* kernels,
             SegmentUnitRange range,
             sketch_collector& collector,
             std::vector<detail::sorted_pair_t>& output,
@@ -1988,6 +1989,15 @@ struct MinimizerSequenceMergedIndex {
             bool allow_packed_paper = false,
             ScalarMpsBuildExecutionProof* scalar_build_proof = nullptr) {
         const std::uint64_t target_length = sequence.bp_size();
+        if ((backend == MinimizerSketchBackend::ExactSimd
+                && (kernels == nullptr
+                    || kernels->two_stack_nthash == nullptr))
+            || (backend == MinimizerSketchBackend::PaperNtHashSimd
+                && (kernels == nullptr
+                    || kernels->paper_nthash == nullptr))) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
         if (range.core_lo_bp > range.core_hi_bp
             || range.core_hi_bp > target_length
             || range.cs_u > range.ce_u || range.ce_u > target_length) {
@@ -2063,6 +2073,7 @@ struct MinimizerSequenceMergedIndex {
                 10u,
                 15u,
                 0u,
+                kernels,
                 "minimizers_per_sequence build");
             if (execution_evidence != nullptr) {
                 execution_evidence->exact_simd_proof.combine(
@@ -2086,6 +2097,7 @@ struct MinimizerSequenceMergedIndex {
                     local_bp_size,
                     10u,
                     15u,
+                    kernels,
                     collector,
                     &materialized_window_bp);
             if (execution_evidence != nullptr) {
@@ -2107,7 +2119,7 @@ struct MinimizerSequenceMergedIndex {
             }
         } else {
             add_route(&MpsGenerationExecutionEvidence::scalar_core_runs);
-            bioseq::simd::HWY_NAMESPACE::collect_minimizers_segment_scalar<
+            bioseq::simd::collect_minimizers_segment_scalar<
                 MinimapSketchData>(
                     collector, sequence, range.cs_u, range.ce_u, 10u, 15u);
             if (scalar_build_proof != nullptr) {
@@ -2145,6 +2157,7 @@ struct MinimizerSequenceMergedIndex {
             S& storage,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             MinimizerSketchBackend backend,
+            const bioseq::minimizers::MinimizerKernels* kernels,
             std::uint64_t core_span_bp = 0,
             std::uint64_t position_segment_span_bp =
                 kMinimizerPreferredSegmentSpanBp,
@@ -2172,6 +2185,15 @@ struct MinimizerSequenceMergedIndex {
         evidence.kmer_size = 15;
         evidence.configured_core_span_bp =
             core_span_bp == 0 ? default_core_span : core_span_bp;
+        if ((backend == MinimizerSketchBackend::ExactSimd
+                && (kernels == nullptr
+                    || kernels->two_stack_nthash == nullptr))
+            || (backend == MinimizerSketchBackend::PaperNtHashSimd
+                && (kernels == nullptr
+                    || kernels->paper_nthash == nullptr))) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
         if (core_span_bp == 0) {
             core_span_bp = default_core_span;
         }
@@ -2348,6 +2370,7 @@ struct MinimizerSequenceMergedIndex {
                 auto collected = collect_generation_core_run(
                     sequence,
                     backend,
+                    kernels,
                     *range,
                     buffers.collector,
                     buffers.run,
@@ -2651,6 +2674,7 @@ struct MinimizerSequenceMergedIndex {
         S& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         ScalarMpsBuildExecutionProof* scalar_build_proof_out = nullptr) {
         constexpr std::size_t w = 10, k = 15;
         constexpr std::size_t lpu = 1u;
@@ -2659,6 +2683,19 @@ struct MinimizerSequenceMergedIndex {
         static_assert(frag_bp < (std::size_t{1} << 28), "fragment core positions fit 28-bit field");
         using detail::HDR; using detail::REC; using detail::BucketRecord;
         constexpr std::size_t kBucketTargetBytes = std::size_t{8} << 20;       // 8 MiB
+
+        if (backend == MinimizerSketchBackend::ExactSimd
+            && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
+            throw ExactSimdIndexRuntimeError{
+                ExactSimdIndexStatus::invalid_state,
+                "minimizers_per_sequence build"};
+        }
+        if (backend == MinimizerSketchBackend::PaperNtHashSimd
+            && (kernels == nullptr || kernels->paper_nthash == nullptr)) {
+            throw PackedPaperNthashIndexRuntimeError{
+                PackedPaperNthashIndexStatus::invalid_state,
+                "minimizers_per_sequence build"};
+        }
 
         if (scalar_build_proof_out != nullptr) {
             *scalar_build_proof_out = {};
@@ -2717,7 +2754,7 @@ struct MinimizerSequenceMergedIndex {
         // pairs are sorted on the HOST, so there is no CPU minimizer COLLECT on
         // this path. The scalar branch is unchanged.
         auto collect_core_range_pairs =
-            [&seq, backend](
+            [&seq, backend, kernels](
                 sequence_size_t core_lo,
                 sequence_size_t core_hi,
                 sketch_collector& collector,
@@ -2731,6 +2768,7 @@ struct MinimizerSequenceMergedIndex {
             if (!range || !collect_generation_core_run(
                     seq,
                     backend,
+                    kernels,
                     *range,
                     collector,
                     out,
@@ -3393,24 +3431,37 @@ struct MinimizerSequenceMergedIndex {
     static void build(
             S& storage,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
-        build(storage, seq, MinimizerSketchBackend::Scalar);
+        build(storage, seq, MinimizerSketchBackend::Scalar, nullptr);
     }
 
     template <sequence_alphabet Alphabet>
     static void rebuild(
         S& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
-        MinimizerSketchBackend backend)
+        MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels)
     {
+        if (backend == MinimizerSketchBackend::ExactSimd
+            && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
+            throw ExactSimdIndexRuntimeError{
+                ExactSimdIndexStatus::invalid_state,
+                "minimizers_per_sequence rebuild"};
+        }
+        if (backend == MinimizerSketchBackend::PaperNtHashSimd
+            && (kernels == nullptr || kernels->paper_nthash == nullptr)) {
+            throw PackedPaperNthashIndexRuntimeError{
+                PackedPaperNthashIndexStatus::invalid_state,
+                "minimizers_per_sequence rebuild"};
+        }
         storage.clear_entity();
-        build(storage, seq, backend);
+        build(storage, seq, backend, kernels);
     }
 
     template <sequence_alphabet Alphabet>
     static void rebuild(
             S& storage,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
-        rebuild(storage, seq, MinimizerSketchBackend::Scalar);
+        rebuild(storage, seq, MinimizerSketchBackend::Scalar, nullptr);
     }
 
     /// query-time: load ONLY the buckets containing any query kmer (§10.5).

@@ -6,7 +6,6 @@
  * storage, need storage to read index_type". NO_POSTGRES.
  */
 module;
-#include <hwy/highway.h>  // DOC0345 Patch H — HWY_NAMESPACE macro names MinimizerSketchBackend
 #include <concepts>
 #include <string_view>
 export module bioseq.indexing.traits;
@@ -15,7 +14,7 @@ import bioseq.indexing.storage;
 import bioseq.sequences;
 import bioseq.storage.lazy;     // canonical basic_lazy_sequence_view
 import bioseq.storage.size;     // sequence_size_t
-import bioseq.sequences.kmers;  // DOC0345 Patch H — MinimizerSketchBackend
+import bioseq.sequences.kmers.highway_contract;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
@@ -52,17 +51,17 @@ concept index_provides_build_fragmented =
     { T::build(s, seq) }   -> std::same_as<void>;
     { T::rebuild(s, seq) } -> std::same_as<void>;
 };
-// DOC0345 Patch H — stronger optional check: the index exposes the explicit
-// 3-arg backend build/rebuild. The registry uses the scalar (2-arg) overload for
-// conformance and the explicit backend overload for PG-selected builds.
+// The explicit backend surface also carries the already-selected immutable
+// minimizer table. SIMD index generation must never redispatch in a leaf.
 template <class T, class Alphabet>
 concept index_provides_backend_build_fragmented =
     sequence_alphabet<Alphabet> && requires (
         typename T::storage_type& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
-        { T::build(storage, seq, backend) } -> std::same_as<void>;
-        { T::rebuild(storage, seq, backend) } -> std::same_as<void>;
+        bioseq::minimizers::MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels) {
+        { T::build(storage, seq, backend, kernels) } -> std::same_as<void>;
+        { T::rebuild(storage, seq, backend, kernels) } -> std::same_as<void>;
     };
 template <class T, class Alphabet>
 concept index_provides_build_inline =
