@@ -509,8 +509,8 @@ struct BlockAlignerScratch {
 /// Pre-compute constants for the prefix scan.
 /// Returns (gap_extend_all, prefix_scan_lane_consts).
 template<class D>
-auto ba_get_prefix_scan_consts(D d, hn::Vec<D> gap_extend)
-    -> std::pair<hn::Vec<D>, hn::Vec<D>>
+HWY_INLINE hn::Vec2<D> ba_get_prefix_scan_consts(
+    D d, hn::Vec<D> gap_extend)
 {
     const size_t L = hn::Lanes(d);
     auto shift1 = lanes_shift_left_zero<1>(d, gap_extend);
@@ -530,9 +530,9 @@ auto ba_get_prefix_scan_consts(D d, hn::Vec<D> gap_extend)
             correct[i] = ba_clamp_i16(
                 static_cast<int32_t>(half_last) + static_cast<int32_t>(tmp[i]));
         }
-        return {hn::Load(d, correct), shift4};
+        return hn::Create2(d, hn::Load(d, correct), shift4);
     }
-    return {shift4, shift4};
+    return hn::Create2(d, shift4, shift4);
 }
 
 /// Parallel prefix scan: result[i] = max_{k=0..i} (input[k] + gap * (i-k)).
@@ -661,27 +661,30 @@ HWY_INLINE auto ba_place_block(
     int16_t relative_zero,
     bool right,
     BlockCoreMetrics& metrics
-) -> std::tuple<hn::Vec<D>, hn::Vec<D>, hn::Vec<D>>
+) -> hn::Vec3<D>
 {
     const size_t L = hn::Lanes(d);
 
     const auto gap_open_vec = hn::Set(d, static_cast<int16_t>(gap_open_neg));
     const auto gap_extend_vec = hn::Set(d, static_cast<int16_t>(gap_extend_neg));
-    auto [gap_extend_all, prefix_scan_consts] =
+    const auto prefix_scan_constants =
         ba_get_prefix_scan_consts(d, gap_extend_vec);
+    const auto gap_extend_all = hn::Get2<0>(prefix_scan_constants);
+    const auto prefix_scan_consts = hn::Get2<1>(prefix_scan_constants);
     auto D_max = hn::Set(d, BA_MIN);
     auto D_argmax_i = hn::Set(d, static_cast<int16_t>(0));
     auto D_argmax_j = hn::Set(d, static_cast<int16_t>(0));
 
     if (width == 0 || height == 0) {
-        return {D_max, D_argmax_i, D_argmax_j};
+        return hn::Create3(d, D_max, D_argmax_i, D_argmax_j);
     }
 
     // gap_open - gap_extend for the prefix scan trick
     const auto gap_open_minus_extend = hn::SaturatedSub(gap_open_vec, gap_extend_vec);
     const auto min_vec = hn::Set(d, BA_MIN);
 
-    hn::Vec<D> D11{}, R11{};
+    auto D11 = min_vec;
+    auto R11 = min_vec;
 
     // The origin (start_i+i==0, start_j+j==0) cell can only fire on the
     // very first place_block call of the very first block. Hoist the
@@ -792,7 +795,7 @@ HWY_INLINE auto ba_place_block(
         metrics.add_product(metrics.cells, processed_columns, height);
     }
 
-    return {D_max, D_argmax_i, D_argmax_j};
+    return hn::Create3(d, D_max, D_argmax_i, D_argmax_j);
 }
 
 // =============================================================================
@@ -935,7 +938,9 @@ void ba_align_core(
         [[maybe_unused]] auto grow_D_argmax_i = hn::Set(d, static_cast<int16_t>(0));
         [[maybe_unused]] auto grow_D_argmax_j = hn::Set(d, static_cast<int16_t>(0));
 
-        hn::Vec<D> D_max{}, D_argmax_i{}, D_argmax_j{};
+        auto D_max = hn::Set(d, BA_MIN);
+        auto D_argmax_i = hn::Zero(d);
+        auto D_argmax_j = hn::Zero(d);
 
         switch (dir) {
         case BlockDirection::Right: {
@@ -952,7 +957,7 @@ void ba_align_core(
             auto d_corner_arg = (prev_dir == BlockDirection::Down)
                 ? hn::SaturatedAdd(D_corner, off_add) : hn::Set(d, BA_MIN);
 
-            std::tie(D_max, D_argmax_i, D_argmax_j) =
+            const auto block_result =
                 ba_place_block<TRACE, X_DROP, COLLECT_METRICS, Alphabet>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     query, reference, alloc.trace,
@@ -962,6 +967,9 @@ void ba_align_core(
                     alloc.temp_buf1.data(), alloc.temp_buf2.data(),
                     d_corner_arg, ba_clamp_i16(-off + BA_ZERO), true,
                     metrics);
+            D_max = hn::Get3<0>(block_result);
+            D_argmax_i = hn::Get3<1>(block_result);
+            D_argmax_j = hn::Get3<2>(block_result);
 
             right_max = ba_prefix_max(d, alloc.D_col.data());
             D_corner = ba_shift_and_offset(d, block_size,
@@ -986,7 +994,7 @@ void ba_align_core(
                 ? hn::SaturatedAdd(D_corner, off_add) : hn::Set(d, BA_MIN);
 
             // Query/ref SWAPPED, D_row<->D_col, R_row<->C_col
-            std::tie(D_max, D_argmax_i, D_argmax_j) =
+            const auto block_result =
                 ba_place_block<TRACE, X_DROP, COLLECT_METRICS, Alphabet>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     reference, query, alloc.trace,
@@ -996,6 +1004,9 @@ void ba_align_core(
                     alloc.temp_buf1.data(), alloc.temp_buf2.data(),
                     d_corner_arg, ba_clamp_i16(-off + BA_ZERO), false,
                     metrics);
+            D_max = hn::Get3<0>(block_result);
+            D_argmax_i = hn::Get3<1>(block_result);
+            D_argmax_j = hn::Get3<2>(block_result);
 
             down_max = ba_prefix_max(d, alloc.D_row.data());
             D_corner = ba_shift_and_offset(d, block_size,
@@ -1015,8 +1026,7 @@ void ba_align_core(
             }
 
             // Grow DOWN: prev_size cols x grow_step rows
-            hn::Vec<D> D_max1, ai1, aj1;
-            std::tie(D_max1, ai1, aj1) =
+            const auto down_block_result =
                 ba_place_block<TRACE, X_DROP, COLLECT_METRICS, Alphabet>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     reference, query, alloc.trace,
@@ -1027,6 +1037,9 @@ void ba_align_core(
                     alloc.C_col.data() + prev_size,
                     hn::Set(d, BA_MIN), ba_clamp_i16(-off + BA_ZERO), false,
                     metrics);
+            const auto D_max1 = hn::Get3<0>(down_block_result);
+            const auto ai1 = hn::Get3<1>(down_block_result);
+            const auto aj1 = hn::Get3<2>(down_block_result);
             grow_D_argmax_i = ai1;
             grow_D_argmax_j = aj1;
 
@@ -1036,8 +1049,7 @@ void ba_align_core(
             }
 
             // Grow RIGHT: grow_step cols x block_size rows
-            hn::Vec<D> D_max2, ai2, aj2;
-            std::tie(D_max2, ai2, aj2) =
+            const auto right_block_result =
                 ba_place_block<TRACE, X_DROP, COLLECT_METRICS, Alphabet>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     query, reference, alloc.trace,
@@ -1048,6 +1060,9 @@ void ba_align_core(
                     alloc.R_row.data() + prev_size,
                     hn::Set(d, BA_MIN), ba_clamp_i16(-off + BA_ZERO), true,
                     metrics);
+            const auto D_max2 = hn::Get3<0>(right_block_result);
+            const auto ai2 = hn::Get3<1>(right_block_result);
+            const auto aj2 = hn::Get3<2>(right_block_result);
 
             right_max = ba_prefix_max(d, alloc.D_col.data());
             down_max  = ba_prefix_max(d, alloc.D_row.data());

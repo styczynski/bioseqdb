@@ -180,7 +180,10 @@ sneaky_snake_simd_batch_for(
     const PrefilterBatchInput& input,
     SneakySnakeOptions options = {})
 {
-    const hn::ScalableTag<std::uint8_t> d;
+    // BitsFromMask returns one uint64_t. Cap scalable targets so every live
+    // predicate bit has an exact scalar representation and the traversal does
+    // not fail its compile-time width contract on wide SVE/RVV machines.
+    const hn::CappedTag<std::uint8_t, 64> d;
     return sneaky_snake_simd_batch_for(d, input, options);
 }
 

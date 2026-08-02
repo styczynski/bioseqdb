@@ -46,15 +46,14 @@ template <class D>
         D d,
         hn::Vec<D> current,
         hn::Vec<D> previous) noexcept {
-    constexpr std::size_t shift = hn::MaxLanes(d) - 1u;
-    if constexpr (hn::MaxLanes(d) <= 64u) {
-        return hn::CombineShiftRightLanes<shift>(d, current, previous);
-    } else {
-        const auto shifted = hn::SlideUpLanes(d, current, 1u);
-        const auto borrowed = hn::Set(
-            d, hn::ExtractLane(previous, hn::Lanes(d) - 1u));
-        return hn::IfThenElse(hn::FirstN(d, 1u), borrowed, shifted);
-    }
+    // MaxLanes is a compile-time capacity, not the runtime vector length on
+    // SVE/RVV. A CombineShiftRightLanes<MaxLanes-1> therefore borrows from
+    // the wrong lane whenever VL is below that capacity. Use the explicit
+    // runtime final lane for every target.
+    const auto shifted = hn::SlideUpLanes(d, current, 1u);
+    const auto borrowed = hn::Set(
+        d, hn::ExtractLane(previous, hn::Lanes(d) - 1u));
+    return hn::IfThenElse(hn::FirstN(d, 1u), borrowed, shifted);
 }
 
 }  // namespace grouped32_target_detail

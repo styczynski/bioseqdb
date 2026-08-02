@@ -800,6 +800,12 @@ struct TwoStackExecutionProof {
     std::uint64_t scalar_event_records = 0;
     std::uint64_t scalar_sort_records = 0;
     std::uint64_t scalar_dedup_records = 0;
+    // Explicit SVE/RVV storage fallback. These counters are never populated
+    // by fixed-width SIMD routes and are authenticated by a disjoint accepted
+    // branch below; scalar work is never relabelled as vector work.
+    std::uint64_t scalable_storage_fallback_calls = 0;
+    std::uint64_t scalable_storage_fallback_input_symbols = 0;
+    std::uint64_t scalable_storage_fallback_minimizers_emitted = 0;
     // Full, contiguous dna4/u32 inputs may use the original report-76
     // vec_stream collector.  These counters are written by the wrapper that
     // actually invokes that collector; they are deliberately separate from
@@ -880,6 +886,12 @@ struct TwoStackExecutionProof {
         BIOSEQ_COMBINE_TWO_STACK_COUNTER(scalar_sort_records);
         BIOSEQ_COMBINE_TWO_STACK_COUNTER(scalar_dedup_records);
         BIOSEQ_COMBINE_TWO_STACK_COUNTER(
+            scalable_storage_fallback_calls);
+        BIOSEQ_COMBINE_TWO_STACK_COUNTER(
+            scalable_storage_fallback_input_symbols);
+        BIOSEQ_COMBINE_TWO_STACK_COUNTER(
+            scalable_storage_fallback_minimizers_emitted);
+        BIOSEQ_COMBINE_TWO_STACK_COUNTER(
             resident_vector_stream_kernel_calls);
         BIOSEQ_COMBINE_TWO_STACK_COUNTER(
             resident_vector_stream_single_calls);
@@ -910,6 +922,75 @@ struct TwoStackExecutionProof {
             bool require_nonempty_vector_work = false) const noexcept {
         const std::uint64_t maximum =
             (std::numeric_limits<std::uint64_t>::max)();
+        const bool scalable_fallback_payload_present =
+            scalable_storage_fallback_calls != 0
+            || scalable_storage_fallback_input_symbols != 0
+            || scalable_storage_fallback_minimizers_emitted != 0;
+        if (scalable_fallback_payload_present) {
+            const bool contradictory_vector_payload_absent =
+                vector_batches == 0
+                && vector_lanes_visited == 0
+                && masked_tail_lanes == 0
+                && bridge_symbols_staged == 0
+                && bridge_vector_runs == 0
+                && consecutive_kmer_batches == 0
+                && canonical_scramble_batches == 0
+                && window_reduction_batches == 0
+                && event_generation_batches == 0
+                && stable_compress_batches == 0
+                && direct_event_compress_batches == 0
+                && tie_matrix_event_batches == 0
+                && row_transpose_batches == 0
+                && row_vector_stores == 0
+                && palindrome_lanes == 0
+                && first_window_tie_events == 0
+                && expiry_tie_events == 0
+                && tie_hash_prefilter_batches == 0
+                && tie_hash_prefilter_rejected_lanes == 0
+                && tie_raw_verification_batches == 0
+                && entering_min_transitions == 0
+                && expiry_rescan_transitions == 0
+                && final_flush_records == 0
+                && fragment_symbols_staged == 0
+                && packed_decode_batches == 0
+                && packed_decode_lanes == 0
+                && packed_word_boundary_merges == 0
+                && ambiguous_symbols == 0
+                && ambiguous_reset_batches == 0
+                && scalar_orchestration_steps == 0
+                && resident_vector_stream_kernel_calls == 0
+                && resident_vector_stream_single_calls == 0
+                && resident_vector_stream_dual_calls == 0
+                && resident_vector_stream_nonempty_work_calls == 0
+                && resident_vector_stream_input_bp == 0
+                && resident_vector_stream_minimizers_emitted == 0
+                && generic_u64_kernel_calls == 0
+                && generic_u64_candidate_blocks == 0
+                && generic_u64_lane_visits == 0
+                && k15_w10_b8_u32_hash_kernel_calls == 0
+                && k15_w10_b8_u32_hash_candidate_blocks == 0
+                && k15_w10_b8_u32_hash_lane_visits == 0
+                && k15_w10_b8_packed22_groups == 0
+                && k15_w10_b8_packed22_lane_visits == 0;
+            const bool exact_scalar_accounting =
+                scalable_storage_fallback_calls > 0
+                && scalar_backend_branches
+                    == scalable_storage_fallback_calls
+                && scalable_storage_fallback_input_symbols == bp_consumed
+                && scalar_hash_symbols == bp_consumed
+                && scalar_window_transitions == bp_consumed
+                && scalable_storage_fallback_minimizers_emitted
+                    == minimizers_emitted
+                && scalar_event_records == minimizers_emitted
+                && scalar_tail_symbols == 0
+                && scalar_sort_records == 0
+                && scalar_dedup_records == 0;
+            return !saturated
+                && fail_closed_rejections == 0
+                && contradictory_vector_payload_absent
+                && exact_scalar_accounting
+                && (!require_nonempty_vector_work || bp_consumed > 0);
+        }
         const bool resident_payload_present =
             resident_vector_stream_kernel_calls != 0
             || resident_vector_stream_single_calls != 0
@@ -1122,9 +1203,10 @@ inline constexpr std::size_t packed_paper_nthash_max_window = 64;
 /**
  * Algorithm-local evidence for the packed paper-ntHash kernel.
  *
- * The scalar append count is truthful orchestration after SIMD has selected a
- * complete (hash, position, strand) event.  It is not a hash/window fallback.
- * The four fallback counters must remain zero on every accepted execution.
+ * The scalar append count is truthful orchestration after fixed-width SIMD
+ * has selected a complete (hash, position, strand) event. SVE/RVV instead use
+ * the disjoint scalable-storage branch below; its explicit counters must not
+ * coexist with vector payload.
  */
 struct PackedPaperNthashExecutionProof {
     std::uint32_t scheme_id = 0;
@@ -1162,6 +1244,9 @@ struct PackedPaperNthashExecutionProof {
     std::uint64_t scalar_window_transitions = 0;
     std::uint64_t scalar_minimum_decisions = 0;
     std::uint64_t fallback_calls = 0;
+    std::uint64_t scalable_storage_fallback_calls = 0;
+    std::uint64_t scalable_storage_fallback_input_symbols = 0;
+    std::uint64_t scalable_storage_fallback_minimizers_emitted = 0;
     bool positions_are_segment_local = false;
     bool aggregation_mismatch = false;
     bool saturated = false;
@@ -1236,11 +1321,71 @@ struct PackedPaperNthashExecutionProof {
         BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(scalar_window_transitions);
         BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(scalar_minimum_decisions);
         BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(fallback_calls);
+        BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(
+            scalable_storage_fallback_calls);
+        BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(
+            scalable_storage_fallback_input_symbols);
+        BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(
+            scalable_storage_fallback_minimizers_emitted);
 #undef BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD
     }
 
     [[nodiscard]] constexpr bool accepted(
         bool require_nonempty_vector_work = true) const noexcept {
+        const bool scalable_fallback_payload_present =
+            scalable_storage_fallback_calls != 0
+            || scalable_storage_fallback_input_symbols != 0
+            || scalable_storage_fallback_minimizers_emitted != 0;
+        if (scalable_fallback_payload_present) {
+            const bool vector_payload_absent =
+                logical_streams == 0
+                && physical_vector_lanes == 0
+                && vector_registers_per_step == 0
+                && packed_decode_batches == 0
+                && packed_decode_lane_visits == 0
+                && hash_initialization_batches == 0
+                && rolling_hash_batches == 0
+                && hash_table_lookup_batches == 0
+                && canonical_sum_batches == 0
+                && window_update_batches == 0
+                && suffix_rebuild_batches == 0
+                && emission_decision_batches == 0
+                && emission_mask_store_batches == 0
+                && stream_boundary_records_buffered == 0
+                && stream_boundary_records_committed == 0
+                && stream_boundary_duplicates_suppressed == 0
+                && partial_chunk_callback_batches == 0
+                && masked_tail_lane_visits == 0;
+            const bool exact_scalar_accounting =
+                scalable_storage_fallback_calls > 0
+                && fallback_calls == scalable_storage_fallback_calls
+                && scalable_storage_fallback_input_symbols == input_symbols
+                && scalar_hash_symbols == input_symbols
+                && input_symbols >= kmer_size
+                && scalar_window_transitions
+                    == input_symbols - kmer_size + 1u
+                && scalar_window_transitions >= window_size
+                && scalar_minimum_decisions
+                    == scalar_window_transitions - window_size + 1u
+                && scalable_storage_fallback_minimizers_emitted
+                    == minimizers_emitted
+                && scalar_collector_appends == minimizers_emitted
+                && tied_endpoint_records_emitted <= minimizers_emitted;
+            return !saturated
+                && !aggregation_mismatch
+                && scheme_id == packed_paper_nthash_scheme_id
+                && kmer_size > 0
+                && window_size > 0
+                && window_size <= packed_paper_nthash_max_window
+                && nthash_rotation == 7
+                && source_storage_unit_bytes >= sizeof(std::uint32_t)
+                && segments_combined > 0
+                && positions_are_segment_local
+                && fail_closed_rejections == 0
+                && vector_payload_absent
+                && exact_scalar_accounting
+                && (!require_nonempty_vector_work || input_symbols > 0);
+        }
         const bool vector_work_ok = !require_nonempty_vector_work
             || (packed_decode_batches > 0
                 && packed_decode_lane_visits > 0
@@ -1583,6 +1728,9 @@ struct ReferenceMinimizerExecutionProof final {
     std::uint64_t vector_callback_batches = 0u;
     std::uint64_t vector_lane_visits = 0u;
     std::uint64_t last_storage_unit_bytes = 0u;
+    std::uint64_t scalable_storage_fallback_calls = 0u;
+    std::uint64_t scalable_storage_fallback_input_symbols = 0u;
+    std::uint64_t scalable_storage_fallback_minimizers_emitted = 0u;
 };
 
 /** Exact family evidence; only the member named by `algorithm` is populated. */

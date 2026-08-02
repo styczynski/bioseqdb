@@ -161,25 +161,28 @@ public:
 
 		HWY_INLINE traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
 #if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-			HWY_ALIGN std::array<input_t, lane_capacity> incoming_storage{};
-			HWY_ALIGN std::array<input_t, lane_capacity> outgoing_storage{};
-			HWY_ALIGN std::array<input_t, lane_capacity> result_storage{};
-			hn::StoreU(incoming, d, incoming_storage.data());
-			hn::StoreU(outgoing, d, outgoing_storage.data());
-			const size_t lanes = hn::Lanes(d);
-			for (size_t lane = 0; lane < lanes; ++lane) {
-				state_forward_storage[lane] =
-					(state_forward_storage[lane] << traits::bits_per_char
-					 | incoming_storage[lane]) & mask_value;
-				state_reverse_compl_storage[lane] =
-					(state_reverse_compl_storage[lane] >> traits::bits_per_char)
-					| (static_cast<input_t>(traits::letter_complement(
-						outgoing_storage[lane])) << rev_shift);
-				result_storage[lane] = std::min(
-					state_forward_storage[lane],
-					state_reverse_compl_storage[lane]);
-			}
-			return hn::LoadU(d, result_storage.data());
+			auto state_forward = hn::LoadU(
+				d, state_forward_storage.data());
+			auto state_reverse_compl = hn::LoadU(
+				d, state_reverse_compl_storage.data());
+			const auto mask = hn::Set(d, mask_value);
+			state_forward = hn::And(
+				hn::Or(
+					hn::ShiftLeft<traits::bits_per_char>(state_forward),
+					incoming),
+				mask);
+			const auto new_vec = hn::ShiftLeftSame(
+				apply_complement(d, outgoing), rev_shift);
+			state_reverse_compl = hn::Or(
+				hn::ShiftRight<traits::bits_per_char>(state_reverse_compl),
+				new_vec);
+			hn::StoreU(
+				state_forward, d, state_forward_storage.data());
+			hn::StoreU(
+				state_reverse_compl,
+				d,
+				state_reverse_compl_storage.data());
+			return hn::Min(state_forward, state_reverse_compl);
 #else
 			state_forward = hn::And(hn::Or(hn::ShiftLeft<traits::bits_per_char>(state_forward), incoming), mask);
 			const typename traits::input_vec_t new_vec = hn::ShiftLeftSame(apply_complement(d, outgoing), rev_shift);

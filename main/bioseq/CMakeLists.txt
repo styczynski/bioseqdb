@@ -245,7 +245,8 @@ function(bioseq_private_packed_access_scope_names
     set(_bioseq_scopes
       consume_two_stack_nthash_fragment
       collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
-      run_fragmented_impl)
+      run_fragmented_impl
+      scalable_two_stack_storage_fallback)
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
     set(_bioseq_scopes
@@ -339,6 +340,11 @@ function(bioseq_private_packed_access_line_allowed
             ": resident.read_cptr(resident.cbegin());"))
       set(_bioseq_allowed TRUE)
     elseif("${_bioseq_scope}" STREQUAL "run_fragmented_impl"
+        AND "${_bioseq_line}" STREQUAL
+          "constexpr std::size_t letters_per_unit = traits::letters_per_unit;")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "scalable_two_stack_storage_fallback"
         AND "${_bioseq_line}" STREQUAL
           "constexpr std::size_t letters_per_unit = traits::letters_per_unit;")
       set(_bioseq_allowed TRUE)

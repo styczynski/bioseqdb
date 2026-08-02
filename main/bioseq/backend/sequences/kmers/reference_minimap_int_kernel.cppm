@@ -9,6 +9,7 @@ import bioseq.common.sequan_compat;
 import bioseq.common.circular_append_buffer;
 import bioseq.sequences;
 import bioseq.instr;
+import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.highway_contract;
 import bioseq.highway.sources.sequence_ops;
 import bioseq.highway.sources.hasher_minimap_int;
@@ -43,6 +44,9 @@ struct ReferenceSimdMinimizerTestReceipt {
     std::uint64_t vector_callback_batches = 0u;
     std::uint64_t vector_lane_visits = 0u;
     std::uint64_t last_storage_unit_bytes = 0u;
+    std::uint64_t scalable_storage_fallback_calls = 0u;
+    std::uint64_t scalable_storage_fallback_input_symbols = 0u;
+    std::uint64_t scalable_storage_fallback_minimizers_emitted = 0u;
 };
 
 inline thread_local ReferenceSimdMinimizerTestReceipt
@@ -137,6 +141,7 @@ inline void collect_minimizers_simd(
     HWY_ALIGN storage_unit temp_buffer3[hn::MaxLanes(dd)];
     HWY_ALIGN storage_unit temp_buffer4[hn::MaxLanes(dd)];
     size_t last_pushed_position = 0;
+    bool has_last_pushed_position = false;
 
     // submit_results emits one MinimapSketch per lane in `min_mask`, drawing the
     // hash from `current_min` and the strand from `strand_to_emit` (which lets the
@@ -185,21 +190,25 @@ inline void collect_minimizers_simd(
                     const size_t current_pos = static_cast<storage_unit>(buffer.last_write_pos());
                     const size_t distance = (current_pos > temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
-                    if (last_pushed_position != real_pos) {
+                    if (!has_last_pushed_position
+                        || last_pushed_position != real_pos) {
                         collector.collect(MinimizerT(
                             /*kmer=*/temp_buffer1[i],
                             /*last_pos=*/real_pos,
                             /*strand=*/strand_bit));
                         last_pushed_position = real_pos;
+                        has_last_pushed_position = true;
                     }
                 } else {
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
-                    if (last_pushed_position != real_pos) {
+                    if (!has_last_pushed_position
+                        || last_pushed_position != real_pos) {
                         collector.collect(MinimizerT(
                             /*kmer=*/temp_buffer1[i],
                             /*last_pos=*/real_pos,
                             /*strand=*/strand_bit));
                         last_pushed_position = real_pos;
+                        has_last_pushed_position = true;
                     }
                 }
             }
@@ -492,6 +501,27 @@ inline void collect_minimizers_simd_constexpr(
 
 namespace minimizer_kernel_detail {
 
+// Donor-visible callable: SVE/RVV select it from statements inside the common
+// run_reference body, so the code generator observes and attributes the same
+// callable geometry before emitting every target.
+template<class Range, class Collector>
+void collect_reference_scalable_storage_fallback(
+    Collector& collector,
+    Range& range,
+    std::size_t window,
+    std::size_t kmer)
+{
+    ::bioseq::simd::collect_minimizers<
+        minimap_int_hasher,
+        MinimapSketchData>(
+            collector,
+            range,
+            range.begin(),
+            range.end(),
+            window,
+            kmer);
+}
+
 template<sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] bool run_reference(
     MinimizerKernelInvocation& invocation,
@@ -505,6 +535,22 @@ template<sequence_alphabet Alphabet, class StorageUnit>
 #ifdef BIOSEQ_TEST_INDEXES
             reset_reference_simd_minimizer_test_receipt();
 #endif
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+            collect_reference_scalable_storage_fallback(
+                collector,
+                range,
+                invocation.window,
+                invocation.kmer);
+#ifdef BIOSEQ_TEST_INDEXES
+            reference_simd_minimizer_test_receipt.kernel_calls = 1u;
+            reference_simd_minimizer_test_receipt.last_storage_unit_bytes =
+                sizeof(StorageUnit);
+            reference_simd_minimizer_test_receipt.
+                scalable_storage_fallback_calls = 1u;
+            reference_simd_minimizer_test_receipt.
+                scalable_storage_fallback_input_symbols = range.bp_size();
+#endif
+#else
             if (invocation.window == 10u && invocation.kmer == 15u) {
                 collect_minimizers_simd_constexpr<
                     10u, 15u, minimap_int_hasher, MinimapSketchData>(
@@ -513,9 +559,18 @@ template<sequence_alphabet Alphabet, class StorageUnit>
                 collect_minimizers_simd<
                     minimap_int_hasher, MinimapSketchData>(
                         collector, range, range.begin(), range.end(),
-                        invocation.window, invocation.kmer);
+                    invocation.window, invocation.kmer);
             }
+#endif
+
+            const bool flushed = collector.flush();
+            result.emitted = collector.committed_size();
 #ifdef BIOSEQ_TEST_INDEXES
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+            reference_simd_minimizer_test_receipt.
+                scalable_storage_fallback_minimizers_emitted =
+                    result.emitted;
+#endif
             const auto receipt =
                 reference_simd_minimizer_test_receipt_snapshot();
             result.proof.reference = {
@@ -524,18 +579,30 @@ template<sequence_alphabet Alphabet, class StorageUnit>
                 .vector_lane_visits = receipt.vector_lane_visits,
                 .last_storage_unit_bytes =
                     receipt.last_storage_unit_bytes,
+                .scalable_storage_fallback_calls =
+                    receipt.scalable_storage_fallback_calls,
+                .scalable_storage_fallback_input_symbols =
+                    receipt.scalable_storage_fallback_input_symbols,
+                .scalable_storage_fallback_minimizers_emitted =
+                    receipt.scalable_storage_fallback_minimizers_emitted,
             };
 #else
             result.proof.reference.kernel_calls = 1u;
             result.proof.reference.last_storage_unit_bytes =
                 sizeof(StorageUnit);
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+            result.proof.reference.scalable_storage_fallback_calls = 1u;
+            result.proof.reference.
+                scalable_storage_fallback_input_symbols = range.bp_size();
+            result.proof.reference.
+                scalable_storage_fallback_minimizers_emitted =
+                    result.emitted;
 #endif
-            if (!collector.flush() || !collector.ok()) {
-                result.emitted = collector.committed_size();
+#endif
+            if (!flushed || !collector.ok()) {
                 result.status = MinimizerKernelStatus::sink_rejected;
                 return;
             }
-            result.emitted = collector.committed_size();
         });
 }
 
