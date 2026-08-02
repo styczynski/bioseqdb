@@ -51,7 +51,7 @@ namespace packed_paper_nthash_internal {
  * selected [begin,end) interval, so iterator offset zero maps to local
  * position zero and every emitted position is segment-local.
  */
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN bounded_u32_dna4_view
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN bounded_u32_dna4_view
 struct bounded_u32_dna4_view {
     using output_sequence = sequence_custom_alphabet<
         seq::dna4, std::uint32_t, 2>;
@@ -95,7 +95,7 @@ struct bounded_u32_dna4_view {
         return static_cast<std::size_t>(last - first);
     }
 };
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END bounded_u32_dna4_view
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END bounded_u32_dna4_view
 
 template<class D, std::size_t NumStreams>
 [[nodiscard]] HWY_INLINE auto lookup_table_stream(
@@ -629,7 +629,7 @@ template<
     class Collector,
     supports_compact_sequence_bitcast_view View,
     class Iterator>
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN run_packed_kernel
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN run_packed_kernel
 [[gnu::always_inline]] [[gnu::flatten]] inline void run_packed_kernel(
     Collector& collector,
     const View& view,
@@ -785,7 +785,7 @@ template<
     proof.scalar_collector_appends =
         state.evidence.scalar_collector_appends;
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END run_packed_kernel
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END run_packed_kernel
 
 } // namespace packed_paper_nthash_internal
 
@@ -803,7 +803,7 @@ template<
     class Iterator = decltype(compact_sequence_range<R>().begin()),
     class Collector = minimizer_sink_collector<MinimizerT>>
 [[nodiscard]] inline PackedPaperNthashResult
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_minimizers_packed_paper_nthash_simd_checked
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN collect_minimizers_packed_paper_nthash_simd_checked
 collect_minimizers_packed_paper_nthash_simd_checked(
     Collector& collector,
     compact_sequence_range<R>& sequence,
@@ -934,7 +934,7 @@ collect_minimizers_packed_paper_nthash_simd_checked(
 #endif
     }
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_minimizers_packed_paper_nthash_simd_checked
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_minimizers_packed_paper_nthash_simd_checked
 
 /** Whole-resident convenience overload; still performs the checked gate. */
 template<

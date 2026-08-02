@@ -3714,7 +3714,7 @@ template<
     supports_compact_sequence_range R,
     class Collector>
 [[nodiscard]] inline TwoStackContinuationStatus
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN consume_two_stack_nthash_fragment
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN consume_two_stack_nthash_fragment
 consume_two_stack_nthash_fragment(
     TwoStackContinuationState<
         W, K, typename compact_sequence_range<R>::traits>& state,
@@ -3740,7 +3740,7 @@ consume_two_stack_nthash_fragment(
         consume_begin_bp,
         consume_end_bp);
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END consume_two_stack_nthash_fragment
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END consume_two_stack_nthash_fragment
 
 
 template<std::size_t W, std::size_t K, class AlphabetTraits, class Collector>
@@ -3857,7 +3857,7 @@ template<
     class Sequence,
     class Collector>
 [[nodiscard]] inline TwoStackFinalizeResult
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
 collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
     Collector& collector,
     Sequence& sequence,
@@ -3958,7 +3958,7 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
         return finalize_two_stack_nthash(state, collector);
     }
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
 
 template<
     std::size_t W,
@@ -4243,6 +4243,7 @@ template<sequence_alphabet Alphabet, class StorageUnit>
             });
 }
 
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN run_fragmented_impl
 template<std::size_t W, std::size_t K,
          sequence_alphabet Alphabet, class StorageUnit>
 void run_fragmented_impl(
@@ -4340,6 +4341,7 @@ void run_fragmented_impl(
             TwoStackContinuationStatus::collector_overflow);
     }
 }
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END run_fragmented_impl
 
 template<sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] bool run_fragmented(

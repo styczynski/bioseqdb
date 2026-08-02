@@ -751,11 +751,11 @@ public:
   [[nodiscard]] iterator cend() const noexcept {
     return cbegin() + size();
   }
-  // BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN byte_upload_range_address_adapter
+  // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN byte_upload_range_address_adapter
   [[nodiscard]] const std::byte *read_cptr(const iterator &it) const noexcept {
     return it.address;
   }
-  // BIOSEQ_DOC0377_PRIVATE_PACKED_END byte_upload_range_address_adapter
+  // BIOSEQ_PRIVATE_PACKED_ACCESS_END byte_upload_range_address_adapter
 };
 
 template <sequence_alphabet Alphabet> struct canonical_u32_window {
@@ -928,7 +928,7 @@ template <sequence_alphabet Alphabet>
 /// byte/bp/padding accessors. Fragmented lazy sequences are excluded by the
 /// separate fragmentation guard; selected Vulkan segment callers use the
 /// checked segment upload path below and throw on GPU declines.
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN vulkan_sketchable_sequence
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN vulkan_sketchable_sequence
 template <class Seq>
 concept vulkan_sketchable_sequence = requires (const Seq& seq) {
     typename std::remove_cvref_t<Seq>::traits;
@@ -940,7 +940,7 @@ concept vulkan_sketchable_sequence = requires (const Seq& seq) {
     { seq.padding() };
     { seq.read_cptr(seq.cbegin()) };
 };
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END vulkan_sketchable_sequence
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END vulkan_sketchable_sequence
 
 struct SequenceUploadView {
     const void* bytes = nullptr;
@@ -1015,7 +1015,7 @@ template <class Traits>
         static_cast<std::size_t>(ceil_div_u64(context_bp, lpu)));
 }
 
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN compute_segment_descriptor
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN compute_segment_descriptor
 template <class Seq>
 [[nodiscard]] SegmentUploadDescriptor compute_segment_descriptor(
     const Seq& seq,
@@ -1043,9 +1043,9 @@ template <class Seq>
         .tail_padding = tail_padding,
     };
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END compute_segment_descriptor
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END compute_segment_descriptor
 
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN make_phase_c_segment_window
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN make_phase_c_segment_window
 template <class Seq>
 [[nodiscard]] PhaseCSegmentWindow make_phase_c_segment_window(
     const Seq& seq,
@@ -1077,7 +1077,7 @@ template <class Seq>
         .collected_bp = sub_descriptor.window_bp,
     };
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END make_phase_c_segment_window
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END make_phase_c_segment_window
 
 template <class Seq>
 [[nodiscard]] bool split_phase_c_segment_window(
@@ -1164,7 +1164,7 @@ template <class MinimizerT, class Traits>
     return collected_floor_bp;
 }
 
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN phase_c_segment_windows
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN phase_c_segment_windows
 template <class MinimizerT, class Seq>
 [[nodiscard]] std::vector<PhaseCSegmentWindow> phase_c_segment_windows(
     const Seq& seq,
@@ -1223,9 +1223,9 @@ template <class MinimizerT, class Seq>
     }
     return windows;
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END phase_c_segment_windows
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END phase_c_segment_windows
 
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN make_upload_view_from_window
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN make_upload_view_from_window
 template <class Seq, class AddressedElement>
 [[nodiscard]] inline SequenceUploadView make_upload_view_from_window(
     const Seq&,
@@ -1257,9 +1257,9 @@ template <class Seq, class AddressedElement>
         .alphabet_kind = alphabet_kernel_kind_of_traits<traits>(),
     };
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END make_upload_view_from_window
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END make_upload_view_from_window
 
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN make_sequence_upload_view
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN make_sequence_upload_view
 template <vulkan_sketchable_sequence Seq>
 [[nodiscard]] inline SequenceUploadView make_sequence_upload_view(const Seq& seq) {
     auto begin = seq.cbegin();
@@ -1348,7 +1348,7 @@ template <sequence_alphabet Alphabet>
         .alphabet_kind = kernel,
     };
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END make_sequence_upload_view
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END make_sequence_upload_view
 
 // ===========================================================================
 // Device minimizer storage + sketch result (DOC0307 §4.3)
@@ -3225,7 +3225,7 @@ template <class MinimizerT, class Seq>
 /// Build a dense GPU-resident minimizer index for one stitched segment window.
 /// Positions in the returned index are local to `lo_unit`; callers that seed
 /// against the full target must attach the global base to the resident handle.
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN build_gpu_segment_index_on_device_resident_impl
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN build_gpu_segment_index_on_device_resident_impl
 template <class MinimizerT, class Seq>
 [[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_segment_index_on_device_resident_impl(
     const Seq& seq,
@@ -3309,7 +3309,7 @@ template <class MinimizerT, class Seq>
         }
     }
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END build_gpu_segment_index_on_device_resident_impl
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END build_gpu_segment_index_on_device_resident_impl
 
 /// Collector-compatible wrapper for existing minimizer call sites. Feeds the
 /// GPU sketch into `collector`; returns false only for pre-dispatch ineligible
@@ -3378,7 +3378,7 @@ decode_sorted_pair_bytes(
 /// sorted by
 /// (kmer, encoded_pos).
 /// Throws `VulkanRuntimeError` on every selected-GPU decline — no scalar fallback.
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
 template <class Seq>
 [[nodiscard]] VulkanOwnedSegmentPairs
 collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
@@ -3841,11 +3841,11 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
         }
     }
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
 
 /// Collector-compatible segment sketch kept for tests and target alignment. It
 /// is checked and throws when used as a selected Vulkan path.
-// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_minimizers_vulkan_segment_resident_impl_or_throw
+// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN collect_minimizers_vulkan_segment_resident_impl_or_throw
 template <class MinimizerT, class Collector, class Seq>
 void collect_minimizers_vulkan_segment_resident_impl_or_throw(
     Collector& collector,
@@ -4028,7 +4028,7 @@ void collect_minimizers_vulkan_segment_resident_impl_or_throw(
         }
     }
 }
-// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_minimizers_vulkan_segment_resident_impl_or_throw
+// BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_minimizers_vulkan_segment_resident_impl_or_throw
 
 template <class MinimizerT, sequence_alphabet Alphabet>
 [[nodiscard]] std::optional<VulkanSketchResult<MinimizerT>>

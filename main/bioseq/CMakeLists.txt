@@ -119,8 +119,8 @@ foreach(_bioseq_pg_source IN LISTS BIOSEQ_PG_RUNTIME_GUARD_SOURCES)
   endif()
 endforeach()
 
-# DOC0377 — representation-erased sequence consumers must not reach through
-# the lazy facade into a concrete scanner/range implementation.  These files
+# Lazy-facade representation-erasure invariant: sequence consumers must not
+# reach through the facade into a concrete scanner/range implementation. These files
 # are the complete implementation-owner allowlist:
 #   * lazy_compact_sequence.cppm owns the canonical facade adapters;
 #   * sequence_scanner*.cppm own scanner implementations and PG leases.
@@ -187,14 +187,14 @@ foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
     if(_bioseq_lazy_code_line MATCHES
         "(\\.scanner[ \t]*\\(|\\.underlying[ \t]*\\(|lazy_compact_sequence[ \t]*<|sequence_scanner_pg[ \t]*<)")
       message(FATAL_ERROR
-        "DOC0377 concrete lazy/scanner dependency in ${_bioseq_lazy_source}; "
+        "Lazy-facade representation-erasure violation in ${_bioseq_lazy_source}; "
         "consume basic_lazy_sequence_view or update the documented ownership boundary; "
         "matched code: ${_bioseq_lazy_code_line}")
     endif()
   endforeach()
 endforeach()
 
-# DOC0377 §14.2 completion gate.  The broad boundary gate above prevents a
+# Lazy-facade completion gate. The broad boundary gate above prevents a
 # concrete lazy/scanner type from escaping anywhere in backend code; this
 # narrower production-owner sweep also rejects the physical-geometry escape
 # hatches named by the specification.
@@ -231,7 +231,7 @@ list(REMOVE_DUPLICATES BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES)
 # scopes.  An exact line is then checked against both its source and active
 # private resident/admitted scope, so copying an allowed spelling elsewhere is
 # still a configure-time failure.
-function(bioseq_doc0377_private_packed_scope_names
+function(bioseq_private_packed_access_scope_names
     _bioseq_source _bioseq_result)
   set(_bioseq_scopes)
   if("${_bioseq_source}" STREQUAL
@@ -265,7 +265,7 @@ endfunction()
 
 # Pure transition helper: production turns a nonempty error into FATAL_ERROR,
 # while the configure-time self-check below proves every rejection branch.
-function(bioseq_doc0377_private_packed_scope_transition
+function(bioseq_private_packed_access_scope_transition
     _bioseq_active _bioseq_seen _bioseq_allowed _bioseq_kind _bioseq_name
     _bioseq_result_active _bioseq_result_seen _bioseq_result_error)
   set(_bioseq_next_active "${_bioseq_active}")
@@ -303,7 +303,7 @@ function(bioseq_doc0377_private_packed_scope_transition
   set(${_bioseq_result_error} "${_bioseq_error}" PARENT_SCOPE)
 endfunction()
 
-function(bioseq_doc0377_private_packed_line_allowed
+function(bioseq_private_packed_access_line_allowed
     _bioseq_source _bioseq_scope _bioseq_line _bioseq_result)
   set(_bioseq_allowed FALSE)
   if("${_bioseq_source}" STREQUAL
@@ -406,19 +406,19 @@ endfunction()
 # backslashes all affect CMake list parsing, so encode each before introducing
 # the newline separators. Decoding happens only after foreach selects one
 # encoded element.
-function(bioseq_doc0377_read_encoded_physical_lines
+function(bioseq_private_packed_access_read_encoded_physical_lines
     _bioseq_source _bioseq_result)
   file(READ "${_bioseq_source}" _bioseq_contents)
   string(REPLACE "\r\n" "\n" _bioseq_contents "${_bioseq_contents}")
   string(REPLACE "\r" "\n" _bioseq_contents "${_bioseq_contents}")
   set(_bioseq_backslash_token
-    "__BIOSEQ_DOC0377_LINE_ESCAPE_BACKSLASH_9F2D__")
+    "__BIOSEQ_PRIVATE_PACKED_LINE_ESCAPE_BACKSLASH_9F2D__")
   set(_bioseq_semicolon_token
-    "__BIOSEQ_DOC0377_LINE_ESCAPE_SEMICOLON_9F2D__")
+    "__BIOSEQ_PRIVATE_PACKED_LINE_ESCAPE_SEMICOLON_9F2D__")
   set(_bioseq_open_bracket_token
-    "__BIOSEQ_DOC0377_LINE_ESCAPE_OPEN_BRACKET_9F2D__")
+    "__BIOSEQ_PRIVATE_PACKED_LINE_ESCAPE_OPEN_BRACKET_9F2D__")
   set(_bioseq_close_bracket_token
-    "__BIOSEQ_DOC0377_LINE_ESCAPE_CLOSE_BRACKET_9F2D__")
+    "__BIOSEQ_PRIVATE_PACKED_LINE_ESCAPE_CLOSE_BRACKET_9F2D__")
   foreach(_bioseq_escape_token IN ITEMS
       "${_bioseq_backslash_token}"
       "${_bioseq_semicolon_token}"
@@ -428,7 +428,7 @@ function(bioseq_doc0377_read_encoded_physical_lines
       _bioseq_escape_collision)
     if(NOT _bioseq_escape_collision EQUAL -1)
       message(FATAL_ERROR
-        "DOC0377 physical-line escape token collision in ${_bioseq_source}")
+        "private packed access invariant physical-line escape token collision in ${_bioseq_source}")
     endif()
   endforeach()
   string(REPLACE "\\" "${_bioseq_backslash_token}"
@@ -443,70 +443,70 @@ function(bioseq_doc0377_read_encoded_physical_lines
   set(${_bioseq_result} "${_bioseq_lines}" PARENT_SCOPE)
 endfunction()
 
-function(bioseq_doc0377_decode_physical_line
+function(bioseq_private_packed_access_decode_physical_line
     _bioseq_encoded _bioseq_result)
   set(_bioseq_line "${_bioseq_encoded}")
-  string(REPLACE "__BIOSEQ_DOC0377_LINE_ESCAPE_SEMICOLON_9F2D__" ";"
+  string(REPLACE "__BIOSEQ_PRIVATE_PACKED_LINE_ESCAPE_SEMICOLON_9F2D__" ";"
     _bioseq_line "${_bioseq_line}")
-  string(REPLACE "__BIOSEQ_DOC0377_LINE_ESCAPE_OPEN_BRACKET_9F2D__" "["
+  string(REPLACE "__BIOSEQ_PRIVATE_PACKED_LINE_ESCAPE_OPEN_BRACKET_9F2D__" "["
     _bioseq_line "${_bioseq_line}")
-  string(REPLACE "__BIOSEQ_DOC0377_LINE_ESCAPE_CLOSE_BRACKET_9F2D__" "]"
+  string(REPLACE "__BIOSEQ_PRIVATE_PACKED_LINE_ESCAPE_CLOSE_BRACKET_9F2D__" "]"
     _bioseq_line "${_bioseq_line}")
-  string(REPLACE "__BIOSEQ_DOC0377_LINE_ESCAPE_BACKSLASH_9F2D__" "\\"
+  string(REPLACE "__BIOSEQ_PRIVATE_PACKED_LINE_ESCAPE_BACKSLASH_9F2D__" "\\"
     _bioseq_line "${_bioseq_line}")
   set(${_bioseq_result} "${_bioseq_line}" PARENT_SCOPE)
 endfunction()
 
 # Configure-time negative self-checks for the marker state machine and the
 # source+scope+exact-line binding.  These do not touch production files.
-set(_bioseq_doc0377_self_allowed alpha beta)
-bioseq_doc0377_private_packed_scope_transition(
-  "" "" "${_bioseq_doc0377_self_allowed}" BEGIN alpha
+set(_bioseq_private_packed_self_allowed alpha beta)
+bioseq_private_packed_access_scope_transition(
+  "" "" "${_bioseq_private_packed_self_allowed}" BEGIN alpha
   _bioseq_self_active _bioseq_self_seen _bioseq_self_error)
 if(NOT _bioseq_self_error STREQUAL "" OR NOT _bioseq_self_active STREQUAL "alpha")
-  message(FATAL_ERROR "DOC0377 private-scope guard positive self-check failed")
+  message(FATAL_ERROR "private packed access invariant private-scope guard positive self-check failed")
 endif()
-bioseq_doc0377_private_packed_scope_transition(
+bioseq_private_packed_access_scope_transition(
   "${_bioseq_self_active}" "${_bioseq_self_seen}"
-  "${_bioseq_doc0377_self_allowed}" BEGIN beta
+  "${_bioseq_private_packed_self_allowed}" BEGIN beta
   _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_nested)
-bioseq_doc0377_private_packed_scope_transition(
+bioseq_private_packed_access_scope_transition(
   "${_bioseq_self_active}" "${_bioseq_self_seen}"
-  "${_bioseq_doc0377_self_allowed}" END beta
+  "${_bioseq_private_packed_self_allowed}" END beta
   _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_mismatch)
-bioseq_doc0377_private_packed_scope_transition(
-  "" "${_bioseq_self_seen}" "${_bioseq_doc0377_self_allowed}" END alpha
+bioseq_private_packed_access_scope_transition(
+  "" "${_bioseq_self_seen}" "${_bioseq_private_packed_self_allowed}" END alpha
   _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_unbalanced)
-bioseq_doc0377_private_packed_scope_transition(
-  "" "${_bioseq_self_seen}" "${_bioseq_doc0377_self_allowed}" BEGIN alpha
+bioseq_private_packed_access_scope_transition(
+  "" "${_bioseq_self_seen}" "${_bioseq_private_packed_self_allowed}" BEGIN alpha
   _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_duplicate)
-bioseq_doc0377_private_packed_scope_transition(
-  "" "${_bioseq_self_seen}" "${_bioseq_doc0377_self_allowed}" BEGIN gamma
+bioseq_private_packed_access_scope_transition(
+  "" "${_bioseq_self_seen}" "${_bioseq_private_packed_self_allowed}" BEGIN gamma
   _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_unknown)
-bioseq_doc0377_private_packed_scope_transition(
-  "" "${_bioseq_self_seen}" "${_bioseq_doc0377_self_allowed}" OTHER alpha
+bioseq_private_packed_access_scope_transition(
+  "" "${_bioseq_self_seen}" "${_bioseq_private_packed_self_allowed}" OTHER alpha
   _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_kind)
 if(_bioseq_self_nested STREQUAL "" OR _bioseq_self_mismatch STREQUAL ""
     OR _bioseq_self_unbalanced STREQUAL "" OR _bioseq_self_duplicate STREQUAL ""
     OR _bioseq_self_unknown STREQUAL "" OR _bioseq_self_kind STREQUAL "")
-  message(FATAL_ERROR "DOC0377 private-scope guard negative self-check failed")
+  message(FATAL_ERROR "private packed access invariant private-scope guard negative self-check failed")
 endif()
-set(_bioseq_doc0377_self_source
+set(_bioseq_private_packed_self_source
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm")
-bioseq_doc0377_private_packed_line_allowed(
-  "${_bioseq_doc0377_self_source}" bounded_u32_dna4_view
+bioseq_private_packed_access_line_allowed(
+  "${_bioseq_private_packed_self_source}" bounded_u32_dna4_view
   "return local_view_units * traits::letters_per_unit - local_bp_size;"
   _bioseq_self_exact_allowed)
-bioseq_doc0377_private_packed_line_allowed(
-  "${_bioseq_doc0377_self_source}" run_packed_kernel
+bioseq_private_packed_access_line_allowed(
+  "${_bioseq_private_packed_self_source}" run_packed_kernel
   "return local_view_units * traits::letters_per_unit - local_bp_size;"
   _bioseq_self_wrong_scope_allowed)
-bioseq_doc0377_private_packed_line_allowed(
-  "${_bioseq_doc0377_self_source}" bounded_u32_dna4_view
+bioseq_private_packed_access_line_allowed(
+  "${_bioseq_private_packed_self_source}" bounded_u32_dna4_view
   "return traits::letters_per_unit;" _bioseq_self_inexact_allowed)
 if(NOT _bioseq_self_exact_allowed OR _bioseq_self_wrong_scope_allowed
     OR _bioseq_self_inexact_allowed)
-  message(FATAL_ERROR "DOC0377 private-scope exact-line self-check failed")
+  message(FATAL_ERROR "private packed access invariant private-scope exact-line self-check failed")
 endif()
 
 foreach(_bioseq_facade_source IN LISTS
@@ -516,32 +516,32 @@ foreach(_bioseq_facade_source IN LISTS
   if(NOT _bioseq_facade_fixture_index EQUAL -1)
     continue()
   endif()
-  bioseq_doc0377_private_packed_scope_names(
+  bioseq_private_packed_access_scope_names(
     "${_bioseq_facade_source}" _bioseq_facade_allowed_scopes)
   set(_bioseq_facade_active_scope "")
   set(_bioseq_facade_seen_scopes)
   set(_bioseq_facade_seen_token_hashes)
   set(_bioseq_facade_marker_count 0)
-  bioseq_doc0377_read_encoded_physical_lines(
+  bioseq_private_packed_access_read_encoded_physical_lines(
     "${_bioseq_facade_source}" _bioseq_facade_encoded_lines)
   foreach(_bioseq_facade_encoded_line IN LISTS
       _bioseq_facade_encoded_lines)
-    bioseq_doc0377_decode_physical_line(
+    bioseq_private_packed_access_decode_physical_line(
       "${_bioseq_facade_encoded_line}" _bioseq_facade_source_line)
     string(FIND "${_bioseq_facade_source_line}"
-      "BIOSEQ_DOC0377_PRIVATE_PACKED_" _bioseq_facade_marker_offset)
+      "BIOSEQ_PRIVATE_PACKED_ACCESS_" _bioseq_facade_marker_offset)
     if(NOT _bioseq_facade_marker_offset EQUAL -1)
       string(STRIP "${_bioseq_facade_source_line}" _bioseq_facade_marker_line)
       if(_bioseq_facade_marker_line MATCHES
-          "^//[ \t]*BIOSEQ_DOC0377_PRIVATE_PACKED_(BEGIN|END)[ \t]+([A-Za-z][A-Za-z0-9_]*)[ \t]*$")
+          "^//[ \t]*BIOSEQ_PRIVATE_PACKED_ACCESS_(BEGIN|END)[ \t]+([A-Za-z][A-Za-z0-9_]*)[ \t]*$")
         set(_bioseq_facade_marker_kind "${CMAKE_MATCH_1}")
         set(_bioseq_facade_marker_name "${CMAKE_MATCH_2}")
       else()
         message(FATAL_ERROR
-          "DOC0377 malformed private packed scope marker in ${_bioseq_facade_source}: "
+          "private packed access invariant malformed private packed scope marker in ${_bioseq_facade_source}: "
           "${_bioseq_facade_marker_line}")
       endif()
-      bioseq_doc0377_private_packed_scope_transition(
+      bioseq_private_packed_access_scope_transition(
         "${_bioseq_facade_active_scope}" "${_bioseq_facade_seen_scopes}"
         "${_bioseq_facade_allowed_scopes}"
         "${_bioseq_facade_marker_kind}" "${_bioseq_facade_marker_name}"
@@ -549,7 +549,7 @@ foreach(_bioseq_facade_source IN LISTS
         _bioseq_facade_marker_error)
       if(NOT _bioseq_facade_marker_error STREQUAL "")
         message(FATAL_ERROR
-          "DOC0377 ${_bioseq_facade_marker_error} in ${_bioseq_facade_source}")
+          "private packed access invariant ${_bioseq_facade_marker_error} in ${_bioseq_facade_source}")
       endif()
       math(EXPR _bioseq_facade_marker_count
         "${_bioseq_facade_marker_count} + 1")
@@ -569,13 +569,13 @@ foreach(_bioseq_facade_source IN LISTS
     endif()
     if(_bioseq_facade_code_line MATCHES
         "(scanner_type|(^|[^A-Za-z0-9_])underlying[ \\t]*\\(|\\.scanner[ \\t]*\\(|fragment_storage_units|traits[ \\t]*::[ \\t]*letters_per_unit|sizeof[ \\t]*\\([^)]*\\)[ \\t]*\\*[ \\t]*CHAR_BIT|\\.padding[ \\t]*\\(|read_cptr)")
-      bioseq_doc0377_private_packed_line_allowed(
+      bioseq_private_packed_access_line_allowed(
         "${_bioseq_facade_source}" "${_bioseq_facade_active_scope}"
         "${_bioseq_facade_code_line}"
         _bioseq_facade_private_allowed)
       if(NOT _bioseq_facade_private_allowed)
         message(FATAL_ERROR
-          "DOC0377 facade completion dependency in ${_bioseq_facade_source}; "
+          "private packed access invariant facade completion dependency in ${_bioseq_facade_source}; "
           "physical scanner/packed access is permitted only in a named private "
           "resident/admitted kernel; matched code: ${_bioseq_facade_code_line}")
       endif()
@@ -585,7 +585,7 @@ foreach(_bioseq_facade_source IN LISTS
         "${_bioseq_facade_token_hash}" _bioseq_facade_token_hash_index)
       if(NOT _bioseq_facade_token_hash_index EQUAL -1)
         message(FATAL_ERROR
-          "DOC0377 duplicate exact private packed token in scope "
+          "private packed access invariant duplicate exact private packed token in scope "
           "${_bioseq_facade_active_scope} in ${_bioseq_facade_source}: "
           "${_bioseq_facade_code_line}")
       endif()
@@ -595,7 +595,7 @@ foreach(_bioseq_facade_source IN LISTS
   endforeach()
   if(NOT _bioseq_facade_active_scope STREQUAL "")
     message(FATAL_ERROR
-      "DOC0377 unclosed private packed scope '${_bioseq_facade_active_scope}' "
+      "private packed access invariant unclosed private packed scope '${_bioseq_facade_active_scope}' "
       "in ${_bioseq_facade_source}")
   endif()
   list(LENGTH _bioseq_facade_allowed_scopes
@@ -605,7 +605,7 @@ foreach(_bioseq_facade_source IN LISTS
   if(NOT _bioseq_facade_marker_count EQUAL
       _bioseq_facade_expected_marker_count)
     message(FATAL_ERROR
-      "DOC0377 private packed marker count mismatch in ${_bioseq_facade_source}; "
+      "private packed access invariant private packed marker count mismatch in ${_bioseq_facade_source}; "
       "expected=${_bioseq_facade_expected_marker_count} "
       "actual=${_bioseq_facade_marker_count}")
   endif()
@@ -615,7 +615,7 @@ foreach(_bioseq_facade_source IN LISTS
       "${_bioseq_facade_required_scope}" _bioseq_facade_required_scope_index)
     if(_bioseq_facade_required_scope_index EQUAL -1)
       message(FATAL_ERROR
-        "DOC0377 missing private packed scope '${_bioseq_facade_required_scope}' "
+        "private packed access invariant missing private packed scope '${_bioseq_facade_required_scope}' "
         "in ${_bioseq_facade_source}")
     endif()
   endforeach()
