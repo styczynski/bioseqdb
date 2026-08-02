@@ -1,0 +1,282 @@
+{
+  "artifact_kind": "bioseq-local-linux-package-qualification",
+  "build": {
+    "build_key": "bfa0e366c005c3e01f98252413800725a7e02c78037b9777df2da7e6a7c4faad",
+    "cache_manifest_content_sha256": "132e14e00f30e24cf8b22d532519fb37a4d5e3bade2e71679f484947a69930ef",
+    "cache_reused": false,
+    "configuration": {
+      "cmake_cache": {
+        "path": "/Users/styczynski/Code/bioseqdb/main/build/package-linux/build-caches/bfa0e366c005c3e01f98252413800725a7e02c78037b9777df2da7e6a7c4faad/caches/package-cmake/debian_13/postgresql17/build-rooted/CMakeCache.txt",
+        "sha256": "f135ed7db6fc95daadd95137caf6905c83eb8faf376919334abc52af6e481a41",
+        "size_bytes": 81632
+      },
+      "profile": {
+        "BIOSEQ_BUILD_CACHE": "ON",
+        "BIOSEQ_BUILD_CORE": "ON",
+        "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+        "BIOSEQ_BUILD_PAPERS": "OFF",
+        "BIOSEQ_BUILD_WEBSITE": "OFF",
+        "BIOSEQ_CACHE_BUILD_TESTS": "OFF",
+        "BIOSEQ_CACHE_TESTING": "OFF",
+        "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0",
+        "BIOSEQ_PACKAGE_BUILD": "ON",
+        "BIOSEQ_TEST_INDEXES": "OFF",
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "toolchain_files": {
+        "cmake/bin/cmake": {
+          "path": "/Users/styczynski/Code/bioseqdb/main/build/package-linux/build-caches/bfa0e366c005c3e01f98252413800725a7e02c78037b9777df2da7e6a7c4faad/caches/package-toolchains/debian_13/postgresql17/cmake/bin/cmake",
+          "sha256": "220cb8246aea890a8dfcfa47f04a95862b583bb41eb32868bf203c54a2d8cc54",
+          "size_bytes": 17662152
+        },
+        "llvm-22/bin/clang": {
+          "path": "/Users/styczynski/Code/bioseqdb/main/build/package-linux/build-caches/bfa0e366c005c3e01f98252413800725a7e02c78037b9777df2da7e6a7c4faad/caches/package-toolchains/debian_13/postgresql17/llvm-22/bin/clang-22",
+          "sha256": "5e07dff5f5026f7cf09d49a68e04a8d27c662efe5fd5b63a2e569d65e0abc5cb",
+          "size_bytes": 330539680
+        },
+        "llvm-22/bin/clang++": {
+          "path": "/Users/styczynski/Code/bioseqdb/main/build/package-linux/build-caches/bfa0e366c005c3e01f98252413800725a7e02c78037b9777df2da7e6a7c4faad/caches/package-toolchains/debian_13/postgresql17/llvm-22/bin/clang-22",
+          "sha256": "5e07dff5f5026f7cf09d49a68e04a8d27c662efe5fd5b63a2e569d65e0abc5cb",
+          "size_bytes": 330539680
+        },
+        "llvm-22/bin/llvm-config": {
+          "path": "/Users/styczynski/Code/bioseqdb/main/build/package-linux/build-caches/bfa0e366c005c3e01f98252413800725a7e02c78037b9777df2da7e6a7c4faad/caches/package-toolchains/debian_13/postgresql17/llvm-22/bin/llvm-config",
+          "sha256": "8269c0f8460b315ad88110a0bb34e3f4452e655a48edb0a2168563cca7d65061",
+          "size_bytes": 775424
+        },
+        "vcpkg/vcpkg": {
+          "path": "/Users/styczynski/Code/bioseqdb/main/build/package-linux/build-caches/bfa0e366c005c3e01f98252413800725a7e02c78037b9777df2da7e6a7c4faad/caches/package-toolchains/debian_13/postgresql17/vcpkg/vcpkg",
+          "sha256": "d9ba3f67adbc743817087f50d4e5734a56bd642ba44ffb73dce97d9ffc78726e",
+          "size_bytes": 8290408
+        }
+      }
+    },
+    "profile_version": 1
+  },
+  "content_sha256": "9e8d91ec056ce0d5ae861dfaea7302f6db24af5a6b26887d5f9ef43c32366644",
+  "host": {
+    "architecture": "arm64",
+    "docker_cli": {
+      "artifact_kind": "bioseq-docker-cli-identity",
+      "content_sha256": "b8a50acbde4a137bf3fd3a708fcbaafcfd638702f7afa19c693c3c579a8ba181",
+      "entry_basename": "docker",
+      "entry_identity_sha256": "f403e3418a8b36ea1ffd975a9abd59ff69cec099e894775490f2b65886e1bf41",
+      "entry_kind": "symlink",
+      "entry_mode": 493,
+      "entry_path": "/usr/local/bin/docker",
+      "entry_size_bytes": 53,
+      "schema_version": 1,
+      "symlink_chain": [
+        {
+          "link_target": "/Applications/OrbStack.app/Contents/MacOS/xbin/docker",
+          "link_target_sha256": "29047c0dfcb2ebc55ed61a1a7470475da0202dd994c67c56ad7534f8e22c3c46",
+          "mode": 493,
+          "path": "/usr/local/bin/docker",
+          "size_bytes": 53
+        },
+        {
+          "link_target": "docker-tools",
+          "link_target_sha256": "02bd3d58bf296d9185729c93140b21f77dcba6ab310e4dd5b9f8e946125d803d",
+          "mode": 493,
+          "path": "/Applications/OrbStack.app/Contents/MacOS/xbin/docker",
+          "size_bytes": 12
+        }
+      ],
+      "target_lexical_path": "/Applications/OrbStack.app/Contents/MacOS/xbin/docker-tools",
+      "target_mode": 493,
+      "target_resolved_path": "/Applications/OrbStack.app/Contents/MacOS/xbin/docker-tools",
+      "target_sha256": "c93921f27c941f7661e5478e8af4042e546b66e69707a2b43f31a86cfe9c85d2",
+      "target_size_bytes": 72126112
+    },
+    "docker_socket": "/Users/styczynski/.orbstack/run/docker.sock",
+    "free_bytes_after_snapshot": 108140498944,
+    "free_bytes_at_start": 110034264064
+  },
+  "image": {
+    "architecture": "arm64",
+    "id": "sha256:fac46bff2e02f51425b6e33b0e1169f55dfb053d83511ca28aa50c09fd5ed7a4",
+    "os": "linux",
+    "repository_digests": [
+      "debian@sha256:fac46bff2e02f51425b6e33b0e1169f55dfb053d83511ca28aa50c09fd5ed7a4"
+    ],
+    "tag": "debian:trixie"
+  },
+  "mode": "package-linux",
+  "package": {
+    "architecture": "arm64",
+    "basename": "bioseq-postgresql17_4.2.3_arm64.deb",
+    "format": "deb",
+    "path": "/Users/styczynski/Code/bioseqdb/main/reporting/bioseq_package_linux/artifacts/objects/packages/fb/fbb29d978fcc5e9d10e561aae2f6aa0d31a088d4994152dde97c9ef17cb017bc-bioseq-postgresql17_4.2.3_arm64.deb",
+    "postgres_major": 17,
+    "sha256": "fbb29d978fcc5e9d10e561aae2f6aa0d31a088d4994152dde97c9ef17cb017bc",
+    "size_bytes": 6666076
+  },
+  "package_environment": {
+    "cache_key": "30e6084b81c2148ea0a65fbbf47834b17c7a07fae0dab446bdc7067bcf0763c7",
+    "path": "/Users/styczynski/Code/bioseqdb/main/build/package-linux/environments/30e6084b81c2148ea0a65fbbf47834b17c7a07fae0dab446bdc7067bcf0763c7",
+    "poetry_lock_sha256": "d3a44b28aecd4203e8eee261b197220b1997c83b824d110e165f1bdd8f058298",
+    "pyproject_sha256": "91ffc1051c6727ccd53f660f39ecbd15b0780874d75aa4fb172f226d4a527dfc",
+    "python": {
+      "path": "/Users/styczynski/.pyenv/shims/python3.13",
+      "sha256": "4f1f0a7c9b73d8b090f3aa7f2779e09a69fc3b14ca1c0fdeb479509c02768bb6",
+      "version": "3.13.3"
+    },
+    "python_liquid": "2.3.0",
+    "schema_version": 1
+  },
+  "payload": {
+    "artifacts": [
+      {
+        "basename": "bioseq.so",
+        "path": "usr/lib/postgresql/17/lib/bioseq.so",
+        "sha256": "038253600a0322e1fbaa10715b5cfa28b4ab297b28fc3866b885b26280ae769c",
+        "size_bytes": 47339064
+      },
+      {
+        "basename": "bioseq_cache.so",
+        "path": "usr/lib/postgresql/17/lib/bioseq_cache.so",
+        "sha256": "736d3338f0250993d4f4ed2f3f320b4d1727665a54740586ad7866a8f22f47ab",
+        "size_bytes": 2110240
+      },
+      {
+        "basename": "bioseq--1.0.sql",
+        "path": "usr/share/postgresql/17/extension/bioseq--1.0.sql",
+        "sha256": "c0a26b78c00cb7dbec4ed4f5a8ccbd148cf01f1edda1475cf08975d5b747aabd",
+        "size_bytes": 116343
+      },
+      {
+        "basename": "bioseq.control",
+        "path": "usr/share/postgresql/17/extension/bioseq.control",
+        "sha256": "25ef36d7667fd62febe6e4d608e830ee1fe9315691e64e3d0fc9d49c95b2977c",
+        "size_bytes": 114
+      },
+      {
+        "basename": "bioseq_cache--1.0.sql",
+        "path": "usr/share/postgresql/17/extension/bioseq_cache--1.0.sql",
+        "sha256": "46b1a800c64d255e6c814487202caa10c5839fb0142d7574afdc2b62918528c5",
+        "size_bytes": 2352
+      },
+      {
+        "basename": "bioseq_cache.control",
+        "path": "usr/share/postgresql/17/extension/bioseq_cache.control",
+        "sha256": "896bc913507581c31cf9c8d047015bd17543c204edb423374bc156aa713e859c",
+        "size_bytes": 184
+      }
+    ],
+    "elf": [
+      {
+        "architecture": "arm64",
+        "basename": "bioseq.so",
+        "build_identity_listing_sha256": "e956582b98c4c9513b165a3357114782d0e9f1d11babc60b7334436eee9956a4",
+        "dependency_listing_sha256": "cd67755ba745fbc883e95af19abe12f608971b92f62a5b2eb04c6d540f22793d",
+        "direct_load_dependencies": [
+          "ld-linux-aarch64.so.1",
+          "libc.so.6",
+          "libm.so.6"
+        ],
+        "format": "ELF",
+        "gnu_build_ids": [
+          "1bf4ba3fe3f4f330561ad846eaddd7ae301720e5"
+        ],
+        "header_listing_sha256": "32718aba61a0e5a6a1de7a5b6637d395215479edfbdc2e3ef3e70a04903e5591",
+        "machine": "AArch64",
+        "sibling_dependency_absent": true
+      },
+      {
+        "architecture": "arm64",
+        "basename": "bioseq_cache.so",
+        "build_identity_listing_sha256": "a9d64b9aef7e509d6b8c63e166ae957fbe62a3fdbaa1bc32c0bb5019f7abb934",
+        "dependency_listing_sha256": "cb802718ada19465a467fc0ac68e8ae764b183b5ee6f36c6f0dc2e1d956a5ff2",
+        "direct_load_dependencies": [
+          "libc.so.6",
+          "libm.so.6"
+        ],
+        "format": "ELF",
+        "gnu_build_ids": [
+          "e73eabea873f7e23b653f06810993de95da831a5"
+        ],
+        "header_listing_sha256": "665532ddcdecfd23879fdb2ac4a0df537bfc33d81cc7d3b26bc9f891eeb72ac5",
+        "machine": "AArch64",
+        "sibling_dependency_absent": true
+      }
+    ],
+    "exact_basenames": [
+      "bioseq--1.0.sql",
+      "bioseq.control",
+      "bioseq.so",
+      "bioseq_cache--1.0.sql",
+      "bioseq_cache.control",
+      "bioseq_cache.so"
+    ],
+    "extraction_receipt": {
+      "content_sha256": "c9b39c99bd883a328e99a95ea6b57af23ab2e07f94bbfce1b8a5b0c59297b9d6",
+      "path": "/Users/styczynski/Code/bioseqdb/main/reporting/bioseq_package_linux/artifacts/objects/evidence/73/731a95e33de203f3a93055b942ff973952096cc7cd7d484ae2919fda609f027d-payload.json",
+      "sha256": "731a95e33de203f3a93055b942ff973952096cc7cd7d484ae2919fda609f027d"
+    },
+    "validator": {
+      "path": "/Users/styczynski/Code/bioseqdb/main/reporting/bioseq_package_linux/artifacts/objects/evidence/39/397f365bab32c9e643a499531a4d01ddb01c518aaad17e940e2db3b37a2adc8e-validator.json",
+      "sha256": "397f365bab32c9e643a499531a4d01ddb01c518aaad17e940e2db3b37a2adc8e"
+    }
+  },
+  "schema_version": 1,
+  "source": {
+    "archive_from_committed_head": true,
+    "archive_sha256": "fdf7b25ae96a8c614ff14305cff78b2607af6faec4c1bfd9291d9a894040f609",
+    "ignored_generated_status_count": 35,
+    "ignored_generated_status_rows": [
+      " M main/cmake/__pycache__/sanitizer_runtime.cpython-310.pyc",
+      "?? main/cmake/__pycache__/qualify_production_extension_dsos.cpython-310.pyc",
+      "?? main/cmake/__pycache__/test_postgresql_extension_elf_visibility.cpython-310.pyc",
+      "?? main/cmake/__pycache__/test_production_dso_qualification.cpython-310.pyc",
+      "?? main/reporting/bioseq_cache_bench/report_3.json",
+      "?? main/reporting/bioseq_cache_bench/report_4.json",
+      "?? main/reporting/bioseq_cache_bench/report_5.json",
+      "?? main/reporting/bioseq_cache_bioseq_bench/report_0.json",
+      "?? main/reporting/bioseq_cache_bioseq_bench/report_1.json",
+      "?? main/reporting/bioseq_cache_bioseq_integration/report_0.json",
+      "?? main/reporting/bioseq_cache_bioseq_integration/report_1.json",
+      "?? main/reporting/bioseq_cache_bioseq_integration/report_2.json",
+      "?? main/reporting/bioseq_cache_bioseq_integration/report_3.json",
+      "?? main/reporting/bioseq_cache_bioseq_integration/report_4.json",
+      "?? main/reporting/bioseq_cache_bioseq_integration/report_5.json",
+      "?? main/reporting/bioseq_cache_bioseq_integration/report_6.json",
+      "?? main/reporting/bioseq_cache_bioseq_integration/report_7.json",
+      "?? main/reporting/bioseq_cache_integration/report_0.json",
+      "?? main/reporting/bioseq_cache_integration/report_1.json",
+      "?? main/reporting/bioseq_cache_integration/report_10.json",
+      "?? main/reporting/bioseq_cache_integration/report_11.json",
+      "?? main/reporting/bioseq_cache_integration/report_12.json",
+      "?? main/reporting/bioseq_cache_integration/report_13.json",
+      "?? main/reporting/bioseq_cache_integration/report_14.json",
+      "?? main/reporting/bioseq_cache_integration/report_2.json",
+      "?? main/reporting/bioseq_cache_integration/report_3.json",
+      "?? main/reporting/bioseq_cache_integration/report_4.json",
+      "?? main/reporting/bioseq_cache_integration/report_5.json",
+      "?? main/reporting/bioseq_cache_integration/report_6.json",
+      "?? main/reporting/bioseq_cache_integration/report_7.json",
+      "?? main/reporting/bioseq_cache_integration/report_8.json",
+      "?? main/reporting/bioseq_cache_integration/report_9.json",
+      "?? main/reporting/bioseq_package_linux/artifacts/build-keys/944a917ab1d56a3df363568039e54ba7c6bdaa7bb889de6efc82b754aec27991/cache-manifest.json",
+      "?? main/reporting/bioseq_package_linux/artifacts/objects/package-files/c6/c670b588a34fda97da68260d8670ba167ec9f81b64367b9850fb64d21db9b6cd.list",
+      "?? main/reporting/bioseq_package_linux/artifacts/objects/packages/09/09ad5ee8c86e99693753a46663054709fca01273c3adfa8b80c408c62d2a5618-bioseq-postgresql17_4.2.3_arm64.deb"
+    ],
+    "input_sha256": {
+      "build_mcp/package_linux.py": "b091f6876b277edec57326dc786880d5c490bfdeca9558383f2f00ff3444d436",
+      "infra/packaging/bioseq_packaging/config.py": "1d645cbb37a143bd11a6f225ea36631767639b557946b26c32dd81a38774c20e",
+      "infra/packaging/bioseq_packaging/containers.py": "6f7cc222cd769530a86283207ae4d9070cc91e6f04692f60decb90ce6b3d729b",
+      "infra/packaging/bioseq_packaging/model.py": "3b5319359813997f2b7bba9abb9a66145068d2ee17a52248910c4f4eb9b1337a",
+      "infra/packaging/bioseq_packaging/packagers/deb.py": "d5a63dc810bd86c289a2c3bbcb6398a7ca04dd6c8fd59c61d01ce9fc74a7f749",
+      "infra/packaging/bioseq_packaging/templates.py": "ece0cab350eb62852d24ad47fd0252a5ef74d5444c2f885c7b725c501328b588",
+      "infra/packaging/bioseq_packaging/workspace.py": "7f590b5c6a9206444198bb04e70eb7502486dc282013202cc2bb80c8cb063e62",
+      "infra/packaging/poetry.lock": "d3a44b28aecd4203e8eee261b197220b1997c83b824d110e165f1bdd8f058298",
+      "infra/packaging/pyproject.toml": "91ffc1051c6727ccd53f660f39ecbd15b0780874d75aa4fb172f226d4a527dfc",
+      "infra/packaging/scripts/build_and_stage.sh": "618c6cf5ac21260417fb90520606031d38a2a88340524abf721494356a0d3c54",
+      "infra/packaging/scripts/prepare_build_environment.sh": "d852de87c4bc41b5ec492b4f7c07e27bb5a221c8166506b859e0b55848e1fe39",
+      "infra/packaging/scripts/validate_package.py": "870dd1a7b011ee0026fc6214b5d71c2d00aff7ee7a23181dddd5c2fe1a8cf69a"
+    },
+    "main_tree": "8fd322a1f6b0b82d8c036f897e77707afe24b6ab",
+    "material_main_clean": true,
+    "revision": "ec2c48c0a7fd96b877360cfd83fef9520e7a6bb1"
+  },
+  "status": "passed"
+}
