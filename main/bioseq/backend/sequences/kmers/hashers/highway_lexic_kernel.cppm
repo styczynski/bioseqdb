@@ -1,4 +1,5 @@
 /** Canonical generator input for the exact lexic minimizer hasher. */
+#ifndef BIOSEQ_HASHER_LEXIC_STATIC_FACADE
 module;
 #include <hwy/highway.h>
 
@@ -9,6 +10,7 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.highway.sources.hasher_base;
 import bioseq.highway.sources.simd_utils;
+#endif
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
@@ -62,10 +64,22 @@ public:
 	public:
         using traits = simd_hash<input_t, d_t>::simd_hasher_base::traits;
 	private:
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+		// SVE and RVV vectors are sizeless C++ types: they are valid locals and
+		// function arguments, but may not be class data members. Keep the rolling
+		// state in ordinary lane storage and load/store at the callable boundary.
+		// This is a target-local storage fallback, not a change to the hash
+		// recurrence or lane ordering.
+		static constexpr size_t lane_capacity = hn::MaxLanes(d_t{});
+		input_t mask_value;
+		std::array<input_t, lane_capacity> state_forward_storage{};
+		std::array<input_t, lane_capacity> state_reverse_compl_storage{};
+#else
 		traits::input_vec_t mask;
-		size_t rev_shift;
 		traits::input_vec_t state_forward;
 		traits::input_vec_t state_reverse_compl;
+#endif
+		size_t rev_shift;
 
 		// Compile-time complement table: index = rank, value = complement(rank).
 		// We cannot use `Xor(rank, char_mask)` in general — that works for dna4
@@ -130,13 +144,48 @@ public:
 		explicit simd_hash(
 			const traits::input_d_t& d,
 			const size_t& kmer_length
-		): mask(hn::Set(d, traits::template kmer_mask<input_t>(std::min(kmer_length, traits::max_kmer_length)))), state_forward(hn::Zero(d)), state_reverse_compl(hn::Zero(d)), rev_shift(traits::bits_per_char * (std::min(kmer_length, traits::max_kmer_length)-1)) {};
+		):
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+		  mask_value(traits::template kmer_mask<input_t>(
+			std::min(kmer_length, traits::max_kmer_length))),
+#else
+		  mask(hn::Set(d, traits::template kmer_mask<input_t>(
+			std::min(kmer_length, traits::max_kmer_length)))),
+		  state_forward(hn::Zero(d)),
+		  state_reverse_compl(hn::Zero(d)),
+#endif
+		  rev_shift(traits::bits_per_char
+			* (std::min(kmer_length, traits::max_kmer_length) - 1)) {
+			(void)d;
+		}
 
-		constexpr traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
+		HWY_INLINE traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+			HWY_ALIGN std::array<input_t, lane_capacity> incoming_storage{};
+			HWY_ALIGN std::array<input_t, lane_capacity> outgoing_storage{};
+			HWY_ALIGN std::array<input_t, lane_capacity> result_storage{};
+			hn::StoreU(incoming, d, incoming_storage.data());
+			hn::StoreU(outgoing, d, outgoing_storage.data());
+			const size_t lanes = hn::Lanes(d);
+			for (size_t lane = 0; lane < lanes; ++lane) {
+				state_forward_storage[lane] =
+					(state_forward_storage[lane] << traits::bits_per_char
+					 | incoming_storage[lane]) & mask_value;
+				state_reverse_compl_storage[lane] =
+					(state_reverse_compl_storage[lane] >> traits::bits_per_char)
+					| (static_cast<input_t>(traits::letter_complement(
+						outgoing_storage[lane])) << rev_shift);
+				result_storage[lane] = std::min(
+					state_forward_storage[lane],
+					state_reverse_compl_storage[lane]);
+			}
+			return hn::LoadU(d, result_storage.data());
+#else
 			state_forward = hn::And(hn::Or(hn::ShiftLeft<traits::bits_per_char>(state_forward), incoming), mask);
 			const typename traits::input_vec_t new_vec = hn::ShiftLeftSame(apply_complement(d, outgoing), rev_shift);
 			state_reverse_compl = hn::Or(hn::ShiftRight<traits::bits_per_char>(state_reverse_compl), new_vec);
 			return hn::Min(state_forward, state_reverse_compl);
+#endif
 		}
 
 		// Returns per-lane mask where `true` means the current k-mer is palindromic
@@ -145,8 +194,14 @@ public:
 		// palindromic lanes' hash with max_val so they never become window minima —
 		// matching the scalar's post-palindrome-push-max behaviour without requiring
 		// per-lane pos tracking.
-		[[nodiscard]] constexpr hn::Mask<d_t> get_palindrome_mask(const d_t& d) const {
+		[[nodiscard]] HWY_INLINE hn::Mask<d_t> get_palindrome_mask(const d_t& d) const {
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+			return hn::Eq(
+				hn::LoadU(d, state_forward_storage.data()),
+				hn::LoadU(d, state_reverse_compl_storage.data()));
+#else
 			return hn::Eq(state_forward, state_reverse_compl);
+#endif
 		}
 
 		// Returns per-lane mask where `true` means the reverse-complement state is the
@@ -155,8 +210,14 @@ public:
 		// Mirrors `select_min_hash_strand`'s `forward < reverse_complement ? FORWARD : REVERSE_COMPLEMENT`
 		// classification — palindromic lanes (forward == reverse_complement) report `false` here but
 		// the caller separately masks them out via `get_palindrome_mask` and pushes a sentinel hash.
-		[[nodiscard]] constexpr hn::Mask<d_t> get_strand_mask(const d_t& d) const {
+		[[nodiscard]] HWY_INLINE hn::Mask<d_t> get_strand_mask(const d_t& d) const {
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+			return hn::Lt(
+				hn::LoadU(d, state_reverse_compl_storage.data()),
+				hn::LoadU(d, state_forward_storage.data()));
+#else
 			return hn::Lt(state_reverse_compl, state_forward);
+#endif
 		}
 
 
