@@ -853,6 +853,12 @@ void configure_cpu_path(libpq::connection& connection) {
         "SET bioseq.aligner.vulkan_fused_frontend_enabled = off; "
         "SET bioseq.aligner.vulkan_gpu_index_build_enabled = off; "
         "SET bioseq.aligner.vulkan_extend_enabled = off; "
+        "SET bioseq.index_async_persist = off; "
+        "SET bioseq.recompute_async_persist = off; "
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on; "
+        "SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash'; "
+        "SET bioseq.aligner.chaining_algorithm = 'simd_mm2'; "
+        "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner'; "
         "SET bioseq.enable_custom_scan = on; "
         "SET bioseq.enable_column_cache = on; "
         "SET bioseq.read_sequence_index = on",
@@ -934,9 +940,9 @@ void create_standalone_fixture(libpq::connection& connection) {
     execute(
         connection,
         "SELECT bioseq.update_index("
-        "'cache_bioseq_2gbp'::regclass, 'minimizers_per_fragment'); "
+        "'cache_bioseq_2gbp'::regclass, 'minimizers_per_sequence'); "
         "SELECT bioseq.set_active_read_index("
-        "'cache_bioseq_2gbp'::regclass, 'minimizers_per_fragment')",
+        "'cache_bioseq_2gbp'::regclass, 'minimizers_per_sequence')",
         40min);
     return fixture_evidence{
         .relation = "cache_bioseq_2gbp",
