@@ -874,9 +874,7 @@ target_sources(bioseq_runtime_core
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
 
 set(BIOSEQ_NOPG_SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/dispatch_info.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_target.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp

@@ -121,7 +121,6 @@ module;
 #include <hwy/highway.h>
 #include "common.h"
 #include "headers/pg_build_config.h"
-#include "pg/scheduler/dispatch_processor_hwy.h"
 
 #include <algorithm>
 #include <array>
@@ -191,7 +190,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> process_sequences_dna4_w1(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w1(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -199,13 +198,13 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> process_sequences_dna4_w2(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w2(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -213,13 +212,13 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> process_sequences_dna4_w4(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w4(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -227,14 +226,14 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 #endif
 
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> process_sequences_dna4_w8(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w8(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -242,14 +241,14 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> process_sequences_dna5_w1(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w1(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -257,13 +256,13 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> process_sequences_dna5_w2(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w2(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -271,13 +270,13 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> process_sequences_dna5_w4(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w4(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -285,7 +284,7 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
@@ -293,7 +292,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 #endif
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> process_sequences_dna5_w8(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w8(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -301,14 +300,14 @@ namespace hn = hwy::HWY_NAMESPACE;
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 #endif
 
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>>
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>>
 dispatch_process_sequences_typed(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -317,7 +316,7 @@ dispatch_process_sequences_typed(
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
@@ -465,7 +464,7 @@ dispatch_process_sequences_typed(
     return {};
 }
 
-[[nodiscard]] std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> BatchProcessor::process_sequences(
+[[nodiscard]] std::map<int32_t, std::vector<MatchResult>> BatchProcessor::process_sequences(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -473,13 +472,13 @@ dispatch_process_sequences_typed(
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
     const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
-    const ::bioseq::pipeline::Minimap2Params& base_params,
+    const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx)
 {
-    std::map<int32_t, std::vector<::bioseq::pipeline::MatchResult>> results;
+    std::map<int32_t, std::vector<MatchResult>> results;
     const bool per_row_query_mode = per_row_query_hdrs != nullptr;
 
     if (!per_row_query_mode && query_hdr == nullptr) {
@@ -497,11 +496,9 @@ dispatch_process_sequences_typed(
         return results;
     }
 
-    ::bioseq::pipeline::Minimap2Params selected_target_params = base_params;
-    auto run_selected_pipeline_body =
+    auto run_pipeline_body =
         [batch_size, alphabet_code, storage_unit_byte_width, query_hdr,
-         per_row_query_hdrs, &target_hdrs, &query_ids,
-         &selected_target_params,
+         per_row_query_hdrs, &target_hdrs, &query_ids, &base_params,
          invocation_role, broadcast_query_ordinal, &stats, scanner_pg_ctx,
          &results] {
         results = dispatch_process_sequences_typed(
@@ -512,38 +509,11 @@ dispatch_process_sequences_typed(
             per_row_query_hdrs,
             target_hdrs,
             query_ids,
-            selected_target_params,
+            base_params,
             invocation_role,
             broadcast_query_ordinal,
             stats,
             scanner_pg_ctx);
-    };
-
-    using SelectedPipelineBody = decltype(run_selected_pipeline_body);
-    struct SelectedTargetInvocation {
-        SelectedPipelineBody* pipeline_body = nullptr;
-        ::bioseq::pipeline::Minimap2Params* params = nullptr;
-        ::bioseq::pipeline_stats::PipelineExecutionStats* stats = nullptr;
-    } selected_invocation{
-        .pipeline_body = &run_selected_pipeline_body,
-        .params = &selected_target_params,
-        .stats = &stats,
-    };
-    bioseq::simd_dispatch::DispatchProcessorTargetRequest target_request{
-        .opaque = &selected_invocation,
-        .callback = [](void* opaque,
-                       const bioseq::simd_dispatch::HighwayTargetContext*
-                           selected_target) {
-            auto* invocation = static_cast<SelectedTargetInvocation*>(opaque);
-            invocation->params->highway_kernels = selected_target->kernels;
-            invocation->stats->record_highway_executed_target(
-                selected_target->target);
-            (*invocation->pipeline_body)();
-        },
-    };
-    auto run_pipeline_body = [&target_request] {
-        bioseq::simd::dispatch_process_sequences_for_best_target(
-            &target_request);
     };
 
     const auto inherited_observer =
@@ -613,8 +583,8 @@ BatchProcessor::CpuPreparedTarget::find_group(
 	return nullptr;
 }
 
-::bioseq::pipeline::Minimap2Params BatchProcessor::effective_params_for_pair(
-		const ::bioseq::pipeline::Minimap2Params& base,
+Minimap2Params BatchProcessor::effective_params_for_pair(
+		const Minimap2Params& base,
 		const std::size_t min_bp) noexcept {
 	const bool all_defaults = base.kmer_size == 15
 		&& base.window_size == 10
@@ -623,7 +593,7 @@ BatchProcessor::CpuPreparedTarget::find_group(
 	if (!all_defaults) {
 		return base;
 	}
-	::bioseq::pipeline::Minimap2Params scaled = base;
+	Minimap2Params scaled = base;
 	if (min_bp < 50) {
 		scaled.kmer_size = 8;
 		scaled.window_size = 3;
@@ -1756,7 +1726,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		const bioseq::storage::sequence_payload_allocation_observer*
 			query_payload_observer,
 		const std::span<const std::uint64_t> query_ordinals,
-		const ::bioseq::pipeline::Minimap2Params& base_params,
+		const Minimap2Params& base_params,
 		const bool include_persisted_parameter_group,
 		const CpuQueryUnionStorage union_storage,
 		CpuPreparedTarget& prepared_target) {
@@ -1952,7 +1922,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 	for (std::size_t query_index = 0u;
 		 parallel_group_is_uniform && query_index < query_headers.size();
 		 ++query_index) {
-		const ::bioseq::pipeline::Minimap2Params effective = effective_params_for_pair(
+		const Minimap2Params effective = effective_params_for_pair(
 			base_params,
 			std::min<std::uint64_t>(
 				target_bp_size, query_bp_sizes[query_index]));
@@ -2163,7 +2133,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 			 ++query_index) {
 			const bioseq::pg_types::seq* const query_header = query_headers[query_index];
 			const std::uint64_t query_ordinal = query_ordinals[query_index];
-			const ::bioseq::pipeline::Minimap2Params effective = effective_params_for_pair(
+			const Minimap2Params effective = effective_params_for_pair(
 				base_params,
 				std::min<std::uint64_t>(
 					target_bp_size, query_bp_sizes[query_index]));
@@ -2768,7 +2738,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		const bioseq::storage::sequence_payload_allocation_observer*
 			query_payload_observer,
 		const std::span<const std::uint64_t> query_ordinals,
-		const ::bioseq::pipeline::Minimap2Params& base_params,
+		const Minimap2Params& base_params,
 		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
 			executor_read,
 		CpuPreparedTarget& prepared_target) {
@@ -4101,7 +4071,7 @@ void BatchProcessor::prepare_gpu_persisted_shape_v5_target(
 		const std::uint64_t query_count,
 		const std::uint8_t alphabet_code,
 		const std::uint8_t storage_unit_byte_width,
-		const ::bioseq::pipeline::Minimap2Params& params,
+		const Minimap2Params& params,
 		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
 			executor_read,
 		GpuPreparedShapeV5Target& prepared_target) {
