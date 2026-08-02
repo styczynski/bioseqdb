@@ -1,4 +1,5 @@
 /** Canonical generator input for exact minimizer vector streams. */
+#ifndef BIOSEQ_VECTOR_STREAM_STATIC_FACADE
 module;
 #include <hwy/highway.h>
 
@@ -6,6 +7,7 @@ export module bioseq.highway.sources.vector_stream;
 
 import std;
 import bioseq.highway.sources.simd_utils;
+#endif
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
@@ -25,6 +27,133 @@ namespace hn = hwy::HWY_NAMESPACE;
 // is a non-trivial cost — see plan §3.3.
 
 template <size_t W> concept stream_width_ok = (W >= 1 && W <= 4);
+
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+
+#if !HWY_HAVE_TUPLE
+#error "bioseq vector streams require Highway native tuple support for SVE/RVV"
+#endif
+
+// SVE (including fixed-bit SVE) and RVV vectors are sizeless. They cannot be
+// members of a class or elements of std::array, but Highway's native tuple
+// values are expressly designed to be created, passed, returned and inspected
+// in local target-attributed code. Masks use the same tuple shape after
+// VecFromMask conversion; this keeps them register-only without attempting to
+// put a sizeless predicate in a C++ aggregate.
+template <class D, size_t W>
+requires (stream_width_ok<W>)
+struct native_stream_type;
+
+template <class D>
+struct native_stream_type<D, 1> { using type = hn::Vec<D>; };
+template <class D>
+struct native_stream_type<D, 2> { using type = hn::Vec2<D>; };
+template <class D>
+struct native_stream_type<D, 3> { using type = hn::Vec3<D>; };
+template <class D>
+struct native_stream_type<D, 4> { using type = hn::Vec4<D>; };
+
+template <class D, typename ST, size_t W>
+requires (stream_width_ok<W>)
+using vec_stream = typename native_stream_type<std::remove_cvref_t<D>, W>::type;
+
+template <class D, size_t W>
+requires (stream_width_ok<W>)
+using mask_stream = typename native_stream_type<std::remove_cvref_t<D>, W>::type;
+
+template <typename T>
+concept native_tuple4 = requires (std::remove_cvref_t<T> value) {
+    hn::Get4<0>(value);
+};
+
+template <typename T>
+concept native_tuple3 = !native_tuple4<T>
+    && requires (std::remove_cvref_t<T> value) { hn::Get3<0>(value); };
+
+template <typename T>
+concept native_tuple2 = !native_tuple4<T> && !native_tuple3<T>
+    && requires (std::remove_cvref_t<T> value) { hn::Get2<0>(value); };
+
+template <typename T>
+concept native_raw_vector = !native_tuple4<T> && !native_tuple3<T>
+    && !native_tuple2<T>
+    && requires { typename hn::DFromV<std::remove_cvref_t<T>>; };
+
+template <typename T>
+struct native_stream_descriptor {
+    static constexpr size_t width = 0;
+    using tag_t = void;
+    using stored_type = void;
+};
+
+template <typename T>
+requires native_raw_vector<T>
+struct native_stream_descriptor<T> {
+    using vec_t = std::remove_cvref_t<T>;
+    using tag_t = hn::DFromV<vec_t>;
+    using stored_type = hn::TFromD<tag_t>;
+    static constexpr size_t width = 1;
+};
+
+template <typename T>
+requires native_tuple2<T>
+struct native_stream_descriptor<T> {
+    using vec_t = std::remove_cvref_t<decltype(
+        hn::Get2<0>(std::declval<std::remove_cvref_t<T>>()))>;
+    using tag_t = hn::DFromV<vec_t>;
+    using stored_type = hn::TFromD<tag_t>;
+    static constexpr size_t width = 2;
+};
+
+template <typename T>
+requires native_tuple3<T>
+struct native_stream_descriptor<T> {
+    using vec_t = std::remove_cvref_t<decltype(
+        hn::Get3<0>(std::declval<std::remove_cvref_t<T>>()))>;
+    using tag_t = hn::DFromV<vec_t>;
+    using stored_type = hn::TFromD<tag_t>;
+    static constexpr size_t width = 3;
+};
+
+template <typename T>
+requires native_tuple4<T>
+struct native_stream_descriptor<T> {
+    using vec_t = std::remove_cvref_t<decltype(
+        hn::Get4<0>(std::declval<std::remove_cvref_t<T>>()))>;
+    using tag_t = hn::DFromV<vec_t>;
+    using stored_type = hn::TFromD<tag_t>;
+    static constexpr size_t width = 4;
+};
+
+template <typename T>
+inline constexpr bool is_vec_stream_v =
+    native_stream_descriptor<std::remove_cvref_t<T>>::width != 0;
+
+// Native mask streams are represented by all-bits/zero vectors so they can
+// use the same native tuple carriers. Operation context determines whether a
+// stream is interpreted as vector data or predicate bits.
+template <typename T>
+inline constexpr bool is_mask_stream_v = is_vec_stream_v<T>;
+
+template <typename T>
+inline constexpr bool is_any_stream_v = is_vec_stream_v<T>;
+
+template <typename... Args>
+concept any_arg_is_stream = (is_any_stream_v<Args> || ... || false);
+
+template <typename T>
+inline constexpr size_t stream_width_v =
+    native_stream_descriptor<std::remove_cvref_t<T>>::width;
+
+template <typename T>
+using stream_tag_t = typename native_stream_descriptor<
+    std::remove_cvref_t<T>>::tag_t;
+
+template <typename T>
+using stream_stored_t = typename native_stream_descriptor<
+    std::remove_cvref_t<T>>::stored_type;
+
+#else
 
 // Forward declarations carry the same `requires` clause as definitions.
 template <class D, typename ST, size_t W>
@@ -246,6 +375,117 @@ private:
 public:
 };
 
+template <typename T>
+inline constexpr size_t stream_width_v =
+    std::remove_cvref_t<T>::stream_width;
+
+template <typename T>
+using stream_tag_t = typename std::remove_cvref_t<T>::tag_t;
+
+template <typename T>
+using stream_stored_t = typename std::remove_cvref_t<T>::stored_type;
+
+#endif
+
+// These free factories are intentionally defined outside target-conditional
+// regions. The Highway renderer obtains callable insertion offsets from one
+// donor AST and reuses them for every generated target; a callable that only
+// existed in an inactive SVE/RVV branch would therefore evade HWY_ATTR
+// insertion. Conditional regions below contain expressions only, never whole
+// callable definitions.
+template <size_t S, typename Stream>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+constexpr decltype(auto) stream_get(Stream&& stream) noexcept {
+    static_assert(S < stream_width_v<Stream>, "stream index out of bounds");
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+    constexpr size_t W = stream_width_v<Stream>;
+    if constexpr (W == 1) {
+        return std::forward<Stream>(stream);
+    } else if constexpr (W == 2) {
+        return hn::Get2<S>(stream);
+    } else if constexpr (W == 3) {
+        return hn::Get3<S>(stream);
+    } else {
+        return hn::Get4<S>(stream);
+    }
+#else
+    return std::forward<Stream>(stream)[S];
+#endif
+}
+
+template <class D, typename ST, size_t W, typename... Vs>
+requires (stream_width_ok<W> && sizeof...(Vs) == W)
+[[nodiscard, gnu::always_inline]] HWY_INLINE constexpr
+vec_stream<D, ST, W> pack_vec_stream(D d, Vs... values) noexcept {
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+    if constexpr (W == 1) {
+        return (values, ...);
+    } else if constexpr (W == 2) {
+        return hn::Create2(d, values...);
+    } else if constexpr (W == 3) {
+        return hn::Create3(d, values...);
+    } else {
+        return hn::Create4(d, values...);
+    }
+#else
+    (void)d;
+    return vec_stream<D, ST, W>::pack(values...);
+#endif
+}
+
+template <class D, size_t W, typename... Ms>
+requires (stream_width_ok<W> && sizeof...(Ms) == W)
+[[nodiscard, gnu::always_inline]] HWY_INLINE constexpr
+mask_stream<D, W> pack_mask_stream(D d, Ms... masks) noexcept {
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+    return pack_vec_stream<D, hn::TFromD<D>, W>(
+        d, hn::VecFromMask(d, masks)...);
+#else
+    (void)d;
+    return mask_stream<D, W>::pack(masks...);
+#endif
+}
+
+template <class D, typename ST, size_t W>
+requires (stream_width_ok<W>)
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+vec_stream<D, ST, W> splat_vec_stream(D d, ST value) noexcept {
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+    const auto lane_value = hn::Set(d, value);
+    if constexpr (W == 1) {
+        return lane_value;
+    } else if constexpr (W == 2) {
+        return hn::Create2(d, lane_value, lane_value);
+    } else if constexpr (W == 3) {
+        return hn::Create3(d, lane_value, lane_value, lane_value);
+    } else {
+        return hn::Create4(d, lane_value, lane_value, lane_value, lane_value);
+    }
+#else
+    return vec_stream<D, ST, W>::splat(d, value);
+#endif
+}
+
+template <class D, size_t W>
+requires (stream_width_ok<W>)
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+mask_stream<D, W> splat_mask_stream_false(D d) noexcept {
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+    const auto mask_bits = hn::VecFromMask(d, hn::MaskFalse(d));
+    if constexpr (W == 1) {
+        return mask_bits;
+    } else if constexpr (W == 2) {
+        return hn::Create2(d, mask_bits, mask_bits);
+    } else if constexpr (W == 3) {
+        return hn::Create3(d, mask_bits, mask_bits, mask_bits);
+    } else {
+        return hn::Create4(d, mask_bits, mask_bits, mask_bits, mask_bits);
+    }
+#else
+    return mask_stream<D, W>::splat_false(d);
+#endif
+}
+
 // ============================================================================
 // Lifting machinery
 // ============================================================================
@@ -265,7 +505,7 @@ template <size_t S, typename Arg>
 [[gnu::always_inline]] HWY_INLINE
 constexpr decltype(auto) project(Arg& arg) {
     if constexpr (is_any_stream_v<Arg>) {
-        return arg[S];
+        return stream_get<S>(arg);
     } else {
         return (arg);    // parens force lvalue-ref return
     }
@@ -287,7 +527,7 @@ inline constexpr size_t stream_width_of_v = 0;
 template <typename T>
 requires (is_any_stream_v<T>)
 inline constexpr size_t stream_width_of_v<T> =
-    std::remove_cvref_t<T>::stream_width;
+    stream_width_v<T>;
 
 // Recursive deduction: pick the first stream arg's width.
 template <typename...> struct deduce_width;
@@ -295,9 +535,10 @@ template <> struct deduce_width<> { static constexpr size_t value = 0; };
 
 template <typename First, typename... Rest>
 struct deduce_width<First, Rest...> {
-    static constexpr size_t value = is_any_stream_v<First>
+    static constexpr size_t tail = deduce_width<Rest...>::value;
+    static constexpr size_t value = stream_width_of_v<First> > tail
         ? stream_width_of_v<First>
-        : deduce_width<Rest...>::value;
+        : tail;
 };
 
 template <typename... Args>
@@ -311,7 +552,7 @@ template <typename T> struct tag_of_impl { using type = void; };
 template <typename T>
 requires (is_any_stream_v<T>)
 struct tag_of_impl<T> {
-    using type = typename std::remove_cvref_t<T>::tag_t;
+    using type = stream_tag_t<T>;
 };
 template <typename T> using tag_of_t = typename tag_of_impl<T>::type;
 
@@ -323,7 +564,7 @@ template <> struct deduce_tag<> { using type = void; };
 template <typename First, typename... Rest>
 requires (is_any_stream_v<First>)
 struct deduce_tag<First, Rest...> {
-    using type = typename std::remove_cvref_t<First>::tag_t;
+    using type = stream_tag_t<First>;
 };
 
 template <typename First, typename... Rest>
@@ -336,7 +577,7 @@ template <typename T> struct stored_of_impl { using type = void; };
 template <typename T>
 requires (is_vec_stream_v<T>)
 struct stored_of_impl<T> {
-    using type = typename std::remove_cvref_t<T>::stored_type;
+    using type = stream_stored_t<T>;
 };
 template <typename T> using stored_of_t = typename stored_of_impl<T>::type;
 
@@ -346,7 +587,7 @@ template <> struct deduce_stored<> { using type = void; };
 template <typename First, typename... Rest>
 requires (is_vec_stream_v<First>)
 struct deduce_stored<First, Rest...> {
-    using type = typename std::remove_cvref_t<First>::stored_type;
+    using type = stream_stored_t<First>;
 };
 
 template <typename First, typename... Rest>
@@ -358,9 +599,17 @@ struct deduce_stored<First, Rest...> : deduce_stored<Rest...> {};
 
 template <typename... Args>
 inline constexpr bool widths_consistent_v =
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+    // A raw vector is the W=1 carrier and is also the broadcast operand for a
+    // wider native tuple. Distinct tuple widths remain a hard error.
+    ((!is_any_stream_v<Args> || stream_width_of_v<Args> == 1
+      || stream_width_of_v<Args> == deduce_width_v<Args...>)
+     && ... && true);
+#else
     ((!is_any_stream_v<Args> ||
       stream_width_of_v<Args> == deduce_width_v<Args...>)
      && ... && true);
+#endif
 
 template <typename... Args>
 inline constexpr bool tags_consistent_v =
@@ -402,7 +651,7 @@ template <class D, typename ST, size_t W,
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 vec_stream<D, ST, W> lift_op_pack_vec(
     std::index_sequence<S...>, Op& op, Args&&... args) {
-    return vec_stream<D, ST, W>::pack(
+    return pack_vec_stream<D, ST, W>(D{},
         lift_eval_at_slot<S>(op, std::forward<Args>(args)...)...);
 }
 
@@ -411,7 +660,7 @@ template <class D, size_t W,
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 mask_stream<D, W> lift_op_pack_mask(
     std::index_sequence<S...>, Op& op, Args&&... args) {
-    return mask_stream<D, W>::pack(
+    return pack_mask_stream<D, W>(D{},
         lift_eval_at_slot<S>(op, std::forward<Args>(args)...)...);
 }
 
@@ -515,10 +764,49 @@ BIOSEQ_VS_DEFINE_TAG(Le);
 BIOSEQ_VS_DEFINE_TAG(Ge);
 BIOSEQ_VS_DEFINE_TAG(ShiftLeftSame);
 BIOSEQ_VS_DEFINE_TAG(ShiftRightSame);
-BIOSEQ_VS_DEFINE_TAG(IfThenElse);
-BIOSEQ_VS_DEFINE_TAG(IfThenElseZero);
-BIOSEQ_VS_DEFINE_TAG(IfThenZeroElse);
 BIOSEQ_VS_DEFINE_TAG(MaskFromVec);
+
+template <typename M>
+[[gnu::always_inline]] HWY_INLINE decltype(auto)
+native_predicate(M&& mask_bits) {
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+    if constexpr (native_raw_vector<M>) {
+        return hn::MaskFromVec(mask_bits);
+    } else {
+        return std::forward<M>(mask_bits);
+    }
+#else
+    return std::forward<M>(mask_bits);
+#endif
+}
+
+struct op_IfThenElse {
+    template <typename M, typename Y, typename N>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        M&& mask, Y&& yes, N&& no) {
+        return hn::IfThenElse(
+            native_predicate(std::forward<M>(mask)),
+            std::forward<Y>(yes), std::forward<N>(no));
+    }
+};
+
+struct op_IfThenElseZero {
+    template <typename M, typename Y>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(M&& mask, Y&& yes) {
+        return hn::IfThenElseZero(
+            native_predicate(std::forward<M>(mask)),
+            std::forward<Y>(yes));
+    }
+};
+
+struct op_IfThenZeroElse {
+    template <typename M, typename N>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(M&& mask, N&& no) {
+        return hn::IfThenZeroElse(
+            native_predicate(std::forward<M>(mask)),
+            std::forward<N>(no));
+    }
+};
 
 #undef BIOSEQ_VS_DEFINE_TAG
 
@@ -588,6 +876,8 @@ BIOSEQ_VS_BINARY_WRAPPER(Le)
 BIOSEQ_VS_BINARY_WRAPPER(Ge)
 BIOSEQ_VS_BINARY_WRAPPER(ShiftLeftSame)
 BIOSEQ_VS_BINARY_WRAPPER(ShiftRightSame)
+BIOSEQ_VS_BINARY_WRAPPER(IfThenElseZero)
+BIOSEQ_VS_BINARY_WRAPPER(IfThenZeroElse)
 
 // Unary lifts.
 BIOSEQ_VS_UNARY_WRAPPER(Not)
@@ -597,8 +887,6 @@ BIOSEQ_VS_UNARY_WRAPPER(MaskFromVec)
 
 // Ternary lifts (full {stream, scalar}^3 = 27 cases handled in one wrapper).
 BIOSEQ_VS_TERNARY_WRAPPER(IfThenElse)
-BIOSEQ_VS_TERNARY_WRAPPER(IfThenElseZero)
-BIOSEQ_VS_TERNARY_WRAPPER(IfThenZeroElse)
 
 #undef BIOSEQ_VS_BINARY_WRAPPER
 #undef BIOSEQ_VS_UNARY_WRAPPER
@@ -648,7 +936,7 @@ namespace vec_stream_internal_bc {
 template <class D_to, class A, size_t S>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto bitcast_at_slot(D_to d_to, A const& a) noexcept {
-    return hn::BitCast(d_to, a[S]);
+    return hn::BitCast(d_to, stream_get<S>(a));
 }
 
 template <class D_to, typename ST_to, size_t W,
@@ -656,7 +944,7 @@ template <class D_to, typename ST_to, size_t W,
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 vec_stream<D_to, ST_to, W> bitcast_pack_impl(
     D_to d_to, A const& a, std::index_sequence<S...>) noexcept {
-    return vec_stream<D_to, ST_to, W>::pack(
+    return pack_vec_stream<D_to, ST_to, W>(d_to,
         bitcast_at_slot<D_to, A, S>(d_to, a)...);
 }
 }  // namespace vec_stream_internal_bc
@@ -667,8 +955,7 @@ vec_stream<D_to, ST_to, W> bitcast_pack_impl(
 template <class D_to, typename A>
 requires (is_vec_stream_v<A>)
 [[nodiscard]] HWY_INLINE auto BitCast(D_to d_to, A&& a) {
-    using ATy = std::remove_cvref_t<A>;
-    constexpr size_t W = ATy::stream_width;
+    constexpr size_t W = stream_width_v<A>;
     using ST_to = hn::TFromD<D_to>;
     return vec_stream_internal_bc::bitcast_pack_impl<D_to, ST_to, W>(
         d_to, a, std::make_index_sequence<W>{});
@@ -678,11 +965,15 @@ requires (is_vec_stream_v<A>)
 template <class D, typename A>
 requires (is_mask_stream_v<A>)
 [[nodiscard]] HWY_INLINE auto VecFromMask(D d, A&& a) {
-    using ATy = std::remove_cvref_t<A>;
-    static_assert(std::is_same_v<typename ATy::tag_t, D>, "VecFromMask: tag mismatch");
+    static_assert(std::is_same_v<stream_tag_t<A>, D>, "VecFromMask: tag mismatch");
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+    // Native mask streams already carry all-bits/zero vector lanes.
+    return std::forward<A>(a);
+#else
     return vec_stream_internal::lift_op(
         [d](auto&& m) [[gnu::always_inline]] { return hn::VecFromMask(d, m); },
         std::forward<A>(a));
+#endif
 }
 
 /// StoreStream: per-stream store to W separate base pointers. The pointers
@@ -692,24 +983,22 @@ requires (is_mask_stream_v<A>)
 template <class D, typename A, typename T>
 requires (is_vec_stream_v<A>)
 HWY_INLINE void StoreStream(A const& stream, D d,
-                            std::array<T*, std::remove_cvref_t<A>::stream_width> ptrs) {
-    using ATy = std::remove_cvref_t<A>;
-    static_assert(std::is_same_v<typename ATy::tag_t, D>, "StoreStream: tag mismatch");
-    for_each_index<ATy::stream_width>([&](auto s_const) [[gnu::always_inline]] {
+                            std::array<T*, stream_width_v<A>> ptrs) {
+    static_assert(std::is_same_v<stream_tag_t<A>, D>, "StoreStream: tag mismatch");
+    for_each_index<stream_width_v<A>>([&](auto s_const) [[gnu::always_inline]] {
         constexpr size_t s = decltype(s_const)::value;
-        hn::Store(stream[s], d, ptrs[s]);
+        hn::Store(stream_get<s>(stream), d, ptrs[s]);
     });
 }
 
 template <class D, typename A, typename T>
 requires (is_vec_stream_v<A>)
 HWY_INLINE void StoreUStream(A const& stream, D d,
-                             std::array<T*, std::remove_cvref_t<A>::stream_width> ptrs) {
-    using ATy = std::remove_cvref_t<A>;
-    static_assert(std::is_same_v<typename ATy::tag_t, D>, "StoreUStream: tag mismatch");
-    for_each_index<ATy::stream_width>([&](auto s_const) [[gnu::always_inline]] {
+                             std::array<T*, stream_width_v<A>> ptrs) {
+    static_assert(std::is_same_v<stream_tag_t<A>, D>, "StoreUStream: tag mismatch");
+    for_each_index<stream_width_v<A>>([&](auto s_const) [[gnu::always_inline]] {
         constexpr size_t s = decltype(s_const)::value;
-        hn::StoreU(stream[s], d, ptrs[s]);
+        hn::StoreU(stream_get<s>(stream), d, ptrs[s]);
     });
 }
 
@@ -718,14 +1007,17 @@ HWY_INLINE void StoreUStream(A const& stream, D d,
 template <class D, typename A>
 requires (is_mask_stream_v<A>)
 [[nodiscard]] HWY_INLINE auto AllFalsePerStream(D d, A const& a)
-    -> std::array<bool, std::remove_cvref_t<A>::stream_width>
+    -> std::array<bool, stream_width_v<A>>
 {
-    using ATy = std::remove_cvref_t<A>;
-    static_assert(std::is_same_v<typename ATy::tag_t, D>, "AllFalsePerStream: tag mismatch");
-    std::array<bool, ATy::stream_width> out{};
-    for_each_index<ATy::stream_width>([&](auto s_const) [[gnu::always_inline]] {
+    static_assert(std::is_same_v<stream_tag_t<A>, D>, "AllFalsePerStream: tag mismatch");
+    std::array<bool, stream_width_v<A>> out{};
+    for_each_index<stream_width_v<A>>([&](auto s_const) [[gnu::always_inline]] {
         constexpr size_t s = decltype(s_const)::value;
-        out[s] = hn::AllFalse(d, a[s]);
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
+        out[s] = hn::AllFalse(d, hn::MaskFromVec(stream_get<s>(a)));
+#else
+        out[s] = hn::AllFalse(d, stream_get<s>(a));
+#endif
     });
     return out;
 }
@@ -752,7 +1044,7 @@ template <class D, typename ST, size_t W, typename Factory>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto make_vec_stream(Factory&& factory) noexcept {
     return [&]<size_t... S>(std::index_sequence<S...>) [[gnu::always_inline]] {
-        return vec_stream<D, ST, W>::pack(
+        return pack_vec_stream<D, ST, W>(D{},
             factory(std::integral_constant<size_t, S>{})...);
     }(std::make_index_sequence<W>{});
 }

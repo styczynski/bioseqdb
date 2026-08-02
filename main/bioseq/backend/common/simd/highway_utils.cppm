@@ -1,16 +1,122 @@
 /** Canonical generator input for minimizer-owned Highway utilities. */
+#ifndef BIOSEQ_SIMD_UTILS_STATIC_FACADE
 module;
 #include <hwy/highway.h>
+#include <hwy/aligned_allocator.h>
 
 export module bioseq.highway.sources.simd_utils;
 
 import std;
 import bioseq.common.templating;
+#endif
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 using ::bioseq::common::templating::for_each_index;
+
+template<class T, class Buffer>
+struct simd_array_allocator {
+    static Buffer allocate(const size_t& length) {
+        return hwy::AllocateAligned<T>(length);
+    }
+};
+
+template<class D, class T, class VecT = hn::Vec<D>>
+HWY_INLINE std::vector<T> hwy_to_vector(D& d, const VecT& value) {
+    HWY_ALIGN T lanes[hn::MaxLanes(d)];
+    hn::Store(value, d, lanes);
+    return std::vector<T>(lanes, lanes + hn::Lanes(d));
+}
+
+template<class T>
+inline constexpr std::pair<T, T> int_div_floor(
+    const T& value, const T& divisor)
+{
+    return {value / divisor, value % divisor};
+}
+
+template<class D, size_t index = 0,
+         class Stored = hn::TFromD<D>>
+HWY_INLINE Stored extract_last(D d, hn::Vec<D> value) {
+    return hn::ExtractLane(value, hn::Lanes(d) - 1 - index);
+}
+
+template<class D, size_t index = 0>
+HWY_INLINE hn::Vec<D> broadcast_last(D d, hn::Vec<D> value) {
+    // Runtime lane lookup is required for capped scalable descriptors, where
+    // MaxLanes(d) is not necessarily the active last lane.
+    return hn::Set(d, extract_last<D, index>(d, value));
+}
+
+template<class D, size_t first_count = 1,
+         class Stored = hn::TFromD<D>>
+HWY_INLINE hn::Vec<D> insert_first(
+    D d, hn::Vec<D> value, Stored first)
+{
+    return hn::IfThenElse(
+        hn::FirstN(d, first_count), hn::Set(d, first), value);
+}
+
+template<class D, class Stored = hn::TFromD<D>>
+HWY_INLINE Stored extract_lane(D, hn::Vec<D> value, size_t lane) {
+    return hn::ExtractLane(value, lane);
+}
+
+template<class D, class Stored = hn::TFromD<D>>
+HWY_INLINE size_t lane_hargmax(
+    D d, hn::Vec<D> value, Stored maximum)
+{
+    const auto lane = hn::FindFirstTrue(
+        d, hn::Eq(value, hn::Set(d, maximum)));
+    if (lane < 0) [[unlikely]] {
+        std::abort();
+    }
+    return static_cast<size_t>(lane);
+}
+
+template<size_t N, class D>
+HWY_INLINE hn::Vec<D> lanes_shift_left_zero(D d, hn::Vec<D> value) {
+    // Block Aligner prefix scans rely on the 128-bit-block-local semantics.
+    return hn::ShiftLeftBytes<N * sizeof(hn::TFromD<D>)>(d, value);
+}
+
+template<class D, class Stored = hn::TFromD<D>>
+HWY_INLINE hn::Vec<D> lanes_shift_left_1_borrow(
+    D d, hn::Vec<D> current, hn::Vec<D> previous)
+{
+    const auto shifted = hn::SlideUpLanes(d, current, 1);
+    return hn::IfThenElse(
+        hn::FirstN(d, 1),
+        hn::Set(d, extract_last(d, previous)),
+        shifted);
+}
+
+template<class D_I, class D_F>
+HWY_INLINE hn::Vec<D_F> vectorized_fast_log2(
+    D_I d_int, D_F d_float, hn::Vec<D_I> input_int)
+{
+    const auto input_as_float = hn::ConvertTo(d_float, input_int);
+    const auto float_as_int_bits = hn::BitCast(d_int, input_as_float);
+    const auto raw_exponent = hn::And(
+        hn::ShiftRight<23>(float_as_int_bits), hn::Set(d_int, 255));
+    const auto biased_exponent = hn::Sub(
+        raw_exponent, hn::Set(d_int, 128));
+    const auto exponent_as_float = hn::ConvertTo(d_float, biased_exponent);
+    const auto mantissa_bits = hn::Add(
+        hn::And(float_as_int_bits, hn::Set(d_int, ~(255 << 23))),
+        hn::Set(d_int, 127 << 23));
+    const auto normalized_mantissa = hn::BitCast(d_float, mantissa_bits);
+    const auto inner_term = hn::MulAdd(
+        hn::Set(d_float, -0.34484843F),
+        normalized_mantissa,
+        hn::Set(d_float, 2.02466578F));
+    const auto fractional_part = hn::MulSub(
+        inner_term,
+        normalized_mantissa,
+        hn::Set(d_float, 0.67487759F));
+    return hn::Add(exponent_as_float, fractional_part);
+}
 
 template<typename D_IN, typename D_OUT>
 concept d_simd_cmp_3x = sizeof(hwy::MakeWide<hwy::MakeWide<hwy::MakeWide<hn::TFromD<D_IN>>>>) == sizeof(hn::TFromD<D_OUT>);

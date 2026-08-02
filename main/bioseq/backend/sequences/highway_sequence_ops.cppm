@@ -1,4 +1,5 @@
 /** Canonical generator input for exact minimizer sequence iteration. */
+#ifndef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
 module;
 #include <hwy/highway.h>
 
@@ -8,38 +9,32 @@ import std;
 import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
 import bioseq.storage.lazy;
+import bioseq.sequences.simd_iteration_geometry;
 import bioseq.highway.sources.simd_utils;
 import bioseq.highway.sources.vector_stream;
+#endif
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
+#ifndef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
 namespace hn = hwy::HWY_NAMESPACE;
+#endif
 
 inline void highway_kernel_invariant(
     const bool condition, const std::string_view message)
 {
+#ifdef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
+    DEBUG_ASSERT(condition, message);
+#else
     if (!condition) {
         throw std::logic_error{std::string{message}};
     }
-}
-
-namespace detail {
-	template<typename T, typename F, std::size_t... Is>
-	constexpr auto generate_array(F& f, std::index_sequence<Is...>)
-		-> std::array<T, sizeof...(Is)> {
-		return {{f(std::integral_constant<std::size_t, Is>{})...}};
-	}
-}
-
-template<typename T, std::size_t N, typename F>
-constexpr auto generate_array(F f) {
-return detail::generate_array<T>(f, std::make_index_sequence<N>{});
+#endif
 }
 
 template <typename T>
 inline constexpr std::pair<T, T> int_div_ceil(const T& val, const T& div) {
-	const T a = (val + div - 1) / div;
-	return std::make_pair(a, a * div - val);
+	return ::bioseq::simd::iteration_geometry::int_div_ceil(val, div);
 }
 
 // deprecated
@@ -63,24 +58,9 @@ std::tuple<size_t, std::array<size_t, max_lanes>> calculate_iteration_offsets(
 	const size_t lanes_n,
 	const size_t context_units
 ) {
-	const auto& [units_per_lane, _] = int_div_ceil(seq_len - context_units, lanes_n);
-	const size_t max_offset = seq_len - context_units - units_per_lane;
-	size_t i = lanes_n - 1;
-	std::array<size_t, max_lanes> offsets = {};
-	offsets[i] = max_offset;
-	while (i>=1) {
-		--i;
-		if (offsets[i+1] < units_per_lane) {
-			// bioseq_log<DBG>("offset problematic at {} ({} cmp {})", i, offsets[i+1], units_per_lane);
-			break;
-		}
-		offsets[i] = offsets[i+1] - units_per_lane;
-		// bioseq_log<DBG>("{} -> {} - {} = {}", i, offsets[i+1], units_per_lane, offsets[i]);
-	}
-	for(; i > 0; --i) {
-		offsets[i] = 0;
-	}
-	return make_tuple(units_per_lane, offsets);
+	return ::bioseq::simd::iteration_geometry::
+		calculate_iteration_offsets<max_lanes>(
+			seq_len, lanes_n, context_units);
 }
 
 template<
@@ -412,6 +392,7 @@ iterate_sequence_bp_simd_v2(
 		"with per-stream circular_append_buffer instances; for delayed "
 		"single-stream iteration use the original iterate_sequence_bp_simd_offsets.");
 	static_assert(NumStreams >= 1, "NumStreams must be >= 1");
+	static_assert(NumStreams <= 4, "NumStreams must be <= 4");
 
 	// Suppress unused-parameter warnings for the parameter-pack args we are
 	// preserving for API shape parity with v1.
