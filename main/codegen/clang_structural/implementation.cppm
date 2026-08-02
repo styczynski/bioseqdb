@@ -5986,7 +5986,8 @@ prepare_compilation_environment(
             !alternates.empty()
             && (std::ranges::any_of(
                     alternates,
-                    [&](const std::filesystem::path& alternate) {
+                    [&raw_commands](
+                        const std::filesystem::path& alternate) {
                         return raw_commands.contains(alternate)
                             || std::filesystem::is_regular_file(
                                 alternate);
@@ -6079,7 +6080,8 @@ prepare_compilation_environment(
         if (!alternates.empty() && source_profile
             && (std::ranges::any_of(
                     alternates,
-                    [&](const std::filesystem::path& alternate) {
+                    [&raw_commands](
+                        const std::filesystem::path& alternate) {
                         return raw_commands.contains(alternate)
                             || std::filesystem::is_regular_file(
                                 alternate);

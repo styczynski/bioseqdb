@@ -2052,7 +2052,8 @@ TEST_CASE(
     }
     std::atomic<std::uint64_t> publish_operations{};
     std::jthread publisher(
-        [&](std::stop_token token) {
+        [&publication_paths,
+         &publish_operations](std::stop_token token) {
             while (!token.stop_requested()) {
                 for (const auto& [committed, partial] :
                      publication_paths) {
