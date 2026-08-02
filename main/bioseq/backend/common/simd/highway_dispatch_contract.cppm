@@ -194,6 +194,16 @@ static_assert(std::is_trivially_copyable_v<HighwayTargetBinding>);
 [[nodiscard]] HighwayDispatchInfo
 registered_highway_dispatch_info() noexcept;
 
+/**
+ * Rebind one supervisor-selected target bit in the current process.
+ *
+ * This is a direct generated target lookup for EXEC_BACKEND/ASLR workers, not
+ * another runtime target selector. The bit must be compiled and runnable on
+ * this process and the returned table must be complete.
+ */
+[[nodiscard]] const HighwayTargetBinding&
+registered_highway_target_binding(std::int64_t exact_target);
+
 /** Format each single target bit in Highway priority order via TargetName(). */
 [[nodiscard]] std::vector<std::string_view> highway_target_names(
     std::int64_t mask);

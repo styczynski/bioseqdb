@@ -109,6 +109,50 @@ namespace detail {
     return value;
 }
 
+[[nodiscard]] inline std::uint32_t parse_ordinal(
+    const std::string_view spelling,
+    const std::filesystem::path& path,
+    const std::string_view record) {
+    std::uint32_t value{};
+    const auto parsed = std::from_chars(
+        spelling.data(), spelling.data() + spelling.size(), value);
+    if (parsed.ec != std::errc{}
+        || parsed.ptr != spelling.data() + spelling.size()) {
+        throw std::runtime_error(
+            path.string() + ": invalid " + std::string{record}
+            + " ordinal '" + std::string{spelling} + "'");
+    }
+    return value;
+}
+
+inline void require_field_count(
+    const std::filesystem::path& path,
+    std::string_view record,
+    std::size_t actual,
+    std::size_t expected);
+
+[[nodiscard]] inline domain_topology_expectation
+parse_domain_topology_record(
+    const std::vector<std::string>& fields,
+    const std::filesystem::path& path,
+    const std::size_t expected_ordinal) {
+    require_field_count(
+        path, "domain-topology", fields.size(), 6u);
+    const std::uint32_t ordinal = parse_ordinal(
+        fields[1], path, "domain-topology");
+    if (ordinal != expected_ordinal) {
+        throw std::runtime_error(
+            path.string()
+            + ": domain-topology ordinals must be contiguous from zero");
+    }
+    return domain_topology_expectation{
+        .name = fields[2],
+        .path = std::filesystem::path{fields[3]},
+        .topology_digest = fields[4],
+        .content_sha256 = fields[5],
+    };
+}
+
 [[nodiscard]] inline std::vector<std::string> split_dependencies(
     std::string_view value) {
     std::vector<std::string> result;
@@ -231,6 +275,10 @@ inline void require_field_count(
                 .bit = detail::parse_target_bit(fields[5], path),
             };
             result.targets.push_back(std::move(target));
+        } else if (fields.front() == "domain-topology") {
+            result.domain_topologies.push_back(
+                detail::parse_domain_topology_record(
+                    fields, path, result.domain_topologies.size()));
         } else {
             throw std::runtime_error(
                 path.string() + ": unknown target-manifest record '"
@@ -320,6 +368,10 @@ inline void require_field_count(
                 .family_field = std::string{fields[1]},
                 .slot_field = std::string{fields[2]},
             });
+        } else if (fields.front() == "domain-topology") {
+            result.domain_topologies.push_back(
+                detail::parse_domain_topology_record(
+                    fields, path, result.domain_topologies.size()));
         } else {
             throw std::runtime_error(
                 path.string() + ": unknown source-manifest record '"
@@ -372,7 +424,24 @@ inline void require_field_count(
            << detail::json_escape(plan.clang_version) << "\",\n"
            << "  \"compilation_signature\": \""
            << detail::json_escape(plan.compilation_signature) << "\",\n"
-           << "  \"targets\": [\n";
+           << "  \"domain_topologies\": [\n";
+    for (std::size_t index = 0;
+         index < plan.domain_topologies.size();
+         ++index) {
+        const domain_topology_provenance& topology =
+            plan.domain_topologies[index];
+        output << "    {\"name\":\"" << detail::json_escape(topology.name)
+               << "\",\"path\":\""
+               << detail::json_escape(topology.path.generic_string())
+               << "\",\"topology_digest\":\""
+               << detail::json_escape(topology.topology_digest)
+               << "\",\"content_sha256\":\""
+               << detail::json_escape(topology.content_sha256) << "\"}"
+               << (index + 1 == plan.domain_topologies.size()
+                       ? "\n"
+                       : ",\n");
+    }
+    output << "  ],\n  \"targets\": [\n";
     for (std::size_t index = 0;
          index < plan.target_inventory.targets.size();
          ++index) {

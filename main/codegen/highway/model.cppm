@@ -42,6 +42,23 @@ struct required_slot_spec {
     std::string slot_field;
 };
 
+/** Ordered external domain topology supplied by configure-time authority. */
+struct domain_topology_manifest_input {
+    std::string name;
+    std::filesystem::path path;
+};
+
+/** Validated external-domain provenance; never a Highway target axis. */
+struct domain_topology_provenance {
+    std::string name;
+    std::filesystem::path path;
+    std::string topology_digest;
+    std::string content_sha256;
+};
+
+/** Configure-sealed expectation repeated in target and source manifests. */
+using domain_topology_expectation = domain_topology_provenance;
+
 struct target_manifest {
     std::string policy_digest;
     std::vector<std::pair<std::string, std::string>> policy_definitions;
@@ -49,6 +66,7 @@ struct target_manifest {
     std::string highway_digest;
     std::string static_target_token;
     std::vector<target_spec> targets;
+    std::vector<domain_topology_expectation> domain_topologies;
 };
 
 struct source_manifest {
@@ -58,6 +76,7 @@ struct source_manifest {
     std::vector<source_spec> sources;
     std::vector<slot_spec> slots;
     std::vector<required_slot_spec> required_slots;
+    std::vector<domain_topology_expectation> domain_topologies;
 };
 
 struct command_line {
@@ -77,10 +96,12 @@ struct command_line {
     std::filesystem::path output_root;
     std::filesystem::path artifact_manifest;
     std::filesystem::path stamp;
+    std::vector<domain_topology_manifest_input> domain_topology_manifests;
 };
 
 struct prepare_command_line {
     std::filesystem::path source_manifest_path;
+    std::filesystem::path signature_source;
     std::filesystem::path raw_compile_database;
     std::filesystem::path clang_binary;
     std::filesystem::path clang_scan_deps;
@@ -95,6 +116,7 @@ struct prepare_command_line {
     std::filesystem::path pcm_manifest;
     std::filesystem::path depfile;
     std::filesystem::path stamp;
+    std::vector<domain_topology_manifest_input> domain_topology_manifests;
 };
 
 struct callable_insertion {
@@ -137,6 +159,7 @@ struct generation_plan {
     std::vector<extracted_source> extracted_sources;
     std::string clang_version;
     std::string compilation_signature;
+    std::vector<domain_topology_provenance> domain_topologies;
 };
 
 struct generation_result {

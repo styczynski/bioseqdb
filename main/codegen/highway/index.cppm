@@ -30,14 +30,21 @@ export namespace bioseq::codegen::highway {
 
 namespace detail {
 
-[[nodiscard]] inline std::map<std::string, std::string, std::less<>>
+struct parsed_options final {
+    std::map<std::string, std::string, std::less<>> singleton;
+    std::vector<std::string> domain_topology_manifests;
+};
+
+[[nodiscard]] inline parsed_options
 parse_options(
     std::span<std::string_view const> args,
     const std::set<std::string_view, std::less<>>& allowed) {
-    std::map<std::string, std::string, std::less<>> result;
+    parsed_options result;
     for (std::size_t index = 0; index < args.size(); ++index) {
         const std::string_view option = args[index];
-        if (!allowed.contains(option)) {
+        constexpr std::string_view domain_option =
+            "--domain-topology-manifest";
+        if (!allowed.contains(option) && option != domain_option) {
             throw std::runtime_error(
                 "unknown Highway generator option '"
                 + std::string{option} + "'");
@@ -48,22 +55,39 @@ parse_options(
                 + std::string{option} + "'");
         }
         const std::string_view value = args[++index];
-        if (value.empty() || !result.emplace(option, value).second) {
+        if (value.empty()) {
             throw std::runtime_error(
                 "Highway generator option '" + std::string{option}
-                + "' must occur once with a non-empty value");
+                + "' requires a non-empty value");
+        }
+        if (option == domain_option) {
+            result.domain_topology_manifests.emplace_back(value);
+        } else if (!result.singleton.emplace(option, value).second) {
+            throw std::runtime_error(
+                "Highway generator option '" + std::string{option}
+                + "' must occur once");
         }
     }
-    if (result.size() != allowed.size()) {
+    if (result.singleton.size() != allowed.size()) {
         std::string missing;
         for (std::string_view option : allowed) {
-            if (!result.contains(option)) {
+            if (!result.singleton.contains(option)) {
                 if (!missing.empty()) missing += ", ";
                 missing += option;
             }
         }
         throw std::runtime_error(
             "missing required Highway generator option(s): " + missing);
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::vector<domain_topology_manifest_input>
+parse_domain_topology_arguments(const std::vector<std::string>& values) {
+    std::vector<domain_topology_manifest_input> result;
+    result.reserve(values.size());
+    for (const std::string& value : values) {
+        result.push_back(parse_domain_topology_manifest_argument(value));
     }
     return result;
 }
@@ -88,7 +112,8 @@ parse_options(
         "--stamp",
         "--target-manifest",
     };
-    const auto options = parse_options(args, allowed);
+    const parsed_options parsed = parse_options(args, allowed);
+    const auto& options = parsed.singleton;
     return command_line{
         .target_manifest_path = options.at("--target-manifest"),
         .source_manifest_path = options.at("--source-manifest"),
@@ -108,6 +133,9 @@ parse_options(
         .output_root = options.at("--output-root"),
         .artifact_manifest = options.at("--artifact-manifest"),
         .stamp = options.at("--stamp"),
+        .domain_topology_manifests =
+            parse_domain_topology_arguments(
+                parsed.domain_topology_manifests),
     };
 }
 
@@ -127,12 +155,15 @@ parse_options(
         "--pcm-manifest",
         "--pcm-root",
         "--raw-compile-database",
+        "--signature-source",
         "--source-manifest",
         "--stamp",
     };
-    const auto options = parse_options(args, allowed);
+    const parsed_options parsed = parse_options(args, allowed);
+    const auto& options = parsed.singleton;
     return prepare_command_line{
         .source_manifest_path = options.at("--source-manifest"),
+        .signature_source = options.at("--signature-source"),
         .raw_compile_database = options.at("--raw-compile-database"),
         .clang_binary = options.at("--clang-binary"),
         .clang_scan_deps = options.at("--clang-scan-deps"),
@@ -149,6 +180,9 @@ parse_options(
         .pcm_manifest = options.at("--pcm-manifest"),
         .depfile = options.at("--depfile"),
         .stamp = options.at("--stamp"),
+        .domain_topology_manifests =
+            parse_domain_topology_arguments(
+                parsed.domain_topology_manifests),
     };
 }
 
@@ -203,16 +237,47 @@ parse_options(
     return result;
 }
 
+[[nodiscard]] inline std::string domain_topology_identity(
+    const std::vector<domain_topology_provenance>& topologies) {
+    std::string material = "bioseq-highway-domain-topologies-v1\n";
+    for (std::size_t index = 0; index < topologies.size(); ++index) {
+        const domain_topology_provenance& topology = topologies[index];
+        material += std::to_string(index) + "\t" + topology.name + "\t"
+            + topology.topology_digest + "\t" + topology.content_sha256
+            + "\n";
+    }
+    return sha256_hex(material);
+}
+
 [[nodiscard]] inline int execute_prepare(prepare_command_line command) {
     validate_prepare_command_line(command);
+    const std::vector<domain_topology_provenance> domain_topologies =
+        load_domain_topology_manifests(
+            command.domain_topology_manifests);
     const source_manifest sources =
         parse_source_manifest(command.source_manifest_path);
+    validate_domain_topology_authority(
+        sources.domain_topologies,
+        domain_topologies,
+        "Highway prepare");
     const std::vector<std::filesystem::path> source_paths =
         source_paths_of(sources);
+    for (const std::filesystem::path& source_path : source_paths) {
+        if (std::filesystem::equivalent(
+                source_path, command.signature_source)) {
+            throw std::runtime_error(
+                "Highway signature donor must not be a canonical target source");
+        }
+    }
     std::filesystem::create_directories(command.pcm_root);
+    // Retarget the neutral attached-primary command to every registered
+    // canonical module, then build their complete module graph only inside
+    // the codegen-owned scratch PCM authority. No authored scan target or
+    // linked object provider is involved.
     clang_structural::prepared_compilation_environment prepared =
         clang_structural::prepare_compilation_environment(
             source_paths,
+            command.signature_source,
             command.raw_compile_database,
             command.clang_binary,
             command.clang_scan_deps,
@@ -226,6 +291,10 @@ parse_options(
             "production",
             "core");
     prepared.dependencies.push_back(command.source_manifest_path);
+    prepared.dependencies.push_back(command.signature_source);
+    for (const domain_topology_provenance& topology : domain_topologies) {
+        prepared.dependencies.push_back(topology.path);
+    }
     write_if_different(
         command.compile_database_output, prepared.compile_database_json);
     write_if_different(command.pcm_manifest, prepared.pcm_manifest_json);
@@ -234,9 +303,11 @@ parse_options(
         render_depfile(command.stamp, std::move(prepared.dependencies)));
     write_if_different(
         command.stamp,
-        "bioseq_highway_prepare_stamp/v1\n"
+        "bioseq_highway_prepare_stamp/v2\n"
         "profile=production\n"
         "authority=core\n"
+        "signature_source_sha256="
+            + sha256_hex(read_file(command.signature_source)) + "\n"
         "compilation_signature=" + prepared.compilation_signature + "\n"
         "relocatable_compilation_signature="
             + prepared.relocatable_compilation_signature + "\n"
@@ -246,22 +317,32 @@ parse_options(
         "relocatable_compile_database_sha256="
             + prepared.relocatable_compile_database_sha256 + "\n"
         "relocatable_pcm_manifest_sha256="
-            + prepared.relocatable_pcm_manifest_sha256 + "\n");
+            + prepared.relocatable_pcm_manifest_sha256 + "\n"
+        "domain_topologies_sha256="
+            + domain_topology_identity(domain_topologies) + "\n");
     touch_stamp(command.stamp);
     return 0;
 }
 
 [[nodiscard]] inline int execute(command_line command) {
     validate_command_line(command);
+    std::vector<domain_topology_provenance> domain_topologies =
+        load_domain_topology_manifests(
+            command.domain_topology_manifests);
     target_manifest targets = parse_target_manifest(command.target_manifest_path);
     source_manifest sources = parse_source_manifest(command.source_manifest_path);
     validate_inventories(targets, sources);
+    validate_domain_topology_authority(
+        targets.domain_topologies,
+        domain_topologies,
+        "Highway generate");
 
     const std::vector<std::filesystem::path> source_paths =
         source_paths_of(sources);
-    // The isolated scan database is a production-profile authority even
-    // though its template providers are never attached to a final target.
-    // Target-policy identity is sealed independently by the target manifest.
+    // The isolated database contains donor-derived commands and scratch BMIs
+    // for the registered canonical module graph. These artifacts are codegen
+    // authority only (never CMake-attached or linked); structural collection
+    // retains compiler-proven callable geometry for generated HWY_ATTR sites.
     constexpr std::string_view compiler_profile = "production";
     const clang_structural::prepared_compilation_validation prepared =
         clang_structural::validate_prepared_compilation_environment(
@@ -291,19 +372,17 @@ parse_options(
             command.compile_database,
             compiler_profile,
             command.pcm_root);
-    if (structural.clang_version != graph.clang_version
-        || structural.compilation_signature != graph.compilation_signature) {
-        throw std::runtime_error(
-            "Highway structural and module scans used divergent compiler identities");
-    }
 
     generation_plan plan{
         .target_inventory = std::move(targets),
         .source_inventory = std::move(sources),
         .clang_version = structural.clang_version,
         .compilation_signature = sha256_hex(
-            "bioseq_highway_relocatable_prepared_closure/v1\n"
-            + prepared.relocatable_compilation_signature + "\n"),
+            "bioseq_highway_relocatable_prepared_closure/v2\n"
+            + prepared.relocatable_compilation_signature + "\n"
+            + "domain_topologies_sha256="
+            + domain_topology_identity(domain_topologies) + "\n"),
+        .domain_topologies = std::move(domain_topologies),
     };
     plan.extracted_sources =
         extract_sources(plan.source_inventory, structural, graph);
@@ -364,6 +443,8 @@ inline void run_contract_self_test() {
             != std::string::npos
         || inventory->content.find("registered_highway_dispatch_info")
             == std::string::npos
+        || inventory->content.find("registered_highway_target_binding")
+            == std::string::npos
         || generated.artifact_manifest_json.find(
                "\"path\":\"highway_registry.cppm\"")
             == std::string::npos
@@ -395,7 +476,8 @@ inline int run(std::span<std::string_view const> args) {
     if (args.empty() || (args.front() != "prepare" && args.front() != "generate")) {
         std::println(
             stderr,
-            "usage: bioseq_codegen highway <prepare|generate> [options]");
+            "usage: bioseq_codegen highway <prepare|generate> [options] "
+            "[--domain-topology-manifest <name>=<absolute-path>]...");
         return 2;
     }
     try {

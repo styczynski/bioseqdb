@@ -19,6 +19,7 @@ export module bioseq.codegen.highway:validator;
 
 import :model;
 import bioseq.codegen.clang_structural;
+import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::highway {
@@ -35,6 +36,17 @@ namespace detail {
     return std::ranges::all_of(value, [](char character) {
         return (character >= 'a' && character <= 'z')
             || (character >= 'A' && character <= 'Z')
+            || (character >= '0' && character <= '9')
+            || character == '_';
+    });
+}
+
+[[nodiscard]] inline bool domain_name(std::string_view value) noexcept {
+    if (value.empty() || value.front() < 'a' || value.front() > 'z') {
+        return false;
+    }
+    return std::ranges::all_of(value, [](const char character) {
+        return (character >= 'a' && character <= 'z')
             || (character >= '0' && character <= '9')
             || character == '_';
     });
@@ -314,7 +326,7 @@ struct parsed_slot_callable final {
 inline void validate_no_forbidden_source_macros(
     const std::filesystem::path& path,
     std::string_view source) {
-    static constexpr std::array<std::string_view, 17> forbidden{
+    static constexpr std::array<std::string_view, 18> forbidden{
         "HWY_TARGET_INCLUDE",
         "hwy/foreach_target.h",
         "HWY_ONCE",
@@ -332,6 +344,7 @@ inline void validate_no_forbidden_source_macros(
         "DisableTargets",
         "select_highway_target_once",
         "registered_highway_dispatch_info",
+        "registered_highway_target_binding",
     };
     for (std::string_view spelling : forbidden) {
         if (source.contains(spelling)) {
@@ -354,7 +367,7 @@ inline void validate_slot_expression(const slot_spec& slot) {
             "Highway slot '" + slot.family_field + "." + slot.slot_field
             + "' expression must contain {target_namespace} exactly once");
     }
-    static constexpr std::array<std::string_view, 11> forbidden{
+    static constexpr std::array<std::string_view, 12> forbidden{
         "HWY_DYNAMIC_DISPATCH",
         "HWY_DYNAMIC_POINTER",
         "HWY_STATIC_DISPATCH",
@@ -366,6 +379,7 @@ inline void validate_slot_expression(const slot_spec& slot) {
         "SupportedTargets",
         "select_highway_target_once",
         "registered_highway_dispatch_info",
+        "registered_highway_target_binding",
     };
     for (std::string_view spelling : forbidden) {
         if (slot.expression.contains(spelling)) {
@@ -377,6 +391,135 @@ inline void validate_slot_expression(const slot_spec& slot) {
 }
 
 }  // namespace detail
+
+[[nodiscard]] inline domain_topology_manifest_input
+parse_domain_topology_manifest_argument(const std::string_view value) {
+    const std::size_t separator = value.find('=');
+    if (separator == std::string_view::npos || separator == 0u
+        || separator + 1u == value.size()) {
+        throw std::runtime_error(
+            "Highway domain topology must use <name>=<absolute-manifest-path>");
+    }
+    domain_topology_manifest_input result{
+        .name = std::string{value.substr(0u, separator)},
+        .path = std::filesystem::path{
+            std::string{value.substr(separator + 1u)}},
+    };
+    if (!detail::domain_name(result.name)) {
+        throw std::runtime_error(
+            "invalid Highway domain topology name '" + result.name + "'");
+    }
+    if (!result.path.is_absolute()) {
+        throw std::runtime_error(
+            "Highway domain topology path must be absolute: "
+            + result.path.string());
+    }
+    return result;
+}
+
+[[nodiscard]] inline std::vector<domain_topology_provenance>
+load_domain_topology_manifests(
+    std::vector<domain_topology_manifest_input>& inputs) {
+    std::set<std::string, std::less<>> names;
+    std::set<std::filesystem::path> lexical_paths;
+    for (const domain_topology_manifest_input& input : inputs) {
+        if (!detail::domain_name(input.name)
+            || !names.insert(input.name).second) {
+            throw std::runtime_error(
+                "duplicate or invalid Highway domain topology name '"
+                + input.name + "'");
+        }
+        if (!input.path.is_absolute()) {
+            throw std::runtime_error(
+                "Highway domain topology path must be absolute: "
+                + input.path.string());
+        }
+        if (!lexical_paths.insert(input.path.lexically_normal()).second) {
+            throw std::runtime_error(
+                "duplicate Highway domain topology path: "
+                + input.path.string());
+        }
+    }
+
+    std::vector<domain_topology_provenance> result;
+    result.reserve(inputs.size());
+    std::vector<std::filesystem::path> physical_paths;
+    for (domain_topology_manifest_input& input : inputs) {
+        // Parse the original physical spelling first. The shared topology
+        // authority rejects symlink chains and unknown schemas; canonicalizing
+        // before this call would conceal path aliases.
+        const auto topology =
+            ::bioseq::codegen::namespace_materialization::
+                read_configure_topology_provenance(
+                input.path);
+        input.path = detail::path_identity(input.path);
+        for (const std::filesystem::path& existing : physical_paths) {
+            std::error_code error;
+            const bool equivalent =
+                std::filesystem::equivalent(input.path, existing, error);
+            if (error) {
+                throw std::runtime_error(
+                    "cannot authenticate Highway domain topology path: "
+                    + input.path.string());
+            }
+            if (equivalent) {
+                throw std::runtime_error(
+                    "duplicate Highway domain topology path: "
+                    + input.path.string());
+            }
+        }
+        detail::require_regular_file(
+            input.path, "domain topology manifest");
+        physical_paths.push_back(input.path);
+        result.push_back(domain_topology_provenance{
+            .name = input.name,
+            .path = input.path,
+            .topology_digest = topology.topology_digest,
+            .content_sha256 = topology.content_sha256,
+        });
+    }
+    return result;
+}
+
+inline void validate_domain_topology_authority(
+    const std::vector<domain_topology_expectation>& expected,
+    const std::vector<domain_topology_provenance>& actual,
+    const std::string_view owner) {
+    std::set<std::string, std::less<>> names;
+    std::set<std::filesystem::path> paths;
+    for (const domain_topology_expectation& topology : expected) {
+        if (!detail::domain_name(topology.name)
+            || !names.insert(topology.name).second
+            || !topology.path.is_absolute()
+            || detail::path_identity(topology.path) != topology.path
+            || !paths.insert(topology.path).second
+            || !detail::lowercase_hex_digest(topology.topology_digest)
+            || !detail::lowercase_hex_digest(topology.content_sha256)) {
+            throw std::runtime_error(
+                std::string{owner}
+                + ": invalid ordered domain-topology authority record '"
+                + topology.name + "'");
+        }
+    }
+    if (expected.size() != actual.size()) {
+        throw std::runtime_error(
+            std::string{owner}
+            + ": domain-topology authority count disagrees with CLI inputs");
+    }
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        const domain_topology_expectation& configured = expected[index];
+        const domain_topology_provenance& observed = actual[index];
+        if (configured.name != observed.name
+            || configured.path != observed.path
+            || configured.topology_digest != observed.topology_digest
+            || configured.content_sha256 != observed.content_sha256) {
+            throw std::runtime_error(
+                std::string{owner} + ": domain-topology authority '"
+                + configured.name
+                + "' changed or was reordered; reconfigure is required");
+        }
+    }
+}
 
 inline void validate_command_line(command_line& command) {
     command.target_manifest_path = detail::path_identity(command.target_manifest_path);
@@ -429,8 +572,14 @@ inline void validate_command_line(command_line& command) {
 }
 
 inline void validate_prepare_command_line(prepare_command_line& command) {
+    if (!command.signature_source.is_absolute()) {
+        throw std::runtime_error(
+            "Highway signature source must be an absolute path");
+    }
     command.source_manifest_path =
         detail::path_identity(command.source_manifest_path);
+    command.signature_source =
+        detail::path_identity(command.signature_source);
     command.raw_compile_database =
         detail::path_identity(command.raw_compile_database);
     command.clang_binary = detail::path_identity(command.clang_binary);
@@ -446,6 +595,7 @@ inline void validate_prepare_command_line(prepare_command_line& command) {
     command.stamp = detail::path_identity(command.stamp);
 
     detail::require_regular_file(command.source_manifest_path, "source manifest");
+    detail::require_regular_file(command.signature_source, "signature source");
     detail::require_regular_file(command.raw_compile_database, "raw compile database");
     detail::require_regular_file(command.clang_binary, "Clang binary");
     detail::require_regular_file(command.clang_scan_deps, "clang-scan-deps binary");
@@ -515,6 +665,11 @@ inline void validate_inventories(
         throw std::runtime_error(
             "Highway target manifest has invalid policy/Highway provenance");
     }
+
+    validate_domain_topology_authority(
+        targets.domain_topologies,
+        sources.domain_topologies,
+        "Highway target/source manifests");
 
     std::string policy_block;
     std::set<std::string, std::less<>> policy_names;

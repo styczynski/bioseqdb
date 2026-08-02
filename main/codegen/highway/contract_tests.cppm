@@ -10,9 +10,11 @@ module;
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 module bioseq.codegen.highway:contract_tests;
 
+import :manifest;
 import :model;
 import :renderer;
 import :validator;
@@ -264,6 +266,154 @@ inline void verify_complete_table_target_policy() {
         "the complete-table target policy retains HWY_EMU128");
 }
 
+inline void verify_external_domain_topology_contract() {
+    const std::filesystem::path manifest =
+        detail::path_identity(
+            std::filesystem::temp_directory_path()
+            / "topology.configure.json");
+    const domain_topology_manifest_input parsed =
+        parse_domain_topology_manifest_argument(
+            "typed_scheduler=" + manifest.generic_string());
+    require(
+        parsed.name == "typed_scheduler" && parsed.path == manifest,
+        "named domain topology CLI grammar preserves name and absolute path");
+
+    const domain_topology_expectation manifest_record =
+        detail::parse_domain_topology_record(
+            {"domain-topology",
+             "0",
+             "typed_scheduler",
+             manifest.generic_string(),
+             std::string(64u, 'a'),
+             std::string(64u, 'b')},
+            "targets.tsv",
+            0u);
+    require(
+        manifest_record.name == "typed_scheduler"
+            && manifest_record.path == manifest
+            && manifest_record.topology_digest == std::string(64u, 'a')
+            && manifest_record.content_sha256 == std::string(64u, 'b'),
+        "target/source manifests preserve sealed ordered topology authority");
+    require_rejected(
+        [&] {
+            (void)detail::parse_domain_topology_record(
+                {"domain-topology",
+                 "1",
+                 "typed_scheduler",
+                 manifest.generic_string(),
+                 std::string(64u, 'a'),
+                 std::string(64u, 'b')},
+                "sources.tsv",
+                0u);
+        },
+        "target/source manifests reject non-contiguous topology ordinals");
+
+    require_rejected(
+        [] {
+            (void)parse_domain_topology_manifest_argument(
+                "typed_scheduler=relative/topology.configure.json");
+        },
+        "domain topology CLI rejects relative paths");
+    require_rejected(
+        [] {
+            (void)parse_domain_topology_manifest_argument(
+                "invalid-name=/tmp/topology.configure.json");
+        },
+        "domain topology CLI rejects invalid names");
+
+    std::vector<domain_topology_manifest_input> duplicate_names{
+        {.name = "typed_scheduler", .path = manifest},
+        {.name = "typed_scheduler",
+         .path = manifest.parent_path() / "other.configure.json"},
+    };
+    require_rejected(
+        [&] { (void)load_domain_topology_manifests(duplicate_names); },
+        "domain topology aliases must have unique names before file access");
+
+    generation_plan plan = two_target_plan();
+    plan.domain_topologies = {
+        domain_topology_provenance{
+            .name = "typed_scheduler",
+            .path = manifest,
+            .topology_digest =
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            .content_sha256 =
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+        domain_topology_provenance{
+            .name = "storage_layout",
+            .path = manifest.parent_path() / "storage.configure.json",
+            .topology_digest =
+                "cccccccccccccccccccccccccccccccc"
+                "cccccccccccccccccccccccccccccccc",
+            .content_sha256 =
+                "dddddddddddddddddddddddddddddddd"
+                "dddddddddddddddddddddddddddddddd",
+        },
+    };
+    std::vector<domain_topology_provenance> observed =
+        plan.domain_topologies;
+    validate_domain_topology_authority(
+        plan.domain_topologies, observed, "contract fixture");
+    std::ranges::reverse(observed);
+    require_rejected(
+        [&] {
+            validate_domain_topology_authority(
+                plan.domain_topologies, observed, "contract fixture");
+        },
+        "ordered topology authority rejects reordered CLI inputs");
+    observed = plan.domain_topologies;
+    observed.front().content_sha256.front() = 'e';
+    require_rejected(
+        [&] {
+            validate_domain_topology_authority(
+                plan.domain_topologies, observed, "contract fixture");
+        },
+        "topology content changes require reconfiguration");
+
+    const generation_result without_domains =
+        render_generation(two_target_plan());
+    const generation_result with_domains = render_generation(plan);
+    require(
+        with_domains.artifacts.size() == without_domains.artifacts.size(),
+        "external domain topology count never multiplies Highway artifacts");
+    for (std::size_t index = 0;
+         index < with_domains.artifacts.size();
+         ++index) {
+        require(
+            with_domains.artifacts[index].relative_path
+                    == without_domains.artifacts[index].relative_path
+                && with_domains.artifacts[index].module_name
+                    == without_domains.artifacts[index].module_name
+                && with_domains.artifacts[index].target_token
+                    == without_domains.artifacts[index].target_token
+                && with_domains.artifacts[index].source_key
+                    == without_domains.artifacts[index].source_key
+                && with_domains.artifacts[index].kind
+                    == without_domains.artifacts[index].kind
+                && with_domains.artifacts[index].content
+                    == without_domains.artifacts[index].content,
+            "external domains are provenance only, not Highway coordinates");
+    }
+    const std::size_t typed_position =
+        with_domains.artifact_manifest_json.find(
+            "\"name\":\"typed_scheduler\"");
+    const std::size_t storage_position =
+        with_domains.artifact_manifest_json.find(
+            "\"name\":\"storage_layout\"");
+    require(
+        typed_position != std::string::npos
+            && storage_position != std::string::npos
+            && typed_position < storage_position
+            && with_domains.artifact_manifest_json.contains(
+                "\"topology_digest\":\"aaaaaaaa")
+            && with_domains.artifact_manifest_json.contains(
+                "\"content_sha256\":\"bbbbbbbb"),
+        "artifact provenance preserves ordered named topology digests");
+}
+
 inline void verify_generated_closure() {
     const generation_result generated = render_generation(two_target_plan());
     require(
@@ -364,14 +514,28 @@ inline void verify_generated_closure() {
                         && artifact.content.contains(
                             "registered_highway_dispatch_info() noexcept")
                         && artifact.content.contains(
+                            "registered_highway_target_binding(")
+                        && artifact.content.contains(
                             "static_cast<std::int64_t>(3ULL)")
+                        && artifact.content.contains(
+                            "case 1ULL:")
+                        && artifact.content.contains(
+                            "N_EMU128::BindHighwayTarget()")
+                        && artifact.content.contains(
+                            "case 2ULL:")
+                        && artifact.content.contains(
+                            "N_SSE2::BindHighwayTarget()")
+                        && artifact.content.contains(
+                            "plan.runnable_targets & exact_target")
+                        && artifact.content.contains(
+                            "binding->target != exact_target")
+                        && artifact.content.contains(
+                            "binding->kernels->complete()")
                         && !artifact.content.contains("HWY_EXPORT(")
                         && !artifact.content.contains(
-                            "HWY_DYNAMIC_DISPATCH(")
-                        && !artifact.content.contains(
-                            "bioseq.highway.generated."),
-                    "the cold contract implementation owns only the exact "
-                    "compiled mask");
+                            "HWY_DYNAMIC_DISPATCH("),
+                    "the cold contract implementation owns the exact mask "
+                    "and direct exact-target rebinder without redispatch");
                 break;
             case artifact_kind::test_support:
                 ++test_support_count;
@@ -498,6 +662,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_exact_structural_marker();
     contract_detail::verify_slot_callable_ownership();
     contract_detail::verify_complete_table_target_policy();
+    contract_detail::verify_external_domain_topology_contract();
     contract_detail::verify_generated_closure();
     contract_detail::verify_typed_alignment_binder();
 }
