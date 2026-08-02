@@ -778,6 +778,12 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm")
 
+# DOC0398 template-flatten inputs have the same exact-set ownership contract as
+# Highway target templates. A marked source is scan-only generator input, never
+# an ordinary module provider, and every registered input must carry the marker.
+set(BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm")
+
 # The annotation and generator registry are one exact ownership boundary. Scan
 # only authored source-tree module units (never current or stale build outputs),
 # normalize both sets to deterministic real paths, and fail before either an
@@ -894,6 +900,123 @@ unset(_bioseq_highway_registered)
 unset(_bioseq_highway_candidate)
 unset(_bioseq_highway_marked_index)
 unset(_bioseq_highway_authored_cppm_candidates)
+
+file(GLOB_RECURSE _bioseq_template_flatten_authored_cppm_candidates
+  LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_LIST_DIR}/*.cppm")
+set(_bioseq_template_flatten_marked_modules)
+foreach(_bioseq_template_flatten_candidate IN LISTS
+    _bioseq_template_flatten_authored_cppm_candidates)
+  get_filename_component(_bioseq_template_flatten_candidate
+    "${_bioseq_template_flatten_candidate}" REALPATH)
+  cmake_path(IS_PREFIX CMAKE_BINARY_DIR
+    "${_bioseq_template_flatten_candidate}"
+    NORMALIZE _bioseq_template_flatten_in_root_binary_dir)
+  cmake_path(IS_PREFIX CMAKE_CURRENT_BINARY_DIR
+    "${_bioseq_template_flatten_candidate}"
+    NORMALIZE _bioseq_template_flatten_in_local_binary_dir)
+  file(RELATIVE_PATH _bioseq_template_flatten_relative_candidate
+    "${CMAKE_CURRENT_LIST_DIR}" "${_bioseq_template_flatten_candidate}")
+  if(_bioseq_template_flatten_in_root_binary_dir
+      OR _bioseq_template_flatten_in_local_binary_dir
+      OR _bioseq_template_flatten_relative_candidate MATCHES
+        "(^|/)(build[^/]*|cmake-build[^/]*|generated|CMakeFiles)(/|$)"
+      OR _bioseq_template_flatten_relative_candidate MATCHES
+        "(^|/)(test|tests|integration_tests|bench|benches|benchmarks)(/|$)"
+      OR _bioseq_template_flatten_relative_candidate MATCHES
+        "(^|/)[^/]*_(test|tests)\\.cppm$")
+    continue()
+  endif()
+
+  file(READ "${_bioseq_template_flatten_candidate}"
+    _bioseq_template_flatten_candidate_contents)
+  string(REGEX REPLACE "[ \t\r\n]+" ""
+    _bioseq_template_flatten_compact_contents
+    "${_bioseq_template_flatten_candidate_contents}")
+  string(FIND "${_bioseq_template_flatten_compact_contents}"
+    "[[bioseq::template_flatten("
+    _bioseq_template_flatten_marker_offset)
+  if(NOT _bioseq_template_flatten_marker_offset EQUAL -1)
+    list(APPEND _bioseq_template_flatten_marked_modules
+      "${_bioseq_template_flatten_candidate}")
+  endif()
+endforeach()
+list(REMOVE_DUPLICATES _bioseq_template_flatten_marked_modules)
+list(SORT _bioseq_template_flatten_marked_modules)
+
+set(_bioseq_template_flatten_registered_modules)
+set(_bioseq_template_flatten_unmarked_registered_modules)
+foreach(_bioseq_template_flatten_registered IN LISTS
+    BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES)
+  if(NOT EXISTS "${_bioseq_template_flatten_registered}")
+    message(FATAL_ERROR
+      "DOC0398 template-flatten generator input does not exist: "
+      "${_bioseq_template_flatten_registered}")
+  endif()
+  get_filename_component(_bioseq_template_flatten_registered
+    "${_bioseq_template_flatten_registered}" REALPATH)
+  cmake_path(IS_PREFIX CMAKE_CURRENT_LIST_DIR
+    "${_bioseq_template_flatten_registered}"
+    NORMALIZE _bioseq_template_flatten_registered_in_source)
+  cmake_path(IS_PREFIX CMAKE_BINARY_DIR
+    "${_bioseq_template_flatten_registered}"
+    NORMALIZE _bioseq_template_flatten_registered_in_binary)
+  if(NOT _bioseq_template_flatten_registered_in_source
+      OR _bioseq_template_flatten_registered_in_binary)
+    message(FATAL_ERROR
+      "DOC0398 template-flatten inputs must be authored beneath "
+      "${CMAKE_CURRENT_LIST_DIR}, not generated/build-tree files: "
+      "${_bioseq_template_flatten_registered}")
+  endif()
+  list(APPEND _bioseq_template_flatten_registered_modules
+    "${_bioseq_template_flatten_registered}")
+  list(FIND _bioseq_template_flatten_marked_modules
+    "${_bioseq_template_flatten_registered}"
+    _bioseq_template_flatten_marked_index)
+  if(_bioseq_template_flatten_marked_index EQUAL -1)
+    list(APPEND _bioseq_template_flatten_unmarked_registered_modules
+      "${_bioseq_template_flatten_registered}")
+  endif()
+endforeach()
+list(REMOVE_DUPLICATES _bioseq_template_flatten_registered_modules)
+list(SORT _bioseq_template_flatten_registered_modules)
+
+set(_bioseq_template_flatten_unregistered_marked_modules
+  ${_bioseq_template_flatten_marked_modules})
+list(REMOVE_ITEM _bioseq_template_flatten_unregistered_marked_modules
+  ${_bioseq_template_flatten_registered_modules})
+if(_bioseq_template_flatten_unregistered_marked_modules
+    OR _bioseq_template_flatten_unmarked_registered_modules
+    OR NOT "${_bioseq_template_flatten_marked_modules}" STREQUAL
+      "${_bioseq_template_flatten_registered_modules}")
+  string(JOIN "\n    " _bioseq_template_flatten_missing_text
+    ${_bioseq_template_flatten_unregistered_marked_modules})
+  string(JOIN "\n    " _bioseq_template_flatten_extra_text
+    ${_bioseq_template_flatten_unmarked_registered_modules})
+  message(FATAL_ERROR
+    "DOC0398 [[bioseq::template_flatten]] ownership registry is not an exact set.\n"
+    "  Marked but unregistered:\n    ${_bioseq_template_flatten_missing_text}\n"
+    "  Registered but unmarked:\n    ${_bioseq_template_flatten_extra_text}")
+endif()
+
+unset(_bioseq_template_flatten_extra_text)
+unset(_bioseq_template_flatten_missing_text)
+unset(_bioseq_template_flatten_unregistered_marked_modules)
+unset(_bioseq_template_flatten_unmarked_registered_modules)
+unset(_bioseq_template_flatten_registered_modules)
+unset(_bioseq_template_flatten_marked_modules)
+unset(_bioseq_template_flatten_marker_offset)
+unset(_bioseq_template_flatten_compact_contents)
+unset(_bioseq_template_flatten_candidate_contents)
+unset(_bioseq_template_flatten_relative_candidate)
+unset(_bioseq_template_flatten_in_local_binary_dir)
+unset(_bioseq_template_flatten_in_root_binary_dir)
+unset(_bioseq_template_flatten_registered_in_binary)
+unset(_bioseq_template_flatten_registered_in_source)
+unset(_bioseq_template_flatten_registered)
+unset(_bioseq_template_flatten_candidate)
+unset(_bioseq_template_flatten_marked_index)
+unset(_bioseq_template_flatten_authored_cppm_candidates)
 
 set(BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_dispatch_contract_impl.cppm"
@@ -1536,7 +1659,7 @@ set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer_api_impl.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
-  "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
+  ${BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES}
   ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS})
 list(APPEND SRC_FILES
   ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS}
