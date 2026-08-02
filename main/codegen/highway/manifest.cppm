@@ -5,12 +5,10 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -405,9 +403,51 @@ inline void require_field_count(
     return result;
 }
 
-[[nodiscard]] inline std::string render_artifact_manifest(
+/// Renders the deterministic Highway-specific evidence object embedded in
+/// the shared publication envelope. Ownership and stale cleanup deliberately
+/// remain outside this policy schema.
+[[nodiscard]] inline std::string render_policy_evidence(
     const generation_plan& plan,
     const std::vector<generated_artifact>& artifacts) {
+    const std::size_t expected_artifact_count =
+        plan.target_inventory.targets.size()
+            * (2u + plan.extracted_sources.size())
+        + 3u;
+    if (plan.target_inventory.targets.empty()
+        || artifacts.size() != expected_artifact_count
+        || plan.clang_version.empty()
+        || plan.compilation_signature.empty()) {
+        throw std::runtime_error(
+            "Highway policy evidence does not describe the complete "
+            "target/source artifact closure");
+    }
+    std::vector<const generated_artifact*> ordered;
+    ordered.reserve(artifacts.size());
+    for (const generated_artifact& artifact : artifacts) {
+        ordered.push_back(&artifact);
+    }
+    std::ranges::sort(
+        ordered,
+        {},
+        [](const generated_artifact* artifact) {
+            return artifact->relative_path.generic_string();
+        });
+    std::string previous_path;
+    for (const generated_artifact* artifact : ordered) {
+        const std::filesystem::path relative = checked_owned_output_path(
+            artifact->relative_path, "Highway policy-evidence artifact");
+        const std::string path = relative.generic_string();
+        if ((!previous_path.empty() && previous_path >= path)
+            || relative.extension() != ".cppm"
+            || artifact->module_name.empty()
+            || artifact->content.empty()) {
+            throw std::runtime_error(
+                "Highway policy evidence contains an invalid or duplicate "
+                "production artifact: " + path);
+        }
+        previous_path = path;
+    }
+
     std::ostringstream output;
     output << "{\n"
            << "  \"schema_version\": " << manifest_schema_version << ",\n"
@@ -489,8 +529,8 @@ inline void require_field_count(
                        : ",\n");
     }
     output << "  ],\n  \"artifacts\": [\n";
-    for (std::size_t index = 0; index < artifacts.size(); ++index) {
-        const generated_artifact& artifact = artifacts[index];
+    for (std::size_t index = 0; index < ordered.size(); ++index) {
+        const generated_artifact& artifact = *ordered[index];
         output << "    {\"path\":\""
                << detail::json_escape(artifact.relative_path.generic_string())
                << "\",\"kind\":\"" << detail::artifact_kind_name(artifact.kind)
@@ -498,43 +538,10 @@ inline void require_field_count(
                << "\",\"target\":\"" << detail::json_escape(artifact.target_token)
                << "\",\"source\":\"" << detail::json_escape(artifact.source_key)
                << "\",\"sha256\":\"" << sha256_hex(artifact.content) << "\"}"
-               << (index + 1 == artifacts.size() ? "\n" : ",\n");
+               << (index + 1 == ordered.size() ? "\n" : ",\n");
     }
     output << "  ]\n}\n";
     return output.str();
-}
-
-/// Reads only the generator-owned relative artifact paths from a manifest
-/// emitted by `render_artifact_manifest`. This deliberately accepts no general
-/// JSON: stale deletion must never infer ownership from an unknown document.
-[[nodiscard]] inline std::vector<std::filesystem::path>
-read_previous_owned_artifacts(const std::filesystem::path& path) {
-    std::error_code error;
-    if (!std::filesystem::exists(path, error) || error) return {};
-    const std::string document = read_file(path);
-    if (!document.contains("\"schema_version\": 1")
-        || !document.contains("\"artifacts\": [")) {
-        throw std::runtime_error(
-            path.string() + ": refusing stale cleanup from an unknown manifest");
-    }
-    constexpr std::string_view prefix = "{\"path\":\"";
-    std::vector<std::filesystem::path> result;
-    std::size_t cursor = 0;
-    while ((cursor = document.find(prefix, cursor)) != std::string::npos) {
-        cursor += prefix.size();
-        const std::size_t end = document.find('"', cursor);
-        if (end == std::string::npos) {
-            throw std::runtime_error(path.string() + ": malformed artifact path");
-        }
-        const std::string_view value{document.data() + cursor, end - cursor};
-        if (value.contains('\\')) {
-            throw std::runtime_error(
-                path.string() + ": escaped artifact paths are not accepted for cleanup");
-        }
-        result.emplace_back(value);
-        cursor = end + 1;
-    }
-    return result;
 }
 
 }  // namespace bioseq::codegen::highway

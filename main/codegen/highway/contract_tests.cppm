@@ -19,6 +19,8 @@ import :model;
 import :renderer;
 import :validator;
 import bioseq.codegen.clang_structural;
+import bioseq.codegen.namespace_materialization;
+import bioseq.codegen.support;
 
 namespace bioseq::codegen::highway {
 
@@ -398,18 +400,18 @@ inline void verify_external_domain_topology_contract() {
             "external domains are provenance only, not Highway coordinates");
     }
     const std::size_t typed_position =
-        with_domains.artifact_manifest_json.find(
+        with_domains.policy_evidence_json.find(
             "\"name\":\"typed_scheduler\"");
     const std::size_t storage_position =
-        with_domains.artifact_manifest_json.find(
+        with_domains.policy_evidence_json.find(
             "\"name\":\"storage_layout\"");
     require(
         typed_position != std::string::npos
             && storage_position != std::string::npos
             && typed_position < storage_position
-            && with_domains.artifact_manifest_json.contains(
+            && with_domains.policy_evidence_json.contains(
                 "\"topology_digest\":\"aaaaaaaa")
-            && with_domains.artifact_manifest_json.contains(
+            && with_domains.policy_evidence_json.contains(
                 "\"content_sha256\":\"bbbbbbbb"),
         "artifact provenance preserves ordered named topology digests");
 }
@@ -569,17 +571,110 @@ inline void verify_generated_closure() {
             },
         "every target has exactly one generated partition for every registered source");
     require(
-        generated.artifact_manifest_json.contains(
+        generated.policy_evidence_json.contains(
             "\"path\":\"highway_registry.cppm\"")
-            && generated.artifact_manifest_json.contains(
+            && generated.policy_evidence_json.contains(
                 "\"path\":\"dispatch_inventory.cppm\"")
-            && generated.artifact_manifest_json.contains(
+            && generated.policy_evidence_json.contains(
                 "\"path\":\"test_support.cppm\"")
-            && generated.artifact_manifest_json.contains(
+            && generated.policy_evidence_json.contains(
                 "\"path\":\"x86/emu128/fixture.cppm\"")
-            && generated.artifact_manifest_json.contains(
+            && generated.policy_evidence_json.contains(
                 "\"path\":\"x86/sse2/fixture.cppm\""),
         "the artifact manifest records the complete generated topology");
+}
+
+inline void verify_shared_publication_envelope() {
+    const generation_plan plan = two_target_plan();
+    const generation_result generated = render_generation(plan);
+    const std::vector<namespace_materialization::publication_artifact>
+        publication = make_publication_artifacts(generated);
+    const std::filesystem::path output_root =
+        std::filesystem::absolute(
+            std::filesystem::temp_directory_path()
+            / "bioseq-highway-publication-contract")
+            .lexically_normal();
+    const namespace_materialization::rendered_publication_manifest manifest =
+        render_highway_publication_manifest(
+            output_root, {}, plan, generated, publication);
+
+    require(
+        publication.size() == generated.artifacts.size()
+            && std::ranges::all_of(
+                publication,
+                [](const namespace_materialization::publication_artifact&
+                       artifact) {
+                    return artifact.artifact_class
+                            == namespace_materialization::
+                                publication_artifact_class::production_cppm
+                        && artifact.relative_path.extension() == ".cppm"
+                        && artifact.content_sha256
+                            == sha256_hex(artifact.content);
+                }),
+        "Highway maps its complete production closure into the shared publisher");
+    require(
+        generated.publication_topology_digest.size() == 64u
+            && manifest.manifest_identity.size() == 64u
+            && manifest.json.contains(
+                "\"publication_schema_version\": 1")
+            && manifest.json.contains("\"policy\": \"highway\"")
+            && manifest.json.contains("\"name\": \"highway\"")
+            && manifest.json.contains(
+                "\"prior_manifest_identity\": \"\"")
+            && manifest.json.contains("\"evidence\": {")
+            && manifest.json.contains("\"schema_version\": 1")
+            && manifest.json.contains("\"targets\": [")
+            && manifest.json.contains("\"sources\": [")
+            && manifest.json.contains("\"slots\": [")
+            && manifest.json.contains("\"manifest_identity\": \"")
+            && manifest.json.contains(manifest.manifest_identity),
+        "Highway evidence is embedded in the policy-neutral self-sealed envelope");
+
+    const std::string prior_identity(64u, 'a');
+    const namespace_materialization::rendered_publication_manifest chained =
+        render_highway_publication_manifest(
+            output_root, prior_identity, plan, generated, publication);
+    require(
+        chained.manifest_identity != manifest.manifest_identity
+            && chained.json.contains(
+                "\"prior_manifest_identity\": \"" + prior_identity + "\""),
+        "Highway transports the exact authenticated prior identity into the seal");
+
+    generation_result stale = generated;
+    stale.policy_evidence_json += " ";
+    require_rejected(
+        [&] {
+            (void)render_highway_publication_manifest(
+                output_root, {}, plan, stale, publication);
+        },
+        "the Highway adapter rejects evidence that diverges from its generation identity");
+
+    std::vector<namespace_materialization::publication_artifact> tampered =
+        publication;
+    tampered.front().content += "// not generated\n";
+    tampered.front().content_sha256 = sha256_hex(tampered.front().content);
+    require_rejected(
+        [&] {
+            (void)render_highway_publication_manifest(
+                output_root, {}, plan, generated, tampered);
+        },
+        "the Highway adapter binds shared ownership to its exact evidence closure");
+
+    generation_result jointly_tampered = generated;
+    jointly_tampered.artifacts.front().content += "// not evidenced\n";
+    const std::vector<namespace_materialization::publication_artifact>
+        jointly_tampered_publication =
+            make_publication_artifacts(jointly_tampered);
+    require_rejected(
+        [&] {
+            (void)render_highway_publication_manifest(
+                output_root,
+                {},
+                plan,
+                jointly_tampered,
+                jointly_tampered_publication);
+        },
+        "the Highway adapter revalidates evidence after artifact mutation");
 }
 
 inline void verify_typed_alignment_binder() {
@@ -664,6 +759,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_complete_table_target_policy();
     contract_detail::verify_external_domain_topology_contract();
     contract_detail::verify_generated_closure();
+    contract_detail::verify_shared_publication_envelope();
     contract_detail::verify_typed_alignment_binder();
 }
 

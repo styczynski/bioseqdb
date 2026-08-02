@@ -4,6 +4,7 @@ module;
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -12,6 +13,8 @@ export module bioseq.codegen.highway:model;
 export namespace bioseq::codegen::highway {
 
 inline constexpr std::uint32_t manifest_schema_version = 1;
+inline constexpr std::string_view publication_policy = "highway";
+inline constexpr std::string_view publication_name = "highway";
 
 struct target_spec {
     std::string platform;
@@ -164,7 +167,8 @@ struct generation_plan {
 
 struct generation_result {
     std::vector<generated_artifact> artifacts;
-    std::string artifact_manifest_json;
+    std::string policy_evidence_json;
+    std::string publication_topology_digest;
 };
 
 }  // namespace bioseq::codegen::highway

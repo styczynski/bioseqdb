@@ -24,6 +24,7 @@ import :renderer;
 import :validator;
 import :contract_tests;
 import bioseq.codegen.clang_structural;
+import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::highway {
@@ -388,8 +389,30 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
         extract_sources(plan.source_inventory, structural, graph);
     validate_slot_callable_ownership(
         plan.source_inventory, plan.extracted_sources);
+    const namespace_materialization::previous_publication previous =
+        namespace_materialization::read_previous_publication(
+            command.artifact_manifest,
+            command.output_root,
+            publication_policy,
+            {});
     generation_result generated = render_generation(plan);
-    publish_generation(command, generated);
+    std::vector<namespace_materialization::publication_artifact> publication =
+        make_publication_artifacts(generated);
+    const namespace_materialization::rendered_publication_manifest manifest =
+        render_highway_publication_manifest(
+            command.output_root,
+            previous.manifest_identity,
+            plan,
+            generated,
+            publication);
+    namespace_materialization::publish_artifacts(
+        namespace_materialization::publication_request{
+            .output_root = command.output_root,
+            .artifact_manifest = command.artifact_manifest,
+            .stamp = command.stamp,
+            .artifact_manifest_json = manifest.json,
+            .artifacts = std::move(publication),
+        });
     return 0;
 }
 
@@ -445,13 +468,13 @@ inline void run_contract_self_test() {
             == std::string::npos
         || inventory->content.find("registered_highway_target_binding")
             == std::string::npos
-        || generated.artifact_manifest_json.find(
+        || generated.policy_evidence_json.find(
                "\"path\":\"highway_registry.cppm\"")
             == std::string::npos
-        || generated.artifact_manifest_json.find(
+        || generated.policy_evidence_json.find(
                "\"path\":\"dispatch_inventory.cppm\"")
             == std::string::npos
-        || generated.artifact_manifest_json.find(
+        || generated.policy_evidence_json.find(
                "\"path\":\"test_support.cppm\"")
             == std::string::npos) {
         throw std::runtime_error(

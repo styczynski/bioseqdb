@@ -11,7 +11,6 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -19,6 +18,7 @@ export module bioseq.codegen.highway:renderer;
 
 import :manifest;
 import :model;
+import bioseq.codegen.namespace_materialization;
 import bioseq.codegen.support;
 
 export namespace bioseq::codegen::highway {
@@ -676,20 +676,6 @@ inline void validate_rendered_artifact(const generated_artifact& artifact) {
     }
 }
 
-inline void reject_symlink_destination(
-    const std::filesystem::path& output_root,
-    const std::filesystem::path& relative) {
-    std::filesystem::path current = output_root;
-    for (const std::filesystem::path& component : relative) {
-        current /= component;
-        std::error_code error;
-        if (std::filesystem::is_symlink(current, error) && !error) {
-            throw std::runtime_error(
-                "Highway output path traverses a symlink: " + current.string());
-        }
-    }
-}
-
 }  // namespace detail
 
 [[nodiscard]] inline generation_result render_generation(
@@ -776,67 +762,77 @@ inline void reject_symlink_destination(
         }
         detail::validate_rendered_artifact(artifact);
     }
-    result.artifact_manifest_json =
-        render_artifact_manifest(plan, result.artifacts);
+    result.policy_evidence_json =
+        render_policy_evidence(plan, result.artifacts);
+    result.publication_topology_digest = sha256_hex(
+        "bioseq_highway_publication_topology/v1\n"
+        + result.policy_evidence_json);
     return result;
 }
 
-inline void publish_generation(
-    const command_line& command,
+[[nodiscard]] inline std::vector<
+    namespace_materialization::publication_artifact>
+make_publication_artifacts(
     const generation_result& result) {
-    std::set<std::filesystem::path> desired;
+    std::vector<namespace_materialization::publication_artifact> publication;
+    publication.reserve(result.artifacts.size());
     for (const generated_artifact& artifact : result.artifacts) {
-        const std::filesystem::path relative = checked_owned_output_path(
-            artifact.relative_path, "Highway generated artifact");
-        if (relative.extension() != ".cppm") {
-            throw std::runtime_error(
-                "Highway production output must use .cppm: " + relative.string());
-        }
-        detail::reject_symlink_destination(command.output_root, relative);
-        desired.insert(relative);
+        publication.push_back(
+            namespace_materialization::publication_artifact{
+                .relative_path = artifact.relative_path,
+                .content = artifact.content,
+                .content_sha256 = sha256_hex(artifact.content),
+                .artifact_class = namespace_materialization::
+                    publication_artifact_class::production_cppm,
+            });
     }
+    return publication;
+}
 
-    for (const std::filesystem::path& previous
-         : read_previous_owned_artifacts(command.artifact_manifest)) {
-        const std::filesystem::path relative = checked_owned_output_path(
-            previous, "previous Highway artifact manifest");
-        if (relative.extension() != ".cppm") {
+[[nodiscard]] inline namespace_materialization::rendered_publication_manifest
+render_highway_publication_manifest(
+    const std::filesystem::path& output_root,
+    std::string_view prior_manifest_identity,
+    const generation_plan& plan,
+    const generation_result& result,
+    const std::vector<namespace_materialization::publication_artifact>&
+        publication) {
+    const std::string expected_policy_evidence =
+        render_policy_evidence(plan, result.artifacts);
+    const std::string expected_topology_digest = sha256_hex(
+        "bioseq_highway_publication_topology/v1\n"
+        + expected_policy_evidence);
+    if (result.policy_evidence_json != expected_policy_evidence
+        || result.publication_topology_digest != expected_topology_digest
+        || publication.size() != result.artifacts.size()) {
+        throw std::runtime_error(
+            "Highway publication adapter received stale policy evidence");
+    }
+    for (std::size_t index = 0; index < publication.size(); ++index) {
+        const generated_artifact& generated = result.artifacts[index];
+        const namespace_materialization::publication_artifact& published =
+            publication[index];
+        if (published.relative_path != generated.relative_path
+            || published.content != generated.content
+            || published.content_sha256 != sha256_hex(generated.content)
+            || published.artifact_class
+                != namespace_materialization::publication_artifact_class::
+                    production_cppm) {
             throw std::runtime_error(
-                "previous Highway manifest claims a non-.cppm production output");
-        }
-        if (desired.contains(relative)) continue;
-        detail::reject_symlink_destination(command.output_root, relative);
-        const std::filesystem::path stale = command.output_root / relative;
-        std::error_code error;
-        if (std::filesystem::exists(stale, error) && !error) {
-            if (!std::filesystem::is_regular_file(stale, error) || error) {
-                throw std::runtime_error(
-                    "refusing to remove non-file stale Highway artifact: "
-                    + stale.string());
-            }
-            if (!std::filesystem::remove(stale, error) || error) {
-                throw std::runtime_error(
-                    "cannot remove stale Highway artifact: " + stale.string());
-            }
-            std::filesystem::path parent = stale.parent_path();
-            while (parent != command.output_root
-                   && parent.string().size()
-                       > command.output_root.string().size()) {
-                error.clear();
-                if (!std::filesystem::remove(parent, error) || error) break;
-                parent = parent.parent_path();
-            }
+                "Highway publication closure disagrees with its policy evidence");
         }
     }
-
-    for (const generated_artifact& artifact : result.artifacts) {
-        write_if_different(
-            command.output_root / artifact.relative_path,
-            artifact.content);
-    }
-    write_if_different(
-        command.artifact_manifest, result.artifact_manifest_json);
-    touch_stamp(command.stamp);
+    return namespace_materialization::render_publication_manifest(
+        namespace_materialization::publication_manifest_request{
+            .output_root = output_root,
+            .policy = std::string{publication_policy},
+            .name = std::string{publication_name},
+            .topology_digest = result.publication_topology_digest,
+            .prior_manifest_identity =
+                std::string{prior_manifest_identity},
+            .policy_evidence_json = result.policy_evidence_json,
+            .artifacts = publication,
+        });
 }
 
 }  // namespace bioseq::codegen::highway
