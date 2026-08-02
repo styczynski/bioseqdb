@@ -36,6 +36,7 @@ import bioseq.common.mlogging;
 import bioseq.instr;
 import bioseq.sequences.chaining.simd;
 import bioseq.sequences.chaining.utils;
+import bioseq.highway.sources.simd_utils;
 
 namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
@@ -50,36 +51,6 @@ using bioseq::chaining::SimdChainingPolicyEvidence;
 using bioseq::chaining::SimdChainingPolicy;
 using bioseq::chaining::SimdChainingRuntimeError;
 using bioseq::chaining::SimdChainingStatus;
-
-// Target-local copy of the only SIMD utility needed by chaining. Importing the
-// ordinary bioseq.simd.utils module here would bind this generated partition to
-// that module's compile-time target instead of this partition's fixed target.
-template<class D_I, class D_F>
-HWY_INLINE hn::Vec<D_F> vectorized_fast_log2(
-    D_I d_int, D_F d_float, hn::Vec<D_I> input_int)
-{
-    const auto input_as_float = hn::ConvertTo(d_float, input_int);
-    const auto float_as_int_bits = hn::BitCast(d_int, input_as_float);
-    const auto raw_exponent = hn::And(
-        hn::ShiftRight<23>(float_as_int_bits), hn::Set(d_int, 255));
-    const auto biased_exponent = hn::Sub(
-        raw_exponent, hn::Set(d_int, 128));
-    const auto exponent_as_float = hn::ConvertTo(
-        d_float, biased_exponent);
-    const auto mantissa_bits = hn::Add(
-        hn::And(float_as_int_bits, hn::Set(d_int, ~(255 << 23))),
-        hn::Set(d_int, 127 << 23));
-    const auto normalized_mantissa = hn::BitCast(d_float, mantissa_bits);
-    const auto inner_term = hn::MulAdd(
-        hn::Set(d_float, -0.34484843F),
-        normalized_mantissa,
-        hn::Set(d_float, 2.02466578F));
-    const auto fractional_part = hn::MulSub(
-        inner_term,
-        normalized_mantissa,
-        hn::Set(d_float, 0.67487759F));
-    return hn::Add(exponent_as_float, fractional_part);
-}
 
 namespace chaining_simd_detail {
 

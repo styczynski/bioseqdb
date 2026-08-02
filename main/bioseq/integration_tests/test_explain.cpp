@@ -244,6 +244,50 @@ std::vector<materialization_signature> materialization_signatures(
     return std::nullopt;
 }
 
+[[nodiscard]] std::optional<std::string_view> json_object_member(
+    std::string_view document, std::string_view key) {
+    const auto key_position = document.find(fmt::format("\"{}\"", key));
+    if (key_position == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto colon = document.find(':', key_position + key.size() + 2u);
+    const auto open = colon == std::string_view::npos
+        ? std::string_view::npos : document.find('{', colon + 1u);
+    if (open == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::size_t depth = 0u;
+    bool in_string = false;
+    bool escaped = false;
+    for (std::size_t position = open; position < document.size(); ++position) {
+        const char value = document[position];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (value == '\\') {
+                escaped = true;
+            } else if (value == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (value == '"') {
+            in_string = true;
+        } else if (value == '{') {
+            ++depth;
+        } else if (value == '}') {
+            if (depth == 0u) {
+                return std::nullopt;
+            }
+            --depth;
+            if (depth == 0u) {
+                return document.substr(open, position - open + 1u);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] std::optional<std::string_view> yaml_property_block(
     std::string_view document, std::string_view key) {
     const auto key_position = document.find(key);
@@ -472,7 +516,7 @@ TEST_CASE("DOC0398 EXPLAIN ANALYZE reports the executed Highway binding",
     REQUIRE(*executed == *planned);
 }
 
-TEST_CASE("EXPLAIN FORMAT JSON returns valid-looking JSON",
+TEST_CASE("EXPLAIN FORMAT JSON owns one complete Highway dispatch object",
           "[explain][json][highway]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
@@ -483,17 +527,48 @@ TEST_CASE("EXPLAIN FORMAT JSON returns valid-looking JSON",
     // BioseqScan and the Custom-Scan node-type string must both appear.
     REQUIRE(json.find("BioseqScan") != std::string::npos);
     REQUIRE(json.find("Custom Scan") != std::string::npos);
-    REQUIRE(json.find("\"Highway SIMD Dispatch\"") != std::string::npos);
-    REQUIRE(json.find("\"Planned Architecture\"") != std::string::npos);
-    REQUIRE(json.find("\"CPU-Supported Architectures\"")
-            != std::string::npos);
-    REQUIRE(json.find("\"Compiled Architectures\"")
-            != std::string::npos);
-    REQUIRE(json.find("\"Runnable Architectures\"")
-            != std::string::npos);
-    REQUIRE(json.find("\"Executed Architecture\"")
-            != std::string::npos);
+    REQUIRE(count_occurrences(
+                json, "\"Highway SIMD Dispatch\"") == 1u);
+    const auto highway_dispatch = json_object_member(
+        json, "Highway SIMD Dispatch");
+    REQUIRE(highway_dispatch.has_value());
+    for (const std::string_view property : {
+             "\"Planned Architecture\"",
+             "\"CPU-Supported Architectures\"",
+             "\"Compiled Architectures\"",
+             "\"Runnable Architectures\"",
+             "\"Executed Architecture\"",
+        }) {
+        CAPTURE(property);
+        REQUIRE(count_occurrences(*highway_dispatch, property) == 1u);
+    }
     REQUIRE(json.find("\"Highway Functions\"") != std::string::npos);
+}
+
+TEST_CASE("DOC0398 structured plan omits an execution target before ANALYZE",
+          "[explain][json][highway][plan-only]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+
+    const auto rows = explain_with_options(
+        ctx, "FORMAT JSON, VERBOSE, COSTS OFF", explain_target_sql());
+    const std::string json = plan_document(rows);
+
+    REQUIRE(count_occurrences(
+                json, "\"Highway SIMD Dispatch\"") == 1u);
+    const auto highway_dispatch = json_object_member(
+        json, "Highway SIMD Dispatch");
+    REQUIRE(highway_dispatch.has_value());
+    REQUIRE(highway_dispatch->find("\"Planned Architecture\"")
+            != std::string_view::npos);
+    REQUIRE(highway_dispatch->find("\"CPU-Supported Architectures\"")
+            != std::string_view::npos);
+    REQUIRE(highway_dispatch->find("\"Compiled Architectures\"")
+            != std::string_view::npos);
+    REQUIRE(highway_dispatch->find("\"Runnable Architectures\"")
+            != std::string_view::npos);
+    REQUIRE(highway_dispatch->find("\"Executed Architecture\"")
+            == std::string_view::npos);
 }
 
 TEST_CASE("DOC0377 plain EXPLAIN reports only materialization boundaries",

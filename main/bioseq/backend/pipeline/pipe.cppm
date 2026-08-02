@@ -1179,6 +1179,11 @@ struct PipelineOperationalStats {
 	std::uint64_t persisted_source_decoded_bp = 0;
 	std::uint64_t persisted_legacy_globalize_calls = 0;
 	std::uint64_t persisted_legacy_rebase_calls = 0;
+    // Runtime-only proof that the selected fixed-target grouped32 validator
+    // was actually entered.  Plan construction cannot know the persisted wire
+    // format selected for a row, so this counter is populated only from the
+    // completed PreparedGrouped32QueryReader route evidence.
+    std::uint64_t indexing_grouped32_validate_calls = 0;
     // PostgreSQL cold persisted-index preparation. These are execution
     // diagnostics only; backend/fallback acceptance remains owned by the
     // existing requested/actual stage proof above.
@@ -1546,6 +1551,8 @@ struct PipelineOperationalStats {
 			rhs.persisted_legacy_globalize_calls);
 		add(persisted_legacy_rebase_calls,
 			rhs.persisted_legacy_rebase_calls);
+        add(indexing_grouped32_validate_calls,
+            rhs.indexing_grouped32_validate_calls);
         add(cold_index_target_relation_reuses,
             rhs.cold_index_target_relation_reuses);
         add(cold_index_target_relation_extra_opens,
@@ -1738,13 +1745,79 @@ struct ExecutionEnvironmentProof {
     [[nodiscard]] static constexpr bool payload_equal(
         const ExecutionEnvironmentProof& lhs,
         const ExecutionEnvironmentProof& rhs) noexcept {
-        return lhs.effective_cpu_workers == rhs.effective_cpu_workers
+        return non_highway_payload_equal(lhs, rhs)
             && lhs.highway_compiled_targets
                 == rhs.highway_compiled_targets
             && lhs.highway_cpu_supported_targets
                 == rhs.highway_cpu_supported_targets
             && lhs.highway_runnable_targets
-                == rhs.highway_runnable_targets
+                == rhs.highway_runnable_targets;
+    }
+
+    /// Compare environment identity while treating a zero Highway mask as an
+    /// observation that has not arrived yet.  This is the compatibility
+    /// predicate used only while merging independently completed proof shards;
+    /// final validation still requires an all-or-none, internally consistent
+    /// Highway plan and a singular executed target.
+    [[nodiscard]] static constexpr bool payload_compatible(
+        const ExecutionEnvironmentProof& lhs,
+        const ExecutionEnvironmentProof& rhs) noexcept {
+        const auto mask_compatible = [](const std::int64_t left,
+                                        const std::int64_t right) noexcept {
+            return left == 0 || right == 0 || left == right;
+        };
+        return non_highway_payload_equal(lhs, rhs)
+            && mask_compatible(
+                lhs.highway_compiled_targets,
+                rhs.highway_compiled_targets)
+            && mask_compatible(
+                lhs.highway_cpu_supported_targets,
+                rhs.highway_cpu_supported_targets)
+            && mask_compatible(
+                lhs.highway_runnable_targets,
+                rhs.highway_runnable_targets);
+    }
+
+    /// True when no Highway plan or binding has been attached.  This sentinel
+    /// is valid while constructing a non-Highway portion of an environment,
+    /// but a partially populated Highway proof is never accepted.
+    [[nodiscard]] static constexpr bool highway_fields_are_absent(
+        const ExecutionEnvironmentProof& value) noexcept {
+        return value.highway_compiled_targets == 0
+            && value.highway_cpu_supported_targets == 0
+            && value.highway_runnable_targets == 0
+            && value.highway_executed_target == 0
+            && !value.highway_executed_target_mixed;
+    }
+
+    /// Validate the exact plan-mask relation and the binding returned by the
+    /// sole dynamic-dispatch root.  Once any Highway field is present, absence,
+    /// a multi-bit target, or a target outside the runnable set fails closed.
+    [[nodiscard]] static constexpr bool highway_fields_are_valid(
+        const ExecutionEnvironmentProof& value) noexcept {
+        if (highway_fields_are_absent(value)) return true;
+        if (value.highway_executed_target_mixed
+            || value.highway_compiled_targets == 0
+            || value.highway_cpu_supported_targets == 0
+            || value.highway_runnable_targets == 0
+            || value.highway_runnable_targets
+                != (value.highway_compiled_targets
+                    & value.highway_cpu_supported_targets)) {
+            return false;
+        }
+        const auto executed = static_cast<std::uint64_t>(
+            value.highway_executed_target);
+        const auto runnable = static_cast<std::uint64_t>(
+            value.highway_runnable_targets);
+        return std::has_single_bit(executed)
+            && (executed & runnable) == executed;
+    }
+
+private:
+    [[nodiscard]] static constexpr bool non_highway_payload_equal(
+        const ExecutionEnvironmentProof& lhs,
+        const ExecutionEnvironmentProof& rhs) noexcept {
+        return lhs.effective_cpu_workers == rhs.effective_cpu_workers
             && lhs.gpu_environment_present == rhs.gpu_environment_present
             && lhs.gpu_device_uuid == rhs.gpu_device_uuid
             && lhs.gpu_driver_identity == rhs.gpu_driver_identity
@@ -1757,6 +1830,8 @@ struct ExecutionEnvironmentProof {
                 == rhs.gpu_pipeline_cache_manifest_checksum
             && lhs.gpu_pipeline_cache_hit == rhs.gpu_pipeline_cache_hit;
     }
+
+public:
 
     /// Adopt the first complete proof and fail closed on absence or drift.
     void merge(const ExecutionEnvironmentProof& rhs) noexcept {
@@ -1772,10 +1847,28 @@ struct ExecutionEnvironmentProof {
             || rhs.effective_cpu_workers == 0
             || mixed_invalid
             || rhs.mixed_invalid
-            || !payload_equal(*this, rhs)) {
+            || !payload_compatible(*this, rhs)) {
             mixed_invalid = true;
             return;
         }
+
+        const auto merge_highway_mask = [this](
+                std::int64_t& destination,
+                const std::int64_t observed) noexcept {
+            if (observed == 0) return;
+            if (destination == 0) {
+                destination = observed;
+            } else if (destination != observed) {
+                mixed_invalid = true;
+            }
+        };
+        merge_highway_mask(
+            highway_compiled_targets, rhs.highway_compiled_targets);
+        merge_highway_mask(
+            highway_cpu_supported_targets,
+            rhs.highway_cpu_supported_targets);
+        merge_highway_mask(
+            highway_runnable_targets, rhs.highway_runnable_targets);
 
         if (highway_executed_target_mixed
             || rhs.highway_executed_target_mixed) {
@@ -1812,8 +1905,21 @@ struct ExecutionEnvironmentProof {
             mixed_invalid = true;
         }
 
-        if (executed_target == 0
-            || highway_executed_target_mixed) {
+        const auto executed = static_cast<std::uint64_t>(executed_target);
+        const auto runnable = static_cast<std::uint64_t>(
+            plan.runnable_targets);
+        if (plan.compiled_targets == 0
+            || plan.cpu_supported_targets == 0
+            || plan.runnable_targets == 0
+            || plan.runnable_targets
+                != (plan.compiled_targets & plan.cpu_supported_targets)
+            || plan.planned_target != executed_target
+            || !std::has_single_bit(executed)
+            || (executed & runnable) != executed) {
+            mixed_invalid = true;
+            return;
+        }
+        if (highway_executed_target_mixed) {
             return;
         }
         if (highway_executed_target == 0) {
@@ -2013,7 +2119,8 @@ merge_simd_alignment_algorithm_identity(
     if (environment.mixed_invalid
         || environment.effective_cpu_workers == 0
         || environment.effective_cpu_workers > sql_integer_value_max
-        || environment.gpu_pipeline_cache_seed_size > sql_bigint_value_max) {
+        || environment.gpu_pipeline_cache_seed_size > sql_bigint_value_max
+        || !ExecutionEnvironmentProof::highway_fields_are_valid(environment)) {
         return false;
     }
     if (backend == ExecutedBackend::scalar_cpu || backend == ExecutedBackend::simd_cpu) {
@@ -2178,6 +2285,8 @@ merge_simd_alignment_algorithm_identity(
             job.observed_simd_alignment_algorithm)
         || !is_concrete_target_index_source(job.requested_target_index_source)
         || job.requested_target_index_source != job.actual_target_index_source
+        || ExecutionEnvironmentProof::highway_fields_are_absent(
+            job.environment)
         || !environment_is_valid_for_backend(job.environment, job.actual_backend)) {
         return false;
     }
@@ -2287,7 +2396,7 @@ struct PipelineExecutionStats {
             || (actual_target_index_source != TargetIndexSource::none
                 && actual_target_index_source != job.actual_target_index_source)
             || (!ExecutionEnvironmentProof::is_unset(environment)
-                && (!ExecutionEnvironmentProof::payload_equal(
+                && (!ExecutionEnvironmentProof::payload_compatible(
                         environment, job.environment)
                     || environment.mixed_invalid
                     || job.environment.mixed_invalid))) {
@@ -2580,6 +2689,8 @@ struct PipelineExecutionStats {
             || stats.operational.backend_fallbacks != 0
             || stats.operational.simd_chaining_policy_rejections != 0
             || stats.operational.simd_chaining_policy_evidence_saturated
+            || ExecutionEnvironmentProof::highway_fields_are_absent(
+                stats.environment)
             || !environment_is_valid_for_backend(
                 stats.environment, stats.actual_backend)
             || !aggregate_stage_coverage_is_valid(stats)) {
@@ -2606,7 +2717,7 @@ struct PipelineExecutionStats {
             && rhs_environment_valid
             && attempted_alignment_jobs != 0
             && rhs.attempted_alignment_jobs != 0
-            && !ExecutionEnvironmentProof::payload_equal(
+            && !ExecutionEnvironmentProof::payload_compatible(
                 environment, rhs.environment);
         const bool lhs_empty = is_exact_empty_proof_operand(*this);
         const bool rhs_empty = is_exact_empty_proof_operand(rhs);
@@ -5933,9 +6044,13 @@ resolve_alignment_kernels(
     const ::bioseq::simd::Minimap2Params& params)
 {
     const auto* root = params.highway_kernels;
-    if (root == nullptr || params.alphabet_code == 0xffu) {
+    constexpr std::uint8_t expected_alphabet_code =
+        minimizer_alphabet_code<Alphabet>();
+    if (root == nullptr
+        || expected_alphabet_code == 0xffu
+        || params.alphabet_code != expected_alphabet_code) {
         throw std::logic_error{
-            "alignment dispatch requires a selected Highway table and alphabet"};
+            "alignment dispatch requires an alphabet-matched Highway table"};
     }
 
     auto required = ::bioseq::simd_dispatch::highway_kernel_set(
@@ -5951,11 +6066,16 @@ resolve_alignment_kernels(
 
     const ::bioseq::simd::AlignmentKernels<Alphabet>* resolved = nullptr;
     for (const auto& entry : root->alignment_by_alphabet) {
-        if (entry.alphabet_code != params.alphabet_code) continue;
+        if (entry.alphabet_code != expected_alphabet_code) continue;
         if (entry.typed_table == nullptr || resolved != nullptr) {
             throw std::logic_error{
                 "selected Highway table has an invalid alignment alphabet entry"};
         }
+        // `expected_alphabet_code` is derived from the actual `Alphabet`
+        // template argument, not copied from runtime params. Generated binders
+        // use the same frozen code mapping when they store this table. The
+        // equality gate above is therefore the type witness for this otherwise
+        // erased root-table slot.
         resolved = static_cast<
             const ::bioseq::simd::AlignmentKernels<Alphabet>*>(
                 entry.typed_table);
@@ -6125,6 +6245,20 @@ struct algorithm_traits<::bioseq::simd::BaseAlignmentAlgorithmType::KSW2_BATCHED
             ::bioseq::simd_dispatch::HighwayKernelId::
                 alignment_ksw2_batched;
 
+        /// The batched entry owns inter-region packing, but its long-fill and
+        /// traceback paths execute the target-local KSW2 z2/d2 kernels as part
+        /// of the same stage.  EXPLAIN therefore reports both coarse functions.
+        [[nodiscard]] static constexpr
+        ::bioseq::simd_dispatch::HighwayKernelSet
+        highway_kernel_ids() noexcept {
+            auto kernels = ::bioseq::simd_dispatch::highway_kernel_set(
+                ::bioseq::simd_dispatch::HighwayKernelId::
+                    alignment_ksw2_batched);
+            kernels |= ::bioseq::simd_dispatch::highway_kernel_set(
+                ::bioseq::simd_dispatch::HighwayKernelId::alignment_ksw2);
+            return kernels;
+        }
+
         template <sequence_alphabet Alphabet>
         [[gnu::always_inline]] static void call(
             std::span<AlignRegion>                       regions,
@@ -6213,11 +6347,55 @@ struct PipelineDescription {
     std::vector<StageDescription> stages;
 };
 
+/**
+ * Resolve the query-sketch Highway function without adding the minimizer
+ * algorithm as another describe-template dimension.  Scalar and Vulkan
+ * sketching are concrete non-Highway routes and therefore map to an empty
+ * set; an unknown enum value is ambiguous and must be rejected by the plan
+ * renderer rather than silently advertised as scalar.
+ */
+[[nodiscard]] inline std::optional<
+    ::bioseq::simd_dispatch::HighwayKernelSet>
+planned_query_minimizer_highway_kernels(
+        const ::bioseq::simd::MinimizerAlgorithmType algorithm) noexcept {
+    using Algorithm = ::bioseq::simd::MinimizerAlgorithmType;
+    using Kernel = ::bioseq::simd_dispatch::HighwayKernelId;
+    switch (algorithm) {
+        case Algorithm::SCALAR:
+        case Algorithm::VULKAN_MINIMAP_INT:
+            return ::bioseq::simd_dispatch::HighwayKernelSet{};
+        case Algorithm::SIMD_MINIMAP2_SLOW:
+            return ::bioseq::simd_dispatch::highway_kernel_set(
+                Kernel::minimizer_reference_minimap_int);
+        case Algorithm::TWO_STACK_NTHASH:
+            return ::bioseq::simd_dispatch::highway_kernel_set(
+                Kernel::minimizer_two_stack_nthash);
+        case Algorithm::PAPER_NTHASH_SIMD:
+            return ::bioseq::simd_dispatch::highway_kernel_set(
+                Kernel::minimizer_paper_nthash);
+    }
+    return std::nullopt;
+}
+
 // =============================================================================
 // 21. Output size estimates (DOC0249 §21)
 // =============================================================================
 
 namespace detail {
+
+/** Exact coarse Highway functions executed by one selected stage kernel. */
+template <class Kernel>
+[[nodiscard]] constexpr ::bioseq::simd_dispatch::HighwayKernelSet
+stage_highway_kernels() noexcept {
+    if constexpr (requires { Kernel::highway_kernel_ids(); }) {
+        return Kernel::highway_kernel_ids();
+    } else if constexpr (requires { Kernel::highway_kernel_id; }) {
+        return ::bioseq::simd_dispatch::highway_kernel_set(
+            Kernel::highway_kernel_id);
+    } else {
+        return {};
+    }
+}
 
 [[nodiscard]] constexpr std::size_t estimated_sketch_count(
     std::size_t bp_size, int32_t window_size) noexcept {
@@ -6551,10 +6729,7 @@ struct MinimizerStage
         algo.name = std::string{Kernel::algorithm_label()};
         Kernel::populate_runtime_params({}, algo.parameters);
         algo.computed_properties = Kernel::template static_properties<Cep>();
-        if constexpr (requires { Kernel::highway_kernel_id; }) {
-            algo.highway_kernels = ::bioseq::simd_dispatch::
-                highway_kernel_set(Kernel::highway_kernel_id);
-        }
+        algo.highway_kernels = detail::stage_highway_kernels<Kernel>();
         desc.algorithm = std::move(algo);
         // Reserve target for the sketch arena slab (DOC0249 §21.4
         // "estimated_sketch_count").  `query_seq_` is a borrowed pointer; on
@@ -7978,10 +8153,7 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
         // kernels (DOC0304 §7.2).
         Kernel::populate_runtime_params(cp, algo.parameters);
         algo.computed_properties = Kernel::template static_properties<Cep>();
-        if constexpr (requires { Kernel::highway_kernel_id; }) {
-            algo.highway_kernels = ::bioseq::simd_dispatch::
-                highway_kernel_set(Kernel::highway_kernel_id);
-        }
+        algo.highway_kernels = detail::stage_highway_kernels<Kernel>();
         desc.algorithm = std::move(algo);
         // Chain stage's two arena slabs are sized from the runtime
         // anchor count (which is unknown at describe time), so we leave
@@ -8695,10 +8867,7 @@ struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
             algo.name = std::string{Kernel::algorithm_label()};
             Kernel::populate_runtime_params(params, algo.parameters);
             algo.computed_properties = Kernel::template static_properties<Cep>();
-            if constexpr (requires { Kernel::highway_kernel_id; }) {
-                algo.highway_kernels = ::bioseq::simd_dispatch::
-                    highway_kernel_set(Kernel::highway_kernel_id);
-            }
+            algo.highway_kernels = detail::stage_highway_kernels<Kernel>();
             desc.algorithm = std::move(algo);
         }
         return desc;
@@ -8864,6 +9033,7 @@ template <is_constexpr_aligner_params Cep,
     const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
     const ScoringMatrix<Alphabet>&    scoring_matrix,
+    const ::bioseq::simd::AlignmentKernels<Alphabet>& alignment_kernels,
     MatchResultCollection&            output_collection,
     const ::bioseq::simd::Minimap2Params& params,
     sequence_size_t                   query_len,
@@ -8872,8 +9042,6 @@ template <is_constexpr_aligner_params Cep,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     PostSeedOwnedLifetime* post_seed_owned_lifetime = nullptr)
 {
-    const auto& alignment_kernels =
-        detail::resolve_alignment_kernels<Alphabet>(params);
     MatchResultCollection* host_timing_dst =
         vulkan_components_requested(params) ? nullptr : &output_collection;
     MatchResultCollection* chaining_proof_dst = nullptr;
@@ -9333,6 +9501,10 @@ template <is_constexpr_aligner_params Cep,
 
     const sequence_size_t target_len = target_seq.bp_size();
     const auto& scoring_matrix = thread_local_scoring_matrix<Alphabet>(params);
+    // Resolve once for the entire alphabet-homogeneous query wave. Every
+    // per-query pipeline borrows this immutable typed binding.
+    const auto& alignment_kernels =
+        detail::resolve_alignment_kernels<Alphabet>(params);
 
     // DOC0307 §4.4/§5.2 — one GPU index cache for the whole batch wave, shared
     // across queries that look up the same target index. When a Vulkan seed
@@ -9424,7 +9596,8 @@ template <is_constexpr_aligner_params Cep,
 
     auto run_one_query =
         [target_len, &query_seqs, &query_minimizers_per_query, target_seq,
-         &effective_index, &scoring_matrix, &params, gpu_index_cache_ptr,
+         &effective_index, &scoring_matrix, &alignment_kernels, &params,
+         gpu_index_cache_ptr,
          gpu_index_identity, vulkan_target_index_built,
          vulkan_target_index_ownership, phase_c_gate_proof](std::size_t qi) {
         const auto query_seq = query_seqs[qi];
@@ -9520,7 +9693,8 @@ template <is_constexpr_aligner_params Cep,
             make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet,
                                   MinimizerT, IndexT>(
             query_seq, target_seq, mins_for_this_query, effective_index,
-            scoring_matrix, out, params, query_len, target_len,
+            scoring_matrix, alignment_kernels, out, params,
+            query_len, target_len,
             gpu_index_cache_ptr, gpu_index_identity);
 
         if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
@@ -9626,6 +9800,8 @@ template <is_constexpr_aligner_params Cep,
     const sequence_size_t target_len = target_seq.bp_size();
     const sequence_size_t query_len = query_seq.bp_size();
     const auto& scoring_matrix = thread_local_scoring_matrix<Alphabet>(params);
+    const auto& alignment_kernels =
+        detail::resolve_alignment_kernels<Alphabet>(params);
 
     if (gpu_index_cache == nullptr
         && params.vulkan_enabled && params.vulkan_seed_hits_enabled
@@ -9909,7 +10085,8 @@ template <is_constexpr_aligner_params Cep,
         make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet,
                               MinimizerT, IndexT, QueryMinimizers>(
         query_seq, target_seq, query_minimizers, effective_index,
-        scoring_matrix, out, params, query_len, target_len,
+        scoring_matrix, alignment_kernels, out, params,
+        query_len, target_len,
         gpu_index_cache_ptr, gpu_index_identity,
         post_seed_owned_lifetime ? &*post_seed_owned_lifetime : nullptr);
 
@@ -10520,17 +10697,22 @@ template <is_constexpr_aligner_params Cep,
     MinimizerHashmapFragmentIndex empty_index{};
     MatchResultCollection         ignored_out{};
     const auto& sm = thread_local_scoring_matrix<Alphabet>(params);
+    const auto& alignment_kernels =
+        detail::resolve_alignment_kernels<Alphabet>(params);
 
     auto pipeline =
         make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet, MinimizerT,
                               MinimizerHashmapFragmentIndex>(
-        query_seq, target_seq, empty_minimizers, empty_index, sm, ignored_out,
-        params, query_len, target_len);
+        query_seq, target_seq, empty_minimizers, empty_index, sm,
+        alignment_kernels, ignored_out, params, query_len, target_len);
     return describe_with_params<Cep>(pipeline);
 }
 
-// Describe-side leaf — see DOC0256 §5.10.3 for the rationale on why
-// EP/MA are pinned constants here instead of chain-dispatched dimensions.
+// Describe-side leaf — EP/MA remain pinned so the structural stage skeleton
+// does not multiply describe instantiations.  The exact query-minimizer
+// Highway function is resolved neutrally from the frozen runtime enum by
+// planned_query_minimizer_highway_kernels() and rendered with the plan-owned
+// dispatch metadata.
 template <sequence_alphabet Alphabet,
           std::size_t L, std::size_t K,
           ::bioseq::simd::BaseAlignmentAlgorithmType BAA,
@@ -10643,9 +10825,9 @@ MatchResultCollection dispatch_pipeline(
 // DOC0256 §7.1 — describe_pipeline_for (EXPLAIN path)
 // =============================================================================
 //
-// One chain instantiation over four steps (L, K, BAA, CA).  EP and MA are
-// pinned constants inside `describe_leaf` (§5.10.3) — describe output is
-// invariant in them.
+// One chain instantiation over four steps (L, K, BAA, CA). EP and MA are
+// pinned constants inside `describe_leaf`; algorithm-specific query-sketch
+// metadata is added through the neutral enum-to-kernel mapping above.
 
 template <sequence_alphabet Alphabet>
 BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
