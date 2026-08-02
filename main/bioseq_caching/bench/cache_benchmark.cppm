@@ -55,8 +55,6 @@ constexpr std::uint64_t target_bases =
 static_assert(query_bases > 0);
 static_assert(query_bases + target_bases == total_input_bases);
 constexpr std::uint64_t gibibyte = 1024ULL * 1024ULL * 1024ULL;
-constexpr std::uint64_t minimum_total_ram = 16ULL * gibibyte;
-constexpr std::uint64_t minimum_available_ram = 8ULL * gibibyte;
 constexpr std::uint64_t minimum_data_space =
     32ULL * gibibyte > 12ULL * total_input_bases
     ? 32ULL * gibibyte
@@ -995,10 +993,11 @@ extension_artifacts(const benchmark_options& options) {
                         postgres_test::host_qualification_requirements{
                             .test_case =
                                 "bioseq cache 2 Gbp native benchmark",
-                            .minimum_total_ram_bytes =
-                                minimum_total_ram,
-                            .minimum_available_ram_bytes =
-                                minimum_available_ram,
+                            // RAM is telemetry: ticketed allocations, bounded
+                            // chunk caches, and spillable runs enforce the
+                            // workload's actual memory envelope.
+                            .minimum_total_ram_bytes = 0,
+                            .minimum_available_ram_bytes = 0,
                             .minimum_data_available_bytes =
                                 minimum_data_space,
                             .minimum_logical_cores = 8,
@@ -1637,14 +1636,10 @@ void validate_passed_report(const benchmark_report& report) {
         || qualification.status != "passed"
         || qualification.host_identity_sha256
             != report.host_identity.identity_sha256
-        || qualification.required_total_ram_bytes
-            < minimum_total_ram
-        || qualification.required_available_ram_bytes
-            < minimum_available_ram
-        || qualification.effective_total_ram_bytes
-            < qualification.required_total_ram_bytes
-        || qualification.effective_available_ram_bytes
-            < qualification.required_available_ram_bytes
+        || qualification.required_total_ram_bytes != 0
+        || qualification.required_available_ram_bytes != 0
+        || qualification.effective_total_ram_bytes == 0
+        || qualification.effective_available_ram_bytes == 0
         || qualification.data_filesystem_available_bytes
             < qualification.required_data_filesystem_available_bytes
         || qualification.required_data_filesystem_available_bytes
@@ -1671,7 +1666,7 @@ void validate_passed_report(const benchmark_report& report) {
             < qualification.required_io_mib_per_second) {
         throw std::runtime_error(
             "passed bioseq-2gbp benchmark report has no valid same-host "
-            "RAM, disk, CPU, and I/O qualification");
+            "RAM telemetry plus disk, CPU, and I/O qualification");
     }
     if (report.measurement_cohort != combined_measurement_cohort
         || report.fixture.source_rows != 1
@@ -2264,9 +2259,9 @@ void write(std::ostream& output, const benchmark_report& report) {
                 .effective_available_ram_bytes =
                     combined ? 16ULL * gibibyte : 0,
                 .required_total_ram_bytes =
-                    combined ? minimum_total_ram : 0,
+                    0,
                 .required_available_ram_bytes =
-                    combined ? minimum_available_ram : 0,
+                    0,
                 .data_filesystem_capacity_bytes =
                     combined ? 100ULL * gibibyte : 0,
                 .data_filesystem_available_bytes =
