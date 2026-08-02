@@ -652,14 +652,15 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   include(CTest)
 endif()
 
-# The website builds on the core extension (module BMIs, the extension DSO, and
-# the private-cluster prerequisites), so require BIOSEQ_BUILD_CORE and export a
-# compile database for the Clang structural pass (§17.1).
+# The website and core namespace-materialization generator need the raw root
+# compile database as the signature source for their isolated Clang closures.
 if(BIOSEQ_BUILD_WEBSITE)
   if(NOT BIOSEQ_BUILD_CORE)
     message(FATAL_ERROR
       "BIOSEQ_BUILD_WEBSITE=ON requires BIOSEQ_BUILD_CORE=ON")
   endif()
+endif()
+if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_WEBSITE)
   set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
@@ -669,6 +670,7 @@ endif()
 # another ExternalProject.
 include(BioseqCodegen)
 include(BioseqHighwayCodegen)
+include(BioseqTemplateFlattenCodegen)
 set(_bioseq_codegen_components)
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
   list(APPEND _bioseq_codegen_components sql)
@@ -680,7 +682,7 @@ if(BIOSEQ_BUILD_WEBSITE)
   list(APPEND _bioseq_codegen_components website)
 endif()
 if(BIOSEQ_BUILD_CORE)
-  list(APPEND _bioseq_codegen_components highway)
+  list(APPEND _bioseq_codegen_components highway namespace_materialization)
 endif()
 if(_bioseq_codegen_components)
   bioseq_add_codegen(
@@ -688,6 +690,15 @@ if(_bioseq_codegen_components)
     PROJECT_TARGET bioseq_codegen_project
     BINARY_DIR "${CMAKE_BINARY_DIR}/codegen"
     COMPONENTS ${_bioseq_codegen_components})
+endif()
+
+if(BIOSEQ_BUILD_CORE)
+  # Build-only P0 gate for the private implementation-partition topology used
+  # by generated template-flatten coordinates. This target intentionally has
+  # no runtime test registration: successful module scan, compile, and link on
+  # both supported toolchains is the contract.
+  add_subdirectory(
+    codegen/namespace_materialization/tests/module_canary)
 endif()
 
 # Include extensions and their shared code
