@@ -270,20 +270,40 @@ struct process_snapshot_result {
     while (iterator != end) {
         const bool regular = iterator->is_regular_file(error);
         if (error) {
-            return std::nullopt;
-        }
-        if (regular) {
-            const std::uintmax_t bytes = iterator->file_size(error);
-            if (error
-                || bytes
-                    > std::numeric_limits<std::uint64_t>::max() - total) {
+            if (error != std::errc::no_such_file_or_directory) {
                 return std::nullopt;
             }
-            total += static_cast<std::uint64_t>(bytes);
+            // The owned tree is live while PostgreSQL atomically publishes
+            // and removes files.  An entry may therefore disappear after the
+            // iterator observed its name but before status(2).  That entry is
+            // absent from this inherently non-atomic sample; every other
+            // filesystem error still invalidates the observation.
+            error.clear();
+        } else if (regular) {
+            const std::uintmax_t bytes = iterator->file_size(error);
+            if (error) {
+                if (error != std::errc::no_such_file_or_directory) {
+                    return std::nullopt;
+                }
+                error.clear();
+            } else if (
+                bytes
+                > std::numeric_limits<std::uint64_t>::max() - total) {
+                return std::nullopt;
+            } else {
+                total += static_cast<std::uint64_t>(bytes);
+            }
         }
         iterator.increment(error);
         if (error) {
-            return std::nullopt;
+            if (error != std::errc::no_such_file_or_directory) {
+                return std::nullopt;
+            }
+            // recursive_directory_iterator cannot promise a resumable state
+            // after an increment error.  Preserve the valid prefix as this
+            // instant's lower-bound sample; a later periodic sample observes
+            // the subsequently stable tree.
+            return total;
         }
     }
     return total;
