@@ -1,3 +1,68 @@
+// Generator input only. CMake instantiates this implementation-unit template
+// once for every entry in BIOSEQ_DISPATCH_PROCESSOR_TYPED_SHAPE_REGISTRY.
+// The configured build-tree units are ordinary .cppm implementation units;
+// this authored file is deliberately excluded from every compiler target.
+module;
+
+#include "common.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <queue>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include <unistd.h>
+
+module bioseq.scheduler.dispatch_processor;
+
+import bioseq.common.mlogging;
+import bioseq.common.hashing;
+import bioseq.common.sequan_compat;
+import bioseq.pg_utils;
+import bioseq.config;
+import bioseq.indexing.type;
+import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_sequence;
+import bioseq.indexing.minimizer_vulkan;
+import bioseq.storage.indexing_pg.chunked_storage;
+import bioseq.storage.indexing_pg.handles;
+import bioseq.storage.indexing_pg.residency;
+import bioseq.storage.indexing_pg.sorted_runs;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.vulkan;
+import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.chaining.vulkan;
+import bioseq.sequences.cigar;
+import bioseq.sequences.minimap_port;
+import bioseq.sequences.pipe;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.types.pg_compact_sequence;
+import bioseq.instr;
+import bioseq.storage.manager;
+import bioseq.storage.lazy;
+import bioseq.storage.scanner;
+import bioseq.storage.scanner_pg;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.memory_admission;
+@BIOSEQ_TYPED_EXTRA_IMPORT@
+import bioseq.scheduler.supervisor_pg;
+
+@BIOSEQ_TYPED_SHAPE_DEFINES@
+
 /*-------------------------------------------------------------------------
  *
  * scheduler/dispatch_processor.cppm
@@ -116,10 +181,7 @@
  *
  *-------------------------------------------------------------------------
  */
-HWY_BEFORE_NAMESPACE();
-
-namespace bioseq::simd::HWY_NAMESPACE {
-namespace hn = hwy::HWY_NAMESPACE;
+namespace bioseq::simd {
 
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_ONLY) \
     || defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY) \
@@ -289,7 +351,7 @@ pg_gpu_index_identity(
         std::string_view index_name,
         sequence_size_t clip_lo_bp,
         sequence_size_t clip_hi_bp,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend sketch_backend) noexcept
+        bioseq::simd::MinimizerSketchBackend sketch_backend) noexcept
 {
     const auto scheme =
         bioseq::indexing::minimizer_scheme_identity_for_backend(sketch_backend);
@@ -796,6 +858,9 @@ inline void record_unattested_job(
             > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())
         ? (std::numeric_limits<std::uint32_t>::max)()
         : static_cast<std::uint32_t>(effective_workers);
+    job.environment.record_highway_target(
+        params.highway_dispatch,
+        params.highway_executed_target);
     if (scanner_pg_ctx != nullptr
         && scanner_pg_ctx->target_rownos[row_index] >= 0) {
         job.logical_target_row = static_cast<std::uint64_t>(
@@ -2602,13 +2667,13 @@ make_fragment_index_persist_target(
         // Paper recompute remains Paper, but persistence must wait for the
         // scheme-tagged READY-generation writer; never relabel it Exact/Scalar.
         && pipe::target_index_sketch_backend_from_params(params)
-            != bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::
+            != bioseq::simd::MinimizerSketchBackend::
                 PaperNtHashSimd;
 }
 
 // DOC0345 Patch J — select the target index sketch backend for recompute from
 // the resolved params (Vulkan only when all three high-level gates are on).
-[[nodiscard]] inline bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend
+[[nodiscard]] inline bioseq::simd::MinimizerSketchBackend
 target_backend_from_params_for_recompute(const Minimap2Params& params) noexcept
 {
     return pipe::target_index_sketch_backend_from_params(params);
@@ -2624,9 +2689,9 @@ pg_segment_unit_ranges(
     const auto backend =
         (pg_vulkan_seed_lookup_selected(params)
          || target_backend_from_params_for_recompute(params)
-             == bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::VulkanSegment)
-            ? bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::VulkanSegment
-            : bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+             == bioseq::simd::MinimizerSketchBackend::VulkanSegment)
+            ? bioseq::simd::MinimizerSketchBackend::VulkanSegment
+            : bioseq::simd::MinimizerSketchBackend::Scalar;
     return pipe::segment_unit_ranges_for_backend(
         total_bp,
         query_len,
@@ -2787,7 +2852,7 @@ template <sequence_alphabet Alphabet>
                 || query_sketch.paper_nthash_execution_proof_present
                 || !scalar_target_build_proof.accepted()
                 || backend
-                    != bioseq::simd::HWY_NAMESPACE::
+                    != bioseq::simd::
                         MinimizerSketchBackend::Scalar) {
                 bioseq_log<ERR>(
                     "Transient MPS scalar build/query lacks actual execution proof");
@@ -2827,7 +2892,7 @@ template <sequence_alphabet Alphabet>
     if (!can_defer_recompute_minimizer_persist(ctx, params)) {
         if (ctx.recompute_async_persist_active
             && target_backend_from_params_for_recompute(params)
-                == bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::
+                == bioseq::simd::MinimizerSketchBackend::
                     PaperNtHashSimd) {
             bioseq_log<DBG>("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} because Paper persistence requires a scheme-tagged READY generation; Paper recompute continues without fallback",
                     static_cast<unsigned long long>(sequence_rowno),
@@ -2971,7 +3036,7 @@ run_recompute_with_deferred_minimizer_persist(
             static_cast<unsigned long long>(sequence_rowno),
             choice.index_name,
             static_cast<unsigned long long>(loc.total_bp_size),
-            bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(
+            bioseq::simd::minimizer_sketch_backend_name(
                 target_backend_from_params_for_recompute(params)));
         return collection;
     }
@@ -3643,7 +3708,7 @@ template <class S>
             target_backend_from_params_for_recompute(dispatch_params);
         const bool legacy_minimizer_scheme_compatible =
             requested_target_backend
-            != bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::
+            != bioseq::simd::MinimizerSketchBackend::
                 PaperNtHashSimd;
         if (scanner_pg_ctx->read_index_active
             && !legacy_minimizer_scheme_compatible) {
@@ -4507,7 +4572,7 @@ template <class S>
                             scanner_pg_ctx->target_rownos[i]),
                         static_cast<unsigned long long>(
                             loc_opt->total_bp_size),
-                        bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(
+                        bioseq::simd::minimizer_sketch_backend_name(
                             target_backend_from_params_for_recompute(params)));
             }
 	                                if (!assembled
@@ -4729,7 +4794,7 @@ template <class S>
                     static_cast<unsigned long long>(
                         loc_opt->total_bp_size),
 					async_staged,
-                    bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(
+                    bioseq::simd::minimizer_sketch_backend_name(
                         target_backend_from_params_for_recompute(params)));
             assembled = true;
         }
@@ -4777,7 +4842,7 @@ template <class S>
                         static_cast<unsigned long long>(
                             loc_opt->total_bp_size),
 						async_staged,
-                        bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(
+                        bioseq::simd::minimizer_sketch_backend_name(
                             target_backend_from_params_for_recompute(params)));
                 assembled = true;
             }
@@ -8612,5 +8677,4 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION(
 }
 #endif
 
-} // namespace bioseq::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
+} // namespace bioseq::simd

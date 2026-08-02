@@ -118,7 +118,6 @@
  */
 module;
 
-#include <hwy/highway.h>
 #include "common.h"
 
 #include <algorithm>
@@ -180,11 +179,20 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.memory_admission;
 import bioseq.scheduler.supervisor_pg;
+import bioseq.highway.dispatch_contract;
 
-HWY_BEFORE_NAMESPACE();
+/**
+ * The generated implementation unit attached to this module owns both the
+ * registry inventory and the process root's sole Highway dynamic dispatch.
+ */
+export namespace bioseq::simd_dispatch {
+[[nodiscard]] HighwayDispatchInfo
+registered_highway_dispatch_info() noexcept;
+[[nodiscard]] const HighwayTargetBinding& select_highway_target_once(
+    const HighwayDispatchInfo& plan);
+} // namespace bioseq::simd_dispatch
 
-namespace bioseq::simd::HWY_NAMESPACE {
-namespace hn = hwy::HWY_NAMESPACE;
+namespace bioseq::simd {
 
 export constexpr size_t kDispatchBatchCapacity = 8192;
 
@@ -914,7 +922,7 @@ public:
      */
     /*
      * Run the minimap2 pipeline across the fixed dispatch-buffer batch shape.
-     * The implementation lives in dispatch_processor_impl.cpp so this module
+     * The implementation lives in dispatch_processor_impl.cppm so this module
      * interface does not instantiate the full pgseq_supported_alphabets ×
      * storage-width minimap pipeline whenever tuple-buffer/admin code changes.
      */
@@ -969,5 +977,4 @@ static_assert(!BatchProcessor::format6_f5_fallback_allowed(
 static_assert(!BatchProcessor::format6_f5_fallback_allowed(
 	false, false, true));
 
-} // namespace bioseq::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
+} // namespace bioseq::simd

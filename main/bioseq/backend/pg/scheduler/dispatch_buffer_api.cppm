@@ -23,20 +23,24 @@ module;
 
 export module bioseq.scheduler.dispatch_buffer_api;
 
-import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
 import bioseq.indexing.type;
 import bioseq.types.pg_compact_sequence;
 import bioseq.storage.scanner_pg;
+import bioseq.highway.dispatch_contract;
 
 export namespace bioseq::scheduler {
+
+/** Cold plan inventory forwarded without exposing the heavy processor BMI. */
+[[nodiscard]] bioseq::simd_dispatch::HighwayDispatchInfo
+highway_dispatch_info_for_plan() noexcept;
 
 struct DispatchNextOutput {
     TupleTableSlot* scan_slot_copy = nullptr;
     std::int64_t sequence_rowno = -1;
     std::uint64_t query_ordinal = 0;
-    const bioseq::simd::active_target::MatchResult* match = nullptr;
+    const bioseq::simd::MatchResult* match = nullptr;
 };
 
 struct DispatchJoinQueryRef {
@@ -55,7 +59,7 @@ public:
     DispatchBufferRuntime& operator=(DispatchBufferRuntime&& rhs) noexcept;
 
     void configure_params(
-        const bioseq::simd::active_target::Minimap2Params& params,
+        const bioseq::simd::Minimap2Params& params,
         bioseq::indexing::IndexReadRequirement index_read_requirement,
         bool read_sequence_index,
         Oid scan_user_relid,

@@ -284,7 +284,7 @@ inline void merge_generation_read_stats(
 }
 
 inline void install_active_read_policy_dispatch_proof(
-		::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext& context,
+		::bioseq::simd::BatchProcessor::ScannerPgContext& context,
 		bioseq::storage::indexing::ActiveReadPolicyResolution resolution,
 		const Oid user_relid,
 		const Oid relfilenode,
@@ -914,7 +914,7 @@ public:
     struct NextOutput {
         BufferedScanEntry* entry;
         std::uint64_t query_ordinal;
-        const ::bioseq::simd::HWY_NAMESPACE::MatchResult* match;
+        const ::bioseq::simd::MatchResult* match;
     };
 
     struct JoinQueryRef {
@@ -928,7 +928,7 @@ public:
     };
 
 private:
-    ::bioseq::simd::HWY_NAMESPACE::BatchProcessor processor;
+    ::bioseq::simd::BatchProcessor processor;
     MmsearchContext mmsearch_context;
 
     /*
@@ -938,7 +938,7 @@ private:
      * row inherits these values with size-heuristic tuning applied if the
      * user left the minimap2 defaults in place.
      */
-    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params base_params{};
+    ::bioseq::simd::Minimap2Params base_params{};
 
     /*
      * Effective per-scan persisted-payload read gate. `allow` preserves the
@@ -966,7 +966,7 @@ private:
     ::bioseq::pipeline_stats::PipelineExecutionStats last_stats{};
 
     std::vector<BufferedScanEntry> buffered_entries;
-    std::map<int32_t, std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>> match_map;
+    std::map<int32_t, std::vector<::bioseq::simd::MatchResult>> match_map;
     std::vector<OutputCursor> output_cursors;
     int output_position = -1;
 
@@ -977,7 +977,7 @@ private:
     AttrNumber join_query_slot_seq_resno = InvalidAttrNumber;
     std::vector<JoinQueryRef> join_queries{};
     std::map<std::uint64_t,
-        std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>>
+        std::vector<::bioseq::simd::MatchResult>>
         join_match_map{};
     std::vector<JoinOutputCursor> join_output_cursors{};
     std::size_t join_output_position = 0;
@@ -990,9 +990,9 @@ private:
 		join_active_read_policy{};
 	bioseq::storage::indexing::ColdIndexPreparationStatsPg
 		join_cold_policy_stats{};
-	::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget
+	::bioseq::simd::BatchProcessor::CpuPreparedTarget
 		join_cpu_prepared_target{};
-	::bioseq::simd::HWY_NAMESPACE::BatchProcessor::GpuPreparedShapeV5Target
+	::bioseq::simd::BatchProcessor::GpuPreparedShapeV5Target
 		join_gpu_prepared_shape_v5_target{};
     std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity> join_target_hdrs{};
     std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity> join_query_hdrs{};
@@ -1000,13 +1000,13 @@ private:
     std::array<bioseq::pg_types::seq*, kDispatchBatchCapacity> join_query_detoast_copies{};
     std::vector<std::vector<char>> join_query_rewidth_varlenas{};
     std::unique_ptr<
-        ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext>
+        ::bioseq::simd::BatchProcessor::ScannerPgContext>
         join_scanner_pg_ctx{};
     // PG_TRY is sigsetjmp-based: the catch path must not read a cache pointer
     // automatic that was assigned inside the protected region.
     bioseq::storage::seq_caches* join_scanner_pg_cache = nullptr;
     std::map<int32_t,
-        std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>>
+        std::vector<::bioseq::simd::MatchResult>>
         join_result_scratch{};
 
     /*
@@ -1445,7 +1445,7 @@ public:
      * aligner_options() overrides have been applied. Must be called before
      * the first submit_scan.
      */
-    void configure_params(const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+    void configure_params(const ::bioseq::simd::Minimap2Params& params,
                           bioseq::indexing::IndexReadRequirement read_requirement,
                           bool read_sequence_index,
                           Oid scan_user_relid,
@@ -1534,7 +1534,7 @@ public:
         scan_snapshot = executor_snapshot;
     }
 
-    [[nodiscard]] const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& base_aligner_params() const { return base_params; }
+    [[nodiscard]] const ::bioseq::simd::Minimap2Params& base_aligner_params() const { return base_params; }
     [[nodiscard]] const ::bioseq::pipeline_stats::PipelineExecutionStats& execution_stats() const { return last_stats; }
     [[nodiscard]] bool reads_sequence_index() const { return read_sequence_index_active; }
     [[nodiscard]] AttrNumber target_sequence_attno() const noexcept {
@@ -1793,10 +1793,10 @@ public:
 		join_prepared_union_outcomes_recorded = false;
 		join_prepared_build_checksum_recorded = false;
 		join_cpu_prepared_target =
-			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
+			::bioseq::simd::BatchProcessor::CpuPreparedTarget{};
 		join_cpu_prepared_target.target_rowno = rowno;
 		join_gpu_prepared_shape_v5_target =
-			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+			::bioseq::simd::BatchProcessor::
 				GpuPreparedShapeV5Target{};
 		join_gpu_prepared_shape_v5_target.target_rowno = rowno;
     }
@@ -2031,7 +2031,7 @@ public:
 								query_ordinals,
 								base_params,
 								/*include_persisted_parameter_group=*/true,
-								::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+								::bioseq::simd::BatchProcessor::
 									CpuQueryUnionStorage::minimizer_sketch,
 								join_cpu_prepared_target);
 						}
@@ -2754,11 +2754,11 @@ public:
         join_result_scratch.clear();
         if (!join_scanner_pg_ctx) {
             join_scanner_pg_ctx = std::make_unique<
-                ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+                ::bioseq::simd::BatchProcessor::
                     ScannerPgContext>();
         }
         *join_scanner_pg_ctx =
-            ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+            ::bioseq::simd::BatchProcessor::
                 ScannerPgContext{};
 		auto& scanner_pg_ctx = *join_scanner_pg_ctx;
         const auto ticket = bioseq::parallelism::pg::begin_batch(
@@ -2978,7 +2978,7 @@ public:
                 join_target_hdrs,
                 join_query_ids,
                 base_params,
-                ::bioseq::simd::HWY_NAMESPACE::BatchInvocationRole::primary,
+                ::bioseq::simd::BatchInvocationRole::primary,
                 0,
                 last_stats,
                 &scanner_pg_ctx);
@@ -3424,9 +3424,9 @@ public:
 		join_active_read_policy.reset();
 		join_cold_policy_stats = {};
 		join_cpu_prepared_target =
-			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
+			::bioseq::simd::BatchProcessor::CpuPreparedTarget{};
 		join_gpu_prepared_shape_v5_target =
-			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+			::bioseq::simd::BatchProcessor::
 				GpuPreparedShapeV5Target{};
         clear_slots();
     }
@@ -3470,10 +3470,10 @@ public:
 		join_active_read_policy.reset();
         join_cold_policy_stats = {};
         join_cpu_prepared_target =
-            ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+            ::bioseq::simd::BatchProcessor::
                 CpuPreparedTarget{};
 		join_gpu_prepared_shape_v5_target =
-			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+			::bioseq::simd::BatchProcessor::
 				GpuPreparedShapeV5Target{};
         for (auto& entry : buffered_entries) {
             entry.scan_slot_copy = nullptr;
@@ -3510,9 +3510,9 @@ public:
 		join_active_read_policy.reset();
 		join_cold_policy_stats = {};
 		join_cpu_prepared_target =
-			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::CpuPreparedTarget{};
+			::bioseq::simd::BatchProcessor::CpuPreparedTarget{};
 		join_gpu_prepared_shape_v5_target =
-			::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+			::bioseq::simd::BatchProcessor::
 				GpuPreparedShapeV5Target{};
         clear_slots();
         last_stats = ::bioseq::pipeline_stats::PipelineExecutionStats{};
@@ -3833,7 +3833,7 @@ public:
         scanner_pg_cache->main_tablespace_oid = user_main_tablespace_oid;
         scanner_pg_cache->main_relfilenode    = user_main_relfilenode;
 
-        typename ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext scanner_pg_ctx{};
+        typename ::bioseq::simd::BatchProcessor::ScannerPgContext scanner_pg_ctx{};
         scanner_pg_ctx.async_job_observer =
             make_slice_async_pool_observer_noexcept(slice_async_owner);
         scanner_pg_ctx.mmsearch_target_payload_observer =
@@ -4090,7 +4090,7 @@ public:
                 }
 
                 ::bioseq::pipeline_stats::PipelineExecutionStats wave_stats{};
-                std::map<int32_t, std::vector<::bioseq::simd::HWY_NAMESPACE::MatchResult>> wave_match_map;
+                std::map<int32_t, std::vector<::bioseq::simd::MatchResult>> wave_match_map;
                 if (per_row_mode()) {
                     wave_match_map = processor.process_sequences(
                         batch_size,
@@ -4100,7 +4100,7 @@ public:
                         &per_row_query_hdrs,
                         target_hdrs, query_ids,
                         base_params,
-                        ::bioseq::simd::HWY_NAMESPACE::BatchInvocationRole::primary,
+                        ::bioseq::simd::BatchInvocationRole::primary,
                         0,
                         wave_stats,
                         scanner_pg_arg);
@@ -4113,7 +4113,7 @@ public:
                         nullptr,
                         target_hdrs, query_ids,
                         base_params,
-                        ::bioseq::simd::HWY_NAMESPACE::BatchInvocationRole::primary,
+                        ::bioseq::simd::BatchInvocationRole::primary,
                         0,
                         wave_stats,
                         scanner_pg_arg);
@@ -4144,7 +4144,7 @@ public:
                             nullptr,
                             target_hdrs, query_ids,
                             base_params,
-                            ::bioseq::simd::HWY_NAMESPACE::BatchInvocationRole::extra_query,
+                            ::bioseq::simd::BatchInvocationRole::extra_query,
                             extra_broadcast_query_ordinal(
                                 per_row_mode(), batch_size, extra_idx),
                             extra_stats,
@@ -4247,7 +4247,7 @@ public:
              * meaningful (passed `min_seed_count` / `min_chain_score`).
              */
             for (size_t m = 0; m < hit->second.size(); ++m) {
-                const ::bioseq::simd::HWY_NAMESPACE::MatchResult& match_candidate = hit->second[m];
+                const ::bioseq::simd::MatchResult& match_candidate = hit->second[m];
                 if (base_params.do_cigar
                     && (!match_candidate.has_cigar
                         || match_candidate.cigar.empty())) {

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * scheduler/dispatch_processor.cppm
+ * scheduler/dispatch_processor_impl.cppm
  *
  * Heavy minimap/pipe implementation for BatchProcessor. Kept out of the
  * dispatch_buffer interface so edits to tuple-buffer or admin code do not
@@ -118,7 +118,6 @@
  */
 module;
 
-#include <hwy/highway.h>
 #include "common.h"
 #include "headers/pg_build_config.h"
 
@@ -138,6 +137,7 @@ module;
 #include <optional>
 #include <queue>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -150,6 +150,7 @@ module bioseq.scheduler.dispatch_processor;
 import bioseq.common.mlogging;
 import bioseq.common.hashing;
 import bioseq.common.sequan_compat;
+import bioseq.highway.dispatch_contract;
 import bioseq.pg_utils;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq::settings::index_run_buffer_bytes, bioseq_scheduler_*, bioseq::settings::index_memory_cap_mb GUCs
 import bioseq.indexing.type;
@@ -184,10 +185,7 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.scheduler.supervisor_pg;
 
-HWY_BEFORE_NAMESPACE();
-
-namespace bioseq::simd::HWY_NAMESPACE {
-namespace hn = hwy::HWY_NAMESPACE;
+namespace bioseq::simd {
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w1(
@@ -496,9 +494,25 @@ dispatch_process_sequences_typed(
         return results;
     }
 
+    const auto highway_plan =
+        ::bioseq::simd_dispatch::registered_highway_dispatch_info();
+    const auto& highway_binding =
+        ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
+    if (highway_binding.target == 0
+        || highway_binding.kernels == nullptr
+        || highway_binding.target != highway_plan.planned_target) {
+        throw std::logic_error{
+            "Highway runtime binding disagrees with the generated target plan"};
+    }
+    Minimap2Params dispatched_params = base_params;
+    dispatched_params.highway_kernels = highway_binding.kernels;
+    dispatched_params.highway_dispatch = highway_plan;
+    dispatched_params.highway_executed_target = highway_binding.target;
+    dispatched_params.alphabet_code = alphabet_code;
+
     auto run_pipeline_body =
         [batch_size, alphabet_code, storage_unit_byte_width, query_hdr,
-         per_row_query_hdrs, &target_hdrs, &query_ids, &base_params,
+         per_row_query_hdrs, &target_hdrs, &query_ids, &dispatched_params,
          invocation_role, broadcast_query_ordinal, &stats, scanner_pg_ctx,
          &results] {
         results = dispatch_process_sequences_typed(
@@ -509,7 +523,7 @@ dispatch_process_sequences_typed(
             per_row_query_hdrs,
             target_hdrs,
             query_ids,
-            base_params,
+            dispatched_params,
             invocation_role,
             broadcast_query_ordinal,
             stats,
@@ -3817,11 +3831,15 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 
 	if (route_plan.route
 			== bioseq::indexing::MinimizerGrouped32ColdLoadRoute::full) {
+		const auto grouped32_validate = base_params.highway_kernels == nullptr
+			? nullptr
+			: base_params.highway_kernels->indexing
+				.validate_non_scatter_local32_w2;
 		auto made = Grouped32Reader::begin_full_generation_stream(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
 			head, manifest, selected_expected, group.sketch_backend,
 			metadata->directory.encoded_bytes(), query_hashes,
-			static_cast<std::uint64_t>(group.max_occ));
+			static_cast<std::uint64_t>(group.max_occ), grouped32_validate);
 		if (!made) {
 			fail(fmt::format("grouped32 full reader begin rejected wire_error={}",
 				static_cast<unsigned>(made.error())));
@@ -3858,11 +3876,15 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 			return;
 		}
 	} else {
+		const auto grouped32_validate = base_params.highway_kernels == nullptr
+			? nullptr
+			: base_params.highway_kernels->indexing
+				.validate_non_scatter_local32_w2;
 		auto made = Grouped32Reader::begin(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
 			head, manifest, selected_expected, group.sketch_backend,
 			metadata->directory.encoded_bytes(), query_hashes,
-			static_cast<std::uint64_t>(group.max_occ));
+			static_cast<std::uint64_t>(group.max_occ), grouped32_validate);
 		if (!made) {
 			fail(fmt::format("grouped32 selective reader begin rejected wire_error={}",
 				static_cast<unsigned>(made.error())));
@@ -4308,5 +4330,4 @@ void BatchProcessor::prepare_gpu_persisted_shape_v5_target(
 	}
 }
 
-} // namespace bioseq::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
+} // namespace bioseq::simd

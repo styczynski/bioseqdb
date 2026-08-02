@@ -4467,7 +4467,7 @@ scheduler_stats() {
     .from = bioseq::sql::public_role,
 })]]
 bool cpu_prepared_target_same_object_reprepare_probe() {
-	return bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+	return bioseq::simd::BatchProcessor::
 		cpu_prepared_target_same_object_reprepare_probe();
 }
 

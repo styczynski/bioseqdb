@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * scheduler/dispatch_buffer_api.cpp
+ * scheduler/dispatch_buffer_api_impl.cppm
  *
  * Implementation of the narrow TupleDispatchBuffer API declared in
  * dispatch_buffer_api.cppm.  This is the only custom-scan-side translation
@@ -11,8 +11,6 @@
 module;
 
 #include "common.h"
-
-#include <hwy/highway.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -26,7 +24,6 @@ module bioseq.scheduler.dispatch_buffer_api;
 
 import bioseq.scheduler.dispatch_processor;
 import bioseq.scheduler.dispatch_buffer;
-import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
 import bioseq.indexing.type;
@@ -34,6 +31,11 @@ import bioseq.types.pg_compact_sequence;
 import bioseq.storage.scanner_pg;
 
 namespace bioseq::scheduler {
+
+bioseq::simd_dispatch::HighwayDispatchInfo
+highway_dispatch_info_for_plan() noexcept {
+    return bioseq::simd_dispatch::registered_highway_dispatch_info();
+}
 
 namespace {
 
@@ -75,7 +77,7 @@ DispatchBufferRuntime& DispatchBufferRuntime::operator=(
 }
 
 void DispatchBufferRuntime::configure_params(
-    const bioseq::simd::active_target::Minimap2Params& params,
+    const bioseq::simd::Minimap2Params& params,
     const bioseq::indexing::IndexReadRequirement index_read_requirement,
     const bool read_sequence_index,
     const Oid scan_user_relid,
