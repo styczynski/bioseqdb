@@ -746,13 +746,6 @@ inline void render_selector_switch(
     validate_enabled_ordinals(
         plan.topology, plan.profile, plan.enabled_ordinals);
     validate_entry_ownership(plan.topology);
-    plan.frontend_counts = frontend_action_counts{
-        .canonical_body_discovery = 0u,
-        .body_free_declaration_probes = static_cast<std::uint32_t>(
-            plan.topology.identity_representative_ordinals.size()),
-        .enabled_body_bearing_units =
-            static_cast<std::uint32_t>(plan.enabled_ordinals.size()),
-    };
     generation_result result;
     result.artifacts.push_back(detail::make_artifact(
         materialization_artifact::kind::api_partition,

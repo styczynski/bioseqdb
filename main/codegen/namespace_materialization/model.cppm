@@ -16,7 +16,7 @@ import bioseq.codegen.clang_structural;
 export namespace bioseq::codegen::namespace_materialization {
 
 inline constexpr std::uint32_t topology_schema_version = 1;
-inline constexpr std::uint32_t artifact_schema_version = 1;
+inline constexpr std::uint32_t artifact_schema_version = 2;
 inline constexpr std::uint32_t publication_schema_version = 1;
 inline constexpr std::string_view generator_version =
     "bioseq-namespace-materialization-v1";
@@ -114,10 +114,22 @@ struct materialization_artifact {
     std::string content_sha256;
 };
 
-struct frontend_action_counts {
-    std::uint32_t canonical_body_discovery{};
-    std::uint32_t body_free_declaration_probes{};
-    std::uint32_t enabled_body_bearing_units{};
+/// Actions directly observed by the namespace-materialization process. This
+/// ledger must never include later CMake module scans or compiler invocations.
+struct frontend_action_ledger {
+    std::uint32_t dependency_preparation_validations{};
+    std::uint32_t canonical_token_slice_scans{};
+    std::uint32_t body_free_declaration_probe_scans{};
+    std::uint32_t artifact_render_passes{};
+    std::uint32_t body_bearing_compiler_invocations{};
+};
+
+/// Generated module units CMake is subsequently obligated to scan and
+/// compile. These are topology-derived obligations, not observed invocations.
+struct cmake_compilation_obligations {
+    std::uint32_t api_partition_units{};
+    std::uint32_t selector_partition_units{};
+    std::uint32_t body_bearing_implementation_units{};
 };
 
 struct topology_plan {
@@ -144,7 +156,8 @@ struct generation_plan {
     std::string compiler_module_inventory_sha256;
     std::string previous_manifest_identity;
     std::vector<clang_structural::translation_unit> declaration_probes;
-    frontend_action_counts frontend_counts;
+    frontend_action_ledger frontend_actions;
+    cmake_compilation_obligations compilation_obligations;
 };
 
 struct generation_result {

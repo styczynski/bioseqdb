@@ -421,16 +421,26 @@ inline void validate_plan_identity(const generation_plan& plan) {
         }
     }
 
-    if (plan.frontend_counts.canonical_body_discovery != 0
-        || plan.frontend_counts.body_free_declaration_probes
+    if (plan.frontend_actions.dependency_preparation_validations != 1u
+        || plan.frontend_actions.canonical_token_slice_scans != 1u
+        || plan.frontend_actions.body_free_declaration_probe_scans
             != plan.declaration_probes.size()
-        || plan.frontend_counts.enabled_body_bearing_units
-            != plan.enabled_ordinals.size()
+        || plan.frontend_actions.artifact_render_passes != 2u
+        || plan.frontend_actions.body_bearing_compiler_invocations != 0u
         || plan.declaration_probes.size()
             != plan.topology.identity_representative_ordinals.size()) {
         throw std::runtime_error(
-            "frontend action counts disagree with zero-body discovery, "
-            "identity probes, or enabled production units");
+            "observed frontend action ledger disagrees with dependency "
+            "validation, token slicing, body-free probes, rendering, or the "
+            "zero body-bearing compiler-action invariant");
+    }
+    if (plan.compilation_obligations.api_partition_units != 1u
+        || plan.compilation_obligations.selector_partition_units != 1u
+        || plan.compilation_obligations.body_bearing_implementation_units
+            != plan.enabled_ordinals.size()) {
+        throw std::runtime_error(
+            "CMake compilation obligations disagree with the generated API, "
+            "selector, or enabled implementation topology");
     }
     for (const clang_structural::translation_unit& probe :
          plan.declaration_probes) {
@@ -964,6 +974,45 @@ verify_manifest_self_seal(
     return {std::move(unsigned_document), identity};
 }
 
+/// Canonical renderers necessarily change the predecessor/self identities on
+/// a repeat publication. Remove only those two authenticated envelope values
+/// so the publisher can recognize an otherwise byte-identical no-op without
+/// weakening any policy evidence or artifact digest.
+[[nodiscard]] inline std::string publication_noop_projection(
+    std::string_view document,
+    std::string_view owner) {
+    static_cast<void>(verify_manifest_self_seal(document, owner));
+    std::string projected{document};
+    const auto normalize_identity = [&](std::string_view marker,
+                                        const bool allow_empty) {
+        const std::size_t marker_position = projected.find(marker);
+        if (marker_position == std::string::npos
+            || projected.find(marker, marker_position + marker.size())
+                != std::string::npos) {
+            throw std::runtime_error(
+                std::string{owner}
+                + ": canonical publication identity field is missing or repeated");
+        }
+        const std::size_t value_begin = marker_position + marker.size();
+        const std::size_t value_end = projected.find('"', value_begin);
+        if (value_end == std::string::npos) {
+            throw std::runtime_error(
+                std::string{owner}
+                + ": canonical publication identity field is unterminated");
+        }
+        const std::size_t value_size = value_end - value_begin;
+        if ((!allow_empty || value_size != 0u) && value_size != 64u) {
+            throw std::runtime_error(
+                std::string{owner}
+                + ": canonical publication identity has an invalid length");
+        }
+        projected.replace(value_begin, value_size, "<authenticated-identity>");
+    };
+    normalize_identity("\"prior_manifest_identity\": \"", true);
+    normalize_identity("\"manifest_identity\": \"", false);
+    return projected;
+}
+
 [[nodiscard]] inline previous_publication parse_publication_manifest(
     std::string_view document,
     std::string_view owner,
@@ -1135,7 +1184,8 @@ inline void validate_template_flatten_publication_manifest(
             std::string_view{"source"},
             std::string_view{"source_module"},
             std::string_view{"output_module"},
-            std::string_view{"frontend_counts"},
+            std::string_view{"frontend_action_ledger"},
+            std::string_view{"cmake_compilation_obligations"},
             std::string_view{"compiler"},
             std::string_view{"declaration_probes"},
             std::string_view{"artifacts"},
@@ -1186,29 +1236,82 @@ inline void validate_template_flatten_publication_manifest(
         require_string(require_member(source, "sha256", owner), "source.sha256"),
         "source.sha256");
 
-    const json_value& frontend_counts = require_member(root, "frontend_counts", owner);
+    const json_value& frontend_actions = require_member(
+        root, "frontend_action_ledger", owner);
     require_exact_members(
-        frontend_counts,
+        frontend_actions,
         std::array{
-            std::string_view{"canonical_body_discovery"},
-            std::string_view{"body_free_declaration_probes"},
-            std::string_view{"enabled_body_bearing_units"},
+            std::string_view{"dependency_preparation_validations"},
+            std::string_view{"canonical_token_slice_scans"},
+            std::string_view{"body_free_declaration_probe_scans"},
+            std::string_view{"artifact_render_passes"},
+            std::string_view{"body_bearing_compiler_invocations"},
         },
-        "template_flatten evidence frontend_counts");
+        "template_flatten evidence frontend_action_ledger");
     if (require_unsigned(
-            require_member(frontend_counts, "canonical_body_discovery", owner),
-            "frontend_counts.canonical_body_discovery")
-        != 0) {
+            require_member(
+                frontend_actions,
+                "dependency_preparation_validations",
+                owner),
+            "frontend_action_ledger.dependency_preparation_validations")
+            != 1u
+        || require_unsigned(
+               require_member(
+                   frontend_actions, "canonical_token_slice_scans", owner),
+               "frontend_action_ledger.canonical_token_slice_scans")
+            != 1u
+        || require_unsigned(
+               require_member(
+                   frontend_actions, "artifact_render_passes", owner),
+               "frontend_action_ledger.artifact_render_passes")
+            != 2u
+        || require_unsigned(
+               require_member(
+                   frontend_actions,
+                   "body_bearing_compiler_invocations",
+                   owner),
+               "frontend_action_ledger.body_bearing_compiler_invocations")
+            != 0u) {
         throw std::runtime_error(
             std::string{owner}
-            + ": canonical body-bearing discovery count must be zero");
+            + ": frontend ledger must record one preparation validation, "
+              "one token slice, two render passes, and zero observed "
+              "body-bearing compiler invocations");
     }
     const std::uint64_t body_free_probe_count = require_unsigned(
-        require_member(frontend_counts, "body_free_declaration_probes", owner),
-        "frontend_counts.body_free_declaration_probes");
-    static_cast<void>(require_unsigned(
-        require_member(frontend_counts, "enabled_body_bearing_units", owner),
-        "frontend_counts.enabled_body_bearing_units"));
+        require_member(
+            frontend_actions,
+            "body_free_declaration_probe_scans",
+            owner),
+        "frontend_action_ledger.body_free_declaration_probe_scans");
+
+    const json_value& obligations = require_member(
+        root, "cmake_compilation_obligations", owner);
+    require_exact_members(
+        obligations,
+        std::array{
+            std::string_view{"api_partition_units"},
+            std::string_view{"selector_partition_units"},
+            std::string_view{"body_bearing_implementation_units"},
+        },
+        "template_flatten evidence cmake_compilation_obligations");
+    if (require_unsigned(
+            require_member(obligations, "api_partition_units", owner),
+            "cmake_compilation_obligations.api_partition_units")
+            != 1u
+        || require_unsigned(
+               require_member(obligations, "selector_partition_units", owner),
+               "cmake_compilation_obligations.selector_partition_units")
+            != 1u) {
+        throw std::runtime_error(
+            std::string{owner}
+            + ": CMake compilation obligations require one API and one "
+              "selector partition");
+    }
+    const std::uint64_t body_bearing_obligation_count = require_unsigned(
+        require_member(
+            obligations, "body_bearing_implementation_units", owner),
+        "cmake_compilation_obligations.body_bearing_implementation_units");
 
     const json_value& compiler = require_member(root, "compiler", owner);
     require_exact_members(
@@ -1343,6 +1446,9 @@ inline void validate_template_flatten_publication_manifest(
               "complete publication set");
     }
     std::string previous_path;
+    std::uint64_t api_partition_count = 0u;
+    std::uint64_t selector_partition_count = 0u;
+    std::uint64_t implementation_unit_count = 0u;
     for (std::size_t index = 0; index < artifacts.children.size(); ++index) {
         const json_value& artifact = artifacts.children[index];
         require_exact_members(
@@ -1380,6 +1486,13 @@ inline void validate_template_flatten_publication_manifest(
                 std::string{owner}
                 + ": unknown template_flatten artifact kind");
         }
+        if (kind == "api_partition") {
+            ++api_partition_count;
+        } else if (kind == "selector_partition") {
+            ++selector_partition_count;
+        } else if (kind == "implementation_unit") {
+            ++implementation_unit_count;
+        }
         const std::string_view module = require_string(
             require_member(artifact, "module", owner), "artifact.module");
         const bool production = publication.artifacts[index].artifact_class
@@ -1409,6 +1522,13 @@ inline void validate_template_flatten_publication_manifest(
             throw std::runtime_error(
                 std::string{owner} + ": unknown artifact validation class");
         }
+    }
+    if (api_partition_count != 1u || selector_partition_count != 1u
+        || implementation_unit_count != body_bearing_obligation_count) {
+        throw std::runtime_error(
+            std::string{owner}
+            + ": rendered artifacts disagree with distinct CMake "
+              "compilation obligations");
     }
 }
 
@@ -2603,13 +2723,24 @@ render_publication_manifest(const publication_manifest_request& request) {
     evidence << ",\n  \"output_module\": ";
     detail::write_string(
         evidence, plan.topology.region.configured_output_module_name);
-    evidence << ",\n  \"frontend_counts\": {"
-           << "\"canonical_body_discovery\":"
-           << plan.frontend_counts.canonical_body_discovery
-           << ",\"body_free_declaration_probes\":"
-           << plan.frontend_counts.body_free_declaration_probes
-           << ",\"enabled_body_bearing_units\":"
-           << plan.frontend_counts.enabled_body_bearing_units
+    evidence << ",\n  \"frontend_action_ledger\": {"
+           << "\"dependency_preparation_validations\":"
+           << plan.frontend_actions.dependency_preparation_validations
+           << ",\"canonical_token_slice_scans\":"
+           << plan.frontend_actions.canonical_token_slice_scans
+           << ",\"body_free_declaration_probe_scans\":"
+           << plan.frontend_actions.body_free_declaration_probe_scans
+           << ",\"artifact_render_passes\":"
+           << plan.frontend_actions.artifact_render_passes
+           << ",\"body_bearing_compiler_invocations\":"
+           << plan.frontend_actions.body_bearing_compiler_invocations
+           << "},\n  \"cmake_compilation_obligations\": {"
+           << "\"api_partition_units\":"
+           << plan.compilation_obligations.api_partition_units
+           << ",\"selector_partition_units\":"
+           << plan.compilation_obligations.selector_partition_units
+           << ",\"body_bearing_implementation_units\":"
+           << plan.compilation_obligations.body_bearing_implementation_units
            << "},\n  \"compiler\": {\"clang_version\":";
     detail::write_string(evidence, plan.clang_version);
     evidence << ",\"compilation_signature\":";
@@ -2756,12 +2887,20 @@ inline void publish_artifacts(const publication_request& request) {
         request.output_root,
         desired_manifest.policy,
         std::string_view{});
-    if ((!previous.present
+    const bool idempotent_republication = previous.present
+        && detail::publication_noop_projection(
+               read_file(request.artifact_manifest),
+               "previous artifacts manifest")
+            == detail::publication_noop_projection(
+                request.artifact_manifest_json,
+                "desired artifacts manifest");
+    if (!idempotent_republication
+        && ((!previous.present
          && !desired_manifest.prior_manifest_identity.empty())
         || (previous.present
             && previous.manifest_identity
                 != desired_manifest.prior_manifest_identity)
-        || (previous.present && previous.name != desired_manifest.name)) {
+        || (previous.present && previous.name != desired_manifest.name))) {
         throw std::runtime_error(
             "prior manifest identity does not authorize stale cleanup");
     }
@@ -2903,8 +3042,10 @@ inline void publish_artifacts(const publication_request& request) {
             parent = parent.parent_path();
         }
     }
-    write_if_different(
-        request.artifact_manifest, request.artifact_manifest_json);
+    if (!idempotent_republication) {
+        write_if_different(
+            request.artifact_manifest, request.artifact_manifest_json);
+    }
     touch_stamp(request.stamp);
 }
 

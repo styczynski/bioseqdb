@@ -450,7 +450,9 @@ inline void validate_configure_handshake(
         .previous_manifest_identity = previous.manifest_identity,
     };
 
+    std::uint32_t artifact_render_passes = 0u;
     generation_result provisional = render_generation(plan, false);
+    ++artifact_render_passes;
     std::vector<clang_structural::translation_unit> probes;
     for (const materialization_artifact& artifact : provisional.artifacts) {
         if (artifact.artifact_kind
@@ -470,7 +472,26 @@ inline void validate_configure_handshake(
     }
     validate_declaration_probes(plan.topology, probes);
     plan.declaration_probes = std::move(probes);
+    plan.frontend_actions = frontend_action_ledger{
+        .dependency_preparation_validations = 1u,
+        .canonical_token_slice_scans = 1u,
+        .body_free_declaration_probe_scans =
+            static_cast<std::uint32_t>(plan.declaration_probes.size()),
+        .artifact_render_passes = artifact_render_passes + 1u,
+        .body_bearing_compiler_invocations = 0u,
+    };
+    plan.compilation_obligations = cmake_compilation_obligations{
+        .api_partition_units = 1u,
+        .selector_partition_units = 1u,
+        .body_bearing_implementation_units =
+            static_cast<std::uint32_t>(plan.enabled_ordinals.size()),
+    };
     generation_result generated = render_generation(plan);
+    ++artifact_render_passes;
+    if (artifact_render_passes != plan.frontend_actions.artifact_render_passes) {
+        throw std::runtime_error(
+            "namespace-materialization render action ledger drifted");
+    }
 
     std::vector<publication_artifact> publication;
     publication.reserve(generated.artifacts.size());
