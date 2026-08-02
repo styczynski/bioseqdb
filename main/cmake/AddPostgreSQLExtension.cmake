@@ -24,6 +24,235 @@ if(DEFINED VCPKG_TARGET_TRIPLET)
 endif()
 find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 
+if(APPLE)
+  include(
+    "${CMAKE_CURRENT_LIST_DIR}/PostgreSQLExtensionVisibilityContract.cmake")
+endif()
+
+function(bioseq_attach_extension_dso_closure TARGET_NAME)
+  cmake_parse_arguments(
+    ARG
+    "REQUIRE_COMPLETE_CODEGEN"
+    "EXTENSION_NAME;SQL_MANIFEST;REPORT_PATH;CONTRACT"
+    "ABI_EXPORTS"
+    ${ARGN})
+  if(ARG_UNPARSED_ARGUMENTS)
+    message(FATAL_ERROR
+      "${TARGET_NAME}: unknown DSO closure arguments: "
+      "${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+  if(NOT TARGET ${TARGET_NAME})
+    message(FATAL_ERROR
+      "cannot attach DSO closure validation to missing target ${TARGET_NAME}")
+  endif()
+  if(NOT ARG_EXTENSION_NAME OR NOT ARG_SQL_MANIFEST)
+    message(FATAL_ERROR
+      "${TARGET_NAME}: EXTENSION_NAME and SQL_MANIFEST are required")
+  endif()
+  if(NOT DEFINED ARG_CONTRACT OR ARG_CONTRACT STREQUAL "")
+    set(ARG_CONTRACT bioseq)
+  endif()
+  set(_bioseq_dso_contracts bioseq manifest)
+  if(NOT ARG_CONTRACT IN_LIST _bioseq_dso_contracts)
+    message(FATAL_ERROR
+      "${TARGET_NAME}: CONTRACT must be bioseq or manifest")
+  endif()
+  if(NOT IS_ABSOLUTE "${ARG_SQL_MANIFEST}")
+    message(FATAL_ERROR
+      "${TARGET_NAME}: SQL_MANIFEST must be an absolute build-tree path")
+  endif()
+  set_source_files_properties(
+    "${ARG_SQL_MANIFEST}" PROPERTIES GENERATED TRUE)
+
+  set(_bioseq_dso_validator
+    "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../codegen/safety/validate_evidence.py")
+  if(NOT EXISTS "${_bioseq_dso_validator}")
+    message(FATAL_ERROR
+      "${TARGET_NAME}: missing DSO validator ${_bioseq_dso_validator}")
+  endif()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+  if(ARG_REPORT_PATH)
+    if(NOT IS_ABSOLUTE "${ARG_REPORT_PATH}")
+      message(FATAL_ERROR
+        "${TARGET_NAME}: REPORT_PATH must be an absolute build-tree path")
+    endif()
+    set(_bioseq_dso_report "${ARG_REPORT_PATH}")
+  else()
+    set(_bioseq_dso_report
+      "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/${ARG_EXTENSION_NAME}-dso-closure.json")
+  endif()
+  set(_bioseq_dso_completion_args)
+  if(ARG_REQUIRE_COMPLETE_CODEGEN)
+    list(APPEND _bioseq_dso_completion_args
+      --require-complete-codegen)
+  endif()
+  set(_bioseq_dso_abi_export_args)
+  foreach(_bioseq_dso_abi_export IN LISTS ARG_ABI_EXPORTS)
+    list(APPEND _bioseq_dso_abi_export_args
+      --allowed-dso-export "${_bioseq_dso_abi_export}")
+  endforeach()
+
+  if(APPLE)
+    # Hidden visibility on the extension's own C++ objects cannot constrain
+    # transitive static/object-library symbols.  Generate an exact Mach-O ABI
+    # allowlist from the same SQL ownership manifest used by the post-link
+    # validator and the ELF version script.
+    set(_bioseq_dso_macho_export_list
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.macho-exported-symbols")
+    set(_bioseq_dso_macho_export_list_generator
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/GeneratePostgreSQLExtensionMachOExportList.cmake")
+    set(_bioseq_dso_shared_export_map_generator
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/GeneratePostgreSQLExtensionElfVersionScript.cmake")
+    string(JOIN "|" _bioseq_dso_abi_exports_pipe ${ARG_ABI_EXPORTS})
+    add_custom_command(
+      OUTPUT "${_bioseq_dso_macho_export_list}"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DINPUT_MANIFEST=${ARG_SQL_MANIFEST}"
+        "-DOUTPUT=${_bioseq_dso_macho_export_list}"
+        "-DABI_EXPORTS_PIPE=${_bioseq_dso_abi_exports_pipe}"
+        -P "${_bioseq_dso_macho_export_list_generator}"
+      DEPENDS
+        "${ARG_SQL_MANIFEST}"
+        "${_bioseq_dso_macho_export_list_generator}"
+        "${_bioseq_dso_shared_export_map_generator}"
+      VERBATIM)
+    string(SHA256 _bioseq_dso_macho_export_list_target_hash
+      "${CMAKE_CURRENT_BINARY_DIR}|${TARGET_NAME}|${_bioseq_dso_macho_export_list}")
+    set(_bioseq_dso_macho_export_list_target
+      "bioseq_macho_export_list_${_bioseq_dso_macho_export_list_target_hash}")
+    if(TARGET "${_bioseq_dso_macho_export_list_target}")
+      message(FATAL_ERROR
+        "${TARGET_NAME}: Mach-O export-list target name collision: "
+        "${_bioseq_dso_macho_export_list_target}")
+    endif()
+    add_custom_target("${_bioseq_dso_macho_export_list_target}"
+      DEPENDS "${_bioseq_dso_macho_export_list}")
+    add_dependencies(
+      ${TARGET_NAME} "${_bioseq_dso_macho_export_list_target}")
+    set(_bioseq_dso_macho_export_list_link_option
+      "LINKER:-exported_symbols_list,${_bioseq_dso_macho_export_list}")
+    target_link_options(
+      ${TARGET_NAME}
+      PRIVATE "${_bioseq_dso_macho_export_list_link_option}")
+    set_property(
+      TARGET ${TARGET_NAME}
+      APPEND PROPERTY LINK_DEPENDS "${_bioseq_dso_macho_export_list}")
+    set_target_properties(
+      ${TARGET_NAME}
+      PROPERTIES
+        BIOSEQ_EXTENSION_DSO_MACHO_EXPORT_LIST
+          "${_bioseq_dso_macho_export_list}"
+        BIOSEQ_EXTENSION_DSO_MACHO_EXPORT_LIST_TARGET
+          "${_bioseq_dso_macho_export_list_target}")
+    bioseq_assert_postgresql_extension_macho_visibility_contract(
+      "${TARGET_NAME}"
+      "${_bioseq_dso_macho_export_list}"
+      "${_bioseq_dso_macho_export_list_target}"
+      "${_bioseq_dso_macho_export_list_link_option}")
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # ELF does not honour Mach-O's unexported-symbols mechanism.  Clang's C++
+    # named-module initializers otherwise remain dynamic exports despite hidden
+    # C++ visibility. Generate the linker version script from the generated SQL
+    # ownership manifest so each extension publishes only its reviewed fmgr /
+    # pg_finfo surface and explicit ABI symbols.
+    set(_bioseq_dso_elf_version_script
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET_NAME}.elf-version-script")
+    set(_bioseq_dso_elf_version_script_generator
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/GeneratePostgreSQLExtensionElfVersionScript.cmake")
+    string(JOIN "|" _bioseq_dso_abi_exports_pipe ${ARG_ABI_EXPORTS})
+    add_custom_command(
+      OUTPUT "${_bioseq_dso_elf_version_script}"
+      COMMAND "${CMAKE_COMMAND}"
+        "-DINPUT_MANIFEST=${ARG_SQL_MANIFEST}"
+        "-DOUTPUT=${_bioseq_dso_elf_version_script}"
+        "-DABI_EXPORTS_PIPE=${_bioseq_dso_abi_exports_pipe}"
+        -P "${_bioseq_dso_elf_version_script_generator}"
+      DEPENDS
+        "${ARG_SQL_MANIFEST}"
+        "${_bioseq_dso_elf_version_script_generator}"
+      VERBATIM)
+    # LINK_DEPENDS requests relinking when this file changes, but is not a
+    # build-graph consumer of an OUTPUT custom command with Ninja.  Give the
+    # output its own collision-resistant target and make the extension depend
+    # on it so the version script is generated before the linker sees it.
+    string(SHA256 _bioseq_dso_elf_version_script_target_hash
+      "${CMAKE_CURRENT_BINARY_DIR}|${TARGET_NAME}|${_bioseq_dso_elf_version_script}")
+    set(_bioseq_dso_elf_version_script_target
+      "bioseq_elf_version_script_${_bioseq_dso_elf_version_script_target_hash}")
+    if(TARGET "${_bioseq_dso_elf_version_script_target}")
+      message(FATAL_ERROR
+        "${TARGET_NAME}: ELF version-script target name collision: "
+        "${_bioseq_dso_elf_version_script_target}")
+    endif()
+    add_custom_target("${_bioseq_dso_elf_version_script_target}"
+      DEPENDS "${_bioseq_dso_elf_version_script}")
+    add_dependencies(${TARGET_NAME} "${_bioseq_dso_elf_version_script_target}")
+    set(_bioseq_dso_elf_version_script_link_option
+      "LINKER:--version-script=${_bioseq_dso_elf_version_script}")
+    set(_bioseq_dso_elf_build_id_link_option
+      "LINKER:--build-id=sha1")
+    target_link_options(
+      ${TARGET_NAME}
+      PRIVATE
+        "${_bioseq_dso_elf_version_script_link_option}"
+        "${_bioseq_dso_elf_build_id_link_option}")
+    set_property(
+      TARGET ${TARGET_NAME}
+      APPEND PROPERTY LINK_DEPENDS "${_bioseq_dso_elf_version_script}")
+    set_target_properties(
+      ${TARGET_NAME}
+      PROPERTIES
+        BIOSEQ_EXTENSION_DSO_ELF_VERSION_SCRIPT
+          "${_bioseq_dso_elf_version_script}"
+        BIOSEQ_EXTENSION_DSO_ELF_VERSION_SCRIPT_TARGET
+          "${_bioseq_dso_elf_version_script_target}"
+        BIOSEQ_EXTENSION_DSO_ELF_BUILD_ID
+          "sha1")
+  endif()
+
+  set_property(TARGET ${TARGET_NAME} APPEND PROPERTY LINK_DEPENDS
+    "${ARG_SQL_MANIFEST}"
+    "${_bioseq_dso_validator}")
+  add_custom_command(
+    TARGET ${TARGET_NAME}
+    POST_BUILD
+    BYPRODUCTS "${_bioseq_dso_report}"
+    COMMAND "${Python3_EXECUTABLE}"
+      "${_bioseq_dso_validator}"
+      --dso-only
+      --dso-contract "${ARG_CONTRACT}"
+      --sql-manifest "${ARG_SQL_MANIFEST}"
+      --dso "$<TARGET_FILE:${TARGET_NAME}>"
+      ${_bioseq_dso_completion_args}
+      ${_bioseq_dso_abi_export_args}
+      --report "${_bioseq_dso_report}"
+    COMMENT
+      "Validating ${ARG_EXTENSION_NAME} fmgr ownership against the linked DSO"
+    VERBATIM)
+  add_custom_target("${TARGET_NAME}_dso_closure"
+    COMMAND "${Python3_EXECUTABLE}"
+      "${_bioseq_dso_validator}"
+      --dso-only
+      --dso-contract "${ARG_CONTRACT}"
+      --sql-manifest "${ARG_SQL_MANIFEST}"
+      --dso "$<TARGET_FILE:${TARGET_NAME}>"
+      ${_bioseq_dso_completion_args}
+      ${_bioseq_dso_abi_export_args}
+      --report "${_bioseq_dso_report}"
+    DEPENDS
+      ${TARGET_NAME}
+      "${ARG_SQL_MANIFEST}"
+      "${_bioseq_dso_validator}"
+    COMMENT
+      "Revalidating ${ARG_EXTENSION_NAME} fmgr ownership report"
+    VERBATIM)
+  set_target_properties(${TARGET_NAME} PROPERTIES
+    BIOSEQ_EXTENSION_DSO_CLOSURE_REPORT "${_bioseq_dso_report}"
+    BIOSEQ_EXTENSION_DSO_CLOSURE_CONTRACT "${ARG_CONTRACT}"
+    BIOSEQ_EXTENSION_DSO_ABI_EXPORTS "${ARG_ABI_EXPORTS}")
+endfunction()
+
 # Helper command to add extensions
 function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   message("%%%% PREPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}>")
@@ -33,12 +262,17 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
     REQUIRE_COMPLETE_CODEGEN)
   set(oneValueArgs
     NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN SCHEMA
-    GENERATED_INSTALL SQL_MANIFEST)
+    GENERATED_INSTALL SQL_MANIFEST DSO_CLOSURE_CONTRACT)
   # SHARED_MODULE_LIBS: object/static libraries that export FILE_SET
   # CXX_MODULES PUBLIC. Linking them into the consumer makes the BMIs they
   # produced visible without rebuilding the module sources for every target —
   # see main/DOCS/IMPL_PLANS/BUILD_TIME_REDUCTION_..._DOC0269.md §5.
-  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS_MAIN TESTS INTEGRATION_TESTS INTEGRATION_TESTS_LINKS INTEGRATION_TESTS_MODULES SHARED_MODULE_LIBS PG_ENTRYPOINT_SOURCES)
+  set(multiValueArgs
+    REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS
+    CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS_MAIN TESTS
+    INTEGRATION_TESTS INTEGRATION_TESTS_LINKS
+    INTEGRATION_TESTS_MODULES SHARED_MODULE_LIBS
+    PG_ENTRYPOINT_SOURCES DSO_ABI_EXPORTS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
   message("%%%% POSTPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}> <${EXTENSION_TESTS}> <${EXTENSION_INTEGRATION_TESTS}>")
 
@@ -387,60 +621,22 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
       # an explicit build of the extension relinks and runs POST_BUILD when
       # either input changes; a failed validation therefore fails the actual
       # extension target rather than an optional sibling target.
-      set(_extension_dso_validator
-        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../codegen/safety/validate_evidence.py")
-      if(NOT EXISTS "${_extension_dso_validator}")
-        message(FATAL_ERROR
-          "${LIBRARY_NAME}: missing DSO validator ${_extension_dso_validator}")
-      endif()
-      find_package(Python3 REQUIRED COMPONENTS Interpreter)
-      set(_extension_dso_report
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/${EXTENSION_NAME}-dso-closure.json")
-      set(_extension_dso_completion_args)
+      set(_extension_dso_closure_options)
       if(EXTENSION_REQUIRE_COMPLETE_CODEGEN)
-        list(APPEND _extension_dso_completion_args
-          --require-complete-codegen)
+        list(APPEND _extension_dso_closure_options
+          REQUIRE_COMPLETE_CODEGEN)
       endif()
-      set(_extension_safety_validator_args --dso-only)
-      set(_extension_safety_dependencies)
-      set(_extension_safety_validation_description "fmgr ownership")
-      set_property(TARGET ${LIBRARY_NAME} APPEND PROPERTY LINK_DEPENDS
-        "${EXTENSION_SQL_MANIFEST}"
-        "${_extension_dso_validator}"
-        ${_extension_safety_dependencies})
-      add_custom_command(
-        TARGET ${LIBRARY_NAME}
-        POST_BUILD
-        BYPRODUCTS "${_extension_dso_report}"
-        COMMAND "${Python3_EXECUTABLE}"
-          "${_extension_dso_validator}"
-          ${_extension_safety_validator_args}
-          --sql-manifest "${EXTENSION_SQL_MANIFEST}"
-          --dso "$<TARGET_FILE:${LIBRARY_NAME}>"
-          ${_extension_dso_completion_args}
-          --report "${_extension_dso_report}"
-        COMMENT
-          "Validating ${EXTENSION_NAME} ${_extension_safety_validation_description} against the linked DSO"
-        VERBATIM)
-      add_custom_target("${LIBRARY_NAME}_dso_closure"
-        COMMAND "${Python3_EXECUTABLE}"
-          "${_extension_dso_validator}"
-          ${_extension_safety_validator_args}
-          --sql-manifest "${EXTENSION_SQL_MANIFEST}"
-          --dso "$<TARGET_FILE:${LIBRARY_NAME}>"
-          ${_extension_dso_completion_args}
-          --report "${_extension_dso_report}"
-        DEPENDS
-          ${LIBRARY_NAME}
-          "${EXTENSION_SQL_MANIFEST}"
-          "${_extension_dso_validator}"
-          ${_extension_safety_dependencies}
-        COMMENT
-          "Revalidating ${EXTENSION_NAME} ${_extension_safety_validation_description} report"
-        VERBATIM)
-      set_target_properties(${LIBRARY_NAME} PROPERTIES
-        BIOSEQ_EXTENSION_DSO_CLOSURE_REPORT
-          "${_extension_dso_report}")
+      if(NOT DEFINED EXTENSION_DSO_CLOSURE_CONTRACT
+          OR EXTENSION_DSO_CLOSURE_CONTRACT STREQUAL "")
+        set(EXTENSION_DSO_CLOSURE_CONTRACT bioseq)
+      endif()
+      bioseq_attach_extension_dso_closure(
+        ${LIBRARY_NAME}
+        EXTENSION_NAME "${EXTENSION_NAME}"
+        SQL_MANIFEST "${EXTENSION_SQL_MANIFEST}"
+        CONTRACT "${EXTENSION_DSO_CLOSURE_CONTRACT}"
+        ABI_EXPORTS ${EXTENSION_DSO_ABI_EXPORTS}
+        ${_extension_dso_closure_options})
     endif()
 
     # Install everything else into share-dir
@@ -466,6 +662,8 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
           "${EXTENSION_INSTALL}"
         BIOSEQ_EXTENSION_SQL_MANIFEST
           "${EXTENSION_SQL_MANIFEST}"
+        BIOSEQ_EXTENSION_DSO
+          "$<TARGET_FILE:${LIBRARY_NAME}>"
         BIOSEQ_EXTENSION_LIBRARY_FILENAME
           "$<TARGET_FILE_NAME:${LIBRARY_NAME}>"
         BIOSEQ_EXTENSION_PG_ENTRYPOINT_SOURCES

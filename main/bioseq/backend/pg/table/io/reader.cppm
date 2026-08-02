@@ -24,6 +24,7 @@ import bioseq.common.mlogging;
 import bioseq.vector.types;
 import bioseq.storage.metadata;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq::settings::enable_dml, bioseq::settings::enable_column_cache GUCs
 import :cache;
 import :pruning;
@@ -589,7 +590,7 @@ HasUnreadStripe(BioseqColumnReadState *readState)
 void
 BioseqColumnRescan(BioseqColumnReadState *readState, List *scanQual)
 {
-	MemoryContextScope ctx_guard{readState->scanContext};
+	bioseq::pg_support::MemoryContextScope ctx_guard{readState->scanContext};
 
 	BioseqColumnResetRead(readState);
 
@@ -653,7 +654,7 @@ BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDes
 				List *projectedColumnList, List *whereClauseList, List *whereClauseVars,
 				MemoryContext stripeReadContext, Snapshot snapshot)
 {
-	MemoryContextScope ctx_guard{stripeReadContext};
+	bioseq::pg_support::MemoryContextScope ctx_guard{stripeReadContext};
 
 	StripeReadState *stripeReadState = make0<StripeReadState>();
 
@@ -687,7 +688,7 @@ BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDes
 static void
 AdvanceStripeRead(BioseqColumnReadState *readState)
 {
-	MemoryContextScope ctx_guard{readState->scanContext};
+	bioseq::pg_support::MemoryContextScope ctx_guard{readState->scanContext};
 
 	if (readState->parallelBioseqColumnScan == 0)
 	{

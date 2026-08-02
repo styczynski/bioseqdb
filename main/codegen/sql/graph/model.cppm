@@ -40,7 +40,12 @@ struct baseline_physical_statement {
 };
 
 struct sql_graph {
+    std::string extension_name{"bioseq"};
     std::string extension_schema{"public"};
+    std::string generated_module_prefix{"bioseq.sql.generated"};
+    std::string fmgr_boundary_module{
+        "bioseq.pg_utils.sql_boundary"};
+    std::string fmgr_prelude{"bioseq_common"};
     std::string compiler_profile;
     std::string clang_version;
     std::string compilation_signature;

@@ -1,0 +1,1277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bioseq.dev/schemas/cache-benchmark-v2.json",
+  "title": "Bioseq cache native benchmark report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "metadata",
+    "scenario",
+    "measurement_cohort",
+    "exact_2gbp_host_qualification",
+    "migration_evidence",
+    "fixture",
+    "correctness_digest",
+    "cold_producer",
+    "samples",
+    "summary",
+    "cache_counter_deltas",
+    "logical_bytes",
+    "stored_bytes",
+    "peak_rss_bytes",
+    "peak_temp_bytes",
+    "cleanup"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "bioseq-cache-benchmark-v2"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "scenario": {
+      "enum": [
+        "standalone",
+        "bioseq-2gbp"
+      ]
+    },
+    "measurement_cohort": {
+      "type": "string",
+      "minLength": 1
+    },
+    "exact_2gbp_host_qualification": {
+      "$ref": "#/$defs/exact_2gbp_host_qualification"
+    },
+    "migration_evidence": {
+      "$ref": "#/$defs/migration_evidence"
+    },
+    "fixture": {
+      "$ref": "#/$defs/fixture"
+    },
+    "correctness_digest": {
+      "type": "string"
+    },
+    "cold_producer": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/producer_sample"
+        }
+      ]
+    },
+    "samples": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/warm_sample"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "cache_counter_deltas": {
+      "$ref": "#/$defs/counter"
+    },
+    "logical_bytes": {
+      "$ref": "#/$defs/non_negative_integer"
+    },
+    "stored_bytes": {
+      "$ref": "#/$defs/non_negative_integer"
+    },
+    "peak_rss_bytes": {
+      "$ref": "#/$defs/non_negative_integer"
+    },
+    "peak_temp_bytes": {
+      "$ref": "#/$defs/non_negative_integer"
+    },
+    "cleanup": {
+      "$ref": "#/$defs/cleanup"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "metadata"
+        ]
+      },
+      "then": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "configured_samples": {
+                "minimum": 3
+              },
+              "artifacts": {
+                "minItems": 1
+              },
+              "resource_sampling": {
+                "properties": {
+                  "rss_samples": {
+                    "minimum": 2
+                  },
+                  "rss_sampling_failures": {
+                    "const": 0
+                  },
+                  "temp_samples": {
+                    "minimum": 2
+                  },
+                  "temp_sampling_failures": {
+                    "const": 0
+                  }
+                }
+              }
+            }
+          },
+          "correctness_digest": {
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "cold_producer": {
+            "$ref": "#/$defs/producer_sample"
+          },
+          "samples": {
+            "minItems": 3
+          },
+          "summary": {
+            "properties": {
+              "sample_count": {
+                "minimum": 3
+              }
+            }
+          },
+          "logical_bytes": {
+            "minimum": 1
+          },
+          "stored_bytes": {
+            "minimum": 1
+          },
+          "peak_rss_bytes": {
+            "minimum": 1
+          },
+          "peak_temp_bytes": {
+            "minimum": 1
+          },
+          "cleanup": {
+            "properties": {
+              "attempted": {
+                "const": true
+              },
+              "succeeded": {
+                "const": true
+              },
+              "private_root_removed": {
+                "const": true
+              }
+            }
+          },
+          "migration_evidence": {
+            "properties": {
+              "coverage": {
+                "const": "full-role"
+              },
+              "migration_phase": {
+                "enum": [
+                  "mapped",
+                  "passing",
+                  "retired_with_proof",
+                  "mixed"
+                ]
+              },
+              "ledger": {
+                "minLength": 1
+              },
+              "ledger_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "evidence_contract_sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "scenario": {
+            "const": "bioseq-2gbp"
+          },
+          "metadata": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "scenario",
+          "metadata"
+        ]
+      },
+      "then": {
+        "properties": {
+          "fixture": {
+            "properties": {
+              "source_rows": {
+                "const": 1
+              },
+              "query_bases": {
+                "const": 5000000
+              },
+              "target_bases": {
+                "const": 1995000000
+              },
+              "aggregate_input_bases": {
+                "const": 2000000000
+              }
+            }
+          },
+          "measurement_cohort": {
+            "const": "bioseq-cpu-column-cache-on"
+          },
+          "exact_2gbp_host_qualification": {
+            "properties": {
+              "required": {
+                "const": true
+              },
+              "performed": {
+                "const": true
+              },
+              "same_execution_host": {
+                "const": true
+              },
+              "status": {
+                "const": "passed"
+              },
+              "host_identity_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "effective_total_ram_bytes": {
+                "minimum": 1
+              },
+              "effective_available_ram_bytes": {
+                "minimum": 1
+              },
+              "required_total_ram_bytes": {
+                "const": 0
+              },
+              "required_available_ram_bytes": {
+                "const": 0
+              },
+              "data_filesystem_capacity_bytes": {
+                "minimum": 34359738368
+              },
+              "data_filesystem_available_bytes": {
+                "minimum": 34359738368
+              },
+              "required_data_filesystem_available_bytes": {
+                "minimum": 34359738368
+              },
+              "effective_cpu_cores": {
+                "minimum": 8
+              },
+              "required_logical_cores": {
+                "minimum": 8
+              },
+              "io_probe_bytes": {
+                "minimum": 1073741824
+              },
+              "io_write_mib_per_second": {
+                "minimum": 150
+              },
+              "io_read_mib_per_second": {
+                "minimum": 150
+              },
+              "required_io_mib_per_second": {
+                "minimum": 150
+              }
+            }
+          },
+          "migration_evidence": {
+            "properties": {
+              "migration_evidence_harness": {
+                "const": "cache-bioseq-bench"
+              },
+              "migration_report_role": {
+                "const": "cache-bioseq-bench"
+              },
+              "coverage": {
+                "const": "full-role"
+              },
+              "probes": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "scenario": {
+            "const": "standalone"
+          },
+          "metadata": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "scenario",
+          "metadata"
+        ]
+      },
+      "then": {
+        "properties": {
+          "measurement_cohort": {
+            "const": "standalone-sql"
+          },
+          "migration_evidence": {
+            "properties": {
+              "migration_evidence_harness": {
+                "const": "cache-bench"
+              },
+              "migration_report_role": {
+                "const": "cache-bench"
+              },
+              "coverage": {
+                "const": "full-role"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "non_negative_integer": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "absolute_path": {
+      "type": "string",
+      "minLength": 2,
+      "pattern": "^/"
+    },
+    "counter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "produced",
+        "completed_hits",
+        "inflight_waits",
+        "reuse_hits",
+        "fallbacks",
+        "invalidations",
+        "evictions",
+        "logical_bytes",
+        "stored_bytes"
+      ],
+      "properties": {
+        "produced": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "completed_hits": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "inflight_waits": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "reuse_hits": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "fallbacks": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "invalidations": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "evictions": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "logical_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "stored_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "measurement_cohort",
+        "ordinal",
+        "wall_time_ns",
+        "time_to_first_row_ns",
+        "rows",
+        "correctness_digest",
+        "cache_counter_delta"
+      ],
+      "properties": {
+        "phase": {
+          "enum": [
+            "producer",
+            "warm"
+          ]
+        },
+        "measurement_cohort": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ordinal": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "wall_time_ns": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "time_to_first_row_ns": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "rows": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "correctness_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "cache_counter_delta": {
+          "$ref": "#/$defs/counter"
+        }
+      }
+    },
+    "producer_sample": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/sample"
+        },
+        {
+          "properties": {
+            "phase": {
+              "const": "producer"
+            }
+          }
+        }
+      ]
+    },
+    "warm_sample": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/sample"
+        },
+        {
+          "properties": {
+            "phase": {
+              "const": "warm"
+            }
+          }
+        }
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "preinstalled_stage_root",
+        "stage_manifest",
+        "stage_manifest_sha256",
+        "control_file",
+        "install_sql",
+        "dso",
+        "staged_control_file",
+        "staged_install_sql",
+        "staged_dso",
+        "control_sha256",
+        "install_sql_sha256",
+        "dso_sha256",
+        "staged_control_sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "preinstalled_stage_root": {
+          "$ref": "#/$defs/absolute_path"
+        },
+        "stage_manifest": {
+          "$ref": "#/$defs/absolute_path"
+        },
+        "stage_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "control_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "install_sql": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dso": {
+          "type": "string",
+          "minLength": 1
+        },
+        "staged_control_file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "staged_install_sql": {
+          "type": "string",
+          "minLength": 1
+        },
+        "staged_dso": {
+          "type": "string",
+          "minLength": 1
+        },
+        "control_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "install_sql_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "dso_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "staged_control_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "build_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable_path",
+        "executable_sha256",
+        "compiler",
+        "compiler_version",
+        "cxx_standard",
+        "build_mode",
+        "identity_sha256"
+      ],
+      "properties": {
+        "executable_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executable_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "compiler": {
+          "type": "string",
+          "minLength": 1
+        },
+        "compiler_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cxx_standard": {
+          "type": "integer",
+          "minimum": 202302
+        },
+        "build_mode": {
+          "enum": [
+            "ndebug",
+            "assertions-enabled"
+          ]
+        },
+        "identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "host_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system_name",
+        "node_name",
+        "release",
+        "version",
+        "machine",
+        "logical_cpu_count",
+        "page_size_bytes",
+        "identity_sha256"
+      ],
+      "properties": {
+        "system_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "node_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "release": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "machine": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logical_cpu_count": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "page_size_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "exact_2gbp_host_qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "performed",
+        "same_execution_host",
+        "status",
+        "evidence_source",
+        "detail",
+        "host_identity_sha256",
+        "effective_total_ram_bytes",
+        "effective_available_ram_bytes",
+        "required_total_ram_bytes",
+        "required_available_ram_bytes",
+        "data_filesystem_capacity_bytes",
+        "data_filesystem_available_bytes",
+        "required_data_filesystem_available_bytes",
+        "effective_cpu_cores",
+        "required_logical_cores",
+        "io_probe_bytes",
+        "io_write_mib_per_second",
+        "io_read_mib_per_second",
+        "required_io_mib_per_second"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "performed": {
+          "type": "boolean"
+        },
+        "same_execution_host": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "not-required",
+            "not-performed",
+            "passed",
+            "infrastructure-inconclusive"
+          ]
+        },
+        "evidence_source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "detail": {
+          "type": "string"
+        },
+        "host_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "effective_total_ram_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "effective_available_ram_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "required_total_ram_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "required_available_ram_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "data_filesystem_capacity_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "data_filesystem_available_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "required_data_filesystem_available_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "effective_cpu_cores": {
+          "type": "number",
+          "minimum": 0
+        },
+        "required_logical_cores": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "io_probe_bytes": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "io_write_mib_per_second": {
+          "type": "number",
+          "minimum": 0
+        },
+        "io_read_mib_per_second": {
+          "type": "number",
+          "minimum": 0
+        },
+        "required_io_mib_per_second": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "migration_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "role",
+        "stable_id",
+        "origin_kind",
+        "origin",
+        "permutation",
+        "ordinal",
+        "passed"
+      ],
+      "properties": {
+        "owner": {
+          "enum": [
+            "cache-bench",
+            "cache-bioseq-bench"
+          ]
+        },
+        "role": {
+          "enum": [
+            "cache-bench",
+            "cache-bioseq-bench"
+          ]
+        },
+        "stable_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "origin_kind": {
+          "const": "benchmark-phase"
+        },
+        "origin": {
+          "type": "string",
+          "minLength": 1
+        },
+        "permutation": {
+          "enum": [
+            "standalone",
+            "bioseq-2gbp"
+          ]
+        },
+        "ordinal": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "passed": {
+          "const": true
+        }
+      }
+    },
+    "migration_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration_evidence_harness",
+        "migration_report_role",
+        "coverage",
+        "ledger",
+        "ledger_sha256",
+        "evidence_contract_sha256",
+        "migration_phase",
+        "mapped_rows",
+        "passing_rows",
+        "retired_with_proof_rows",
+        "probes"
+      ],
+      "properties": {
+        "migration_evidence_harness": {
+          "enum": [
+            "cache-bench",
+            "cache-bioseq-bench"
+          ]
+        },
+        "migration_report_role": {
+          "enum": [
+            "cache-bench",
+            "cache-bioseq-bench"
+          ]
+        },
+        "coverage": {
+          "const": "full-role"
+        },
+        "ledger": {
+          "type": "string"
+        },
+        "ledger_sha256": {
+          "type": "string"
+        },
+        "evidence_contract_sha256": {
+          "type": "string"
+        },
+        "migration_phase": {
+          "enum": [
+            "not-sealed",
+            "mapped",
+            "passing",
+            "retired_with_proof",
+            "mixed"
+          ]
+        },
+        "mapped_rows": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "passing_rows": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "retired_with_proof_rows": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "probes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/migration_probe"
+          }
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempted",
+        "succeeded",
+        "private_root_removed",
+        "private_root",
+        "detail",
+        "verdict_source",
+        "external_watchdog_scope"
+      ],
+      "properties": {
+        "attempted": {
+          "type": "boolean"
+        },
+        "succeeded": {
+          "type": "boolean"
+        },
+        "private_root_removed": {
+          "type": "boolean"
+        },
+        "private_root": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "verdict_source": {
+          "const": "private_cluster::cleanup"
+        },
+        "external_watchdog_scope": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "resource_sampling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "measurement_window",
+        "rss_scope",
+        "rss_sample_interval_ms",
+        "rss_samples",
+        "rss_sampling_failures",
+        "temp_scope",
+        "temp_sample_interval_ms",
+        "temp_samples",
+        "temp_sampling_failures"
+      ],
+      "properties": {
+        "measurement_window": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rss_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rss_sample_interval_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rss_samples": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "rss_sampling_failures": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "temp_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "temp_sample_interval_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "temp_samples": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "temp_sampling_failures": {
+          "$ref": "#/$defs/non_negative_integer"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "error",
+        "executable",
+        "build_identity",
+        "host_identity",
+        "postgres_server_version",
+        "configured_samples",
+        "configured_warmup_samples",
+        "first_row_measurement",
+        "resource_sampling",
+        "artifacts"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        "error": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "build_identity": {
+          "$ref": "#/$defs/build_identity"
+        },
+        "host_identity": {
+          "$ref": "#/$defs/host_identity"
+        },
+        "postgres_server_version": {
+          "type": "string"
+        },
+        "configured_samples": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "configured_warmup_samples": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "first_row_measurement": {
+          "const": "PQsetSingleRowMode first PGRES_SINGLE_TUPLE arrival"
+        },
+        "resource_sampling": {
+          "$ref": "#/$defs/resource_sampling"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relation",
+        "source_rows",
+        "query_bases",
+        "target_bases",
+        "aggregate_input_bases",
+        "query"
+      ],
+      "properties": {
+        "relation": {
+          "type": "string"
+        },
+        "source_rows": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "query_bases": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "target_bases": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "aggregate_input_bases": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "query": {
+          "type": "string"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "population",
+        "measurement_cohort",
+        "sample_count",
+        "p50",
+        "p95",
+        "min",
+        "max"
+      ],
+      "properties": {
+        "population": {
+          "const": "warm samples only"
+        },
+        "measurement_cohort": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sample_count": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "p50": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "p95": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "min": {
+          "$ref": "#/$defs/non_negative_integer"
+        },
+        "max": {
+          "$ref": "#/$defs/non_negative_integer"
+        }
+      }
+    }
+  },
+  "schema_version": "bioseq-cache-benchmark-v2",
+  "required_fields": {
+    "top_level": [
+      "schema_version",
+      "metadata",
+      "scenario",
+      "measurement_cohort",
+      "exact_2gbp_host_qualification",
+      "migration_evidence",
+      "fixture",
+      "correctness_digest",
+      "cold_producer",
+      "samples",
+      "summary",
+      "cache_counter_deltas",
+      "logical_bytes",
+      "stored_bytes",
+      "peak_rss_bytes",
+      "peak_temp_bytes",
+      "cleanup"
+    ],
+    "metadata": [
+      "status",
+      "error",
+      "executable",
+      "build_identity",
+      "host_identity",
+      "postgres_server_version",
+      "configured_samples",
+      "configured_warmup_samples",
+      "first_row_measurement",
+      "resource_sampling",
+      "artifacts"
+    ],
+    "build_identity": [
+      "executable_path",
+      "executable_sha256",
+      "compiler",
+      "compiler_version",
+      "cxx_standard",
+      "build_mode",
+      "identity_sha256"
+    ],
+    "host_identity": [
+      "system_name",
+      "node_name",
+      "release",
+      "version",
+      "machine",
+      "logical_cpu_count",
+      "page_size_bytes",
+      "identity_sha256"
+    ],
+    "resource_sampling": [
+      "measurement_window",
+      "rss_scope",
+      "rss_sample_interval_ms",
+      "rss_samples",
+      "rss_sampling_failures",
+      "temp_scope",
+      "temp_sample_interval_ms",
+      "temp_samples",
+      "temp_sampling_failures"
+    ],
+    "artifact": [
+      "name",
+      "preinstalled_stage_root",
+      "stage_manifest",
+      "stage_manifest_sha256",
+      "control_file",
+      "install_sql",
+      "dso",
+      "staged_control_file",
+      "staged_install_sql",
+      "staged_dso",
+      "control_sha256",
+      "install_sql_sha256",
+      "dso_sha256",
+      "staged_control_sha256"
+    ],
+    "fixture": [
+      "relation",
+      "source_rows",
+      "query_bases",
+      "target_bases",
+      "aggregate_input_bases",
+      "query"
+    ],
+    "sample": [
+      "phase",
+      "measurement_cohort",
+      "ordinal",
+      "wall_time_ns",
+      "time_to_first_row_ns",
+      "rows",
+      "correctness_digest",
+      "cache_counter_delta"
+    ],
+    "summary": [
+      "population",
+      "measurement_cohort",
+      "sample_count",
+      "p50",
+      "p95",
+      "min",
+      "max"
+    ],
+    "counter": [
+      "produced",
+      "completed_hits",
+      "inflight_waits",
+      "reuse_hits",
+      "fallbacks",
+      "invalidations",
+      "evictions",
+      "logical_bytes",
+      "stored_bytes"
+    ],
+    "exact_2gbp_host_qualification": [
+      "required",
+      "performed",
+      "same_execution_host",
+      "status",
+      "evidence_source",
+      "detail",
+      "host_identity_sha256",
+      "effective_total_ram_bytes",
+      "effective_available_ram_bytes",
+      "required_total_ram_bytes",
+      "required_available_ram_bytes",
+      "data_filesystem_capacity_bytes",
+      "data_filesystem_available_bytes",
+      "required_data_filesystem_available_bytes",
+      "effective_cpu_cores",
+      "required_logical_cores",
+      "io_probe_bytes",
+      "io_write_mib_per_second",
+      "io_read_mib_per_second",
+      "required_io_mib_per_second"
+    ],
+    "migration_evidence": [
+      "migration_evidence_harness",
+      "migration_report_role",
+      "coverage",
+      "ledger",
+      "ledger_sha256",
+      "evidence_contract_sha256",
+      "migration_phase",
+      "mapped_rows",
+      "passing_rows",
+      "retired_with_proof_rows",
+      "probes"
+    ],
+    "migration_probe": [
+      "owner",
+      "role",
+      "stable_id",
+      "origin_kind",
+      "origin",
+      "permutation",
+      "ordinal",
+      "passed"
+    ],
+    "cleanup": [
+      "attempted",
+      "succeeded",
+      "private_root_removed",
+      "private_root",
+      "detail",
+      "verdict_source",
+      "external_watchdog_scope"
+    ]
+  },
+  "semantics": {
+    "cold_producer": "one separately reported cold cache-production sample on passed reports; null on failures before production",
+    "samples": "at least three measured warm cache-hit samples only; every sample carries the report measurement_cohort",
+    "summary": "nearest-rank wall-time statistics over samples only; a passed report rejects mixed measurement cohorts",
+    "fixture_base_counts": "query_bases and target_bases are measured after storage from bioseq.inspect_locator total_bp_size; aggregate_input_bases is their checked sum, and bioseq-2gbp requires a nonempty query plus target totaling exactly 2000000000",
+    "peak_rss_bytes": "maximum sampled sum of current RSS for the owned PostgreSQL postmaster and all descendant processes",
+    "peak_temp_bytes": "maximum sampled regular-file bytes below the owned private-cluster root",
+    "resource_measurement_window": "running private-cluster workload only; excludes initdb, server startup, shutdown, and cleanup; any sampling failure rejects a passed report",
+    "exact_2gbp_host_qualification": "bioseq-2gbp success requires same-process pre-initdb RAM, data-filesystem, CPU, and I/O qualification tied to metadata.host_identity.identity_sha256",
+    "migration_evidence": "full-role coverage for one exact harness/role: the benchmark seals the supplied ledger once before cluster mutation, derives raw and canonical digests, phase, counts, and exact probe expectations from that immutable snapshot, records truthful benchmark-phase origins, then verifies the on-disk raw digest again immediately before publishing success",
+    "cleanup": "native private_cluster::cleanup verdict including verified private-root removal; external watchdog absence remains an out-of-process MCP gate and is not claimed here"
+  }
+}

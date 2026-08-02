@@ -28,11 +28,34 @@ export module bioseq.libpq.client;
 // Every connection and every command runs through the same nonblocking
 // PQconnectStartParams/PQconnectPoll and PQsendQuery/PQflush/PQconsumeInput/
 // PQgetResult state machine (§13.5): a fixed connection deadline, chunked row
-// retrieval (PQsetChunkedRowsMode), bounded PQcancel + drain on a client
+// retrieval (PQsetChunkedRowsMode) for ordinary calls, an opt-in single-row
+// observer for true first-tuple timing, bounded PQcancel + drain on a client
 // deadline or a caller-imposed result limit, rejection of the COPY sub-protocols
-// no tutorial may enter, and a PQTRANS_IDLE requirement after every phase. No
-// blocking PQconnectdb/PQexec shortcut exists anywhere in this module.
+// no tutorial may enter, and a PQTRANS_IDLE requirement by default. Explicit
+// PostgreSQL isolation fixtures may select allow_open so transactions span
+// independently bounded commands. No blocking PQconnectdb/PQexec shortcut
+// exists anywhere in this module.
 export namespace bioseq::libpq {
+
+/// @brief Controls whether a command must leave its connection transaction-idle.
+///
+/// Existing website and one-shot test callers use `require_idle`, which retains
+/// the historical fail-safe rollback after an accidental BEGIN. PostgreSQL
+/// isolation fixtures opt into `allow_open` so a transaction can intentionally
+/// span several independently bounded commands.
+enum class transaction_policy : std::uint8_t {
+    require_idle,
+    allow_open,
+};
+
+/// @brief Source-neutral view of libpq's current transaction state.
+enum class transaction_state : std::uint8_t {
+    idle,
+    active,
+    in_transaction,
+    failed_transaction,
+    unknown,
+};
 
 /// @brief A libpq error carrying the failing SQLSTATE and structured diagnostics.
 ///
@@ -69,7 +92,7 @@ struct notice {
     std::string message;
 };
 
-/// @brief Caller-imposed retention bounds applied while chunked rows accumulate.
+/// @brief Caller-imposed retention bounds applied while streamed rows accumulate.
 ///
 /// A zero field means "unlimited". The state machine retains rows up to and
 /// including the first element that crosses a bound, then cancels the running
@@ -150,6 +173,40 @@ private:
     }
 };
 
+/// @brief Optional, non-owning observation sink for completed client commands.
+///
+/// Connections do not install an observer by default. Test fixtures may attach
+/// one whose lifetime exceeds the connection; callbacks are synchronous,
+/// nonthrowing, and receive owned results before they are returned to callers.
+class execution_observer {
+public:
+    virtual ~execution_observer() = default;
+
+    virtual void command_succeeded(
+        std::string_view context,
+        std::string_view sql,
+        const result& outcome,
+        std::chrono::nanoseconds elapsed) noexcept = 0;
+
+    virtual void command_failed(
+        std::string_view context,
+        std::string_view sql,
+        const query_error& error,
+        std::chrono::nanoseconds elapsed) noexcept = 0;
+};
+
+/// @brief Materialised result plus wire-observed first-row and completion time.
+///
+/// `time_to_first_row` is empty for a successful command or empty tuple result.
+/// Tuple queries use libpq single-row mode, and the timestamp is captured when
+/// the first `PGRES_SINGLE_TUPLE` reaches the client state machine. `elapsed`
+/// covers send, flush, every row, and the terminal result.
+struct single_row_observed_result {
+    result rows;
+    std::optional<std::chrono::nanoseconds> time_to_first_row;
+    std::chrono::nanoseconds elapsed{};
+};
+
 /// @brief Every result set a (possibly multi-statement) phase produced, in order.
 ///
 /// A multi-statement visible phase such as `SELECT 1; SELECT 'a','b'` yields one
@@ -168,18 +225,25 @@ struct multi_result {
 ///
 /// Constructed from an explicit Unix-socket conninfo so callers never build the
 /// string outside their owning policy module; connection uses
-/// PQconnectStartParams/PQconnectPoll with a fixed ten-second deadline and then
-/// PQsetnonblocking(1). Notices are captured into an owned buffer the caller
-/// drains after each command.
+/// PQconnectStartParams/PQconnectPoll with either the default ten-second or a
+/// caller-supplied deadline and then PQsetnonblocking(1). Notices are captured
+/// into an owned buffer the caller drains after each command.
 class connection {
 public:
     explicit connection(const std::string& conninfo)
         : handle_(nonblocking_connect(conninfo, std::chrono::seconds(10))) {
         PQsetNoticeReceiver(handle_, &connection::receive_notice, this);
     }
+    /// @brief Opens a connection under a caller-supplied positive deadline.
+    connection(const std::string& conninfo, std::chrono::milliseconds deadline)
+        : handle_(nonblocking_connect(conninfo, deadline)) {
+        PQsetNoticeReceiver(handle_, &connection::receive_notice, this);
+    }
     connection(connection&& other) noexcept
         : handle_(std::exchange(other.handle_, nullptr)),
-          notices_(std::move(other.notices_)) {
+          notices_(std::move(other.notices_)),
+          observer_(std::exchange(other.observer_, nullptr)),
+          observer_context_(std::move(other.observer_context_)) {
         if (handle_) {
             PQsetNoticeReceiver(handle_, &connection::receive_notice, this);
         }
@@ -195,20 +259,64 @@ public:
 
     /// @brief Runs a command with the default ten-second client deadline.
     [[nodiscard]] result exec(std::string_view sql) {
-        return run_statement(sql, std::chrono::seconds(10), execution_limits{});
+        return execute_observed(
+            sql, std::chrono::seconds(10), execution_limits{},
+            transaction_policy::require_idle);
     }
 
     /// @brief Runs a command with an explicit client deadline (e.g. the fence).
     [[nodiscard]] result exec(std::string_view sql,
                               std::chrono::milliseconds deadline) {
-        return run_statement(sql, deadline, execution_limits{});
+        return execute_observed(
+            sql, deadline, execution_limits{},
+            transaction_policy::require_idle);
+    }
+
+    /// @brief Runs a command while applying the selected transaction-idle policy.
+    [[nodiscard]] result exec(std::string_view sql, transaction_policy policy) {
+        return execute_observed(
+            sql, std::chrono::seconds(10), execution_limits{}, policy);
+    }
+
+    /// @brief Runs a bounded command that may intentionally leave a transaction open.
+    [[nodiscard]] result exec(std::string_view sql,
+                              std::chrono::milliseconds deadline,
+                              transaction_policy policy) {
+        return execute_observed(
+            sql, deadline, execution_limits{}, policy);
     }
 
     /// @brief Runs a command under both a client deadline and retention limits.
     [[nodiscard]] result exec_bounded(std::string_view sql,
                                       std::chrono::milliseconds deadline,
                                       const execution_limits& limits) {
-        return run_statement(sql, deadline, limits);
+        return execute_observed(
+            sql, deadline, limits, transaction_policy::require_idle);
+    }
+
+    /// @brief Runs a retention-bounded command under an explicit transaction policy.
+    [[nodiscard]] result exec_bounded(std::string_view sql,
+                                      std::chrono::milliseconds deadline,
+                                      const execution_limits& limits,
+                                      transaction_policy policy) {
+        return execute_observed(sql, deadline, limits, policy);
+    }
+
+    /// @brief Executes one bounded query and observes its first wire-level row.
+    ///
+    /// The returned rows have the same owned representation and transaction
+    /// policy as `exec`; only libpq's retrieval mode changes from 32-row chunks
+    /// to `PQsetSingleRowMode`. Default `exec` behavior remains unchanged.
+    [[nodiscard]] single_row_observed_result exec_single_row_observed(
+        std::string_view sql,
+        std::chrono::milliseconds deadline,
+        execution_limits limits = {},
+        transaction_policy policy =
+            transaction_policy::require_idle) {
+        single_row_observed_result observed;
+        observed.rows = execute_observed(
+            sql, deadline, limits, policy, &observed);
+        return observed;
     }
 
     /// @brief Runs a (possibly multi-statement) phase capturing every result set
@@ -221,7 +329,32 @@ public:
     [[nodiscard]] multi_result exec_bounded_multi(std::string_view sql,
                                                   std::chrono::milliseconds deadline,
                                                   const execution_limits& limits) {
-        return run_statement_multi(sql, deadline, limits);
+        return execute_multi_observed(
+            sql, deadline, limits, transaction_policy::require_idle);
+    }
+
+    /// @brief Runs a multi-result command under an explicit transaction policy.
+    [[nodiscard]] multi_result exec_bounded_multi(
+        std::string_view sql,
+        std::chrono::milliseconds deadline,
+        const execution_limits& limits,
+        transaction_policy policy) {
+        return execute_multi_observed(sql, deadline, limits, policy);
+    }
+
+    /// @brief Attaches or clears a non-owning synchronous execution observer.
+    void set_execution_observer(
+        execution_observer* observer,
+        std::string context = {}) {
+        observer_context_ = observer == nullptr
+            ? std::string{}
+            : std::move(context);
+        observer_ = observer;
+    }
+
+    /// @brief Returns the currently attached observer, if any.
+    [[nodiscard]] execution_observer* execution_observer_ptr() const noexcept {
+        return observer_;
     }
 
     /// @brief Drains and clears notices captured since the last drain.
@@ -265,6 +398,26 @@ public:
             && PQtransactionStatus(handle_) == PQTRANS_IDLE;
     }
 
+    /// @brief Returns the current libpq transaction state without exposing PGconn.
+    [[nodiscard]] transaction_state current_transaction_state() const noexcept {
+        if (handle_ == nullptr || PQstatus(handle_) != CONNECTION_OK) {
+            return transaction_state::unknown;
+        }
+        switch (PQtransactionStatus(handle_)) {
+        case PQTRANS_IDLE:
+            return transaction_state::idle;
+        case PQTRANS_ACTIVE:
+            return transaction_state::active;
+        case PQTRANS_INTRANS:
+            return transaction_state::in_transaction;
+        case PQTRANS_INERROR:
+            return transaction_state::failed_transaction;
+        case PQTRANS_UNKNOWN:
+            return transaction_state::unknown;
+        }
+        return transaction_state::unknown;
+    }
+
     [[nodiscard]] std::string server_version() const {
         const int version = PQserverVersion(handle_);
         if (version == 0) {
@@ -277,6 +430,75 @@ public:
 
 private:
     using clock = std::chrono::steady_clock;
+
+    [[nodiscard]] result execute_observed(
+        std::string_view sql,
+        clock::duration budget,
+        const execution_limits& limits,
+        transaction_policy policy,
+        single_row_observed_result* observation = nullptr) {
+        const auto started = clock::now();
+        try {
+            result outcome =
+                run_statement(sql, budget, limits, policy, observation);
+            notify_success(sql, outcome, started);
+            return outcome;
+        } catch (const query_error& error) {
+            notify_failure(sql, error, started);
+            throw;
+        }
+    }
+
+    [[nodiscard]] multi_result execute_multi_observed(
+        std::string_view sql,
+        clock::duration budget,
+        const execution_limits& limits,
+        transaction_policy policy) {
+        const auto started = clock::now();
+        try {
+            multi_result outcome =
+                run_statement_multi(sql, budget, limits, policy);
+            if (outcome.error) {
+                notify_failure(sql, *outcome.error, started);
+            } else {
+                const result empty;
+                notify_success(
+                    sql,
+                    outcome.results.empty() ? empty : outcome.results.back(),
+                    started);
+            }
+            return outcome;
+        } catch (const query_error& error) {
+            notify_failure(sql, error, started);
+            throw;
+        }
+    }
+
+    void notify_success(
+        std::string_view sql,
+        const result& outcome,
+        clock::time_point started) noexcept {
+        if (observer_ == nullptr) {
+            return;
+        }
+        observer_->command_succeeded(
+            observer_context_, sql, outcome,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - started));
+    }
+
+    void notify_failure(
+        std::string_view sql,
+        const query_error& error,
+        clock::time_point started) noexcept {
+        if (observer_ == nullptr) {
+            return;
+        }
+        observer_->command_failed(
+            observer_context_, sql, error,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - started));
+    }
 
     [[nodiscard]] static std::optional<std::uint64_t> command_affected_rows(
         PGresult* raw) noexcept {
@@ -330,6 +552,9 @@ private:
     // lets the single conninfo string flow through the "dbname" keyword unchanged.
     static PGconn* nonblocking_connect(const std::string& conninfo,
                                        clock::duration budget) {
+        if (budget <= clock::duration::zero()) {
+            throw query_error("connection deadline must be positive", std::string{});
+        }
         const char* keywords[] = {"dbname", nullptr};
         const char* values[] = {conninfo.c_str(), nullptr};
         PGconn* conn = PQconnectStartParams(keywords, values, /*expand_dbname=*/1);
@@ -347,7 +572,7 @@ private:
             const bool want_read = (polling == PGRES_POLLING_READING);
             if (!wait_socket(conn, want_read, deadline)) {
                 PQfinish(conn);
-                throw query_error("connection did not complete within 10s",
+                throw query_error("connection deadline exceeded",
                                   std::string{});
             }
             polling = PQconnectPoll(conn);
@@ -420,6 +645,10 @@ private:
                 out.columns_.push_back(result::column_meta{
                     .name = PQfname(res, column) ? PQfname(res, column) : std::string{},
                     .type_oid = static_cast<unsigned int>(PQftype(res, column))});
+            }
+            if (limits.max_columns != 0
+                && out.columns_.size() > limits.max_columns) {
+                limited = true;
             }
         }
         if (!copy_rows) {
@@ -557,8 +786,12 @@ private:
     // exceptions exactly as before.
     [[nodiscard]] result run_statement(std::string_view sql,
                                        clock::duration budget,
-                                       const execution_limits& limits) {
-        multi_result outcome = run_statement_multi(sql, budget, limits);
+                                       const execution_limits& limits,
+                                       transaction_policy policy,
+                                       single_row_observed_result*
+                                           observation = nullptr) {
+        multi_result outcome = run_statement_multi(
+            sql, budget, limits, policy, observation);
         if (outcome.error) {
             throw *outcome.error;
         }
@@ -566,8 +799,9 @@ private:
     }
 
     // The single §13.5 send/flush/consume state machine. Sends `sql`, enables
-    // 32-row chunked retrieval, then polls the socket under `budget` while
-    // consuming results — committing chunked rows only on their zero-row
+    // ordinary 32-row chunks or opt-in single-row observation, then polls the
+    // socket under `budget` while consuming results — committing streamed rows
+    // only on their zero-row
     // PGRES_TUPLES_OK terminator, discarding a failed statement's provisional
     // rows, rejecting COPY, bounding accumulation against `limits`, and requiring
     // a PQTRANS_IDLE connection afterward. Every fully completed result set is
@@ -577,17 +811,33 @@ private:
     // the successful results before it (§10.7). Client-side failures still throw.
     [[nodiscard]] multi_result run_statement_multi(std::string_view sql,
                                                    clock::duration budget,
-                                                   const execution_limits& limits) {
-        const auto deadline = clock::now() + budget;
+                                                   const execution_limits& limits,
+                                                   transaction_policy policy,
+                                                   single_row_observed_result*
+                                                       observation = nullptr) {
+        const auto started = clock::now();
+        const auto deadline = started + budget;
+        if (observation != nullptr) {
+            observation->time_to_first_row.reset();
+            observation->elapsed = std::chrono::nanoseconds::zero();
+        }
         const std::string owned(sql);
         if (PQsendQuery(handle_, owned.c_str()) == 0) {
             throw query_error("failed to send command: " + current_error_message(),
                               std::string{});
         }
-        if (PQsetChunkedRowsMode(handle_, 32) == 0) {
+        const int row_mode_enabled =
+            observation != nullptr
+                ? PQsetSingleRowMode(handle_)
+                : PQsetChunkedRowsMode(handle_, 32);
+        if (row_mode_enabled == 0) {
             cancel_bounded(std::chrono::seconds(2));
             drain_results_bounded(std::chrono::seconds(2));
-            throw query_error("failed to enable chunked row retrieval", std::string{});
+            throw query_error(
+                observation != nullptr
+                    ? "failed to enable single-row retrieval"
+                    : "failed to enable chunked row retrieval",
+                std::string{});
         }
         for (;;) {
             const int flushed = PQflush(handle_);
@@ -640,10 +890,24 @@ private:
             }
             const ExecStatusType st = PQresultStatus(res);
             bool capped = false;
-            if (st == PGRES_TUPLES_CHUNK) {
+            if (st == PGRES_SINGLE_TUPLE || st == PGRES_TUPLES_CHUNK) {
+                if (observation != nullptr
+                    && !observation->time_to_first_row
+                    && PQntuples(res) > 0) {
+                    observation->time_to_first_row =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            clock::now() - started);
+                }
                 absorb(provisional, res, /*copy_rows=*/true, limits, total_bytes, limited);
                 have_chunk_columns = true;
             } else if (st == PGRES_TUPLES_OK) {
+                if (observation != nullptr
+                    && !observation->time_to_first_row
+                    && PQntuples(res) > 0) {
+                    observation->time_to_first_row =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            clock::now() - started);
+                }
                 result current;
                 current.status_ = PGRES_TUPLES_OK;
                 if (PQntuples(res) == 0 && have_chunk_columns) {
@@ -701,11 +965,17 @@ private:
                 }
                 cancel_bounded(std::chrono::seconds(2));
                 drain_results_bounded(std::chrono::seconds(2));
+                if (observation != nullptr) {
+                    observation->elapsed =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            clock::now() - started);
+                }
                 return outcome;
             }
         }
 
-        if (PQtransactionStatus(handle_) != PQTRANS_IDLE) {
+        if (policy == transaction_policy::require_idle
+            && PQtransactionStatus(handle_) != PQTRANS_IDLE) {
             rollback_bounded(std::chrono::seconds(2));
             if (!error) {
                 error = captured_error{
@@ -719,6 +989,11 @@ private:
         if (error) {
             outcome.error = query_error(error->primary, error->sqlstate, error->detail,
                                         error->hint, error->severity);
+        }
+        if (observation != nullptr) {
+            observation->elapsed =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    clock::now() - started);
         }
         return outcome;
     }
@@ -750,6 +1025,8 @@ private:
 
     PGconn* handle_{};
     std::vector<notice> notices_;
+    execution_observer* observer_{};
+    std::string observer_context_;
 };
 
 /// @brief Builds a Unix-socket-only conninfo string from explicit parts.

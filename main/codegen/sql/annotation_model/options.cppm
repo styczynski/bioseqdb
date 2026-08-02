@@ -69,6 +69,16 @@ enum class null_input_policy : std::uint8_t {
     strict,
 };
 
+enum class schema_provision : std::uint8_t {
+    install_sql,
+    extension_control,
+};
+
+enum class plan_cache_policy : std::uint8_t {
+    unchanged,
+    reset,
+};
+
 enum class persistence : std::uint8_t {
     ordinary,
     temporary,
@@ -147,6 +157,7 @@ enum class privileges : std::uint16_t {
     usage = 1U << 7U,
     execute = 1U << 8U,
     all = 1U << 9U,
+    create = 1U << 10U,
 };
 
 enum class acl_scope : std::uint8_t {
@@ -178,6 +189,7 @@ struct function_options {
     bool has_rows{};
     identifier support{"none"};
     checked_sql configuration{};
+    null_input_policy null_input{null_input_policy::derived};
 };
 
 struct procedure_options {
@@ -212,6 +224,7 @@ struct column_options {
 
 struct schema_options {
     create_mode create{create_mode::create};
+    schema_provision provision{schema_provision::install_sql};
 };
 
 struct sequence_options {
@@ -323,6 +336,7 @@ struct guc_options {
     guc_flag flags{guc_flag::none};
     std::int64_t minimum{std::numeric_limits<std::int64_t>::min()};
     std::int64_t maximum{std::numeric_limits<std::int64_t>::max()};
+    plan_cache_policy plan_cache{plan_cache_policy::unchanged};
 };
 
 struct primary_key_options {

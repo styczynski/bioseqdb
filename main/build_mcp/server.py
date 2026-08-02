@@ -47,6 +47,7 @@ import hashlib
 import json
 import math
 import os
+import platform as host_platform
 import re
 import select
 import secrets
@@ -71,12 +72,17 @@ from pathlib import Path
 from inspect_tool import (
     run_inspect as _run_inspect_impl,
     MATCHES_WARN_THRESHOLD,
+    MAX_INSPECT_MATCHES,
+    MAX_INSPECT_SNIPPET_LINES,
+    MAX_RETAINED_SNIPPET_BYTES,
+    MAX_TOTAL_RETAINED_SNIPPET_BYTES,
 )
 
 # Lazy provisioning for the document tools (npm qmd + poetry jsonschema). Imported here only
 # to define functions; ensure_doc_env() is called on first doc-tool use, never at import and
 # never by the detached --run-build worker (which is stdlib-only).
 import bootstrap  # noqa: E402
+import package_linux  # noqa: E402
 
 from postgres_error_safety_promotion import (  # noqa: E402
     PromotionError as PostgresErrorSafetyPromotionError,
@@ -90,6 +96,8 @@ from postgres_error_safety_promotion import (  # noqa: E402
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 CMAKE_PRESETS_FILE = PROJECT_ROOT / "CMakePresets.json"
+_CMAKE_CONFIGURE_STAMP_NAME = ".bioseq-build-mcp-configure.json"
+_CMAKE_CONFIGURE_STAMP_KIND = "bioseq-build-mcp-configure-v1"
 _CMAKE_HELPER_DIR = PROJECT_ROOT / "cmake"
 if str(_CMAKE_HELPER_DIR) not in sys.path:
     sys.path.insert(0, str(_CMAKE_HELPER_DIR))
@@ -216,6 +224,7 @@ WEBSITE_BUILD_PRESET = os.environ.get(
 WEBSITE_DEBUG_BUILD_PRESET = os.environ.get(
     "BIOSEQ_WEBSITE_DEBUG_BUILD_PRESET", "website-aws-x64-linux-debug")
 POSTGRES_ERROR_SAFETY_MODE = "postgres-error-safety"
+PACKAGE_LINUX_MODE = package_linux.MODE
 POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET = (
     "postgres-error-safety-production")
 POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET = (
@@ -455,6 +464,7 @@ def _safe_parallel_jobs() -> int:
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
+CACHE_EXACT2G_FINALIZATION_RESERVE_SEC = 10 * 60.0
 
 
 def _safe_heavy_jobs() -> int:
@@ -533,42 +543,160 @@ def _cmake_cache_contains(build_dir: Path, needle: str) -> bool:
         return False
 
 
+def _expand_cmake_preset_include(
+        value: str,
+        *,
+        source_dir: Path,
+        file_dir: Path,
+        environment: Mapping[str, str]) -> Path:
+    """Resolve the bounded macro set accepted in project preset includes."""
+    expanded = value
+    replacements = {
+        "${sourceDir}": str(source_dir),
+        "${fileDir}": str(file_dir),
+        "${dollar}": "$",
+        "${pathListSep}": os.pathsep,
+    }
+    for macro, replacement in replacements.items():
+        expanded = expanded.replace(macro, replacement)
+
+    def replace_environment(match: re.Match[str]) -> str:
+        return environment.get(match.group(1), "")
+
+    expanded = re.sub(
+        r"\$(?:p?env)\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        replace_environment,
+        expanded,
+    )
+    if re.search(r"\$\{[^}]+\}|\$(?:p?env)\{[^}]+\}", expanded):
+        raise RuntimeError(
+            "unsupported dynamic macro in CMake preset include "
+            f"{value!r}")
+    path = Path(expanded)
+    return path if path.is_absolute() else file_dir / path
+
+
+def _cmake_preset_payload_graph(
+        presets_file: Path,
+        *,
+        environment: Mapping[str, str] | None = None,
+) -> tuple[tuple[Path, Path, dict[str, object], bytes], ...]:
+    """Load the project/user preset files and their transitive includes."""
+    effective_environment = (
+        os.environ if environment is None else environment)
+    source_dir = presets_file.parent.resolve(strict=False)
+    records: list[
+        tuple[Path, Path, dict[str, object], bytes]
+    ] = []
+    visited: set[Path] = set()
+    lexical_sources: dict[Path, Path] = {}
+    active: list[Path] = []
+
+    def visit(path: Path) -> None:
+        lexical = Path(os.path.abspath(path))
+        try:
+            lexical_metadata = lexical.lstat()
+            if (
+                stat.S_ISLNK(lexical_metadata.st_mode)
+                or not stat.S_ISREG(lexical_metadata.st_mode)
+            ):
+                raise RuntimeError(
+                    "CMake preset source must be a regular non-symlink "
+                    f"file: {lexical}")
+            canonical = path.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot resolve CMake preset include {path}: {exc}") from exc
+        previous_lexical = lexical_sources.get(canonical)
+        if previous_lexical is not None and previous_lexical != lexical:
+            raise RuntimeError(
+                "CMake preset graph aliases one file through multiple "
+                f"lexical paths: {previous_lexical} and {lexical}")
+        if canonical in active:
+            cycle = " -> ".join(str(item) for item in (*active, canonical))
+            raise RuntimeError(f"CMake preset include cycle: {cycle}")
+        if canonical in visited:
+            return
+        lexical_sources[canonical] = lexical
+        try:
+            metadata = canonical.stat()
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError(
+                    "CMake preset source must resolve to a regular file: "
+                    f"{canonical}")
+            body = canonical.read_bytes()
+            payload = json.loads(body)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"cannot read CMake configure presets from {canonical}: "
+                f"{exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"CMake preset source must be a regular JSON object: "
+                f"{canonical}")
+
+        active.append(canonical)
+        records.append((lexical, canonical, payload, body))
+        raw_includes = payload.get("include", [])
+        if isinstance(raw_includes, str):
+            includes = [raw_includes]
+        elif (
+            isinstance(raw_includes, list)
+            and all(isinstance(item, str) and item for item in raw_includes)
+        ):
+            includes = raw_includes
+        else:
+            raise RuntimeError(
+                f"{canonical} contains an invalid CMake preset include list")
+        for include in includes:
+            visit(_expand_cmake_preset_include(
+                include,
+                source_dir=source_dir,
+                file_dir=lexical.parent,
+                environment=effective_environment,
+            ))
+        active.pop()
+        visited.add(canonical)
+
+    visit(presets_file)
+    user_presets = presets_file.with_name("CMakeUserPresets.json")
+    if presets_file.name == "CMakePresets.json" and user_presets.exists():
+        visit(user_presets)
+    return tuple(records)
+
+
 def _resolved_cmake_preset_cache_variables(
         preset: str,
         *,
-        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, object]:
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> dict[str, object]:
     """Resolve configure-preset cache variables with CMake inheritance rules.
 
     Earlier entries in an ``inherits`` array have priority, the selected
     preset overrides every parent, and an explicit ``null`` remains a
     tombstone so a later parent cannot restore the value.
     """
-    try:
-        payload = json.loads(presets_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"cannot read CMake configure presets from {presets_file}: "
-            f"{exc}") from exc
-
-    raw_presets = payload.get("configurePresets")
-    if not isinstance(raw_presets, list):
-        raise RuntimeError(
-            f"{presets_file} does not contain a configurePresets array")
-
     presets: dict[str, dict] = {}
-    for raw_preset in raw_presets:
-        if not isinstance(raw_preset, dict):
+    for _, source, payload, _ in _cmake_preset_payload_graph(
+            presets_file,
+            environment=environment):
+        raw_presets = payload.get("configurePresets", [])
+        if not isinstance(raw_presets, list):
             raise RuntimeError(
-                f"{presets_file} contains a non-object configure preset")
-        name = raw_preset.get("name")
-        if not isinstance(name, str) or not name:
-            raise RuntimeError(
-                f"{presets_file} contains a configure preset without a name")
-        if name in presets:
-            raise RuntimeError(
-                f"{presets_file} contains duplicate configure preset "
-                f"{name!r}")
-        presets[name] = raw_preset
+                f"{source} does not contain a configurePresets array")
+        for raw_preset in raw_presets:
+            if not isinstance(raw_preset, dict):
+                raise RuntimeError(
+                    f"{source} contains a non-object configure preset")
+            name = raw_preset.get("name")
+            if not isinstance(name, str) or not name:
+                raise RuntimeError(
+                    f"{source} contains a configure preset without a name")
+            if name in presets:
+                raise RuntimeError(
+                    f"CMake preset graph contains duplicate configure "
+                    f"preset {name!r}")
+            presets[name] = raw_preset
 
     resolved: dict[str, dict[str, object]] = {}
 
@@ -623,14 +751,312 @@ def _resolved_cmake_preset_cache_variables(
     return dict(resolve(preset, ()))
 
 
+def _cmake_executable_identity(
+        environment: Mapping[str, str]) -> dict[str, object]:
+    """Seal the exact CMake executable and version used by the worker."""
+    executable = shutil.which(
+        "cmake",
+        path=environment.get("PATH"),
+    )
+    if executable is None:
+        raise RuntimeError(
+            "cannot resolve `cmake` from the MCP worker PATH")
+    lexical = Path(executable)
+    try:
+        resolved = lexical.resolve(strict=True)
+        metadata = resolved.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(
+                f"CMake executable is not a regular file: {resolved}")
+        body = resolved.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect CMake executable {lexical}: {exc}") from exc
+    try:
+        version = subprocess.run(
+            [str(resolved), "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=10.0,
+            env=dict(environment),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"cannot query CMake executable version {resolved}: {exc}") from exc
+    if version.returncode != 0 or not version.stdout:
+        raise RuntimeError(
+            "CMake executable version query failed: "
+            f"path={resolved} exit_code={version.returncode}")
+    version_line = version.stdout.splitlines()[0].decode(
+        "utf-8",
+        errors="replace",
+    )
+    return {
+        "lexical_path": str(lexical),
+        "resolved_path": str(resolved),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "byte_count": len(body),
+        "version_line": version_line,
+        "version_output_sha256":
+            hashlib.sha256(version.stdout).hexdigest(),
+    }
+
+
+def _cmake_configure_stamp_document(
+        preset: str,
+        *,
+        mode_cache_variables: Mapping[str, str],
+        managed_arguments: List[str],
+        environment: Mapping[str, str],
+        cmake_executable_identity: Mapping[str, object],
+        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, object]:
+    """Seal every MCP-owned input which can select a CMake configuration."""
+    preset_graph = _cmake_preset_payload_graph(
+        presets_file,
+        environment=environment,
+    )
+    resolved_cache = _resolved_cmake_preset_cache_variables(
+        preset,
+        presets_file=presets_file,
+        environment=environment,
+    )
+    referenced_environment_names = sorted(set(re.findall(
+        rb"\$(?:p?env)\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        b"\n".join(body for _, _, _, body in preset_graph),
+    )))
+
+    def sealed_environment_value(name: str) -> dict[str, object]:
+        present = name in environment
+        value = environment.get(name, "")
+        return {
+            "present": present,
+            "sha256": (
+                hashlib.sha256(value.encode("utf-8")).hexdigest()
+                if present else None
+            ),
+        }
+
+    referenced_environment = {
+        name.decode("ascii"):
+            sealed_environment_value(name.decode("ascii"))
+        for name in referenced_environment_names
+    }
+    managed_environment_names = (
+        "BIOSEQ_COMPILER_LAUNCHER",
+        "BIOSEQ_GCC16_ROOT",
+        "BIOSEQ_LIBCXX_MODULES_JSON",
+        "BIOSEQ_LIBSTDCXX_MODULES_JSON",
+        "BIOSEQ_LLVM_ROOT",
+        "BIOSEQ_OPTTIMIZATION_LEVEL",
+        "CC",
+        "CXX",
+        "CMAKE_EXPORT_COMPILE_COMMANDS",
+        "CMAKE_NAMED_ENV_TYPE",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "PATH",
+        "POSTGRESQL_VERSION",
+        "SDKROOT",
+        "VCPKG_ROOT",
+    )
+    inputs = {
+        "preset": preset,
+        "presets_file": str(presets_file.resolve(strict=False)),
+        "preset_files": [
+            {
+                "lexical_path": str(lexical),
+                "resolved_path": str(resolved),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "byte_count": len(body),
+                "ordered_include_targets": [
+                    str(_expand_cmake_preset_include(
+                        include,
+                        source_dir=presets_file.parent.resolve(
+                            strict=False),
+                        file_dir=lexical.parent,
+                        environment=environment,
+                    ).resolve(strict=False))
+                    for include in (
+                        [payload["include"]]
+                        if isinstance(payload.get("include", []), str)
+                        else payload.get("include", [])
+                    )
+                ],
+            }
+            for lexical, resolved, payload, body in sorted(
+                preset_graph,
+                key=lambda record: str(record[1]),
+            )
+        ],
+        "resolved_cache_variables": resolved_cache,
+        "mode_cache_variables": dict(sorted(mode_cache_variables.items())),
+        "managed_arguments": list(managed_arguments),
+        "cmake_executable_identity": dict(cmake_executable_identity),
+        "referenced_environment": referenced_environment,
+        "managed_environment": {
+            name: sealed_environment_value(name)
+            for name in managed_environment_names
+        },
+    }
+    canonical_inputs = json.dumps(
+        inputs,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "artifact_kind": _CMAKE_CONFIGURE_STAMP_KIND,
+        "schema_version": 1,
+        "inputs": inputs,
+        "inputs_sha256": hashlib.sha256(canonical_inputs).hexdigest(),
+    }
+
+
+def _cmake_configure_stamp_status(
+        build_dir: Path,
+        expected: Mapping[str, object]) -> tuple[bool, str]:
+    """Return whether an existing tree was configured from ``expected``."""
+    stamp = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    try:
+        metadata = stamp.lstat()
+    except FileNotFoundError:
+        return False, "configure stamp is missing"
+    except OSError as exc:
+        return False, f"configure stamp cannot be inspected: {exc}"
+    if stamp.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        return False, "configure stamp is not a regular non-symlink file"
+    try:
+        observed = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, f"configure stamp is unreadable: {exc}"
+    if observed != expected:
+        return False, "configure inputs changed"
+    return True, "configure inputs match"
+
+
+def _fsync_cmake_configure_stamp_directory(build_dir: Path) -> None:
+    directory_flags = os.O_RDONLY
+    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory_descriptor = os.open(str(build_dir), directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot durably update the CMake configure stamp directory "
+            f"{build_dir}: {exc}") from exc
+
+
+def _invalidate_cmake_configure_stamp(build_dir: Path) -> None:
+    """Remove the old configure claim before attempting any reconfigure."""
+    stamp = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    try:
+        metadata = stamp.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect stale CMake configure stamp {stamp}: "
+            f"{exc}") from exc
+    if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+        raise RuntimeError(
+            "refusing to remove non-file CMake configure stamp "
+            f"{stamp}")
+    try:
+        stamp.unlink()
+        _fsync_cmake_configure_stamp_directory(build_dir)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot invalidate CMake configure stamp {stamp}: {exc}") from exc
+
+
+def _publish_cmake_configure_stamp(
+        build_dir: Path,
+        document: Mapping[str, object]) -> None:
+    """Atomically publish a retry-safe configure stamp after validation."""
+    stamp = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    build_dir.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(
+        document,
+        ensure_ascii=True,
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=f".{stamp.name}.",
+                suffix=".tmp",
+                dir=build_dir,
+                delete=False) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, stamp)
+        temporary_path = None
+        try:
+            _fsync_cmake_configure_stamp_directory(build_dir)
+        except RuntimeError:
+            with contextlib.suppress(OSError):
+                stamp.unlink()
+            with contextlib.suppress(RuntimeError):
+                _fsync_cmake_configure_stamp_directory(build_dir)
+            raise
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot publish CMake configure stamp {stamp}: {exc}") from exc
+    finally:
+        if temporary_path is not None:
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+
+
+def _finalize_cmake_configure_stamp(
+        build_dir: Path,
+        before: Mapping[str, object],
+        after: Mapping[str, object],
+        *,
+        context: str) -> str:
+    """Reject configure-input mutation, then publish the validated seal."""
+    if after != before:
+        _invalidate_cmake_configure_stamp(build_dir)
+        raise RuntimeError(
+            "CMake configure inputs changed while the MCP worker was "
+            f"configuring {context}; refusing a mixed configuration")
+    final_matches, _ = _cmake_configure_stamp_status(
+        build_dir,
+        after,
+    )
+    if not final_matches:
+        _publish_cmake_configure_stamp(
+            build_dir,
+            after,
+        )
+    seal = after.get("inputs_sha256")
+    if not isinstance(seal, str) or not re.fullmatch(r"[0-9a-f]{64}", seal):
+        _invalidate_cmake_configure_stamp(build_dir)
+        raise RuntimeError(
+            f"CMake configure stamp for {context} has no valid input seal")
+    return seal
+
+
 def _cmake_preset_cache_contract(
         preset: str,
         keys: tuple[str, ...],
         *,
-        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, str]:
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return exact, non-null values selected by a configure preset."""
     variables = _resolved_cmake_preset_cache_variables(
-        preset, presets_file=presets_file)
+        preset,
+        presets_file=presets_file,
+        environment=environment,
+    )
     contract: dict[str, str] = {}
     for key in keys:
         raw_value = variables.get(key)
@@ -661,10 +1087,15 @@ def _cmake_preset_cache_repairs(
         preset: str,
         *,
         keys: tuple[str, ...] = ("PostgreSQL_CONFIG",),
-        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, str]:
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> dict[str, str]:
     """Plan exact repairs for preset-owned cache values in one build tree."""
     contract = _cmake_preset_cache_contract(
-        preset, keys, presets_file=presets_file)
+        preset,
+        keys,
+        presets_file=presets_file,
+        environment=environment,
+    )
     return {
         key: expected
         for key, expected in contract.items()
@@ -683,12 +1114,14 @@ def _postgresql_discovery_cache_reset_args(
         build_dir: Path,
         preset: str,
         *,
-        presets_file: Path = CMAKE_PRESETS_FILE) -> tuple[str, ...]:
+        presets_file: Path = CMAKE_PRESETS_FILE,
+        environment: Mapping[str, str] | None = None) -> tuple[str, ...]:
     """Invalidate derived PostgreSQL discovery when its toolchain is stale."""
     contract = _cmake_preset_cache_contract(
         preset,
         ("PostgreSQL_CONFIG",),
         presets_file=presets_file,
+        environment=environment,
     )
     expected_config = contract.get("PostgreSQL_CONFIG")
     if expected_config is None:
@@ -747,6 +1180,7 @@ def _ensure_local_toolchain_environment(
 
 
 def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> None:
+    _invalidate_cmake_configure_stamp(build_dir)
     log_handle.write(f"# CMake cache repair: clearing configure cache ({reason}).\n")
     log_handle.flush()
     for path in (build_dir / "CMakeCache.txt", build_dir / "CMakeFiles"):
@@ -757,6 +1191,86 @@ def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> No
                 path.unlink()
         except OSError as e:
             raise RuntimeError(f"failed to remove stale CMake cache path {path}: {e}") from e
+
+
+def _run_cmake_preset_configure(
+        arguments: List[str],
+        *,
+        build_dir: Path,
+        log_handle,
+        deadline: float,
+        environment: Mapping[str, str]) -> int:
+    """Run the sole MCP configure path after retiring any older seal."""
+    if len(arguments) < 3 or arguments[:2] != ["cmake", "--preset"]:
+        raise ValueError(
+            "CMake preset configure command must start with "
+            "`cmake --preset`")
+    _invalidate_cmake_configure_stamp(build_dir)
+    return _stream_subprocess(
+        arguments,
+        log_handle,
+        deadline,
+        cwd=PROJECT_ROOT,
+        env=dict(environment),
+    )
+
+
+def _ensure_cmake_preset_tree_fresh(
+        *,
+        build_dir: Path,
+        preset: str,
+        configure_stamp: Mapping[str, object],
+        configure_arguments: List[str],
+        log_handle,
+        deadline: float,
+        environment: Mapping[str, str],
+        failure_label: str = "cmake configure") -> bool:
+    """Fresh-configure a tree iff Ninja and the MCP input seal disagree."""
+    build_ninja = build_dir / "build.ninja"
+    stamp_matches, stamp_reason = _cmake_configure_stamp_status(
+        build_dir,
+        configure_stamp,
+    )
+    if build_ninja.is_file() and stamp_matches:
+        return False
+
+    _invalidate_cmake_configure_stamp(build_dir)
+    cache = build_dir / "CMakeCache.txt"
+    cmake_files = build_dir / "CMakeFiles"
+    if (
+        cache.exists()
+        or cache.is_symlink()
+        or cmake_files.exists()
+        or cmake_files.is_symlink()
+    ):
+        reason = (
+            stamp_reason
+            if build_ninja.exists()
+            else "previous configure did not produce build.ninja"
+        )
+        _clear_cmake_configure_cache(
+            build_dir,
+            log_handle,
+            reason,
+        )
+    log_handle.write(
+        "# CMake configure freshness mismatch: "
+        f"{stamp_reason}; reconfiguring with preset {preset}.\n")
+    log_handle.flush()
+    rc = _run_cmake_preset_configure(
+        configure_arguments,
+        build_dir=build_dir,
+        log_handle=log_handle,
+        deadline=deadline,
+        environment=environment,
+    )
+    if rc != 0:
+        raise RuntimeError(f"{failure_label} exited with code {rc}")
+    if not build_ninja.is_file():
+        raise RuntimeError(
+            f"preset {preset!r} did not produce {build_ninja}")
+    return True
+
 
 # Prompt template injected into every `subagent` call.
 # Placeholders replaced at call time via str.replace (not f-string so the JSON
@@ -915,7 +1429,7 @@ class ModeDefinition:
     commands: List[List[str]]
     """Extra documentation"""
     docs: str
-    """This applies only to benchmarks. Defines subdirectory within REPORTING_DIR where benchmark report is saved"""
+    """Optional subdirectory within REPORTING_DIR for a native run report."""
     reporting_subdir_name: Optional[str] = None
     """This applies only to benchmark. Is this benchmark target?"""
     is_bench_mode: bool = False
@@ -938,6 +1452,8 @@ class ModeDefinition:
     post_build_targets: tuple[str, ...] = ()
     """True when all PostgreSQL work occurs in a disposable private cluster."""
     uses_private_cluster: bool = False
+    """Optional mode-wide wall-clock ceiling, including build and cleanup."""
+    hard_timeout_min: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.preset_family not in {
@@ -948,6 +1464,8 @@ class ModeDefinition:
             raise ValueError(
                 "private-cluster modes must not install/restart the shared "
                 "PostgreSQL extension")
+        if self.hard_timeout_min is not None and self.hard_timeout_min <= 0:
+            raise ValueError("mode hard_timeout_min must be positive")
 
     @property
     def verb_is(self) -> str:
@@ -958,8 +1476,8 @@ class ModeDefinition:
         return "were" if self.is_verb_plular else "was"
 
     @property
-    def reporting_dir(self) -> str:
-        if not self.is_bench_mode or not self.reporting_subdir_name:
+    def reporting_dir(self) -> Path:
+        if not self.reporting_subdir_name:
             return REPORTING_DIR / "__does_not_exist__"
         return REPORTING_DIR / self.reporting_subdir_name
 
@@ -1053,6 +1571,21 @@ MODES: Dict[str, ModeDefinition] = {
             "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
             "BIOSEQ_BUILD_WEBSITE": "OFF",
         },
+    ),
+    PACKAGE_LINUX_MODE: ModeDefinition(
+        lock_group=PACKAGE_LINUX_MODE,
+        expected_duration_min=240.0,
+        build_only_expected_duration_min=240.0,
+        label="Local Debian package qualification",
+        docs=(
+            "Build and extract the fixed native ARM64 Debian 13/PostgreSQL 17 "
+            "DEB from clean committed source and seal its exact six-file payload"),
+        is_verb_plular=False,
+        targets=[],
+        commands=[],
+        preset_override=PACKAGE_LINUX_MODE,
+        reporting_subdir_name=package_linux.REPORTING_SUBDIR,
+        hard_timeout_min=240.0,
     ),
     "unit+integration": ModeDefinition(
         lock_group="tests",
@@ -1158,9 +1691,23 @@ MODES: Dict[str, ModeDefinition] = {
         is_verb_plular=True,
         preset_family="cache",
         binary_subdir="bioseq_caching",
-        targets=["postgresql_bioseq_cache", "bioseq_cache_unit_tests"],
+        targets=[
+            "postgresql_bioseq_cache",
+            "bioseq_cache_unit_tests",
+            "bioseq_postgres_test_support_contract_tests",
+            "bioseq_cache_benchmark_report_contract_tests",
+            "bioseq_durable_file_io_contract_tests",
+            "bioseq_build_mcp_configure_freshness_contract_tests",
+            "bioseq_cache_legacy_retirement_gate",
+        ],
         commands=[
             ["bioseq_cache_unit_tests",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            ["bioseq_postgres_test_support_contract_tests",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            ["bioseq_cache_benchmark_report_contract_tests",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            ["bioseq_durable_file_io_contract_tests",
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
     ),
@@ -1169,17 +1716,36 @@ MODES: Dict[str, ModeDefinition] = {
         expected_duration_min=8.0,
         build_only_expected_duration_min=1.0,
         label="bioseq_cache temporary-cluster tests",
-        docs="Run cache regression, isolation and TAP tests in private clusters",
+        docs="Run native cache Catch2 integration tests in a private cluster",
         is_verb_plular=True,
         preset_family="cache",
         binary_subdir="bioseq_caching",
-        targets=["postgresql_bioseq_cache"],
-        commands=[],
-        post_build_targets=(
-            "test_bioseq_cache_regress",
-            "test_bioseq_cache_isolation",
-            "test_bioseq_cache_tap",
-        ),
+        targets=[
+            "postgresql_bioseq_cache",
+            "postgresql_bioseq_cache_test_support",
+            "bioseq_cache_integration_tests",
+        ],
+        commands=[
+            [
+                "bioseq_cache_integration_tests",
+                "--postgres-bin-dir",
+                "{cache_test_support_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_test_support_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_test_support_postgres_stage_manifest}",
+                "--cache-control", "{cache_test_control}",
+                "--cache-install-sql", "{cache_test_install_sql}",
+                "--cache-dso", "{cache_test_dso}",
+                "--migration-ledger", "{migration_ledger}",
+                "--migration-harness", "cache-integration",
+                "--migration-report-role", "cache-integration",
+                "--report", "{report}",
+                "--case-timeout-seconds", "480",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+        ],
+        reporting_subdir_name="bioseq_cache_integration",
         uses_private_cluster=True,
     ),
     "cache-bench": ModeDefinition(
@@ -1192,8 +1758,25 @@ MODES: Dict[str, ModeDefinition] = {
         preset_family="cache",
         binary_subdir="bioseq_caching",
         targets=["postgresql_bioseq_cache", "bioseq_cache_bench"],
-        commands=[],
-        post_build_targets=("run_bioseq_cache_bench",),
+        commands=[
+            [
+                "bioseq_cache_bench",
+                "--postgres-bin-dir",
+                "{cache_production_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_production_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_production_postgres_stage_manifest}",
+                "--cache-control", "{cache_control}",
+                "--cache-install-sql", "{cache_install_sql}",
+                "--cache-dso", "{cache_dso}",
+                "--migration-ledger", "{migration_ledger}",
+                "--scenario", "standalone",
+                "--samples", "7",
+                "--warmup-samples", "1",
+                "--report", "{report}",
+            ],
+        ],
         reporting_subdir_name="bioseq_cache_bench",
         is_bench_mode=True,
         uses_private_cluster=True,
@@ -1203,14 +1786,78 @@ MODES: Dict[str, ModeDefinition] = {
         expected_duration_min=120.0,
         build_only_expected_duration_min=10.0,
         label="bioseq_cache provider integration tests",
-        docs="Build both DSOs and run Bioseq cache tests in a private cluster",
+        docs=(
+            "Run support-profile Bioseq/cache diagnostics, then gate the exact "
+            "2 Gbp case against both shipping production extensions"
+        ),
         is_verb_plular=True,
         preset_family="cache-bioseq",
         binary_subdir="bioseq_caching",
-        targets=["postgresql_bioseq_cache", "postgresql_bioseq"],
-        commands=[],
-        post_build_targets=("test_bioseq_cache_bioseq_private",),
+        targets=[
+            "postgresql_bioseq_cache",
+            "postgresql_bioseq_cache_test_support",
+            "postgresql_bioseq",
+            "bioseq_cache_bioseq_production_dso_qualification",
+            "bioseq_cache_bioseq_support_integration_tests",
+            "bioseq_cache_bioseq_production_integration_tests",
+        ],
+        commands=[
+            [
+                "bioseq_cache_bioseq_support_integration_tests",
+                "--postgres-bin-dir",
+                "{cache_bioseq_support_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_bioseq_support_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_bioseq_support_postgres_stage_manifest}",
+                "--bioseq-only-postgres-bin-dir",
+                "{cache_bioseq_only_postgres_bin_dir}",
+                "--bioseq-only-postgres-stage-root",
+                "{cache_bioseq_only_postgres_stage_root}",
+                "--bioseq-only-postgres-stage-manifest",
+                "{cache_bioseq_only_postgres_stage_manifest}",
+                "--cache-control", "{cache_test_control}",
+                "--cache-install-sql", "{cache_test_install_sql}",
+                "--cache-dso", "{cache_test_dso}",
+                "--bioseq-control", "{bioseq_control}",
+                "--bioseq-install-sql", "{bioseq_install_sql}",
+                "--bioseq-dso", "{bioseq_dso}",
+                "--provider-peer-test-dso", "{provider_peer_test_dso}",
+                "--migration-ledger", "{migration_ledger}",
+                "--migration-harness", "cache-bioseq-integration",
+                "--migration-report-role",
+                "cache-bioseq-support-integration",
+                "--report", "{report}",
+                "--case-timeout-seconds", "480",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+            [
+                "bioseq_cache_bioseq_production_integration_tests",
+                "--postgres-bin-dir",
+                "{cache_bioseq_production_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_bioseq_production_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_bioseq_production_postgres_stage_manifest}",
+                "--cache-control", "{cache_control}",
+                "--cache-install-sql", "{cache_install_sql}",
+                "--cache-dso", "{cache_dso}",
+                "--bioseq-control", "{bioseq_control}",
+                "--bioseq-install-sql", "{bioseq_install_sql}",
+                "--bioseq-dso", "{bioseq_dso}",
+                "--migration-ledger", "{migration_ledger}",
+                "--migration-harness", "cache-bioseq-integration",
+                "--migration-report-role",
+                "cache-bioseq-production-integration",
+                "--report", "{report}",
+                "--case-timeout-seconds", "480",
+                "--large-case-timeout-seconds", "6300",
+                "--reporter", "console::out=-::colour-mode=ansi",
+            ],
+        ],
+        reporting_subdir_name="bioseq_cache_bioseq_integration",
         uses_private_cluster=True,
+        hard_timeout_min=120.0,
     ),
     "cache-bioseq-bench": ModeDefinition(
         lock_group="bench",
@@ -1221,9 +1868,35 @@ MODES: Dict[str, ModeDefinition] = {
         is_verb_plular=False,
         preset_family="cache-bioseq",
         binary_subdir="bioseq_caching",
-        targets=["postgresql_bioseq_cache", "postgresql_bioseq"],
-        commands=[],
-        post_build_targets=("run_bioseq_cache_bioseq_bench",),
+        targets=[
+            "postgresql_bioseq_cache",
+            "postgresql_bioseq",
+            "bioseq_cache_bioseq_production_dso_qualification",
+            "bioseq_cache_bioseq_bench",
+            "bioseq_cache_legacy_retirement_gate",
+        ],
+        commands=[
+            [
+                "bioseq_cache_bioseq_bench",
+                "--postgres-bin-dir",
+                "{cache_bioseq_production_postgres_bin_dir}",
+                "--postgres-stage-root",
+                "{cache_bioseq_production_postgres_stage_root}",
+                "--postgres-stage-manifest",
+                "{cache_bioseq_production_postgres_stage_manifest}",
+                "--cache-control", "{cache_control}",
+                "--cache-install-sql", "{cache_install_sql}",
+                "--cache-dso", "{cache_dso}",
+                "--bioseq-control", "{bioseq_control}",
+                "--bioseq-install-sql", "{bioseq_install_sql}",
+                "--bioseq-dso", "{bioseq_dso}",
+                "--migration-ledger", "{migration_ledger}",
+                "--scenario", "bioseq-2gbp",
+                "--samples", "3",
+                "--warmup-samples", "1",
+                "--report", "{report}",
+            ],
+        ],
         reporting_subdir_name="bioseq_cache_bioseq_bench",
         is_bench_mode=True,
         uses_private_cluster=True,
@@ -1236,12 +1909,14 @@ VALID_MODES: Set[str] = set(MODES.keys())
 REMOTE_RUN_REJECTED_MODES: Set[str] = {
     "website",
     POSTGRES_ERROR_SAFETY_MODE,
+    PACKAGE_LINUX_MODE,
 }
 REMOTE_RUN_BUILD_MODES: tuple[str, ...] = tuple(sorted(
     VALID_MODES - REMOTE_RUN_REJECTED_MODES))
 BENCH_CLI_MODES: tuple[str, ...] = tuple(sorted(
     mode for mode, details in MODES.items()
-    if details.is_bench_mode and details.commands
+    if (details.is_bench_mode and details.commands
+        and not mode.startswith("cache-"))
 ))
 
 
@@ -1250,6 +1925,48 @@ class InspectTargetDefinition:
     mode: str
     artifact_names: tuple[str, ...]
     shared_target_names: tuple[str, ...] = ()
+    profiled_artifact_directory: str | None = None
+
+
+def _native_shared_library_suffix(system_name: str) -> str:
+    if system_name == "Darwin":
+        return ".dylib"
+    if system_name == "Windows":
+        return ".dll"
+    return ".so"
+
+
+def _inspect_artifact_candidates(
+    definition: InspectTargetDefinition,
+    build_dir: Path,
+    debug: bool,
+    *,
+    system_name: str | None = None,
+) -> tuple[str, ...]:
+    if definition.profiled_artifact_directory is None:
+        return definition.artifact_names
+
+    suffix = _native_shared_library_suffix(
+        system_name or host_platform.system())
+    native_names = tuple(
+        name for name in definition.artifact_names
+        if Path(name).suffix == suffix
+    )
+    if not native_names:
+        raise RuntimeError(
+            f"inspect target has no artifact for native suffix {suffix}")
+    configuration = (
+        _cmake_cache_value(build_dir, "CMAKE_BUILD_TYPE")
+        or ("Debug" if debug else "Release")
+    )
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", configuration) is None:
+        raise RuntimeError(
+            f"inspect build has invalid CMake configuration {configuration!r}")
+    profiled_names = tuple(
+        f"{definition.profiled_artifact_directory}/{configuration}/{name}"
+        for name in native_names
+    )
+    return profiled_names + native_names
 
 
 INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
@@ -1278,13 +1995,18 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
         mode="cache-unit",
         artifact_names=("bioseq_cache.dylib", "bioseq_cache.so",
                         "bioseq_cache.dll"),
-        shared_target_names=("bioseq_cache_core",)),
+        shared_target_names=("bioseq_cache_core",),
+        profiled_artifact_directory="artifacts/cache_production"),
     "bioseq_cache_unit_tests": InspectTargetDefinition(
         mode="cache-unit", artifact_names=("bioseq_cache_unit_tests",),
         shared_target_names=("bioseq_cache_core",)),
     "bioseq_cache_bench": InspectTargetDefinition(
         mode="cache-bench", artifact_names=("bioseq_cache_bench",),
-        shared_target_names=("bioseq_cache_core",)),
+        shared_target_names=("bioseq_cache_benchmark_support",)),
+    "bioseq_cache_bioseq_bench": InspectTargetDefinition(
+        mode="cache-bioseq-bench",
+        artifact_names=("bioseq_cache_bioseq_bench",),
+        shared_target_names=("bioseq_cache_benchmark_support",)),
 }
 
 
@@ -1316,24 +2038,45 @@ def _log(msg: str) -> None:
 
 # --------------------------- state file I/O --------------------------------
 
+_STATE_THREAD_LOCK = threading.RLock()
+_STATE_LOCK_CONTEXT = threading.local()
+
+
 @contextlib.contextmanager
 def _global_lock():
-    """Cross-process advisory lock around state-file mutations.
+    """Reentrant thread/process lock around state-file mutations.
 
     MCP servers are spawned per Claude Code session, so two sessions can
     race on start_build for the same mode. The lock makes the read-check-
-    spawn-write critical section atomic across processes.
+    spawn-write critical section atomic across processes. A process-local
+    RLock and thread-local depth make nested state helpers safe: opening a
+    second independent fd and calling flock again can otherwise deadlock the
+    calling process against its own first lock.
     """
-    LOCK_FILE.touch()
-    fd = os.open(str(LOCK_FILE), os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
+    with _STATE_THREAD_LOCK:
+        depth = getattr(_STATE_LOCK_CONTEXT, "depth", 0)
+        if depth:
+            _STATE_LOCK_CONTEXT.depth = depth + 1
+            try:
+                yield
+            finally:
+                _STATE_LOCK_CONTEXT.depth = depth
+            return
+
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(str(LOCK_FILE), flags, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            _STATE_LOCK_CONTEXT.depth = 1
+            yield
         finally:
-            os.close(fd)
+            _STATE_LOCK_CONTEXT.depth = 0
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def _load_state() -> dict:
@@ -1349,24 +2092,58 @@ def _load_state() -> dict:
         return {}
 
 
-def _save_state(state: dict) -> None:
+def _save_state_locked(state: dict) -> None:
+    """Durably replace the state file while `_global_lock` is held."""
+    if getattr(_STATE_LOCK_CONTEXT, "depth", 0) <= 0:
+        raise RuntimeError(
+            "_save_state_locked requires the global state lock")
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(".json.tmp")
-    with tmp.open("w") as f:
-        json.dump(state, f, indent=2, sort_keys=True)
-    tmp.replace(STATE_FILE)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=f".{STATE_FILE.name}.",
+                suffix=".tmp",
+                dir=STATE_FILE.parent,
+                delete=False) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, STATE_FILE)
+        temporary_path = None
+
+        directory_flags = os.O_RDONLY
+        directory_flags |= getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(str(STATE_FILE.parent), directory_flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _save_state(state: dict) -> None:
+    """Durably replace the complete state under the reentrant global lock."""
+    with _global_lock():
+        _save_state_locked(state)
 
 
 def _update_entry(mode: str, **fields) -> None:
-    """Merge `fields` into the per-mode state entry. Caller is responsible
-    for any locking — workers do their own atomic writes via tmp+rename
-    and only mutate their own mode's slot, which is already reserved by
-    the parent server under the global lock."""
-    state = _load_state()
-    entry = dict(state.get(mode) or {})
-    entry.update(fields)
-    state[mode] = entry
-    _save_state(state)
+    """Atomically merge fields without losing another worker's state."""
+    with _global_lock():
+        state = _load_state()
+        entry = dict(state.get(mode) or {})
+        entry.update(fields)
+        state[mode] = entry
+        _save_state_locked(state)
 
 
 # --------------------------- pid liveness ----------------------------------
@@ -1437,9 +2214,15 @@ def _kill_pgroup(pid: int) -> None:
                 return
 
 
-def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
-                       cwd: Path | None = None,
-                       env: dict | None = None) -> int:
+def _stream_subprocess(
+        cmd: list[str],
+        log_handle,
+        deadline: float,
+        cwd: Path | None = None,
+        env: dict | None = None,
+        *,
+        verified_executable: Path | None = None,
+) -> int:
     """Run cmd, tee combined stdout/stderr to log_handle and stderr, enforce
     deadline. Returns the process return code on clean exit. Raises
     TimeoutError if the deadline is hit.
@@ -1456,6 +2239,10 @@ def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
 
     proc = subprocess.Popen(
         cmd,
+        executable=(
+            str(verified_executable)
+            if verified_executable is not None else None
+        ),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         cwd=str(cwd) if cwd else None,
@@ -1509,6 +2296,8 @@ def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        if proc.stdout is not None:
+            proc.stdout.close()
 
 
 def _is_aws_clang_preset(preset: str) -> bool:
@@ -1880,7 +2669,7 @@ def _postgresql_e2e_restart_shell_command(active_build_dir: Path,
 # --------------------------- build worker ----------------------------------
 
 def _report_index(filename: str) -> int:
-    """Return the ordinal of an exact benchmark report filename.
+    """Return the ordinal of an exact native run-report filename.
 
     The benchmark framework writes ``report_<N>.json``.  Keep accepting the
     older MCP-owned ``report_build_<N>.json`` spelling so an older benchmark
@@ -1908,8 +2697,7 @@ def _report_paths(reporting_dir: Path) -> set[Path]:
 
 
 def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
-    """Return the highest-numbered report file produced after `snapshot_paths`
-    was taken (i.e. one not in the snapshot)."""
+    """Return the highest-numbered mode report created after the snapshot."""
     mode_details = MODES[mode]
     if not mode_details.reporting_dir.exists():
         return None
@@ -1925,6 +2713,2952 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
             _report_index(p.name),
             not p.name.startswith("report_build_"),
         ),
+    )
+
+
+_CACHE_NATIVE_ARTIFACT_KEYS = frozenset({
+    "cache_test_support_postgres_bin_dir",
+    "cache_test_support_postgres_stage_root",
+    "cache_test_support_postgres_stage_manifest",
+    "cache_production_postgres_bin_dir",
+    "cache_production_postgres_stage_root",
+    "cache_production_postgres_stage_manifest",
+    "cache_bioseq_support_postgres_bin_dir",
+    "cache_bioseq_support_postgres_stage_root",
+    "cache_bioseq_support_postgres_stage_manifest",
+    "cache_bioseq_only_postgres_bin_dir",
+    "cache_bioseq_only_postgres_stage_root",
+    "cache_bioseq_only_postgres_stage_manifest",
+    "cache_bioseq_production_postgres_bin_dir",
+    "cache_bioseq_production_postgres_stage_root",
+    "cache_bioseq_production_postgres_stage_manifest",
+    "production_dso_qualification_receipt",
+    "cache_control",
+    "cache_install_sql",
+    "cache_dso",
+    "cache_test_control",
+    "cache_test_install_sql",
+    "cache_test_dso",
+    "bioseq_control",
+    "bioseq_install_sql",
+    "bioseq_dso",
+    "provider_peer_test_dso",
+    "migration_ledger",
+    "legacy_inventory",
+    "migration_catch_cases",
+    "legacy_retirement_gate",
+})
+
+
+def _cache_native_artifacts(active_bin_dir: Path) -> dict[str, str]:
+    """Load CMake-generated input paths for native cache runners."""
+    manifest = active_bin_dir / "cache_native_artifacts.json"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read native cache artifact manifest {manifest}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"native cache artifact manifest is not an object: {manifest}")
+    unknown = set(payload) - _CACHE_NATIVE_ARTIFACT_KEYS
+    missing = _CACHE_NATIVE_ARTIFACT_KEYS - set(payload)
+    if unknown or missing:
+        raise RuntimeError(
+            "native cache artifact manifest keys differ from the MCP "
+            f"contract: missing={sorted(missing)} unknown={sorted(unknown)}")
+    values: dict[str, str] = {}
+    for key, value in payload.items():
+        if not isinstance(value, str):
+            raise RuntimeError(
+                f"native cache artifact {key!r} is not a string")
+        if value and not Path(value).is_absolute():
+            raise RuntimeError(
+                f"native cache artifact {key!r} is not absolute: {value}")
+        values[key] = value
+    return values
+
+
+_CACHE_BIOSEQ_DSO_QUALIFICATION_MODES = frozenset({
+    "cache-bioseq-integration",
+    "cache-bioseq-bench",
+})
+_CACHE_BIOSEQ_DSO_QUALIFICATION_RECEIPT_KEY = (
+    "production_dso_qualification_receipt"
+)
+_CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS = (
+    "production_dso_qualification_receipt",
+    "production_dso_qualification_receipt_sha256",
+    "production_dso_qualification_content_sha256",
+)
+_CACHE_COMBINED_EVIDENCE_ROLES = frozenset({
+    "cache-bioseq-support-integration",
+    "cache-bioseq-production-integration",
+    "cache-bioseq-bench",
+})
+
+
+def _qualification_exact_keys(
+        value: Mapping[str, object], expected: set[str], context: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise RuntimeError(
+            f"{context} keys differ from the contract: "
+            f"missing={sorted(expected - actual)} "
+            f"unknown={sorted(actual - expected)}")
+
+
+def _qualification_digest(value: object, context: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise RuntimeError(f"{context} is not a lowercase SHA-256 digest")
+    return value
+
+
+def _qualification_architecture(value: object, context: str) -> str:
+    if not isinstance(value, str):
+        raise RuntimeError(f"{context} is not a string")
+    normalized = value.strip().lower().replace("-", "_")
+    aliases = {
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "arm64e": "arm64",
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+    }
+    if normalized not in aliases:
+        raise RuntimeError(f"{context} is unsupported: {value!r}")
+    return aliases[normalized]
+
+
+def _qualification_file_identity(
+        value: object,
+        context: str,
+        *,
+        validate_live: bool,
+        executable: bool,
+) -> Path:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{context} identity is not an object")
+    _qualification_exact_keys(
+        value,
+        {"lexical_path", "resolved_path", "size_bytes", "sha256"},
+        f"{context} identity",
+    )
+    lexical_raw = value["lexical_path"]
+    resolved_raw = value["resolved_path"]
+    size = value["size_bytes"]
+    digest = _qualification_digest(value["sha256"], f"{context} SHA-256")
+    if (
+        not isinstance(lexical_raw, str)
+        or not Path(lexical_raw).is_absolute()
+        or not isinstance(resolved_raw, str)
+        or not Path(resolved_raw).is_absolute()
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+    ):
+        raise RuntimeError(f"{context} identity fields are invalid")
+    resolved = Path(resolved_raw)
+    if not validate_live:
+        return resolved
+    lexical = Path(lexical_raw)
+    try:
+        lexical_metadata = lexical.lstat()
+        current = lexical.resolve(strict=True)
+        current_metadata = current.stat()
+    except OSError as exc:
+        raise RuntimeError(f"cannot inspect current {context}: {exc}") from exc
+    if (
+        not (stat.S_ISREG(lexical_metadata.st_mode)
+             or stat.S_ISLNK(lexical_metadata.st_mode))
+        or not stat.S_ISREG(current_metadata.st_mode)
+        or current != resolved
+        or current_metadata.st_size != size
+        or _sha256_path(current) != digest
+        or (executable and not os.access(current, os.X_OK))
+    ):
+        raise RuntimeError(f"current {context} differs from its sealed identity")
+    return current
+
+
+def _run_qualification_inspection(
+        tool: Path, arguments: list[str], context: str) -> str:
+    environment = os.environ.copy()
+    environment.update({"LC_ALL": "C", "LANG": "C"})
+    try:
+        completed = subprocess.run(
+            [str(tool), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"production DSO {context} exceeded 30 seconds") from exc
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot rerun production DSO {context}: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(
+            f"production DSO {context} failed: "
+            f"{detail or completed.returncode}")
+    output = completed.stdout
+    if not output.strip() and completed.stderr.strip():
+        output = completed.stderr
+    lines = output.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    return "\n".join(line.rstrip() for line in lines).strip() + "\n"
+
+
+def _live_dso_inspection(
+        tool: Path, path: Path, system_name: str) -> dict[str, object]:
+    commands = (
+        (("-hv",), ("-L",), ("-l",))
+        if system_name == "Darwin"
+        else (("-h",), ("-d",), ("-n",))
+    )
+    header = _run_qualification_inspection(
+        tool, [*commands[0], str(path)], f"header inspection for {path}")
+    dependency = _run_qualification_inspection(
+        tool, [*commands[1], str(path)], f"dependency inspection for {path}")
+    identity = _run_qualification_inspection(
+        tool, [*commands[2], str(path)], f"build-identity inspection for {path}")
+    if system_name == "Darwin":
+        architectures = sorted({
+            _qualification_architecture(match.group(1), "Mach-O architecture")
+            for match in re.finditer(
+                r"^\s*MH_[A-Z0-9_]+\s+([A-Za-z0-9_-]+)\s+",
+                header,
+                re.MULTILINE,
+            )
+        })
+        dependencies = sorted(
+            match.group(1)
+            for line in dependency.splitlines()[1:]
+            if (match := re.match(
+                r"^\s+(.+?)\s+\(compatibility version ", line))
+        )
+        identities = sorted({
+            match.group(1).lower()
+            for match in re.finditer(
+                r"^\s*uuid\s+([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-"
+                r"[0-9A-Fa-f]{12})\b",
+                identity,
+                re.MULTILINE,
+            )
+        })
+        binary: dict[str, object] = {
+            "format": "Mach-O",
+            "architectures": architectures,
+        }
+        identity_kind = "mach-o-lc-uuid"
+    else:
+        fields: dict[str, str] = {}
+        for field, key in (("Class", "class"), ("Data", "data"),
+                           ("Machine", "machine")):
+            match = re.search(
+                rf"^\s*{field}:\s*(.+?)\s*$", header, re.MULTILINE)
+            if match is None:
+                raise RuntimeError(
+                    f"live ELF header for {path} omits {field}")
+            fields[key] = match.group(1)
+        if re.search(
+                r"(?:X86-64|Advanced Micro Devices X86-64)",
+                fields["machine"]):
+            architecture = "x86_64"
+        elif fields["machine"] == "AArch64":
+            architecture = "arm64"
+        else:
+            raise RuntimeError(
+                f"live ELF machine for {path} is unsupported: "
+                f"{fields['machine']}")
+        architectures = [architecture]
+        dependencies = sorted(
+            re.findall(r"\(NEEDED\).*?\[([^]\r\n]+)\]", dependency))
+        identities = sorted({
+            match.group(1).lower()
+            for match in re.finditer(
+                r"^\s*Build ID:\s*([0-9A-Fa-f]+)\s*$",
+                identity,
+                re.MULTILINE,
+            )
+        })
+        binary = {
+            "format": "ELF",
+            "architectures": architectures,
+            **fields,
+            "architecture": architecture,
+        }
+        identity_kind = "elf-gnu-build-id"
+    if not architectures or not dependencies or not identities:
+        raise RuntimeError(
+            f"live production DSO inspection is incomplete for {path}")
+    if len(dependencies) != len(set(dependencies)):
+        raise RuntimeError(
+            f"live production DSO dependencies are duplicated for {path}")
+    return {
+        "binary": binary,
+        "direct_load_dependencies": dependencies,
+        "build_identity": {"kind": identity_kind, "values": identities},
+        "header_listing_sha256": _sha256_bytes(header.encode("utf-8")),
+        "dependency_listing_sha256":
+            _sha256_bytes(dependency.encode("utf-8")),
+        "build_identity_listing_sha256":
+            _sha256_bytes(identity.encode("utf-8")),
+    }
+
+
+def _load_production_dso_qualification_receipt(
+        receipt_path: Path,
+        *,
+        artifacts: Mapping[str, str] | None = None,
+        expected_build_dir: Path | None = None,
+        expected_preset: str | None = None,
+        validate_live: bool,
+) -> tuple[Path, dict[str, object]]:
+    if not receipt_path.is_absolute():
+        raise RuntimeError(
+            f"production DSO qualification receipt is not absolute: {receipt_path}")
+    try:
+        metadata = receipt_path.lstat()
+        resolved_receipt = receipt_path.resolve(strict=True)
+        document = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read production DSO qualification receipt "
+            f"{receipt_path}: {exc}") from exc
+    if receipt_path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(
+            "production DSO qualification receipt is not a regular "
+            f"non-symlink file: {receipt_path}")
+    if not isinstance(document, dict):
+        raise RuntimeError(
+            "production DSO qualification receipt is not an object")
+    _qualification_exact_keys(
+        document,
+        {
+            "schema_version", "artifact_kind", "platform",
+            "inspection_tool", "build_context", "dsos", "content_sha256",
+        },
+        "production DSO qualification receipt",
+    )
+    if (
+        document["schema_version"] != 1
+        or document["artifact_kind"]
+            != "bioseq-production-dso-load-qualification"
+    ):
+        raise RuntimeError("production DSO qualification receipt schema is invalid")
+    try:
+        _validate_json_content_seal(
+            document, "production DSO qualification receipt")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    platform_value = document["platform"]
+    if not isinstance(platform_value, dict):
+        raise RuntimeError("production DSO platform is not an object")
+    _qualification_exact_keys(
+        platform_value,
+        {
+            "system_name", "system_release", "machine", "binary_format",
+            "dso_suffix",
+        },
+        "production DSO platform",
+    )
+    system_name = platform_value["system_name"]
+    if not isinstance(system_name, str) or system_name not in {"Darwin", "Linux"}:
+        raise RuntimeError("production DSO platform system is unsupported")
+    machine = _qualification_architecture(
+        platform_value["machine"], "production DSO platform architecture")
+    binary_format = "Mach-O" if system_name == "Darwin" else "ELF"
+    suffix = ".dylib" if system_name == "Darwin" else ".so"
+    if (
+        not isinstance(platform_value["system_release"], str)
+        or not platform_value["system_release"]
+        or platform_value["machine"] != machine
+        or platform_value["binary_format"] != binary_format
+        or platform_value["dso_suffix"] != suffix
+    ):
+        raise RuntimeError("production DSO platform fields are inconsistent")
+    if validate_live and (
+        host_platform.system() != system_name
+        or host_platform.release() != platform_value["system_release"]
+        or _qualification_architecture(
+            host_platform.machine(), "current host architecture") != machine
+    ):
+        raise RuntimeError("production DSO qualification platform is not current")
+
+    tool_value = document["inspection_tool"]
+    if not isinstance(tool_value, dict):
+        raise RuntimeError("production DSO inspection tool is not an object")
+    _qualification_exact_keys(
+        tool_value,
+        {
+            "lexical_path", "resolved_path", "size_bytes", "sha256",
+            "identity_kind", "header_arguments", "dependency_arguments",
+            "build_identity_arguments",
+        },
+        "production DSO inspection tool",
+    )
+    if tool_value["identity_kind"] != "executable-sha256":
+        raise RuntimeError("production DSO inspection tool identity kind is invalid")
+    expected_tool_name = "otool" if system_name == "Darwin" else "readelf"
+    if Path(str(tool_value["lexical_path"])).name != expected_tool_name:
+        raise RuntimeError(
+            "production DSO inspection tool is not platform exact")
+    expected_arguments = (
+        (["-hv"], ["-L"], ["-l"])
+        if system_name == "Darwin" else (["-h"], ["-d"], ["-n"])
+    )
+    if (
+        tool_value["header_arguments"],
+        tool_value["dependency_arguments"],
+        tool_value["build_identity_arguments"],
+    ) != expected_arguments:
+        raise RuntimeError("production DSO inspection tool arguments are invalid")
+    inspection_tool = _qualification_file_identity(
+        {
+            key: tool_value[key]
+            for key in ("lexical_path", "resolved_path", "size_bytes", "sha256")
+        },
+        "production DSO inspection tool",
+        validate_live=validate_live,
+        executable=True,
+    )
+
+    context = document["build_context"]
+    if not isinstance(context, dict):
+        raise RuntimeError("production DSO build context is not an object")
+    _qualification_exact_keys(
+        context,
+        {
+            "preset", "configuration", "build_type", "generator",
+            "build_directory", "cmake_system", "cmake_cache",
+            "configure_input", "compilers",
+        },
+        "production DSO build context",
+    )
+    for field in ("preset", "configuration", "build_type", "generator"):
+        if not isinstance(context[field], str) or not context[field]:
+            raise RuntimeError(f"production DSO build context {field} is invalid")
+    if context["configuration"] != context["build_type"]:
+        raise RuntimeError("production DSO configuration and build type differ")
+    build_directory_raw = context["build_directory"]
+    if not isinstance(build_directory_raw, str) or not Path(
+            build_directory_raw).is_absolute():
+        raise RuntimeError("production DSO build directory is invalid")
+    build_directory = Path(build_directory_raw)
+    if expected_build_dir is not None and (
+        build_directory != expected_build_dir.resolve(strict=validate_live)
+    ):
+        raise RuntimeError("production DSO receipt names the wrong build directory")
+    if expected_preset is not None and context["preset"] != expected_preset:
+        raise RuntimeError("production DSO receipt names the wrong CMake preset")
+    cmake_system = context["cmake_system"]
+    if not isinstance(cmake_system, dict):
+        raise RuntimeError("production DSO CMake system is not an object")
+    _qualification_exact_keys(
+        cmake_system, {"name", "processor"}, "production DSO CMake system")
+    if (
+        cmake_system["name"] != system_name
+        or _qualification_architecture(
+            cmake_system["processor"], "production DSO CMake processor") != machine
+    ):
+        raise RuntimeError("production DSO CMake system differs from the binary")
+
+    def context_file(
+            raw: object, label: str, expected_name: str) -> tuple[Path, str]:
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"production DSO {label} is not an object")
+        _qualification_exact_keys(
+            raw, {"path", "size_bytes", "sha256"},
+            f"production DSO {label}")
+        path_raw = raw["path"]
+        size = raw["size_bytes"]
+        digest = _qualification_digest(
+            raw["sha256"], f"production DSO {label} SHA-256")
+        if (
+            not isinstance(path_raw, str)
+            or not Path(path_raw).is_absolute()
+            or Path(path_raw).name != expected_name
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            raise RuntimeError(f"production DSO {label} fields are invalid")
+        path = Path(path_raw)
+        if path.parent != build_directory:
+            raise RuntimeError(f"production DSO {label} escapes the build directory")
+        if validate_live:
+            try:
+                file_metadata = path.lstat()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot inspect current production DSO {label}: {exc}") from exc
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(file_metadata.st_mode)
+                or file_metadata.st_size != size
+                or _sha256_path(path) != digest
+            ):
+                raise RuntimeError(
+                    f"current production DSO {label} differs from its seal")
+        return path, digest
+
+    cmake_cache_path, _ = context_file(
+        context["cmake_cache"], "CMake cache", "CMakeCache.txt")
+    configure_input = context["configure_input"]
+    if not isinstance(configure_input, dict):
+        raise RuntimeError("production DSO configure input is not an object")
+    _qualification_exact_keys(
+        configure_input,
+        {"path", "size_bytes", "sha256", "inputs_sha256"},
+        "production DSO configure input",
+    )
+    configure_inputs_sha256 = _qualification_digest(
+        configure_input["inputs_sha256"],
+        "production DSO configure-input seal",
+    )
+    configure_path, _ = context_file(
+        {
+            key: configure_input[key]
+            for key in ("path", "size_bytes", "sha256")
+        },
+        "configure input",
+        _CMAKE_CONFIGURE_STAMP_NAME,
+    )
+
+    compilers = context["compilers"]
+    if not isinstance(compilers, dict):
+        raise RuntimeError("production DSO compilers are not an object")
+    _qualification_exact_keys(
+        compilers, {"c", "cxx"}, "production DSO compilers")
+    for language in ("c", "cxx"):
+        compiler = compilers[language]
+        if not isinstance(compiler, dict):
+            raise RuntimeError(f"production DSO {language} compiler is invalid")
+        _qualification_exact_keys(
+            compiler,
+            {
+                "lexical_path", "resolved_path", "size_bytes", "sha256",
+                "compiler_id", "compiler_version",
+            },
+            f"production DSO {language} compiler",
+        )
+        if (
+            not isinstance(compiler["compiler_id"], str)
+            or not compiler["compiler_id"]
+            or not isinstance(compiler["compiler_version"], str)
+            or not compiler["compiler_version"]
+        ):
+            raise RuntimeError(
+                f"production DSO {language} compiler metadata is invalid")
+        _qualification_file_identity(
+            {
+                key: compiler[key]
+                for key in ("lexical_path", "resolved_path", "size_bytes", "sha256")
+            },
+            f"production DSO {language} compiler",
+            validate_live=validate_live,
+            executable=True,
+        )
+
+    if validate_live:
+        try:
+            configure_stamp = json.loads(configure_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"cannot parse current CMake configure stamp: {exc}") from exc
+        if (
+            not isinstance(configure_stamp, dict)
+            or configure_stamp.get("artifact_kind") != _CMAKE_CONFIGURE_STAMP_KIND
+            or configure_stamp.get("schema_version") != 1
+            or not isinstance(configure_stamp.get("inputs"), dict)
+            or configure_stamp.get("inputs_sha256") != configure_inputs_sha256
+            or _canonical_json_sha256(configure_stamp["inputs"])
+                != configure_inputs_sha256
+            or configure_stamp["inputs"].get("preset") != context["preset"]
+        ):
+            raise RuntimeError("current CMake configure-input seal is invalid")
+        if (
+            _cmake_cache_value(build_directory, "CMAKE_BUILD_TYPE")
+                != context["build_type"]
+            or _cmake_cache_value(build_directory, "CMAKE_GENERATOR")
+                != context["generator"]
+            or _cmake_cache_value(build_directory, "CMAKE_C_COMPILER")
+                != compilers["c"]["lexical_path"]
+            or _cmake_cache_value(build_directory, "CMAKE_CXX_COMPILER")
+                != compilers["cxx"]["lexical_path"]
+        ):
+            raise RuntimeError("current CMake cache context differs from the receipt")
+        if cmake_cache_path != build_directory / "CMakeCache.txt":
+            raise RuntimeError("production DSO CMake cache path is not canonical")
+
+    dso_records = document["dsos"]
+    if not isinstance(dso_records, list) or len(dso_records) != 2:
+        raise RuntimeError("production DSO qualification must contain two DSOs")
+    expected_dsos: dict[str, Path] | None = None
+    if artifacts is not None:
+        try:
+            expected_dsos = {
+                "bioseq": Path(artifacts["bioseq_dso"]).resolve(
+                    strict=validate_live),
+                "bioseq_cache": Path(artifacts["cache_dso"]).resolve(
+                    strict=validate_live),
+            }
+        except (KeyError, OSError) as exc:
+            raise RuntimeError("canonical production DSO paths are unavailable") from exc
+    observed: dict[str, Path] = {}
+    for record in dso_records:
+        if not isinstance(record, dict):
+            raise RuntimeError("production DSO qualification row is not an object")
+        _qualification_exact_keys(
+            record,
+            {
+                "extension", "path", "basename", "size_bytes", "sha256",
+                "binary", "header_listing_sha256", "build_identity",
+                "direct_load_dependencies", "dependency_listing_sha256",
+                "build_identity_listing_sha256", "sibling_extension",
+                "sibling_basename", "sibling_dependency_absent",
+            },
+            "production DSO qualification row",
+        )
+        extension = record["extension"]
+        if (
+            not isinstance(extension, str)
+            or extension not in {"bioseq", "bioseq_cache"}
+            or extension in observed
+        ):
+            raise RuntimeError("production DSO qualification roster is invalid")
+        path_raw = record["path"]
+        expected_basename = f"{extension}{suffix}"
+        size = record["size_bytes"]
+        digest = _qualification_digest(
+            record["sha256"], f"production {extension} DSO SHA-256")
+        if (
+            not isinstance(path_raw, str)
+            or not Path(path_raw).is_absolute()
+            or record["basename"] != expected_basename
+            or Path(path_raw).name != expected_basename
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            raise RuntimeError(f"production {extension} DSO identity is invalid")
+        path = Path(path_raw)
+        binary = record["binary"]
+        if not isinstance(binary, dict):
+            raise RuntimeError(f"production {extension} binary metadata is invalid")
+        expected_binary_keys = (
+            {"format", "architectures"}
+            if system_name == "Darwin"
+            else {"format", "architectures", "class", "data", "machine", "architecture"}
+        )
+        _qualification_exact_keys(
+            binary, expected_binary_keys, f"production {extension} binary metadata")
+        if (
+            binary["format"] != binary_format
+            or binary["architectures"] != [machine]
+            or (system_name == "Linux" and binary["architecture"] != machine)
+        ):
+            raise RuntimeError(
+                f"production {extension} binary architecture is invalid")
+        if system_name == "Linux" and any(
+            not isinstance(binary[field], str) or not binary[field]
+            for field in ("class", "data", "machine")
+        ):
+            raise RuntimeError(f"production {extension} ELF header is incomplete")
+        for field in (
+            "header_listing_sha256", "dependency_listing_sha256",
+            "build_identity_listing_sha256",
+        ):
+            _qualification_digest(
+                record[field], f"production {extension} {field}")
+        build_identity = record["build_identity"]
+        if not isinstance(build_identity, dict):
+            raise RuntimeError(f"production {extension} build identity is invalid")
+        _qualification_exact_keys(
+            build_identity, {"kind", "values"},
+            f"production {extension} build identity")
+        identities = build_identity["values"]
+        identity_pattern = (
+            r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+            if system_name == "Darwin" else r"(?:[0-9a-f]{2})+"
+        )
+        expected_identity_kind = (
+            "mach-o-lc-uuid" if system_name == "Darwin" else "elf-gnu-build-id")
+        if (
+            build_identity["kind"] != expected_identity_kind
+            or not isinstance(identities, list)
+            or not identities
+            or any(not isinstance(identity, str)
+                   or re.fullmatch(identity_pattern, identity) is None
+                   for identity in identities)
+            or identities != sorted(set(identities))
+        ):
+            raise RuntimeError(f"production {extension} build identity is invalid")
+        dependencies = record["direct_load_dependencies"]
+        sibling = "bioseq_cache" if extension == "bioseq" else "bioseq"
+        sibling_basename = f"{sibling}{suffix}"
+        sibling_stem = sibling_basename.removesuffix(suffix)
+        if (
+            not isinstance(dependencies, list)
+            or not dependencies
+            or any(not isinstance(dependency, str) or not dependency
+                   for dependency in dependencies)
+            or dependencies != sorted(set(dependencies))
+            or record["sibling_extension"] != sibling
+            or record["sibling_basename"] != sibling_basename
+            or record["sibling_dependency_absent"] is not True
+            or any(
+                Path(dependency).name == sibling_basename
+                or Path(dependency).name.startswith(sibling_basename + ".")
+                or (
+                    suffix == ".dylib"
+                    and Path(dependency).name.startswith(sibling_stem + ".")
+                    and Path(dependency).name.endswith(suffix)
+                )
+                for dependency in dependencies
+            )
+        ):
+            raise RuntimeError(
+                f"production {extension} DSO sibling-dependency proof is invalid")
+        if expected_dsos is not None and path.resolve(
+                strict=validate_live) != expected_dsos[extension]:
+            raise RuntimeError(
+                f"production {extension} DSO path is not the canonical target")
+        if validate_live:
+            try:
+                dso_metadata = path.lstat()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot inspect current production {extension} DSO: {exc}") from exc
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(dso_metadata.st_mode)
+                or dso_metadata.st_size != size
+                or _sha256_path(path) != digest
+            ):
+                raise RuntimeError(
+                    f"current production {extension} DSO differs from its receipt")
+            live = _live_dso_inspection(
+                inspection_tool, path, system_name)
+            for field in (
+                "binary",
+                "direct_load_dependencies",
+                "build_identity",
+                "header_listing_sha256",
+                "dependency_listing_sha256",
+                "build_identity_listing_sha256",
+            ):
+                if live[field] != record[field]:
+                    raise RuntimeError(
+                        f"current production {extension} DSO {field} differs "
+                        "from its qualification receipt")
+        observed[str(extension)] = path.resolve(strict=validate_live)
+    if set(observed) != {"bioseq", "bioseq_cache"}:
+        raise RuntimeError("production DSO qualification roster is incomplete")
+    return resolved_receipt, document
+
+
+def _cache_bioseq_dso_qualification_evidence(
+        active_bin_dir: Path,
+        *,
+        expected_build_dir: Path | None = None,
+        expected_preset: str | None = None,
+        snapshot_for_report: Path | None = None,
+) -> dict[str, str]:
+    """Validate and bind the CMake-owned production DSO receipt."""
+    artifacts = _cache_native_artifacts(active_bin_dir)
+    raw = artifacts.get(_CACHE_BIOSEQ_DSO_QUALIFICATION_RECEIPT_KEY, "")
+    if not raw:
+        raise RuntimeError("combined cache qualification has no production DSO receipt")
+    path, document = _load_production_dso_qualification_receipt(
+        Path(raw),
+        artifacts=artifacts,
+        expected_build_dir=expected_build_dir,
+        expected_preset=expected_preset,
+        validate_live=True,
+    )
+    evidence_path = path
+    if snapshot_for_report is not None:
+        ordinal = _report_index(snapshot_for_report.name)
+        if ordinal < 0:
+            raise RuntimeError(
+                "cache native report has no stable ordinal for its production "
+                f"DSO qualification snapshot: {snapshot_for_report}")
+        evidence_path = snapshot_for_report.resolve(strict=True).with_name(
+            f"production_dso_qualification_{ordinal}.json")
+        if evidence_path.exists() or evidence_path.is_symlink():
+            try:
+                existing = _load_json_object(
+                    evidence_path,
+                    "immutable production DSO qualification snapshot",
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "cannot reuse immutable production DSO qualification "
+                    f"snapshot {evidence_path}: {exc}") from exc
+            if existing != document:
+                raise RuntimeError(
+                    "immutable production DSO qualification snapshot already "
+                    f"exists with different content: {evidence_path}")
+        else:
+            _write_json_atomic(evidence_path, document)
+        _, snapshot_document = _load_production_dso_qualification_receipt(
+            evidence_path, validate_live=False)
+        if snapshot_document != document:
+            raise RuntimeError(
+                "immutable production DSO qualification snapshot differs "
+                "from the live CMake receipt")
+    return {
+        "production_dso_qualification_receipt": str(evidence_path),
+        "production_dso_qualification_receipt_sha256":
+            _sha256_path(evidence_path),
+        "production_dso_qualification_content_sha256":
+            str(document["content_sha256"]),
+    }
+
+
+def _validate_cache_evidence_dso_binding(
+        value: Mapping[str, object]) -> None:
+    """Require combined evidence to transitively seal its DSO qualification."""
+    role = value.get("report_role")
+    present = {
+        field for field in _CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS
+        if field in value
+    }
+    if role not in _CACHE_COMBINED_EVIDENCE_ROLES:
+        if present:
+            raise RuntimeError(
+                "standalone cache evidence unexpectedly carries a production "
+                "DSO qualification binding")
+        return
+    required = set(_CACHE_DSO_QUALIFICATION_EVIDENCE_FIELDS)
+    if present != required:
+        raise RuntimeError(
+            "combined cache evidence has an incomplete production DSO "
+            f"qualification binding: missing={sorted(required - present)}")
+    raw_path = value["production_dso_qualification_receipt"]
+    if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+        raise RuntimeError(
+            "combined cache evidence DSO qualification path is invalid")
+    receipt_sha256 = _qualification_digest(
+        value["production_dso_qualification_receipt_sha256"],
+        "combined cache evidence DSO receipt SHA-256",
+    )
+    content_sha256 = _qualification_digest(
+        value["production_dso_qualification_content_sha256"],
+        "combined cache evidence DSO content SHA-256",
+    )
+    path, document = _load_production_dso_qualification_receipt(
+        Path(raw_path), validate_live=False)
+    if (
+        str(path) != raw_path
+        or _sha256_path(path) != receipt_sha256
+        or document["content_sha256"] != content_sha256
+    ):
+        raise RuntimeError(
+            "combined cache evidence production DSO qualification seal changed")
+
+
+_CACHE_MIGRATION_LEDGER = (
+    PROJECT_ROOT / "bioseq_caching" / "test"
+    / "legacy_migration_ledger.tsv"
+)
+_CACHE_LEGACY_INVENTORY = (
+    PROJECT_ROOT / "bioseq_caching" / "test"
+    / "legacy_asset_inventory.txt"
+)
+_CACHE_LEGACY_ROOT = PROJECT_ROOT / "bioseq_caching"
+_CACHE_RETIREMENT_PROOF = (
+    PROJECT_ROOT / "bioseq_caching" / "test"
+    / "legacy_retirement_receipt.json"
+)
+_CACHE_RETIREMENT_REPORTING_DIR = (
+    REPORTING_DIR / "bioseq_cache_retirement"
+)
+_CACHE_UNIT_REPORTING_DIR = REPORTING_DIR / "bioseq_cache_unit"
+_CACHE_SOURCE_SCOPES = (
+    "main/CMakeLists.txt",
+    "main/CMakePresets.json",
+    "main/vcpkg.json",
+    "main/vcpkg-configuration.json",
+    "main/bench",
+    "main/bench_framework",
+    "main/bioseq",
+    "main/bioseq_caching",
+    "main/codegen",
+    "main/common",
+    "main/config",
+    "main/overlays",
+    "main/vendor",
+    "main/cmake",
+    ":(top,exclude,glob)main/cmake/**/__pycache__/**",
+    "main/build_mcp",
+    ":(top,exclude,glob)main/build_mcp/**/__pycache__/**",
+)
+_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE = {
+    "bioseq_cache_integration_tests": "cache-integration",
+    "bioseq_cache_bioseq_support_integration_tests":
+        "cache-bioseq-support-integration",
+    "bioseq_cache_bioseq_production_integration_tests":
+        "cache-bioseq-production-integration",
+    "bioseq_cache_bench": "cache-bench",
+    "bioseq_cache_bioseq_bench": "cache-bioseq-bench",
+}
+_CACHE_EVIDENCE_EXECUTABLE_BY_ROLE = {
+    role: executable
+    for executable, role in _CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.items()
+}
+_CACHE_EVIDENCE_MODE_BY_ROLE = {
+    "cache-integration": "cache-integration",
+    "cache-bioseq-support-integration": "cache-bioseq-integration",
+    "cache-bioseq-production-integration": "cache-bioseq-integration",
+    "cache-bench": "cache-bench",
+    "cache-bioseq-bench": "cache-bioseq-bench",
+}
+_CACHE_EVIDENCE_SCENARIO_BY_ROLE = {
+    "cache-integration": "cache-integration",
+    "cache-bioseq-support-integration": "cache-bioseq-support",
+    "cache-bioseq-production-integration":
+        "cache-bioseq-production-exact-2gbp",
+    "cache-bench": "standalone",
+    "cache-bioseq-bench": "bioseq-2gbp",
+}
+_CACHE_INTEGRATION_HARNESS_BY_ROLE = {
+    "cache-integration": "cache-integration",
+    "cache-bioseq-support-integration": "cache-bioseq-integration",
+    "cache-bioseq-production-integration": "cache-bioseq-integration",
+}
+_CACHE_EVIDENCE_REPORTING_DIRS = (
+    REPORTING_DIR / "bioseq_cache_integration",
+    REPORTING_DIR / "bioseq_cache_bioseq_integration",
+    REPORTING_DIR / "bioseq_cache_bench",
+    REPORTING_DIR / "bioseq_cache_bioseq_bench",
+)
+_CACHE_RECEIPT_MODES = frozenset({
+    "cache-unit",
+    "cache-integration",
+    "cache-bench",
+    "cache-bioseq-integration",
+    "cache-bioseq-bench",
+})
+
+
+def _cache_git_bytes(arguments: list[str]) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(WORKSPACE_ROOT), *arguments],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect cache proof Git provenance: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            "cache proof Git provenance command failed: "
+            f"{detail or result.returncode}")
+    return result.stdout
+
+
+def _cache_length_prefix(value: bytes) -> bytes:
+    return str(len(value)).encode("ascii") + b":" + value
+
+
+def _cache_source_provenance() -> dict[str, object]:
+    revision = _cache_git_bytes(["rev-parse", "HEAD"]).strip().decode(
+        "ascii", errors="strict")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise RuntimeError(
+            "cache proof source revision is not a lowercase 40-hex commit")
+    status = _cache_git_bytes([
+        "status", "--porcelain=v1", "-z", "--untracked-files=all",
+        "--", *_CACHE_SOURCE_SCOPES,
+    ])
+    tree = _cache_git_bytes([
+        "ls-tree", "-r", "-z", "--full-tree", revision,
+        "--", *_CACHE_SOURCE_SCOPES,
+    ])
+    material = bytearray(b"bioseq-cache-source-scope/v1\0")
+    material += _cache_length_prefix(revision.encode("ascii"))
+    for scope in _CACHE_SOURCE_SCOPES:
+        material += _cache_length_prefix(scope.encode("utf-8"))
+    material += _cache_length_prefix(tree)
+    return {
+        "source_revision": revision,
+        "source_scope_sha256": hashlib.sha256(material).hexdigest(),
+        "source_scoped_clean": not status,
+    }
+
+
+def _cache_migration_contract(
+        path: Path = _CACHE_MIGRATION_LEDGER,
+) -> dict[str, str]:
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot seal cache migration ledger {path}: {exc}"
+        ) from exc
+    lines = text.splitlines()
+    expected_header = (
+        "legacy_path\tlegacy_line_or_assertion\tstable_id\t"
+        "evidence_harness\tevidence_role\tsource_kind\t"
+        "scenario_or_permutation\texpected_sqlstate_or_result\t"
+        "expected_state_invariant\tcatch2_case\tcatch2_section\t"
+        "catch2_tags\tmigration_status"
+    )
+    if not lines or lines[0] != expected_header or len(lines) == 1:
+        raise RuntimeError(
+            "cache migration ledger header/body is invalid")
+    material = bytearray(
+        b"bioseq-cache-migration-evidence-contract/v1\n")
+    phases: set[str] = set()
+    for line_number, line in enumerate(lines[1:], start=2):
+        fields = line.split("\t")
+        if len(fields) != 13:
+            raise RuntimeError(
+                f"cache migration ledger line {line_number} "
+                "does not contain 13 fields")
+        phases.add(fields[12])
+        for field in fields[:12]:
+            material += _cache_length_prefix(field.encode("utf-8"))
+        material += b"\n"
+    phase = next(iter(phases)) if len(phases) == 1 else "mixed"
+    if phase not in {"mapped", "passing", "retired_with_proof", "mixed"}:
+        raise RuntimeError(
+            f"cache migration ledger has invalid phase {phase!r}")
+    return {
+        "migration_ledger_sha256": hashlib.sha256(raw).hexdigest(),
+        "evidence_contract_sha256":
+            hashlib.sha256(material).hexdigest(),
+        "migration_phase": phase,
+    }
+
+
+def _cache_run_provenance() -> dict[str, object]:
+    source = _cache_source_provenance()
+    if not source["source_scoped_clean"]:
+        raise RuntimeError(
+            "cache qualification requires a clean relevant source scope")
+    return {**source, **_cache_migration_contract()}
+
+
+def _cache_qualification_provenance(
+        mode: str, build_only: bool) -> dict[str, object] | None:
+    """Start a release receipt only for executable lifecycle phases."""
+    if build_only or mode not in _CACHE_RECEIPT_MODES:
+        return None
+    phase = _cache_migration_contract()["migration_phase"]
+    if phase not in {"passing", "retired_with_proof"}:
+        return None
+    return _cache_run_provenance()
+
+
+def _require_same_cache_run_provenance(
+        before: Mapping[str, object],
+        after: Mapping[str, object],
+) -> None:
+    if before != after or not after.get("source_scoped_clean"):
+        raise RuntimeError(
+            "cache source/ledger provenance changed during qualification")
+
+
+_CACHE_NATIVE_ARTIFACT_FIELDS = frozenset({
+    "name",
+    "preinstalled_stage_root",
+    "stage_manifest",
+    "stage_manifest_sha256",
+    "control_file",
+    "install_sql",
+    "dso",
+    "staged_control_file",
+    "staged_install_sql",
+    "staged_dso",
+    "control_sha256",
+    "install_sql_sha256",
+    "dso_sha256",
+    "staged_control_sha256",
+})
+_CACHE_NATIVE_ARTIFACT_PATH_FIELDS = (
+    "preinstalled_stage_root",
+    "stage_manifest",
+    "control_file",
+    "install_sql",
+    "dso",
+    "staged_control_file",
+    "staged_install_sql",
+    "staged_dso",
+)
+_CACHE_NATIVE_ARTIFACT_DIGEST_FIELDS = (
+    "stage_manifest_sha256",
+    "control_sha256",
+    "install_sql_sha256",
+    "dso_sha256",
+    "staged_control_sha256",
+)
+
+
+def _cache_native_artifact_contracts(
+        artifacts: object,
+) -> list[dict[str, object]]:
+    if (
+        not isinstance(artifacts, list)
+        or not artifacts
+        or any(not isinstance(artifact, dict)
+               for artifact in artifacts)
+    ):
+        raise RuntimeError(
+            "native cache report artifact contract is incomplete")
+    result: list[dict[str, object]] = []
+    for ordinal, artifact in enumerate(artifacts):
+        if set(artifact) != _CACHE_NATIVE_ARTIFACT_FIELDS:
+            raise RuntimeError(
+                "native cache report artifact has an inexact field "
+                f"contract at ordinal {ordinal}")
+        if artifact.get("name") not in {"bioseq_cache", "bioseq"}:
+            raise RuntimeError(
+                "native cache report artifact names an unexpected "
+                f"extension at ordinal {ordinal}")
+        for field in _CACHE_NATIVE_ARTIFACT_PATH_FIELDS:
+            value = artifact.get(field)
+            if (
+                not isinstance(value, str)
+                or not Path(value).is_absolute()
+                or os.path.normpath(value) != value
+            ):
+                raise RuntimeError(
+                    "native cache report artifact path is not normalized "
+                    f"and absolute: artifacts[{ordinal}].{field}")
+        for field in _CACHE_NATIVE_ARTIFACT_DIGEST_FIELDS:
+            value = artifact.get(field)
+            if (
+                not isinstance(value, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", value)
+            ):
+                raise RuntimeError(
+                    "native cache report artifact digest is invalid: "
+                    f"artifacts[{ordinal}].{field}")
+        result.append(dict(artifact))
+    return result
+
+
+def _require_absent_nofollow_path(
+        path: Path,
+        context: str,
+) -> None:
+    if not path.is_absolute():
+        raise RuntimeError(f"{context} is not absolute: {path}")
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot inspect {context} component {current}: {exc}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError(
+                f"{context} traverses a symlink: {current}")
+        if current == path:
+            raise RuntimeError(f"{context} still exists: {path}")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(
+                f"{context} traverses a non-directory: {current}")
+    raise RuntimeError(f"{context} still exists: {path}")
+
+
+def _cache_cleanup_root_contracts(
+        cleanup_observations: list[object],
+) -> list[str]:
+    canonical_temporary_directory = Path(
+        tempfile.gettempdir()).resolve(strict=True)
+    roots = [
+        observation.get("root")
+        if isinstance(observation, dict) else None
+        for observation in cleanup_observations
+    ]
+    if any(
+        not isinstance(root, str)
+        or not Path(root).is_absolute()
+        or os.path.normpath(root) != root
+        or not Path(root).name.startswith("bioseq-pg-test-")
+        or Path(root).parent != canonical_temporary_directory
+        for root in roots
+    ):
+        raise RuntimeError(
+            "native cache integration cleanup roots are invalid or "
+            "not marker-owned direct children of the canonical temporary "
+            "directory")
+    return roots
+
+
+def _require_cache_cleanup_roots_absent(
+        cleanup_roots: list[Path],
+        context: str,
+) -> None:
+    for cleanup_root in cleanup_roots:
+        _require_absent_nofollow_path(cleanup_root, context)
+
+
+def _cache_native_report_contract(
+        report_path: Path,
+) -> dict[str, object]:
+    try:
+        value = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read native cache report {report_path}: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("native cache report is not a JSON object")
+    schema = value.get("schema_version")
+    if schema == "bioseq-cache-test-v2":
+        cases = value.get("cases")
+        arguments = value.get("arguments")
+        cleanup = value.get("cleanup")
+        cleanup_observations = value.get("cleanup_observations")
+        cluster = value.get("cluster_configuration")
+        if (
+            not isinstance(cases, list)
+            or not cases
+            or any(
+                not isinstance(case, dict)
+                or case.get("status") != "passed"
+                for case in cases
+            )
+            or not isinstance(cleanup, dict)
+            or cleanup.get("succeeded") is not True
+            or not isinstance(cleanup_observations, list)
+            or not cleanup_observations
+            or any(
+                not isinstance(observation, dict)
+                or observation.get("succeeded") is not True
+                for observation in cleanup_observations
+            )
+            or not isinstance(cluster, dict)
+            or cluster.get("retained-supervision-state") != "none"
+        ):
+            raise RuntimeError(
+                "native cache integration report did not pass with "
+                "complete cleanup evidence")
+        role = value.get("migration_report_role")
+        harness = value.get("migration_evidence_harness")
+        ledger_sha256 = value.get("migration_ledger_sha256")
+        evidence_sha256 = value.get("evidence_contract_sha256")
+        phase = value.get("migration_phase")
+        coverage = value.get("migration_coverage")
+        executable = value.get("executable")
+        executable_sha256 = value.get("build_identity")
+        artifacts = _cache_native_artifact_contracts(
+            value.get("artifacts"))
+        cleanup_roots = _cache_cleanup_root_contracts(
+            cleanup_observations)
+        scenario = (
+            _CACHE_EVIDENCE_SCENARIO_BY_ROLE.get(role)
+            if isinstance(role, str) else None
+        )
+        if not isinstance(arguments, list) or not arguments:
+            raise RuntimeError(
+                "native cache integration report has no executed argv")
+        reported_argv: list[str] = []
+        for index, argument in enumerate(arguments):
+            if (
+                not isinstance(argument, dict)
+                or set(argument) != {"name", "value", "redacted"}
+                or argument.get("name") != f"argv[{index}]"
+                or not isinstance(argument.get("value"), str)
+                or argument.get("redacted") is not False
+            ):
+                raise RuntimeError(
+                    "native cache integration report argv is not an "
+                    "exact unredacted sequence")
+            reported_argv.append(argument["value"])
+        allowed_options = {
+            "--postgres-bin-dir",
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            "--bioseq-only-postgres-bin-dir",
+            "--bioseq-only-postgres-stage-root",
+            "--bioseq-only-postgres-stage-manifest",
+            "--cache-control",
+            "--cache-install-sql",
+            "--cache-dso",
+            "--bioseq-control",
+            "--bioseq-install-sql",
+            "--bioseq-dso",
+            "--provider-peer-test-dso",
+            "--migration-ledger",
+            "--migration-harness",
+            "--migration-report-role",
+            "--report",
+            "--case-timeout-seconds",
+            "--large-case-timeout-seconds",
+            "--reporter",
+        }
+        if len(reported_argv) % 2 != 1:
+            raise RuntimeError(
+                "native cache integration report argv has a missing "
+                "option value")
+        reported_options: dict[str, str] = {}
+        for index in range(1, len(reported_argv), 2):
+            option = reported_argv[index]
+            if (
+                option not in allowed_options
+                or option in reported_options
+            ):
+                raise RuntimeError(
+                    "native cache integration report argv contains a "
+                    "Catch2 filter, unknown option, or duplicate option")
+            reported_options[option] = reported_argv[index + 1]
+        if (
+            reported_options.get("--migration-harness") != harness
+            or reported_options.get("--migration-report-role") != role
+            or (
+                "--reporter" in reported_options
+                and reported_options["--reporter"]
+                    != "console::out=-::colour-mode=ansi"
+            )
+        ):
+            raise RuntimeError(
+                "native cache integration report argv is not bound to "
+                "its fixed migration harness/role")
+    elif schema == "bioseq-cache-benchmark-v2":
+        metadata = value.get("metadata")
+        cleanup = value.get("cleanup")
+        migration = value.get("migration_evidence")
+        build_identity = (
+            metadata.get("build_identity")
+            if isinstance(metadata, dict) else None
+        )
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("status") != "passed"
+            or metadata.get("error") != ""
+            or not isinstance(cleanup, dict)
+            or cleanup.get("attempted") is not True
+            or cleanup.get("succeeded") is not True
+            or cleanup.get("private_root_removed") is not True
+            or not isinstance(migration, dict)
+            or not isinstance(build_identity, dict)
+        ):
+            raise RuntimeError(
+                "native cache benchmark did not pass with complete "
+                "cleanup and migration evidence")
+        role = migration.get("migration_report_role")
+        ledger_sha256 = migration.get("ledger_sha256")
+        evidence_sha256 = migration.get("evidence_contract_sha256")
+        phase = migration.get("migration_phase")
+        coverage = migration.get("coverage")
+        executable = build_identity.get("executable_path")
+        executable_sha256 = build_identity.get("executable_sha256")
+        scenario = value.get("scenario")
+        harness = migration.get("migration_evidence_harness")
+        configured_samples = metadata.get("configured_samples")
+        configured_warmup_samples = metadata.get(
+            "configured_warmup_samples")
+        artifacts = _cache_native_artifact_contracts(
+            metadata.get("artifacts"))
+        cleanup_roots = []
+        if (
+            not isinstance(configured_samples, int)
+            or isinstance(configured_samples, bool)
+            or configured_samples <= 0
+            or not isinstance(configured_warmup_samples, int)
+            or isinstance(configured_warmup_samples, bool)
+            or configured_warmup_samples < 0
+        ):
+            raise RuntimeError(
+                "native cache benchmark invocation/artifact contract "
+                "is incomplete")
+    else:
+        raise RuntimeError(
+            f"native cache report schema is not release-safe: {schema!r}")
+    if (
+        role not in set(_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
+        or coverage != "full-role"
+        or not isinstance(ledger_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", ledger_sha256)
+        or not isinstance(evidence_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256)
+        or not isinstance(executable, str)
+        or not Path(executable).is_absolute()
+        or not isinstance(executable_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", executable_sha256)
+        or harness != _CACHE_INTEGRATION_HARNESS_BY_ROLE.get(
+            role, role)
+        or scenario != _CACHE_EVIDENCE_SCENARIO_BY_ROLE.get(role)
+        or phase not in {
+            "mapped", "passing", "retired_with_proof", "mixed"}
+    ):
+        raise RuntimeError(
+            "native cache report migration contract is incomplete")
+    expected_executable = _CACHE_EVIDENCE_EXECUTABLE_BY_ROLE[role]
+    if (
+        Path(executable).name != expected_executable
+        or (
+            schema == "bioseq-cache-test-v2"
+            and Path(reported_argv[0]) != Path(executable)
+        )
+    ):
+        raise RuntimeError(
+            "native cache report executable is incompatible with its "
+            "fixed migration role")
+    return {
+        "report_role": role,
+        "migration_ledger_sha256": ledger_sha256,
+        "evidence_contract_sha256": evidence_sha256,
+        "migration_phase": phase,
+        "executable": executable,
+        "executable_sha256": executable_sha256,
+        "scenario": scenario,
+        "arguments": (
+            reported_argv
+            if schema == "bioseq-cache-test-v2" else []
+        ),
+        "configured_samples": (
+            configured_samples
+            if schema == "bioseq-cache-benchmark-v2" else None
+        ),
+        "configured_warmup_samples": (
+            configured_warmup_samples
+            if schema == "bioseq-cache-benchmark-v2" else None
+        ),
+        "artifacts": artifacts,
+        "cleanup_roots": cleanup_roots,
+    }
+
+
+def _write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        raise RuntimeError(f"refusing to replace evidence receipt {path}")
+    temporary = path.with_name(path.name + ".partial")
+    if temporary.exists() or temporary.is_symlink():
+        raise RuntimeError(
+            f"stale evidence receipt temporary path exists: {temporary}")
+    body = json.dumps(
+        value, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_flags = os.O_RDONLY
+        directory_flags |= getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(str(path.parent), directory_flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise RuntimeError(
+            f"cannot publish evidence receipt {path}: {exc}"
+        ) from exc
+
+
+def _cache_report_receipt_path(report_path: Path) -> Path:
+    ordinal = _report_index(report_path.name)
+    if ordinal < 0:
+        raise RuntimeError(
+            f"cache native report has no stable ordinal: {report_path}")
+    return report_path.with_name(f"receipt_{ordinal}.json")
+
+
+def _seal_cache_native_report(
+        mode: str,
+        active_bin_dir: Path,
+        invocation: list[str],
+        report_path: Path,
+        provenance: Mapping[str, object],
+) -> Path:
+    if not invocation:
+        raise RuntimeError("cache report invocation is empty")
+    executable_name = Path(invocation[0]).name
+    expected_role = _CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.get(executable_name)
+    if expected_role is None:
+        raise RuntimeError(
+            "cache report executable has no fixed role: "
+            f"{executable_name}")
+    native = _cache_native_report_contract(report_path)
+    if (
+        native["report_role"] != expected_role
+        or mode != _CACHE_EVIDENCE_MODE_BY_ROLE[expected_role]
+        or native["scenario"]
+            != _CACHE_EVIDENCE_SCENARIO_BY_ROLE[expected_role]
+    ):
+        raise RuntimeError(
+            "native cache report mode/role/scenario differs from its "
+            "fixed executable")
+    expected_argv = list(invocation)
+    expected_argv[0] = str(Path(expected_argv[0]).resolve(strict=True))
+    if len(expected_argv) % 2 != 1:
+        raise RuntimeError(
+            "fixed cache report command has an invalid option shape")
+    expected_options = {
+        expected_argv[index]: expected_argv[index + 1]
+        for index in range(1, len(expected_argv), 2)
+    }
+    if len(expected_options) != (len(expected_argv) - 1) // 2:
+        raise RuntimeError(
+            "fixed cache report command duplicates an option")
+    if expected_role in _CACHE_INTEGRATION_HARNESS_BY_ROLE:
+        reported_argv = list(native["arguments"])
+        reported_argv[0] = str(
+            Path(reported_argv[0]).resolve(strict=True))
+        if reported_argv != expected_argv:
+            raise RuntimeError(
+                "native cache integration report argv differs from the "
+                "exact MCP command")
+    else:
+        if (
+            native["scenario"] != expected_options.get("--scenario")
+            or native["configured_samples"]
+                != int(expected_options["--samples"])
+            or native["configured_warmup_samples"]
+                != int(expected_options["--warmup-samples"])
+        ):
+            raise RuntimeError(
+                "native cache benchmark invocation differs from the "
+                "fixed MCP command")
+    artifact_contracts = [
+        (
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            "bioseq_cache",
+            ("--cache-control", "--cache-install-sql", "--cache-dso"),
+        ),
+    ]
+    if "--bioseq-control" in expected_options:
+        artifact_contracts.append((
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            "bioseq",
+            ("--bioseq-control", "--bioseq-install-sql", "--bioseq-dso"),
+        ))
+    if "--bioseq-only-postgres-stage-root" in expected_options:
+        artifact_contracts.append((
+            "--bioseq-only-postgres-stage-root",
+            "--bioseq-only-postgres-stage-manifest",
+            "bioseq",
+            ("--bioseq-control", "--bioseq-install-sql", "--bioseq-dso"),
+        ))
+    if "--provider-peer-test-dso" in expected_options:
+        provider_contract = (
+            "--postgres-stage-root",
+            "--postgres-stage-manifest",
+            "bioseq_cache",
+            (
+                "--cache-control",
+                "--cache-install-sql",
+                "--provider-peer-test-dso",
+            ),
+        )
+        artifact_contracts.extend(
+            (provider_contract, provider_contract))
+    expected_artifacts: dict[tuple[object, ...], int] = {}
+    for (
+        stage_root_option,
+        stage_manifest_option,
+        name,
+        artifact_options,
+    ) in artifact_contracts:
+        paths = tuple(
+            Path(expected_options[option]).resolve(strict=True)
+            for option in artifact_options
+        )
+        key = (
+            name,
+            Path(expected_options[stage_root_option]).resolve(
+                strict=True),
+            Path(expected_options[stage_manifest_option]).resolve(
+                strict=True),
+            *paths,
+        )
+        expected_artifacts[key] = expected_artifacts.get(key, 0) + 1
+    reported_artifacts: dict[tuple[object, ...], int] = {}
+    reported_rows: list[
+        tuple[tuple[object, ...], Mapping[str, object]]
+    ] = []
+    for artifact in native["artifacts"]:
+        name = artifact.get("name")
+        if not isinstance(name, str):
+            raise RuntimeError(
+                "native cache report artifact name is invalid")
+        key = (
+            name,
+            Path(artifact.get(
+                "preinstalled_stage_root", "")).resolve(strict=True),
+            Path(artifact.get(
+                "stage_manifest", "")).resolve(strict=True),
+            Path(artifact.get(
+                "control_file", "")).resolve(strict=True),
+            Path(artifact.get(
+                "install_sql", "")).resolve(strict=True),
+            Path(artifact.get("dso", "")).resolve(strict=True),
+        )
+        reported_artifacts[key] = reported_artifacts.get(key, 0) + 1
+        reported_rows.append((key, artifact))
+    if reported_artifacts != expected_artifacts:
+        raise RuntimeError(
+            "native cache report artifact roster differs from the "
+            "fixed MCP command")
+    lexical_cleanup_roots = [
+        Path(root) for root in native["cleanup_roots"]
+    ]
+    _require_cache_cleanup_roots_absent(
+        lexical_cleanup_roots,
+        "native cache integration cleanup root",
+    )
+    cleanup_roots = {
+        root.resolve(strict=False)
+        for root in lexical_cleanup_roots
+    }
+    provider_staged_dsos: set[Path] = set()
+    canonical_cache_dso = Path(
+        expected_options["--cache-dso"]).resolve(strict=True)
+    canonical_rows = [
+        (key, artifact)
+        for key, artifact in reported_rows
+        if key[0] == "bioseq_cache"
+        and key[5] == canonical_cache_dso
+    ]
+    if len(canonical_rows) != 1:
+        raise RuntimeError(
+            "native cache report does not contain one canonical cache "
+            "artifact")
+    canonical_key, canonical_artifact = canonical_rows[0]
+    canonical_stage_root = canonical_key[1]
+    canonical_staged_control = Path(
+        canonical_artifact["staged_control_file"]).resolve(strict=True)
+    canonical_staged_install_sql = Path(
+        canonical_artifact["staged_install_sql"]).resolve(strict=True)
+    canonical_cache_staged_dso = Path(
+        canonical_artifact["staged_dso"]).resolve(strict=True)
+    canonical_shared_values = tuple(
+        canonical_artifact[field]
+        for field in (
+            "stage_manifest_sha256",
+            "control_sha256",
+            "install_sql_sha256",
+            "staged_control_sha256",
+        )
+    )
+    for key, artifact in reported_rows:
+        (
+            name,
+            stage_root,
+            stage_manifest,
+            control_file,
+            install_sql,
+            dso,
+        ) = key
+        expected_paths = (control_file, install_sql, dso)
+        expected_hashes = tuple(
+            _sha256_path(path) for path in expected_paths)
+        staged_control = Path(artifact.get(
+            "staged_control_file", "")).resolve(strict=True)
+        staged_install_sql = Path(artifact.get(
+            "staged_install_sql", "")).resolve(strict=True)
+        staged_dso_reported = Path(
+            artifact.get("staged_dso", ""))
+        if (
+            not staged_control.is_relative_to(stage_root)
+            or not staged_install_sql.is_relative_to(stage_root)
+        ):
+            raise RuntimeError(
+                "native cache report staged control/SQL escapes its "
+                f"preinstalled stage: {name}")
+        is_provider_override = (
+            name == "bioseq_cache"
+            and "--provider-peer-test-dso" in expected_options
+            and dso == Path(expected_options[
+                "--provider-peer-test-dso"]).resolve(strict=True)
+        )
+        if (
+            artifact.get("stage_manifest_sha256")
+                != _sha256_path(stage_manifest)
+            or (
+                artifact.get("control_sha256"),
+                artifact.get("install_sql_sha256"),
+                artifact.get("dso_sha256"),
+            ) != expected_hashes
+            or artifact.get("staged_control_sha256")
+                != _sha256_path(staged_control)
+            or _sha256_path(staged_install_sql) != expected_hashes[1]
+        ):
+            raise RuntimeError(
+                "native cache report artifact identity differs from "
+                f"its fixed MCP command: {name}")
+        if is_provider_override:
+            lexical_runtime_root = (
+                staged_dso_reported.parent.parent)
+            if not lexical_runtime_root.name.startswith(
+                    "bioseq-pg-test-"):
+                raise RuntimeError(
+                    "native provider-peer artifact runtime root is not "
+                    "marker-owned")
+            _require_absent_nofollow_path(
+                staged_dso_reported,
+                "native provider-peer staged DSO",
+            )
+            staged_dso = staged_dso_reported.resolve(strict=False)
+            runtime_root = (
+                lexical_runtime_root.resolve(strict=False))
+            if (
+                stage_root != canonical_stage_root
+                or staged_control != canonical_staged_control
+                or staged_install_sql
+                    != canonical_staged_install_sql
+                or tuple(
+                    artifact[field]
+                    for field in (
+                        "stage_manifest_sha256",
+                        "control_sha256",
+                        "install_sql_sha256",
+                        "staged_control_sha256",
+                    )
+                ) != canonical_shared_values
+                or staged_dso.exists()
+                or staged_dso.is_symlink()
+                or staged_dso.parent.name != "runtime-library"
+                or runtime_root not in cleanup_roots
+                or not runtime_root.name.startswith("bioseq-pg-test-")
+                or staged_dso in provider_staged_dsos
+            ):
+                raise RuntimeError(
+                    "native provider-peer artifact does not identify a "
+                    "distinct cleaned marker-owned runtime DSO")
+            provider_staged_dsos.add(staged_dso)
+        else:
+            staged_dso = staged_dso_reported.resolve(strict=True)
+            if (
+                not staged_dso.is_relative_to(stage_root)
+                or _sha256_path(staged_dso) != expected_hashes[2]
+            ):
+                raise RuntimeError(
+                    "native cache report staged DSO differs from its "
+                    f"fixed MCP command: {name}")
+    if (
+        "--provider-peer-test-dso" in expected_options
+        and (
+            len(provider_staged_dsos) != 2
+            or any(
+                path.name != canonical_cache_staged_dso.name
+                for path in provider_staged_dsos
+            )
+        )
+    ):
+        raise RuntimeError(
+            "native provider-peer artifact multiplicity or staged DSO "
+            "basename differs from the canonical cache artifact")
+    executable = (active_bin_dir / executable_name).resolve(strict=True)
+    native_executable = Path(native["executable"]).resolve(strict=True)
+    if (
+        native_executable != executable
+        or native["executable_sha256"] != _sha256_path(executable)
+    ):
+        raise RuntimeError(
+            "native cache report executable identity differs from its "
+            "fixed MCP command")
+    for field in (
+        "migration_ledger_sha256",
+        "evidence_contract_sha256",
+        "migration_phase",
+    ):
+        if native[field] != provenance[field]:
+            raise RuntimeError(
+                f"native cache report {field} differs from MCP provenance")
+    receipt = {
+        "schema_version": "bioseq-cache-mcp-evidence-receipt-v1",
+        "mode": mode,
+        "report_role": expected_role,
+        "native_report": str(report_path.resolve(strict=True)),
+        "native_report_sha256": _sha256_path(report_path),
+        "executable": str(executable),
+        "executable_sha256": native["executable_sha256"],
+        "scenario": native["scenario"],
+        "source_revision": provenance["source_revision"],
+        "source_scope_sha256": provenance["source_scope_sha256"],
+        "source_scoped_clean": provenance["source_scoped_clean"],
+        "migration_ledger_sha256":
+            provenance["migration_ledger_sha256"],
+        "evidence_contract_sha256":
+            provenance["evidence_contract_sha256"],
+        "migration_phase": provenance["migration_phase"],
+    }
+    if expected_role in _CACHE_COMBINED_EVIDENCE_ROLES:
+        receipt.update(_cache_bioseq_dso_qualification_evidence(
+            active_bin_dir,
+            expected_build_dir=active_bin_dir.parent,
+            expected_preset=active_bin_dir.parent.name,
+            snapshot_for_report=report_path,
+        ))
+    output = _cache_report_receipt_path(report_path)
+    _require_cache_cleanup_roots_absent(
+        lexical_cleanup_roots,
+        "native cache integration cleanup root before receipt publication",
+    )
+    _write_json_atomic(output, receipt)
+    return output
+
+
+def _next_cache_unit_receipt_path() -> Path:
+    _CACHE_UNIT_REPORTING_DIR.mkdir(parents=True, exist_ok=True)
+    ordinals = []
+    for path in _CACHE_UNIT_REPORTING_DIR.glob("receipt_*.json"):
+        match = re.fullmatch(r"receipt_([0-9]+)\.json", path.name)
+        if match:
+            ordinals.append(int(match.group(1)))
+    return _CACHE_UNIT_REPORTING_DIR / (
+        f"receipt_{max(ordinals, default=-1) + 1}.json")
+
+
+def _seal_cache_unit_receipt(
+        active_bin_dir: Path,
+        provenance: Mapping[str, object],
+        command_records: list[dict[str, object]],
+) -> Path:
+    configured = MODES["cache-unit"].commands
+    if len(command_records) != len(configured):
+        raise RuntimeError(
+            "cache-unit receipt requires one frozen identity for each "
+            "fixed native command")
+    commands: list[dict[str, object]] = []
+    for command, record in zip(
+            configured, command_records, strict=True):
+        executable = record.get("executable")
+        executable_sha256 = record.get("executable_sha256")
+        arguments = record.get("arguments")
+        identity = record.get("_identity")
+        if (
+            not isinstance(executable, str)
+            or not Path(executable).is_absolute()
+            or not isinstance(executable_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", executable_sha256)
+            or not isinstance(arguments, list)
+            or any(not isinstance(argument, str)
+                   for argument in arguments)
+            or not isinstance(identity, tuple)
+        ):
+            raise RuntimeError(
+                "cache-unit frozen native command identity is invalid")
+        policy = _run_command_argv(
+            "cache-unit", active_bin_dir, command)
+        policy[0] = str(Path(policy[0]).resolve(strict=True))
+        invocation = [executable, *arguments]
+        if invocation != policy:
+            raise RuntimeError(
+                "cache-unit frozen invocation differs from its fixed "
+                "mode policy")
+        if _stable_native_command_identity(invocation) != record:
+            raise RuntimeError(
+                "cache-unit executable identity changed before receipt "
+                f"publication: {executable}")
+        commands.append({
+            "executable": executable,
+            "executable_sha256": executable_sha256,
+            "arguments": arguments,
+        })
+    receipt = {
+        "schema_version": "bioseq-cache-mcp-unit-receipt-v1",
+        "mode": "cache-unit",
+        "status": "passed",
+        "source_revision": provenance["source_revision"],
+        "source_scope_sha256": provenance["source_scope_sha256"],
+        "source_scoped_clean": provenance["source_scoped_clean"],
+        "migration_ledger_sha256":
+            provenance["migration_ledger_sha256"],
+        "evidence_contract_sha256":
+            provenance["evidence_contract_sha256"],
+        "migration_phase": provenance["migration_phase"],
+        "commands": commands,
+    }
+    output = _next_cache_unit_receipt_path()
+    _write_json_atomic(output, receipt)
+    return output
+
+
+def _load_json_object(path: Path, context: str) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read {context} {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{context} is not a JSON object: {path}")
+    return value
+
+
+def _cache_receipt_candidates() -> list[Path]:
+    result: list[Path] = []
+    for directory in _CACHE_EVIDENCE_REPORTING_DIRS:
+        result.extend(directory.glob("receipt_*.json"))
+    return result
+
+
+def _cache_receipt_sort_key(path: Path) -> tuple[int, str]:
+    try:
+        return path.stat().st_mtime_ns, str(path)
+    except OSError:
+        return -1, str(path)
+
+
+def _find_current_cache_evidence_receipts(
+        provenance: Mapping[str, object]) -> list[Path]:
+    by_role: dict[str, Path] = {}
+    for path in sorted(
+            _cache_receipt_candidates(), key=_cache_receipt_sort_key):
+        value = _load_json_object(path, "cache evidence receipt")
+        if (
+            value.get("schema_version")
+                != "bioseq-cache-mcp-evidence-receipt-v1"
+            or value.get("source_revision")
+                != provenance["source_revision"]
+            or value.get("source_scope_sha256")
+                != provenance["source_scope_sha256"]
+            or value.get("source_scoped_clean") is not True
+            or value.get("migration_ledger_sha256")
+                != provenance["migration_ledger_sha256"]
+            or value.get("evidence_contract_sha256")
+                != provenance["evidence_contract_sha256"]
+            or value.get("migration_phase")
+                != provenance["migration_phase"]
+        ):
+            continue
+        role = value.get("report_role")
+        executable = value.get("executable")
+        executable_sha256 = value.get("executable_sha256")
+        if (
+            role in set(_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
+            and value.get("mode") == _CACHE_EVIDENCE_MODE_BY_ROLE[role]
+            and isinstance(executable, str)
+            and Path(executable).is_absolute()
+            and Path(executable).name
+                == _CACHE_EVIDENCE_EXECUTABLE_BY_ROLE[role]
+            and isinstance(executable_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", executable_sha256)
+            and value.get("scenario")
+                == _CACHE_EVIDENCE_SCENARIO_BY_ROLE[role]
+        ):
+            _validate_cache_evidence_dso_binding(value)
+            by_role[str(role)] = path
+    required = set(_CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
+    if set(by_role) != required:
+        raise RuntimeError(
+            "current clean source has no exact five-role cache evidence "
+            f"roster; missing={sorted(required - set(by_role))}")
+    return [by_role[role] for role in (
+        "cache-integration",
+        "cache-bioseq-support-integration",
+        "cache-bioseq-production-integration",
+        "cache-bench",
+        "cache-bioseq-bench",
+    )]
+
+
+def _find_current_cache_unit_receipt(
+        provenance: Mapping[str, object]) -> Path:
+    matches: list[Path] = []
+    for path in _CACHE_UNIT_REPORTING_DIR.glob("receipt_*.json"):
+        value = _load_json_object(path, "cache-unit receipt")
+        if (
+            value.get("schema_version")
+                == "bioseq-cache-mcp-unit-receipt-v1"
+            and value.get("mode") == "cache-unit"
+            and value.get("status") == "passed"
+            and value.get("source_revision")
+                == provenance["source_revision"]
+            and value.get("source_scope_sha256")
+                == provenance["source_scope_sha256"]
+            and value.get("source_scoped_clean") is True
+            and value.get("migration_ledger_sha256")
+                == provenance["migration_ledger_sha256"]
+            and value.get("evidence_contract_sha256")
+                == provenance["evidence_contract_sha256"]
+            and value.get("migration_phase")
+                == provenance["migration_phase"]
+        ):
+            matches.append(path)
+    if not matches:
+        raise RuntimeError(
+            "current clean source has no passing cache-unit MCP receipt")
+    return max(matches, key=_cache_receipt_sort_key)
+
+
+def _load_cache_retirement_proof() -> dict[str, object]:
+    value = _load_json_object(
+        _CACHE_RETIREMENT_PROOF, "cache retirement proof")
+    if value.get("schema_version") != "bioseq-cache-retirement-proof-v1":
+        raise RuntimeError("cache retirement proof schema is invalid")
+    return value
+
+
+def _find_proof_cache_receipts(
+        proof: Mapping[str, object]) -> tuple[Path, list[Path]]:
+    unit_sha256 = proof.get("unit_receipt_sha256")
+    report_records = proof.get("reports")
+    if (
+        not isinstance(unit_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", unit_sha256)
+        or not isinstance(report_records, list)
+        or len(report_records) != 5
+    ):
+        raise RuntimeError(
+            "cache retirement proof receipt seals are invalid")
+    expected_reports: dict[str, str] = {}
+    for record in report_records:
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                "cache retirement proof report seal is invalid")
+        role = record.get("report_role")
+        receipt_sha256 = record.get("receipt_sha256")
+        if (
+            role in expected_reports
+            or role not in set(
+                _CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.values())
+            or not isinstance(receipt_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt_sha256)
+        ):
+            raise RuntimeError(
+                "cache retirement proof report roster is invalid")
+        expected_reports[str(role)] = receipt_sha256
+    found_reports: dict[str, Path] = {}
+    for path in _cache_receipt_candidates():
+        digest = _sha256_path(path)
+        for role, expected in expected_reports.items():
+            if digest == expected:
+                if role in found_reports:
+                    raise RuntimeError(
+                        f"duplicate retained proof receipt for {role}")
+                found_reports[role] = path
+    if set(found_reports) != set(expected_reports):
+        raise RuntimeError(
+            "retained proof-ready native report receipts are incomplete")
+    for role, path in found_reports.items():
+        value = _load_json_object(path, "retained cache evidence receipt")
+        if (
+            value.get("schema_version")
+                != "bioseq-cache-mcp-evidence-receipt-v1"
+            or value.get("report_role") != role
+        ):
+            raise RuntimeError(
+                f"retained proof-ready receipt schema/role is invalid: {role}")
+        _validate_cache_evidence_dso_binding(value)
+    unit_matches = [
+        path
+        for path in _CACHE_UNIT_REPORTING_DIR.glob("receipt_*.json")
+        if _sha256_path(path) == unit_sha256
+    ]
+    if len(unit_matches) != 1:
+        raise RuntimeError(
+            "retained proof-ready cache-unit receipt is unavailable "
+            "or ambiguous")
+    return unit_matches[0], [
+        found_reports[role] for role in (
+            "cache-integration",
+            "cache-bioseq-support-integration",
+            "cache-bioseq-production-integration",
+            "cache-bench",
+            "cache-bioseq-bench",
+        )
+    ]
+
+
+def _cache_legacy_inventory_paths() -> list[str]:
+    try:
+        lines = _CACHE_LEGACY_INVENTORY.read_text(
+            encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot read cache legacy inventory: {exc}") from exc
+    if not lines or lines[0] != "legacy_path\tsha256":
+        raise RuntimeError("cache legacy inventory header is invalid")
+    paths: list[str] = []
+    for line in lines[1:]:
+        fields = line.split("\t")
+        if (
+            len(fields) != 2
+            or not fields[0]
+            or not re.fullmatch(r"[0-9a-f]{64}", fields[1])
+        ):
+            raise RuntimeError("cache legacy inventory row is invalid")
+        paths.append(fields[0])
+    if len(paths) != 85 or paths != sorted(set(paths)):
+        raise RuntimeError(
+            "cache legacy inventory must contain 85 sorted unique paths")
+    return paths
+
+
+def _cache_retirement_transition_sha256(
+        proof_revision: str, current_revision: str) -> str:
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", proof_revision)
+        or not re.fullmatch(r"[0-9a-f]{40}", current_revision)
+        or proof_revision == current_revision
+    ):
+        raise RuntimeError(
+            "cache retirement transition revisions are invalid")
+    ancestor = subprocess.run(
+        ["git", "-C", str(WORKSPACE_ROOT), "merge-base",
+         "--is-ancestor", proof_revision, current_revision],
+        capture_output=True,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise RuntimeError(
+            "cache proof revision is not an ancestor of retired source")
+    raw = _cache_git_bytes([
+        "diff", "--name-status", "-z", "--no-renames",
+        proof_revision, current_revision, "--", *_CACHE_SOURCE_SCOPES,
+    ])
+    tokens = raw.split(b"\0")
+    if tokens and tokens[-1] == b"":
+        tokens.pop()
+    if len(tokens) % 2 != 0:
+        raise RuntimeError(
+            "cache retirement Git transition is malformed")
+    actual: dict[str, str] = {}
+    for index in range(0, len(tokens), 2):
+        status = tokens[index].decode("ascii", errors="strict")
+        path = tokens[index + 1].decode("utf-8", errors="strict")
+        if status not in {"A", "M", "D"} or path in actual:
+            raise RuntimeError(
+                "cache retirement Git transition contains unsupported "
+                "or duplicate changes")
+        actual[path] = status
+    expected = {
+        f"main/bioseq_caching/{path}": "D"
+        for path in _cache_legacy_inventory_paths()
+    }
+    expected["main/bioseq_caching/test/legacy_migration_ledger.tsv"] = "M"
+    receipt_path = (
+        "main/bioseq_caching/test/legacy_retirement_receipt.json")
+    receipt_status = actual.get(receipt_path)
+    if receipt_status != "A":
+        raise RuntimeError(
+            "cache retirement transition must add the append-only proof "
+            "receipt")
+    expected[receipt_path] = "A"
+    if actual != expected:
+        missing = sorted(set(expected) - set(actual))
+        unexpected = sorted(set(actual) - set(expected))
+        wrong = sorted(
+            path for path in set(actual) & set(expected)
+            if actual[path] != expected[path])
+        raise RuntimeError(
+            "cache retirement transition is not exact: "
+            f"missing={missing} unexpected={unexpected} wrong={wrong}")
+    material = bytearray(b"bioseq-cache-retirement-transition/v1\n")
+    material += _cache_length_prefix(proof_revision.encode("ascii"))
+    material += _cache_length_prefix(current_revision.encode("ascii"))
+    for path, status in sorted(actual.items()):
+        material += _cache_length_prefix(status.encode("ascii"))
+        material += _cache_length_prefix(path.encode("utf-8"))
+    return hashlib.sha256(material).hexdigest()
+
+
+def _next_cache_retirement_bundle_path(operation: str) -> Path:
+    _CACHE_RETIREMENT_REPORTING_DIR.mkdir(parents=True, exist_ok=True)
+    return _CACHE_RETIREMENT_REPORTING_DIR / (
+        f"gate_{operation}_{time.time_ns()}.json")
+
+
+def _cache_transition_receipt_path(
+        provenance: Mapping[str, object]) -> Path:
+    revision = provenance["source_revision"]
+    if not isinstance(revision, str) or not re.fullmatch(
+            r"[0-9a-f]{40}", revision):
+        raise RuntimeError(
+            "cache transition receipt source revision is invalid")
+    return _CACHE_RETIREMENT_REPORTING_DIR / (
+        f"transition_{revision}.json")
+
+
+def _cache_combined_case_manifest(
+        active_bin_dir: Path) -> Path:
+    path = Path(
+        _cache_native_artifacts(
+            active_bin_dir)["migration_catch_cases"])
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(
+            f"combined cache Catch manifest is unavailable: {path}")
+    return path.resolve(strict=True)
+
+
+def _write_cache_retirement_bundle(
+        operation: str,
+        provenance: Mapping[str, object],
+        unit_receipt: Path,
+        evidence_receipts: list[Path],
+        active_bin_dir: Path,
+        transition_sha256: str = "",
+        proof_unit_receipt: Path | None = None,
+        proof_evidence_receipts: list[Path] | None = None,
+) -> Path:
+    if operation not in {
+            "proof-ready", "retired-transition", "retired-final"}:
+        raise RuntimeError(
+            f"invalid cache retirement operation {operation!r}")
+    bundle = {
+        "schema_version": "bioseq-cache-retirement-gate-input-v1",
+        "phase": operation,
+        "ledger": str(_CACHE_MIGRATION_LEDGER.resolve(strict=True)),
+        "catch_cases":
+            str(_cache_combined_case_manifest(active_bin_dir)),
+        "legacy_root": str(_CACHE_LEGACY_ROOT.resolve(strict=True)),
+        "legacy_inventory":
+            str(_CACHE_LEGACY_INVENTORY.resolve(strict=True)),
+        "proof_receipt": str(_CACHE_RETIREMENT_PROOF.absolute()),
+        "current_source_revision": provenance["source_revision"],
+        "current_source_scope_sha256":
+            provenance["source_scope_sha256"],
+        "current_source_scoped_clean":
+            provenance["source_scoped_clean"],
+        "retirement_transition_sha256": transition_sha256,
+        "unit_receipt": str(unit_receipt.resolve(strict=True)),
+        "evidence_receipts": [
+            str(path.resolve(strict=True)) for path in evidence_receipts],
+        "proof_unit_receipt": (
+            str(proof_unit_receipt.resolve(strict=True))
+            if proof_unit_receipt is not None else ""
+        ),
+        "proof_evidence_receipts": [
+            str(path.resolve(strict=True))
+            for path in (proof_evidence_receipts or [])
+        ],
+        "transition_receipt": (
+            str(
+                _cache_transition_receipt_path(provenance).resolve(
+                    strict=operation == "retired-final"))
+            if operation != "proof-ready"
+            else ""
+        ),
+    }
+    output = _next_cache_retirement_bundle_path(operation)
+    _write_json_atomic(output, bundle)
+    return output
+
+
+def _seal_cache_mode_receipts(
+        mode: str,
+        active_bin_dir: Path,
+        report_files: list[Path],
+        report_invocations: list[list[str]],
+        unit_command_records: list[dict[str, object]],
+        provenance: Mapping[str, object],
+) -> tuple[Path | None, list[Path]]:
+    """Seal the exact native evidence produced by one successful MCP mode."""
+    if mode == "cache-unit":
+        if report_files or report_invocations:
+            raise RuntimeError(
+                "cache-unit unexpectedly produced native report files")
+        return _seal_cache_unit_receipt(
+            active_bin_dir, provenance, unit_command_records), []
+    if unit_command_records:
+        raise RuntimeError(
+            f"{mode} unexpectedly captured cache-unit command identities")
+
+    report_commands = [
+        command for command in MODES[mode].commands
+        if "{report}" in command
+    ]
+    if (
+        len(report_commands) != len(report_files)
+        or len(report_commands) != len(report_invocations)
+    ):
+        raise RuntimeError(
+            f"{mode} cannot bind {len(report_files)} reports and "
+            f"{len(report_invocations)} invocations to its "
+            f"{len(report_commands)} fixed report commands")
+    receipts: list[Path] = []
+    for command, report_path, invocation in zip(
+            report_commands, report_files, report_invocations,
+            strict=True):
+        policy = _run_command_argv(
+            mode,
+            active_bin_dir,
+            command,
+            report_path=report_path,
+        )
+        policy[0] = str(Path(policy[0]).resolve(strict=True))
+        actual = list(invocation)
+        if not actual:
+            raise RuntimeError(
+                f"{mode} captured an empty native report invocation")
+        actual[0] = str(Path(actual[0]).resolve(strict=True))
+        role = _CACHE_EVIDENCE_ROLE_BY_EXECUTABLE.get(
+            Path(actual[0]).name)
+        if role == "cache-bioseq-production-integration":
+            option = "--large-case-timeout-seconds"
+            try:
+                policy_index = policy.index(option)
+                actual_index = actual.index(option)
+                configured_timeout = int(policy[policy_index + 1])
+                actual_timeout = int(actual[actual_index + 1])
+            except (ValueError, IndexError) as exc:
+                raise RuntimeError(
+                    "captured exact-2G invocation has no valid bounded "
+                    "large-case watchdog") from exc
+            if (
+                policy_index != actual_index
+                or actual_timeout <= 0
+                or actual_timeout > configured_timeout
+            ):
+                raise RuntimeError(
+                    "captured exact-2G invocation violates the MCP "
+                    "runtime-budget policy")
+            policy[policy_index + 1] = str(actual_timeout)
+        if actual != policy:
+            raise RuntimeError(
+                f"{mode} captured invocation differs from its fixed "
+                "mode policy")
+        receipts.append(_seal_cache_native_report(
+            mode, active_bin_dir, actual, report_path, provenance))
+    return None, receipts
+
+
+def _run_cache_retirement_lifecycle_gate(
+        mode: str,
+        active_bin_dir: Path,
+        active_build_dir: Path,
+        run_env: dict[str, str],
+        provenance: Mapping[str, object],
+        log_handle,
+        deadline: float,
+) -> dict[str, object] | None:
+    """Run only the fixed lifecycle closure point for the current phase."""
+    phase = provenance["migration_phase"]
+    operation: str | None = None
+    transition_sha256 = ""
+    proof_unit_receipt: Path | None = None
+    proof_evidence_receipts: list[Path] = []
+
+    if mode == "cache-unit" and phase == "retired_with_proof":
+        operation = "retired-transition"
+        proof = _load_cache_retirement_proof()
+        unit_receipt, evidence_receipts = _find_proof_cache_receipts(
+            proof)
+        proof_revision = proof.get("proof_source_revision")
+        if not isinstance(proof_revision, str):
+            raise RuntimeError(
+                "cache retirement proof has no source revision")
+        transition_sha256 = _cache_retirement_transition_sha256(
+            proof_revision, str(provenance["source_revision"]))
+    elif mode == "cache-bioseq-bench" and phase in {
+            "passing", "retired_with_proof"}:
+        unit_receipt = _find_current_cache_unit_receipt(provenance)
+        evidence_receipts = _find_current_cache_evidence_receipts(
+            provenance)
+        if phase == "passing":
+            operation = "proof-ready"
+        else:
+            operation = "retired-final"
+            proof = _load_cache_retirement_proof()
+            (
+                proof_unit_receipt,
+                proof_evidence_receipts,
+            ) = _find_proof_cache_receipts(proof)
+            proof_revision = proof.get("proof_source_revision")
+            if not isinstance(proof_revision, str):
+                raise RuntimeError(
+                    "cache retirement proof has no source revision")
+            transition_sha256 = _cache_retirement_transition_sha256(
+                proof_revision, str(provenance["source_revision"]))
+    else:
+        return None
+
+    bundle = _write_cache_retirement_bundle(
+        operation,
+        provenance,
+        unit_receipt,
+        evidence_receipts,
+        active_bin_dir,
+        transition_sha256,
+        proof_unit_receipt,
+        proof_evidence_receipts,
+    )
+    gate = Path(_cache_native_artifacts(
+        active_bin_dir)["legacy_retirement_gate"])
+    gate_command = [str(gate), "--bundle", str(bundle)]
+    _update_entry(
+        mode,
+        step=f"running cache retirement gate {operation}",
+        cache_retirement_gate_operation=operation,
+        cache_retirement_gate_bundle=str(bundle),
+    )
+    with _verified_native_command_execution(gate_command) as (
+            gate_identity, verified_executable):
+        rc = _stream_subprocess(
+            gate_command,
+            log_handle,
+            deadline,
+            cwd=active_build_dir,
+            env=run_env,
+            verified_executable=verified_executable,
+        )
+    if _stable_native_command_identity(
+            gate_command) != gate_identity:
+        raise RuntimeError(
+            "cache retirement gate executable identity changed during "
+            f"{operation}")
+    if rc != 0:
+        raise RuntimeError(
+            f"cache retirement gate {operation} exited with code {rc}")
+    proof_path = _CACHE_RETIREMENT_PROOF.resolve(strict=True)
+    return {
+        "operation": operation,
+        "bundle": str(bundle.resolve(strict=True)),
+        "proof_receipt": str(proof_path),
+        "proof_receipt_sha256": _sha256_path(proof_path),
+        "retirement_transition_sha256": transition_sha256,
+        "gate_executable": gate_identity["executable"],
+        "gate_executable_sha256":
+            gate_identity["executable_sha256"],
+    }
+
+
+def _next_report_path(reporting_dir: Path) -> Path:
+    """Reserve the next deterministic report name without creating the file."""
+    reporting_dir.mkdir(parents=True, exist_ok=True)
+    ordinals = [
+        _report_index(path.name)
+        for path in _report_paths(reporting_dir)
+    ]
+    next_ordinal = max(ordinals, default=-1) + 1
+    return reporting_dir / f"report_{next_ordinal}.json"
+
+
+def _require_allocated_command_report(
+        mode: str, command: List[str], report_path: Path) -> None:
+    """Fail closed unless one native command published its exact receipt."""
+    try:
+        metadata = report_path.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            f"{mode} command {command[0]!r} completed without publishing "
+            f"its allocated regular JSON report: {report_path}"
+        ) from exc
+    if report_path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(
+            f"{mode} command {command[0]!r} did not publish its allocated "
+            f"path as a regular non-symlink JSON report: {report_path}")
+
+
+def _cache_apply_runtime_budget(
+        mode: str, argv: list[str], deadline: float,
+        *, now: float | None = None) -> list[str]:
+    """Reserve bounded in-run time for watchdog cleanup/report publication."""
+    if (
+        mode != "cache-bioseq-integration"
+        or not argv
+        or Path(argv[0]).name
+            != "bioseq_cache_bioseq_production_integration_tests"
+        or not math.isfinite(deadline)
+    ):
+        return argv
+    current_time = time.time() if now is None else now
+    usable_seconds = math.floor(
+        deadline - CACHE_EXACT2G_FINALIZATION_RESERVE_SEC - current_time)
+    if usable_seconds <= 0:
+        raise TimeoutError(
+            "cache-bioseq-integration has no remaining execution budget "
+            "before its cleanup/report reserve")
+    try:
+        option = argv.index("--large-case-timeout-seconds")
+        configured = int(argv[option + 1])
+    except (ValueError, IndexError) as exc:
+        raise RuntimeError(
+            "exact-2G command has no valid large-case watchdog") from exc
+    bounded = min(configured, usable_seconds)
+    if bounded <= 0:
+        raise TimeoutError(
+            "exact-2G watchdog budget is exhausted")
+    result = list(argv)
+    result[option + 1] = str(bounded)
+    return result
+
+
+def _validate_failed_cache_terminal_report(report_path: Path) -> None:
+    """A timed/failed runner may fail, but never retain owned resources."""
+    value = _load_json_object(
+        report_path, "failed cache integration terminal report")
+    if value.get("schema_version") != "bioseq-cache-test-v2":
+        raise RuntimeError(
+            "failed cache integration has no v2 terminal report")
+    cleanup = value.get("cleanup")
+    observations = value.get("cleanup_observations")
+    cluster = value.get("cluster_configuration")
+    if (
+        not isinstance(cleanup, dict)
+        or cleanup.get("succeeded") is not True
+        or not isinstance(observations, list)
+        or not observations
+        or any(
+            not isinstance(observation, dict)
+            or observation.get("succeeded") is not True
+            for observation in observations
+        )
+        or not isinstance(cluster, dict)
+        or cluster.get("retained-supervision-state") != "none"
+    ):
+        raise RuntimeError(
+            "failed cache integration terminal report does not prove "
+            "successful cleanup and zero retained supervision state")
+    cleanup_roots = _cache_cleanup_root_contracts(observations)
+    lexical_cleanup_roots = [
+        Path(root) for root in cleanup_roots
+    ]
+    _require_cache_cleanup_roots_absent(
+        lexical_cleanup_roots,
+        "failed cache integration cleanup root",
+    )
+    _require_cache_cleanup_roots_absent(
+        lexical_cleanup_roots,
+        "failed cache integration cleanup root before acceptance",
+    )
+
+
+def _native_executable_identity(
+        metadata: os.stat_result,
+) -> tuple[int, ...]:
+    # Access time is intentionally omitted because hashing/execution may
+    # update it. The execution snapshot is a separate inode, so source link
+    # count and ctime remain authoritative retained-handle metadata.
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _sha256_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
+def _open_native_command_identity(
+        argv: list[str],
+) -> tuple[int, dict[str, object]]:
+    if not argv:
+        raise RuntimeError("native command invocation is empty")
+    requested = Path(argv[0])
+    try:
+        requested_status = requested.lstat()
+        resolved = requested.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"native command executable is unavailable: {requested}"
+        ) from exc
+    if requested.is_symlink() or not stat.S_ISREG(requested_status.st_mode):
+        raise RuntimeError(
+            "native command executable is not a regular non-symlink file: "
+            f"{requested}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(resolved), flags)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot open native command executable: {resolved}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError(
+                f"native command executable is not regular: {resolved}")
+        digest = _sha256_descriptor(descriptor)
+        after = os.fstat(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    identity = _native_executable_identity(before)
+    if identity != _native_executable_identity(after):
+        os.close(descriptor)
+        raise RuntimeError(
+            "native command executable changed while it was hashed: "
+            f"{resolved}")
+    return descriptor, {
+        "executable": str(resolved),
+        "executable_sha256": digest,
+        "arguments": list(argv[1:]),
+        "_identity": identity,
+    }
+
+
+def _stable_native_command_identity(
+        argv: list[str]) -> dict[str, object]:
+    descriptor, result = _open_native_command_identity(argv)
+    os.close(descriptor)
+    return result
+
+
+def _copy_descriptor_exact(
+        source_descriptor: int,
+        destination_descriptor: int,
+) -> None:
+    offset = 0
+    while True:
+        chunk = os.pread(
+            source_descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        written = 0
+        while written < len(chunk):
+            count = os.write(
+                destination_descriptor, chunk[written:])
+            if count <= 0:
+                raise RuntimeError(
+                    "short write while creating verified native "
+                    "execution snapshot")
+            written += count
+        offset += len(chunk)
+
+
+def _verified_native_execution_snapshot(
+        executable: Path,
+        source_descriptor: int,
+        expected_sha256: str,
+) -> tuple[Path, int, tuple[int, ...]]:
+    # Darwin intentionally has no fexecve/execveat and rejects execve on
+    # /dev/fd.  A private byte snapshot in the same directory preserves
+    # @executable_path/$ORIGIN semantics while binding the launched bytes to
+    # the retained source FD.  This closes concurrent build/output mutation of
+    # the source path; it is not a security boundary against a malicious
+    # same-UID process that actively hunts and replaces random snapshot names.
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    for _attempt in range(32):
+        candidate = executable.with_name(
+            ".bioseq-verified-exec-"
+            f"{os.getpid()}-{secrets.token_hex(12)}")
+        try:
+            creator_descriptor = os.open(
+                candidate, flags, 0o700)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise RuntimeError(
+                "cannot create verified native execution snapshot beside "
+                f"{executable}: {exc}") from exc
+        retained_descriptor: int | None = None
+        try:
+            _copy_descriptor_exact(
+                source_descriptor, creator_descriptor)
+            os.fchmod(creator_descriptor, 0o500)
+            os.fsync(creator_descriptor)
+            directory_flags = os.O_RDONLY
+            directory_flags |= getattr(os, "O_DIRECTORY", 0)
+            directory_descriptor = os.open(
+                str(candidate.parent), directory_flags)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+            snapshot_status = os.fstat(creator_descriptor)
+            path_status = candidate.lstat()
+            snapshot_identity = _native_executable_identity(
+                snapshot_status)
+            if (
+                candidate.is_symlink()
+                or not stat.S_ISREG(snapshot_status.st_mode)
+                or _native_executable_identity(path_status)
+                    != snapshot_identity
+                or _sha256_descriptor(source_descriptor)
+                    != expected_sha256
+                or _sha256_descriptor(creator_descriptor)
+                    != expected_sha256
+                or _sha256_path(candidate) != expected_sha256
+            ):
+                raise RuntimeError(
+                    "native executable changed while its verified byte "
+                    f"snapshot was created: {executable}")
+            os.close(creator_descriptor)
+            creator_descriptor = None
+            retained_flags = os.O_RDONLY
+            retained_flags |= getattr(os, "O_CLOEXEC", 0)
+            retained_flags |= getattr(os, "O_NOFOLLOW", 0)
+            retained_descriptor = os.open(
+                candidate, retained_flags)
+            retained_status = os.fstat(retained_descriptor)
+            if (
+                _native_executable_identity(retained_status)
+                    != snapshot_identity
+                or _sha256_descriptor(retained_descriptor)
+                    != expected_sha256
+                or (
+                    fcntl.fcntl(retained_descriptor, fcntl.F_GETFL)
+                    & os.O_ACCMODE
+                ) != os.O_RDONLY
+            ):
+                raise RuntimeError(
+                    "verified native execution snapshot could not be "
+                    "retained read-only")
+            result_descriptor = retained_descriptor
+            retained_descriptor = None
+            return candidate, result_descriptor, snapshot_identity
+        except BaseException:
+            if retained_descriptor is not None:
+                os.close(retained_descriptor)
+            if creator_descriptor is not None:
+                os.close(creator_descriptor)
+            with contextlib.suppress(OSError):
+                candidate.unlink()
+            raise
+    raise RuntimeError(
+        "cannot allocate a unique verified native execution snapshot "
+        f"beside {executable}")
+
+
+def _remove_verified_native_execution_snapshot(
+        snapshot: Path,
+) -> None:
+    try:
+        snapshot.unlink()
+    except FileNotFoundError:
+        # The desired terminal state is absence. Reconcile it below using
+        # component-wise no-follow inspection rather than suppressing an
+        # arbitrary unlink failure.
+        pass
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot remove verified native execution snapshot "
+            f"{snapshot}: {exc}") from exc
+    _require_absent_nofollow_path(
+        snapshot,
+        "verified native execution snapshot after cleanup",
+    )
+
+
+@contextlib.contextmanager
+def _verified_native_command_execution(
+        argv: list[str],
+):
+    descriptor, record = _open_native_command_identity(argv)
+    executable = Path(str(record["executable"]))
+    identity = record["_identity"]
+    executable_sha256 = record["executable_sha256"]
+    if (
+        not isinstance(identity, tuple)
+        or not isinstance(executable_sha256, str)
+    ):
+        os.close(descriptor)
+        raise RuntimeError(
+            "native executable retained identity is invalid")
+    snapshot: Path | None = None
+    snapshot_descriptor: int | None = None
+    snapshot_identity: tuple[int, ...] | None = None
+    try:
+        (
+            snapshot,
+            snapshot_descriptor,
+            snapshot_identity,
+        ) = _verified_native_execution_snapshot(
+            executable, descriptor, executable_sha256)
+        yield record, snapshot
+        if (
+            _native_executable_identity(os.fstat(descriptor))
+                != identity
+            or _sha256_descriptor(descriptor) != executable_sha256
+            or _native_executable_identity(
+                os.fstat(snapshot_descriptor))
+                != snapshot_identity
+            or _sha256_descriptor(snapshot_descriptor)
+                != executable_sha256
+            or _native_executable_identity(snapshot.lstat())
+                != snapshot_identity
+            or _sha256_path(snapshot) != executable_sha256
+        ):
+            raise RuntimeError(
+                "native executable changed while its verified handle "
+                f"was executing: {executable}")
+    finally:
+        try:
+            if snapshot_descriptor is not None:
+                os.close(snapshot_descriptor)
+            if snapshot is not None:
+                _remove_verified_native_execution_snapshot(
+                    snapshot)
+        finally:
+            os.close(descriptor)
+
+
+def _run_mode_commands(
+        mode: str,
+        active_bin_dir: Path,
+        active_build_dir: Path,
+        run_env: dict[str, str],
+        log_handle,
+        deadline: float,
+        pre_reports: set[Path],
+        bench_flags=None,
+        test_flags=None,
+) -> tuple[
+    Path | None,
+    list[Path],
+    list[list[str]],
+    list[dict[str, object]],
+]:
+    """Run configured commands and persist every ordered report receipt."""
+    mode_details = MODES[mode]
+    expected_report_count = sum(
+        1 for command in mode_details.commands if "{report}" in command)
+    command_report_files: list[Path] = []
+    command_report_invocations: list[list[str]] = []
+    unit_command_records: list[dict[str, object]] = []
+
+    for command in mode_details.commands:
+        # MODES.commands store binary BASENAMES; resolve against the active
+        # build's bin dir (DOC0270). Args after the first slot are passed
+        # through verbatim.
+        command_report_path = (
+            _next_report_path(mode_details.reporting_dir)
+            if "{report}" in command else None
+        )
+        full_command = _run_command_argv(
+            mode,
+            active_bin_dir,
+            command,
+            bench_flags=bench_flags,
+            test_flags=test_flags,
+            report_path=command_report_path,
+        )
+        full_command = _cache_apply_runtime_budget(
+            mode, full_command, deadline)
+        unit_command_before: dict[str, object] | None = None
+        if mode == "cache-unit":
+            with _verified_native_command_execution(
+                    full_command) as (
+                        unit_command_before,
+                        verified_executable,
+                    ):
+                rc = _stream_subprocess(
+                    full_command,
+                    log_handle,
+                    deadline,
+                    cwd=active_build_dir,
+                    env=run_env,
+                    verified_executable=verified_executable,
+                )
+        else:
+            try:
+                rc = _stream_subprocess(
+                    full_command,
+                    log_handle,
+                    deadline,
+                    cwd=active_build_dir,
+                    env=run_env,
+                )
+            except TimeoutError:
+                if (
+                    mode in {
+                        "cache-integration",
+                        "cache-bioseq-integration",
+                    }
+                    and command_report_path is not None
+                ):
+                    _require_allocated_command_report(
+                        mode, command, command_report_path)
+                    _validate_failed_cache_terminal_report(
+                        command_report_path)
+                raise
+        if unit_command_before is not None:
+            unit_command_after = _stable_native_command_identity(
+                full_command)
+            if unit_command_after != unit_command_before:
+                raise RuntimeError(
+                    "cache-unit executable identity changed during its "
+                    f"native command: {full_command[0]}")
+            unit_command_records.append(unit_command_before)
+
+        if command_report_path is not None:
+            _require_allocated_command_report(
+                mode, command, command_report_path)
+            command_report_files.append(command_report_path)
+            command_report_invocations.append(list(full_command))
+            ordered_receipts = [
+                str(path) for path in command_report_files
+            ]
+            _update_entry(
+                mode,
+                report_file=ordered_receipts[-1],
+                report_files=ordered_receipts,
+            )
+
+        if rc != 0:
+            if (
+                mode == "cache-bioseq-integration"
+                and command_report_path is not None
+            ):
+                _validate_failed_cache_terminal_report(
+                    command_report_path)
+            # Bench exits non-zero when regression rules are violated
+            # (exit code 2) — the report is still a valid receipt, so this is
+            # a "completed with violations" outcome rather than a worker
+            # failure. The console log already explains the violations.
+            if (
+                mode_details.is_bench_mode
+                and rc == 2
+                and mode not in _CACHE_RECEIPT_MODES
+            ):
+                _log(
+                    f"bench reported regression violations (exit {rc}); "
+                    "treating as completed-with-violations")
+                break
+            raise RuntimeError(
+                f"run failed with exit code {rc}: {' '.join(command)}")
+
+    if expected_report_count:
+        if len(command_report_files) != expected_report_count:
+            raise RuntimeError(
+                f"{mode} published {len(command_report_files)} ordered "
+                "command reports, but its command contract requires exactly "
+                f"{expected_report_count}")
+        return (
+            command_report_files[-1],
+            command_report_files,
+            command_report_invocations,
+            unit_command_records,
+        )
+
+    report_path = (
+        _newest_report(pre_reports, mode)
+        if mode_details.reporting_subdir_name else None
+    )
+    if mode_details.reporting_subdir_name and report_path is None:
+        raise RuntimeError(
+            f"{mode} completed without publishing its required native "
+            "JSON report")
+    return (
+        report_path,
+        ([report_path] if report_path is not None else []),
+        [],
+        unit_command_records,
     )
 
 
@@ -3964,11 +7698,60 @@ def _run_sql_guardrail_promotion(
 
 def _run_command_argv(mode: str, active_bin_dir: Path,
                       command: List[str], bench_flags=None,
-                      test_flags=None) -> List[str]:
+                      test_flags=None,
+                      report_path: Path | None = None) -> List[str]:
     """Resolve one configured command and apply its mode-scoped arguments."""
     if not command:
         raise ValueError("configured run command may not be empty")
-    full_command = [str(active_bin_dir / command[0]), *command[1:]]
+    if Path(command[0]).suffix.lower() in {".py", ".pl", ".pm"}:
+        raise ValueError(
+            f"cache/build mode runner must be native: {command[0]}")
+
+    artifact_values: dict[str, str] | None = None
+    resolved_arguments: list[str] = []
+    for argument in command[1:]:
+        if argument == "{report}":
+            if report_path is None:
+                raise ValueError(
+                    f"mode {mode!r} requires a generated report path")
+            resolved_arguments.append(str(report_path))
+            continue
+        if argument.startswith("{") and argument.endswith("}"):
+            key = argument[1:-1]
+            if key not in _CACHE_NATIVE_ARTIFACT_KEYS:
+                raise ValueError(
+                    f"unknown native cache command placeholder: {argument}")
+            if artifact_values is None:
+                artifact_values = _cache_native_artifacts(active_bin_dir)
+            value = artifact_values[key]
+            if not value:
+                raise RuntimeError(
+                    f"native cache artifact {key!r} is unavailable in "
+                    f"the {mode!r} build tree")
+            artifact_path = Path(value)
+            directory_key = key.endswith(
+                ("_postgres_bin_dir", "_postgres_stage_root"))
+            usable = (
+                artifact_path.is_dir()
+                if directory_key
+                else artifact_path.is_file()
+            )
+            if not usable:
+                expected_kind = (
+                    "directory" if directory_key
+                    else "file"
+                )
+                raise RuntimeError(
+                    f"native cache artifact {key!r} is not a usable "
+                    f"{expected_kind}: {artifact_path}")
+            resolved_arguments.append(value)
+            continue
+        resolved_arguments.append(argument)
+
+    full_command = [
+        str(active_bin_dir / command[0]),
+        *resolved_arguments,
+    ]
     if MODES[mode].is_bench_mode and bench_flags:
         full_command += list(bench_flags)
     elif mode == "unit+integration" and test_flags:
@@ -3991,7 +7774,9 @@ _POSTGRES_ERROR_SAFETY_PATH_CACHE_KEYS = frozenset({
 
 
 def _postgres_error_safety_cache_contract(
-        preset: str) -> dict[str, str]:
+        preset: str,
+        *,
+        environment: Mapping[str, str] | None = None) -> dict[str, str]:
     common = {
         "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE":
             str(POSTGRES_ERROR_SAFETY_CASE_TEMPLATE),
@@ -4000,7 +7785,10 @@ def _postgres_error_safety_cache_contract(
         "BIOSEQ_BUILD_WEBSITE": "OFF",
     }
     common.update(_cmake_preset_cache_contract(
-        preset, ("PostgreSQL_CONFIG",)))
+        preset,
+        ("PostgreSQL_CONFIG",),
+        environment=environment,
+    ))
     if preset == POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET:
         return {
             "BIOSEQ_BUILD_TESTS": "ON",
@@ -4085,15 +7873,40 @@ def _checked_postgres_error_safety_case_template() -> Path:
 def _configure_postgres_error_safety_tree(
         preset: str, build_dir: Path, log_handle, deadline: float,
         env: dict[str, str], rt_priority: int | None) -> None:
-    expected_cache = _postgres_error_safety_cache_contract(preset)
+    expected_cache = _postgres_error_safety_cache_contract(
+        preset,
+        environment=env,
+    )
+    initial_clang_rt_args = _initial_clang_rt_cmake_args(
+        preset,
+        rt_priority,
+    )
+    cmake_identity = _cmake_executable_identity(env)
+    configure_stamp = _cmake_configure_stamp_document(
+        preset,
+        mode_cache_variables=expected_cache,
+        managed_arguments=initial_clang_rt_args,
+        environment=env,
+        cmake_executable_identity=cmake_identity,
+    )
     build_ninja = build_dir / "build.ninja"
-    if not build_ninja.exists() and (build_dir / "CMakeCache.txt").exists():
-        _clear_cmake_configure_cache(
-            build_dir,
-            log_handle,
-            "previous PostgreSQL error-safety configure did not produce "
-            "build.ninja",
-        )
+    configured_fresh = _ensure_cmake_preset_tree_fresh(
+        build_dir=build_dir,
+        preset=preset,
+        configure_stamp=configure_stamp,
+        configure_arguments=[
+            "cmake",
+            "--preset",
+            preset,
+            *(f"-D{key}={value}"
+              for key, value in expected_cache.items()),
+            *initial_clang_rt_args,
+        ],
+        log_handle=log_handle,
+        deadline=deadline,
+        environment=env,
+        failure_label=f"configure of preset {preset!r}",
+    )
 
     repairs = {
         key: expected
@@ -4104,12 +7917,12 @@ def _configure_postgres_error_safety_tree(
     postgresql_reset_args = _postgresql_discovery_cache_reset_args(
         build_dir,
         preset,
+        environment=env,
     )
     clang_rt_repairs, clang_rt_reasons = _clang_rt_cmake_cache_repairs(
         build_dir, preset, rt_priority)
     if (
-        not build_ninja.exists()
-        or repairs
+        repairs
         or postgresql_reset_args
         or clang_rt_repairs
     ):
@@ -4125,16 +7938,12 @@ def _configure_postgres_error_safety_tree(
                 + "; ".join(clang_rt_reasons)
                 + ".\n")
         log_handle.flush()
-        configure_cache = (
-            dict(expected_cache)
-            if not build_ninja.exists()
-            else dict(repairs)
-        )
+        configure_cache = dict(repairs)
         if postgresql_reset_args:
             configure_cache["PostgreSQL_CONFIG"] = expected_cache[
                 "PostgreSQL_CONFIG"
             ]
-        rc = _stream_subprocess(
+        rc = _run_cmake_preset_configure(
             [
                 "cmake",
                 "--preset",
@@ -4142,18 +7951,18 @@ def _configure_postgres_error_safety_tree(
                 *postgresql_reset_args,
                 *(f"-D{key}={value}"
                   for key, value in configure_cache.items()),
-                *_initial_clang_rt_cmake_args(preset, rt_priority),
+                *initial_clang_rt_args,
                 *clang_rt_repairs,
             ],
-            log_handle,
-            deadline,
-            cwd=PROJECT_ROOT,
-            env=env,
+            build_dir=build_dir,
+            log_handle=log_handle,
+            deadline=deadline,
+            environment=env,
         )
         if rc != 0:
             raise RuntimeError(
                 f"configure of preset {preset!r} exited with code {rc}")
-    else:
+    elif not configured_fresh:
         log_handle.write(
             f"# build tree already configured ({build_ninja}); all "
             "PostgreSQL error-safety cache invariants are correct.\n")
@@ -4172,6 +7981,23 @@ def _configure_postgres_error_safety_tree(
         raise RuntimeError(
             "PostgreSQL error-safety cache invariant failed closed for "
             f"preset {preset!r}: {', '.join(failed_invariants)}")
+    final_configure_stamp = _cmake_configure_stamp_document(
+        preset,
+        mode_cache_variables=expected_cache,
+        managed_arguments=initial_clang_rt_args,
+        environment=env,
+        cmake_executable_identity=_cmake_executable_identity(env),
+    )
+    configure_seal = _finalize_cmake_configure_stamp(
+        build_dir,
+        configure_stamp,
+        final_configure_stamp,
+        context=f"PostgreSQL error-safety preset {preset!r}",
+    )
+    log_handle.write(
+        "# verified CMake configure input seal="
+        f"{configure_seal}.\n")
+    log_handle.flush()
 
 
 def _resolve_postgres_error_safety_dso(build_dir: Path) -> Path:
@@ -4517,6 +8343,10 @@ def _run_postgres_error_safety_worker(
                 str(qualification_report)
                 if qualification_report is not None else None
             ),
+            report_files=(
+                [str(qualification_report)]
+                if qualification_report is not None else []
+            ),
             build_only=build_only,
             debug=False,
         )
@@ -4553,6 +8383,89 @@ def _run_postgres_error_safety_worker(
             debug=False,
         )
         log_handle.write(f"\n# worker failed: {exc}\n")
+        return 1
+    finally:
+        log_handle.close()
+
+
+def _run_package_linux_worker(entry: Mapping[str, object]) -> int:
+    """Run the fixed local package qualifier outside the CMake mode path."""
+    mode = PACKAGE_LINUX_MODE
+    started_at = float(entry["started_at"])
+    deadline = started_at + min(
+        HARD_TIMEOUT_SEC,
+        float(MODES[mode].hard_timeout_min or HARD_TIMEOUT_MIN) * 60.0,
+    )
+    log_path = Path(str(entry["log_file"]))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("w", buffering=1)
+    log_handle.write(
+        f"# bioseq package worker — mode={mode} pid={os.getpid()} "
+        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
+        f"# project_root={PROJECT_ROOT}\n"
+        f"# package_state_root={PROJECT_ROOT / 'build' / mode}\n"
+        "# profile=debian:trixie postgresql=17 architecture=arm64\n"
+    )
+    log_handle.flush()
+
+    def progress(step: str) -> None:
+        _update_entry(mode, step=step)
+        log_handle.write(f"# step={step}\n")
+        log_handle.flush()
+
+    try:
+        result = package_linux.run_package_linux(
+            project_root=PROJECT_ROOT,
+            workspace_root=WORKSPACE_ROOT,
+            log_handle=log_handle,
+            deadline=deadline,
+            progress=progress,
+        )
+        completed_at = time.time()
+        receipt = str(result["receipt_path"])
+        _update_entry(
+            mode,
+            status="completed",
+            step="completed",
+            completed_at=completed_at,
+            exit_code=0,
+            report_file=receipt,
+            report_files=[receipt],
+            package_linux_qualification=dict(result),
+            build_only=False,
+            debug=False,
+        )
+        log_handle.write(
+            "# package qualification completed: "
+            + json.dumps(result, sort_keys=True) + "\n")
+        return 0
+    except TimeoutError as exc:
+        completed_at = time.time()
+        _update_entry(
+            mode,
+            status="killed_timeout",
+            step="killed_timeout",
+            completed_at=completed_at,
+            exit_code=None,
+            notes=str(exc),
+            build_only=False,
+            debug=False,
+        )
+        log_handle.write(f"# package qualification timed out: {exc}\n")
+        return 124
+    except Exception as exc:
+        completed_at = time.time()
+        _update_entry(
+            mode,
+            status="failed",
+            step="failed",
+            completed_at=completed_at,
+            exit_code=None,
+            notes=str(exc),
+            build_only=False,
+            debug=False,
+        )
+        log_handle.write(f"# package qualification failed: {exc}\n")
         return 1
     finally:
         log_handle.close()
@@ -4602,6 +8515,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
     if not entry:
         _log(f"worker for {mode}: no state entry, exiting")
         return 1
+    if mode == PACKAGE_LINUX_MODE:
+        if (
+            build_only or debug or bench_flags or test_flags
+            or bench_e2e_config or sql_guardrail_request_json
+            or postgres_error_safety_review_waiver_json
+        ):
+            _log("package-linux worker received forbidden variable inputs")
+            return 1
+        return _run_package_linux_worker(entry)
     if mode == POSTGRES_ERROR_SAFETY_MODE:
         return _run_postgres_error_safety_worker(
             entry,
@@ -4618,9 +8540,18 @@ def _run_build_worker(mode: str, build_only: bool = False,
             "postgres-error-safety mode")
         return 1
 
+    mode_details = MODES[mode]
     started_at = float(entry["started_at"])
     log_path = Path(entry["log_file"])
-    deadline = started_at + HARD_TIMEOUT_SEC
+    mode_timeout_sec = (
+        HARD_TIMEOUT_SEC
+        if mode_details.hard_timeout_min is None
+        else min(
+            HARD_TIMEOUT_SEC,
+            mode_details.hard_timeout_min * 60.0,
+        )
+    )
+    deadline = started_at + mode_timeout_sec
 
     active_preset = preset_for(mode, debug)
     active_build_dir = build_dir_for(mode, debug)
@@ -4643,20 +8574,25 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# postgres_error_safety_review_waiver_snapshot="
         f"{_sha256_bytes((postgres_error_safety_review_waiver_json or '').encode())}\n"
         f"# clang_rt_priority={entry.get('rt_priority')}\n"
-        f"# hard_timeout_min={HARD_TIMEOUT_MIN}\n"
+        f"# hard_timeout_min={mode_timeout_sec / 60.0}\n"
     )
     log_handle.flush()
 
-    mode_details = MODES[mode]
     if mode_details.uses_private_cluster and mode_details.install_extension:
         raise AssertionError(
             "private-cluster mode reached shared extension install routing")
 
     pre_reports: set[Path] = set()
-    if mode_details.is_bench_mode and mode_details.reporting_dir.exists():
+    if (mode_details.reporting_subdir_name
+            and mode_details.reporting_dir.exists()):
         pre_reports = _report_paths(mode_details.reporting_dir)
 
     try:
+        # Bind qualification to the source that enters configure/build, then
+        # compare again after every native command. Development runs in
+        # mapped/mixed phases remain usable from a dirty tree.
+        cache_provenance_before = _cache_qualification_provenance(
+            mode, build_only)
         sql_guardrail_workflow = None
         if sql_guardrail_request_json:
             try:
@@ -4697,6 +8633,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 completed_at=completed_at,
                 exit_code=0,
                 report_file=None,
+                report_files=[],
                 sql_guardrail_workflow=workflow_evidence,
                 build_only=False,
                 debug=debug,
@@ -4738,17 +8675,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
                       preset_family=mode_details.preset_family,
                       binary_subdir=mode_details.binary_subdir,
                       uses_private_cluster=mode_details.uses_private_cluster)
-        # Only run the (expensive) configure when the tree isn't configured yet.
-        # Re-running `cmake --preset` on an already-configured C++-modules tree
-        # regenerates the Ninja dyndep/modmap graph and invalidates EVERY module
-        # TU across all targets (~219 edges here vs ~34 for a true incremental),
-        # turning every run into a full rebuild that cannot finish inside the
-        # hard timeout. Ninja still auto-reconfigures via its RERUN_CMAKE rule
-        # when CMakeLists / cache / vcpkg manifest actually change, so a later
-        # `cmake --build` still picks up genuine configuration changes.
+        # Configure an existing C++-modules tree only when its sealed effective
+        # preset inputs changed. CMakePresets.json is not part of Ninja's
+        # RERUN_CMAKE dependency graph, so relying on build.ninja alone can
+        # silently retain stale include/toolchain cache values. Conversely,
+        # configuring every run regenerates all module dyndep/modmap edges.
         required_cache = mode_details.required_cache_variables or {}
         preset_cache_contract = _cmake_preset_cache_contract(
-            active_preset, ("PostgreSQL_CONFIG",))
+            active_preset,
+            ("PostgreSQL_CONFIG",),
+            environment=env,
+        )
         configure_cache_contract = {
             **required_cache,
             **preset_cache_contract,
@@ -4759,52 +8696,64 @@ def _run_build_worker(mode: str, build_only: bool = False,
         ]
         initial_clang_rt_args = _initial_clang_rt_cmake_args(
             active_preset, machine_rt_priority)
+        cmake_identity = _cmake_executable_identity(env)
+        configure_stamp = _cmake_configure_stamp_document(
+            active_preset,
+            mode_cache_variables=configure_cache_contract,
+            managed_arguments=initial_clang_rt_args,
+            environment=env,
+            cmake_executable_identity=cmake_identity,
+        )
         build_ninja = active_build_dir / "build.ninja"
+        configured_fresh = _ensure_cmake_preset_tree_fresh(
+            build_dir=active_build_dir,
+            preset=active_preset,
+            configure_stamp=configure_stamp,
+            configure_arguments=[
+                "cmake",
+                "--preset",
+                active_preset,
+                *required_cache_args,
+                *initial_clang_rt_args,
+            ],
+            log_handle=log_handle,
+            deadline=deadline,
+            environment=env,
+        )
         expected_test_indexes = mode_details.preset_family == "test"
-        if not build_ninja.exists():
-            if (active_build_dir / "CMakeCache.txt").exists():
-                _clear_cmake_configure_cache(
-                    active_build_dir,
-                    log_handle,
-                    "previous configure did not produce build.ninja",
-                )
-            rc = _stream_subprocess(
-                ["cmake", "--preset", active_preset, *required_cache_args,
-                 *initial_clang_rt_args],
-                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+        cached_test_indexes = _cmake_cache_bool(
+            active_build_dir, "BIOSEQ_TEST_INDEXES")
+        if cached_test_indexes != expected_test_indexes:
+            expected_text = "ON" if expected_test_indexes else "OFF"
+            observed_text = (
+                "missing/invalid"
+                if cached_test_indexes is None
+                else ("ON" if cached_test_indexes else "OFF")
+            )
+            log_handle.write(
+                "# BIOSEQ_TEST_INDEXES cache invariant mismatch: "
+                f"expected={expected_text} observed={observed_text}; "
+                f"reconfiguring with preset {active_preset}.\n")
+            log_handle.flush()
+            rc = _run_cmake_preset_configure(
+                ["cmake", "--preset", active_preset,
+                 *required_cache_args, *initial_clang_rt_args],
+                build_dir=active_build_dir,
+                log_handle=log_handle,
+                deadline=deadline,
+                environment=env,
             )
             if rc != 0:
-                raise RuntimeError(f"cmake configure exited with code {rc}")
+                raise RuntimeError(
+                    "CMake hook-isolation repair exited with code "
+                    f"{rc}")
         else:
-            cached_test_indexes = _cmake_cache_bool(
-                active_build_dir, "BIOSEQ_TEST_INDEXES")
-            if cached_test_indexes != expected_test_indexes:
-                expected_text = "ON" if expected_test_indexes else "OFF"
-                observed_text = (
-                    "missing/invalid"
-                    if cached_test_indexes is None
-                    else ("ON" if cached_test_indexes else "OFF")
-                )
-                log_handle.write(
-                    "# BIOSEQ_TEST_INDEXES cache invariant mismatch: "
-                    f"expected={expected_text} observed={observed_text}; "
-                    f"reconfiguring with preset {active_preset}.\n")
-                log_handle.flush()
-                rc = _stream_subprocess(
-                    ["cmake", "--preset", active_preset,
-                     *required_cache_args, *initial_clang_rt_args],
-                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
-                )
-                if rc != 0:
-                    raise RuntimeError(
-                        "CMake hook-isolation repair exited with code "
-                        f"{rc}")
-            else:
+            if not configured_fresh:
                 log_handle.write(
                     f"# build tree already configured ({build_ninja}); "
-                    "BIOSEQ_TEST_INDEXES invariant is correct; skipping "
-                    "redundant `cmake --preset` to avoid a full C++-module "
-                    "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
+                    "sealed configure inputs and BIOSEQ_TEST_INDEXES "
+                    "invariant are correct; skipping redundant "
+                    "`cmake --preset`.\n")
                 log_handle.flush()
 
         cache_repairs = {
@@ -4813,10 +8762,14 @@ def _run_build_worker(mode: str, build_only: bool = False,
             if _cmake_cache_value(active_build_dir, name) != value
         }
         cache_repairs.update(_cmake_preset_cache_repairs(
-            active_build_dir, active_preset))
+            active_build_dir,
+            active_preset,
+            environment=env,
+        ))
         postgresql_reset_args = _postgresql_discovery_cache_reset_args(
             active_build_dir,
             active_preset,
+            environment=env,
         )
         if postgresql_reset_args:
             cache_repairs.update(preset_cache_contract)
@@ -4832,11 +8785,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 )
                 + f"setting {repair_description}.\n")
             log_handle.flush()
-            rc = _stream_subprocess(
+            _invalidate_cmake_configure_stamp(active_build_dir)
+            rc = _run_cmake_preset_configure(
                 ["cmake", "--preset", active_preset,
                  *postgresql_reset_args,
                  *(f"-D{name}={value}" for name, value in cache_repairs.items())],
-                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                build_dir=active_build_dir,
+                log_handle=log_handle,
+                deadline=deadline,
+                environment=env,
             )
             if rc != 0:
                 raise RuntimeError(
@@ -4955,10 +8912,14 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 log_handle.write("# AWS cache repair: setting "
                                  + "; ".join(repair_reasons) + ".\n")
                 log_handle.flush()
-                rc = _stream_subprocess(
+                _invalidate_cmake_configure_stamp(active_build_dir)
+                rc = _run_cmake_preset_configure(
                     ["cmake", "--preset", active_preset,
                      *dict.fromkeys(repair_unset_args), *repair_args],
-                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                    build_dir=active_build_dir,
+                    log_handle=log_handle,
+                    deadline=deadline,
+                    environment=env,
                 )
                 if rc != 0:
                     raise RuntimeError(
@@ -4976,9 +8937,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 "# clang RT cache repair: "
                 + "; ".join(clang_rt_reasons) + ".\n")
             log_handle.flush()
-            rc = _stream_subprocess(
+            _invalidate_cmake_configure_stamp(active_build_dir)
+            rc = _run_cmake_preset_configure(
                 ["cmake", "--preset", active_preset, *clang_rt_repairs],
-                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                build_dir=active_build_dir,
+                log_handle=log_handle,
+                deadline=deadline,
+                environment=env,
             )
             if rc != 0:
                 raise RuntimeError(
@@ -4986,7 +8951,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     f"code {rc}")
 
         postgresql_config_repairs = _cmake_preset_cache_repairs(
-            active_build_dir, active_preset)
+            active_build_dir,
+            active_preset,
+            environment=env,
+        )
         if postgresql_config_repairs:
             expected = postgresql_config_repairs["PostgreSQL_CONFIG"]
             observed = _cmake_cache_value(
@@ -5015,6 +8983,23 @@ def _run_build_worker(mode: str, build_only: bool = False,
             "# verified BIOSEQ_TEST_INDEXES="
             f"{verified_test_indexes} preset={active_preset}.\n")
         log_handle.flush()
+        final_configure_stamp = _cmake_configure_stamp_document(
+            active_preset,
+            mode_cache_variables=configure_cache_contract,
+            managed_arguments=initial_clang_rt_args,
+            environment=env,
+            cmake_executable_identity=_cmake_executable_identity(env),
+        )
+        configure_seal = _finalize_cmake_configure_stamp(
+            active_build_dir,
+            configure_stamp,
+            final_configure_stamp,
+            context=f"preset {active_preset!r}",
+        )
+        log_handle.write(
+            "# verified CMake configure input seal="
+            f"{configure_seal}.\n")
+        log_handle.flush()
 
         _update_entry(mode, step="building", build_only=build_only,
                       debug=debug,
@@ -5027,6 +9012,23 @@ def _run_build_worker(mode: str, build_only: bool = False,
             )
             if rc != 0:
                 raise RuntimeError(f"build of target '{tgt}' exited with code {rc}")
+
+        if mode in _CACHE_BIOSEQ_DSO_QUALIFICATION_MODES:
+            _update_entry(
+                mode,
+                step="validating production DSO qualification receipt",
+            )
+            qualification_evidence = (
+                _cache_bioseq_dso_qualification_evidence(
+                    active_bin_dir,
+                    expected_build_dir=active_build_dir,
+                    expected_preset=active_preset,
+                )
+            )
+            _update_entry(
+                mode,
+                production_dso_qualification=qualification_evidence,
+            )
 
         # Maintain the build/compile_commands.json symlink — clangd / IDEs
         # probe build/ by default. Only matters for human operators, but
@@ -5052,6 +9054,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 completed_at=completed_at,
                 exit_code=0,
                 report_file=None,
+                report_files=[],
                 build_only=True,
                 debug=debug,
             )
@@ -5119,6 +9122,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     exit_code=0,
                     report_file=(
                         str(report_path) if report_path else None),
+                    report_files=(
+                        [str(report_path)] if report_path else []),
                     build_only=False,
                     debug=debug,
                     sql_guardrail_workflow=workflow_evidence,
@@ -5151,29 +9156,84 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "# BIOSEQ_E2E_CONFIG_OVERRIDE="
                     f"{bench_e2e_config}\n")
                 log_handle.flush()
-            for cmd in mode_details.commands:
-                # MODES.commands store binary BASENAMES; resolve against the
-                # active build's bin dir (DOC0270). Args after the first slot
-                # are passed through verbatim.
-                full_cmd = _run_command_argv(
-                    mode, active_bin_dir, cmd,
-                    bench_flags=bench_flags, test_flags=test_flags)
-                rc = _stream_subprocess(
-                    full_cmd, log_handle, deadline,
-                    cwd=active_build_dir, env=run_env,
+            (
+                report_path,
+                report_files,
+                report_invocations,
+                unit_command_records,
+            ) = _run_mode_commands(
+                mode,
+                active_bin_dir,
+                active_build_dir,
+                run_env,
+                log_handle,
+                deadline,
+                pre_reports,
+                bench_flags=bench_flags,
+                test_flags=test_flags,
+            )
+            cache_completion_fields: dict[str, object] = {}
+            if cache_provenance_before is not None:
+                cache_provenance_after = _cache_run_provenance()
+                _require_same_cache_run_provenance(
+                    cache_provenance_before,
+                    cache_provenance_after,
                 )
-                if rc != 0:
-                    # Bench exits non-zero when regression rules are violated
-                    # (exit code 2) — we still want to surface the report path,
-                    # so this is a "completed with violations" outcome rather
-                    # than a worker failure. The console log already explains
-                    # the violations.
-                    if mode_details.is_bench_mode and rc == 2:
-                        _log(f"bench reported regression violations (exit {rc}); "
-                            "treating as completed-with-violations")
-                        break
-                    raise RuntimeError(f"run failed with exit code {rc}: {' '.join(cmd)}")
-            report_path = _newest_report(pre_reports, mode) if mode_details.is_bench_mode else None
+                _update_entry(
+                    mode, step="sealing cache qualification receipts")
+                retirement_gate = None
+                if (
+                    mode == "cache-unit"
+                    and cache_provenance_after["migration_phase"]
+                        == "retired_with_proof"
+                ):
+                    # A failed historical-proof/deletion transition must not
+                    # leave a discoverable current cache-unit receipt that a
+                    # later retired-final run could mistake for authorization.
+                    retirement_gate = (
+                        _run_cache_retirement_lifecycle_gate(
+                            mode,
+                            active_bin_dir,
+                            active_build_dir,
+                            run_env,
+                            cache_provenance_after,
+                            log_handle,
+                            deadline,
+                        )
+                    )
+                unit_receipt, evidence_receipts = (
+                    _seal_cache_mode_receipts(
+                        mode,
+                        active_bin_dir,
+                        report_files,
+                        report_invocations,
+                        unit_command_records,
+                        cache_provenance_after,
+                    )
+                )
+                if retirement_gate is None:
+                    retirement_gate = (
+                        _run_cache_retirement_lifecycle_gate(
+                            mode,
+                            active_bin_dir,
+                            active_build_dir,
+                            run_env,
+                            cache_provenance_after,
+                            log_handle,
+                            deadline,
+                        )
+                    )
+                cache_completion_fields = {
+                    "cache_run_provenance": cache_provenance_after,
+                    "cache_unit_receipt": (
+                        str(unit_receipt)
+                        if unit_receipt is not None else None
+                    ),
+                    "cache_evidence_receipts": [
+                        str(path) for path in evidence_receipts
+                    ],
+                    "cache_retirement_gate": retirement_gate,
+                }
             completed_at = time.time()
             _update_entry(
                 mode,
@@ -5182,8 +9242,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 completed_at=completed_at,
                 exit_code=0,
                 report_file=str(report_path) if report_path else None,
+                report_files=[str(path) for path in report_files],
                 build_only=False,
                 debug=debug,
+                **cache_completion_fields,
             )
         log_handle.write(
             f"\n# worker exiting cleanly at "
@@ -5203,7 +9265,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
             build_only=build_only,
             debug=debug,
         )
-        log_handle.write(f"\n# killed by {HARD_TIMEOUT_MIN}-min hard timeout: {e}\n")
+        log_handle.write(
+            f"\n# killed by {mode_timeout_sec / 60.0}-min "
+            f"mode hard timeout: {e}\n")
         return 124
 
     except Exception as e:
@@ -6156,6 +10220,18 @@ def tool_start_build(mode: str, build_only: bool = False,
                 f"{', '.join(VALID_MODES)}.")
 
     mode_details = MODES[mode]
+    if mode == PACKAGE_LINUX_MODE and (
+        build_only
+        or debug_supplied or debug
+        or filter_supplied or bench_filter is not None
+        or debug_report_supplied or debug_report
+        or bench_e2e_config is not None
+        or postgres_error_safety_review_waiver is not None
+    ):
+        return (
+            "package-linux owns one fixed local Debian 13/PostgreSQL 17/ARM64 "
+            "qualification and accepts no build_only, debug, filter, "
+            "debug_report, bench_e2e_config, or review-waiver inputs.")
     resolved_e2e_config, config_error = _validate_bench_e2e_config_override(
         mode, bench_e2e_config)
     if config_error is not None:
@@ -6298,7 +10374,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             sql_guardrail_workflow is not None
             and sql_guardrail_workflow["phase"] == "baseline_promotion"
         )
-        if promotion_only:
+        if promotion_only or mode == PACKAGE_LINUX_MODE:
             configured_rt_priority = None
         else:
             try:
@@ -6359,6 +10435,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             "log_file": str(log_path),
             "exit_code": None,
             "report_file": None,
+            "report_files": [],
             "notes": None,
             "debug": debug,
             "build_only": build_only,
@@ -6472,6 +10549,12 @@ def _run_build_inline(mode: str, build_only: bool = False,
     if mode not in VALID_MODES:
         _log(f"--run-build-sync: invalid mode '{mode}'")
         return 2
+    if mode == PACKAGE_LINUX_MODE and (
+        build_only or debug or bench_flags or test_flags
+        or bench_e2e_config or postgres_error_safety_review_waiver_json
+    ):
+        _log("--run-build-sync: package-linux rejects variable inputs")
+        return 2
     resolved_e2e_config, config_error = _validate_bench_e2e_config_override(
         mode, bench_e2e_config)
     if config_error is not None:
@@ -6573,7 +10656,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
             sql_guardrail_workflow is not None
             and sql_guardrail_workflow["phase"] == "baseline_promotion"
         )
-        if promotion_only:
+        if promotion_only or mode == PACKAGE_LINUX_MODE:
             configured_rt_priority = None
         else:
             try:
@@ -6608,6 +10691,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "log_file": str(log_path),
             "exit_code": None,
             "report_file": None,
+            "report_files": [],
             "notes": None,
             "debug": debug,
             "build_only": build_only,
@@ -6690,8 +10774,12 @@ def tool_inspect(arguments: dict) -> str:
             return int(v)
         return default
 
-    max_matches = _int_arg("max_matches", 4)
-    snippet_lines = _int_arg("snippet_lines", 200)
+    # run_inspect validates/defaults/clamps these two result-size controls and
+    # surfaces any correction in warnings. Preserve the raw value here so a
+    # malformed direct/CLI caller does not silently become indistinguishable
+    # from an explicit default.
+    max_matches = arguments.get("max_matches", 4)
+    snippet_lines = arguments.get("snippet_lines", 200)
     max_llc_bc_files = _int_arg("max_llc_bc_files", 4)
     source_basename = arguments.get("source_basename")
     if source_basename is not None and not isinstance(source_basename, str):
@@ -6728,6 +10816,15 @@ def tool_inspect(arguments: dict) -> str:
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, indent=2)
 
+    try:
+        artifact_names = _inspect_artifact_candidates(
+            target_definition,
+            inspect_build_dir,
+            debug_chosen,
+        )
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
     out = _run_inspect_impl(
         function_name=function_name,
         target=target,
@@ -6738,7 +10835,7 @@ def tool_inspect(arguments: dict) -> str:
         llc_on_bc=llc_on_bc,
         max_llc_bc_files=max_llc_bc_files,
         binary_subdir=MODES[inspect_mode].binary_subdir,
-        artifact_names=target_definition.artifact_names,
+        artifact_names=artifact_names,
         shared_target_names=target_definition.shared_target_names,
     )
     # Surface which tree was inspected so the AI agent can act on
@@ -6757,8 +10854,13 @@ def tool_status(mode: str) -> str:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
-    state = _load_state()
-    entry = _refresh(state, mode)
+    with _global_lock():
+        state = _load_state()
+        refreshed_entry = _refresh(state, mode)
+        entry = (
+            dict(refreshed_entry)
+            if refreshed_entry is not None else None
+        )
     mode_details = MODES[mode]
 
     if not entry:
@@ -6782,6 +10884,22 @@ def tool_status(mode: str) -> str:
         f" Focused Catch2 args: {shlex.join(focused_test_args)}."
         if focused_test_args else ""
     )
+    report_files = entry.get("report_files")
+    if isinstance(report_files, list) and report_files:
+        report_suffix = ". Reports: " + ", ".join(
+            str(path) for path in report_files)
+    elif entry.get("report_file"):
+        # Compatibility with state entries created before ordered receipts.
+        report_suffix = f". Report: {entry['report_file']}"
+    else:
+        report_suffix = ""
+    qualification = entry.get("production_dso_qualification")
+    qualification_suffix = (
+        ". Production DSO qualification: "
+        + json.dumps(qualification, sort_keys=True)
+        if isinstance(qualification, dict) and qualification
+        else ""
+    )
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
@@ -6792,7 +10910,7 @@ def tool_status(mode: str) -> str:
                 f"Current step: {step}. "
                 f"Predicted finish in {_format_minutes(eta_min)}. "
                 f"{focus_suffix} "
-                f"Log: {log_path}")
+                f"Log: {log_path}{report_suffix}{qualification_suffix}")
 
     completed_at = entry.get("completed_at") or time.time()
     duration_min = (completed_at - entry["started_at"]) / 60.0
@@ -6802,9 +10920,7 @@ def tool_status(mode: str) -> str:
                f"{preset_suffix} "
                f"(total time: {_format_minutes(duration_min, plural_int=True)}). "
                f"{focus_suffix} "
-               f"Log: {log_path}")
-        if entry.get("report_file"):
-            msg += f". Report: {entry['report_file']}"
+               f"Log: {log_path}{report_suffix}")
         workflow_evidence = entry.get("sql_guardrail_workflow")
         if isinstance(workflow_evidence, dict):
             surfaced = {
@@ -6832,33 +10948,37 @@ def tool_status(mode: str) -> str:
                     "DWARF + per-TU .s/.bc artefacts are available under "
                     f"{entry.get('build_dir', str(build_dir_for(mode, True)))} for the "
                     "`inspect` tool.")
+        msg += qualification_suffix
         return msg
 
     if status == "killed_timeout":
         return ("Last run was forcefully killed due to timeout. "
                 f"{focus_suffix} "
-                f"Logs for inspection are available here: {log_path}")
+                f"Logs for inspection are available here: "
+                f"{log_path}{report_suffix}{qualification_suffix}")
 
     if status == "failed":
         notes = entry.get("notes") or "(no notes)"
         private_note = (
-            " The CMake-owned private-cluster runner is responsible for "
+            " The native private-cluster executable is responsible for "
             "capturing logs and cleanup."
             if private_cluster else ""
         )
         return (f"{mode_details.label} run failed after "
                 f"{_format_minutes(duration_min)}: {notes}. "
                 f"{focus_suffix} "
-                f"Log: {log_path}.{private_note}")
+                f"Log: {log_path}{report_suffix}{qualification_suffix}."
+                f"{private_note}")
 
     if status == "aborted":
         return (f"{mode_details.label} run was aborted (worker process died "
                 f"unexpectedly after {_format_minutes(duration_min)}). "
                 f"{focus_suffix} "
-                f"Log: {log_path}")
+                f"Log: {log_path}{report_suffix}{qualification_suffix}")
 
     return (f"{mode_details.label} status: {status}."
-            f"{focus_suffix} Log: {log_path}")
+            f"{focus_suffix} Log: {log_path}{report_suffix}"
+            f"{qualification_suffix}")
 
 
 def _sha256_file(path: Path) -> str:
@@ -9354,9 +13474,11 @@ TOOL_DEFINITIONS = [
             "and a sweep of inline sites where the function appears as "
             ".loc directives or DEBUG_VALUE annotations in other TUs' .s "
             "files (useful for [[gnu::always_inline]] functions that have "
-            "no standalone symbol). All large outputs are written to "
-            "/tmp/bioseq_inspect/ and pointed at via paths so the AI can "
-            "Read them on demand.\n\n"
+            "no standalone symbol). Full post-LTO objdump text is written "
+            "under /tmp/bioseq_inspect/. Pre-LTO assembly listings remain "
+            "in the selected build tree; each match returns that build path "
+            "and exact line range. JSON snippets are byte-bounded, while "
+            "those file paths preserve access to complete evidence.\n\n"
             "DOC0270/DOC0371 — fast core/test/cache trees do "
             "NOT carry per-TU .s/.bc files or DWARF. Call `start_build` for "
             "the requested target's mode with debug=true first to produce "
@@ -9381,11 +13503,25 @@ TOOL_DEFINITIONS = [
             "field surfaces the un-capped count so you can decide whether "
             "to retry with a tighter prefix; a top-level warning fires "
             f"when the count exceeds {MATCHES_WARN_THRESHOLD}.\n\n"
-            "Latency: lazy disk-cached llc fallback. First call after a "
-            "fresh debug build is ~25-100s (one llc per relevant .bc, "
-            "capped at 4). Subsequent calls reuse the cached .s and "
-            "complete in ~6-9s. Cache invalidates on .bc mtime; rebuilds "
-            "cleanly reset it.\n\n"
+            "Latency and observability: when available, ripgrep first scans "
+            "compiler listings in native bounded memory for exact symbol "
+            "labels plus an explicitly supplied source_basename; only "
+            "candidate listings enter the bounded Python parser. One "
+            "assembly-phase deadline covers both rg and every fallback "
+            "streaming chunk. If rg is absent or fails while time remains, "
+            "the parser streams every listing once; if the shared deadline "
+            "is exhausted it stops safely and reports incomplete evidence. "
+            "Fallback latency is proportional to total .s bytes. The lazy llc fallback can add "
+            "up to ~25s per selected .bc on a cold tree and reuses a sibling "
+            ".s until the .bc mtime changes. build_metadata.tools.rg records "
+            "the prefilter tool. summary.asm_listings_scanned retains its "
+            "legacy discovered-count meaning; asm_listings_candidates, "
+            "asm_listings_parsed, asm_listings_unparsed, "
+            "asm_listing_bytes_streamed, asm_listing_scan_duration_ms and "
+            "asm_listing_scan_incomplete expose actual work/completeness. "
+            "Summary also reports snippet byte limits/truncation and honest "
+            "source-state overflow/entries-cleared/records-dropped counts; "
+            "warnings identify every clamp or fail-closed omission.\n\n"
             "Caveats:\n"
             "  - llvm-objdump symbolises every branch target by finding "
             "the closest *named* symbol with a smaller address — even when "
@@ -9400,7 +13536,12 @@ TOOL_DEFINITIONS = [
             "  - At clang -O3 the default -discard-value-names strips "
             "DEBUG_VALUE annotations for templated/inlined code, so "
             "inline_sites[].debug_value_hits is often 0. The .loc "
-            "directive count is the primary signal."
+            "directive count is the primary signal.\n"
+            "  - Post-LTO extraction is not a whole-DSO disassembly: objdump "
+            "is filtered to each exact matched symbol and has a 120-second "
+            "per-process timeout; its c++filt pass has a 60-second timeout. "
+            "The one whole-DSO nm/c++filt symbol enumeration is separately "
+            "time-bounded to 60 seconds per process."
         ),
         "inputSchema": {
             "type": "object",
@@ -9428,29 +13569,33 @@ TOOL_DEFINITIONS = [
                     "type": "integer",
                     "default": 4,
                     "minimum": 1,
+                    "maximum": MAX_INSPECT_MATCHES,
                     "description":
                         "Cap on the number of returned symbols. Largest "
-                        "first (by computed size).",
+                        "first (by computed size); out-of-range direct calls "
+                        "are clamped with a warning.",
                 },
                 "snippet_lines": {
                     "type": "integer",
                     "default": 200,
                     "minimum": 1,
+                    "maximum": MAX_INSPECT_SNIPPET_LINES,
                     "description":
-                        "How many lines of asm/disasm to inline in the "
-                        "JSON. Full output is always written to /tmp and "
-                        "the path is included; use Read on the path for "
-                        "the rest.",
+                        "Maximum lines of asm/disasm to inline in JSON, also "
+                        f"bounded to {MAX_RETAINED_SNIPPET_BYTES} bytes per "
+                        f"snippet and {MAX_TOTAL_RETAINED_SNIPPET_BYTES} "
+                        "bytes total. Full objdump text is under /tmp; full "
+                        "assembly listings remain at returned build-tree "
+                        "paths.",
                 },
                 "source_basename": {
                     "type": "string",
                     "description":
                         "Basename of the source file (e.g. "
                         "'two_stacks_minimizers.cppm') used to filter "
-                        "the inline-site .loc sweep. Defaults to "
-                        "'<function_name>.cppm', which is usually wrong "
-                        "for namespaced functions — pass it explicitly "
-                        "for accurate inline_sites[].",
+                        "the inline-site .loc sweep. When omitted, that sweep "
+                        "is skipped with a warning; exact standalone pre-LTO "
+                        "symbol-block inspection remains enabled.",
                 },
                 "max_llc_bc_files": {
                     "type": "integer",
@@ -9468,7 +13613,8 @@ TOOL_DEFINITIONS = [
                     "description":
                         "Whether to run the llc-on-.bc fallback when no "
                         ".s files are present (clang ThinLTO case). "
-                        "Disable for fast/incomplete inspect calls.",
+                        "Disabling it prevents only .bc-to-.s synthesis; it "
+                        "does not disable scanning existing .s evidence.",
                 },
                 "debug": {
                     "type": "boolean",
@@ -9952,14 +14098,20 @@ TOOL_DEFINITIONS += [
             "focused Catch2 filter.tags for unit+integration and CMake-owned "
             "private-cluster execution for cache modes.\n"
             "  operation='inspect' — runs the inspect tool on a box-side binary, "
-            "same parameters as the local inspect tool.\n\n"
+            "with the local tool's exact-label prefilter, one end-to-end "
+            "assembly deadline, bounded streaming fallback, snippet/state "
+            "budgets, and source_basename semantics. "
+            "Omitting source_basename skips only the inline-site sweep.\n\n"
             "IMPORTANT CAVEATS:\n"
             "  - The box is x86_64 Linux. Build/test/bench modes expect the "
             "provisioned PostgreSQL + bioseq DB to be ready on the box; failures in "
             "our code should now be treated as real regressions, not as an expected "
             "::NEON/macOS dispatch.h gap.\n"
             "  - remote inspect needs a successfully-built binary on the box, so it "
-            "won't return useful disassembly until the build succeeds." + _REMOTE_MUTEX_NOTE
+            "won't return useful disassembly until the build succeeds. Paths in its "
+            "JSON are box-side paths: objdump files are under the box's /tmp, while "
+            "assembly listings remain in its build tree; use remote-ssh for follow-up "
+            "reads." + _REMOTE_MUTEX_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -10101,12 +14253,16 @@ TOOL_DEFINITIONS += [
                             "default": "bioseq_bench",
                             "description": "Which target binary to inspect on the box.",
                         },
-                        "max_matches": {"type": "integer", "minimum": 1, "default": 4,
-                                        "description": "Cap on returned symbols."},
-                        "snippet_lines": {"type": "integer", "minimum": 1, "default": 200,
-                                          "description": "Lines of asm/disasm to inline."},
+                        "max_matches": {"type": "integer", "minimum": 1,
+                                        "maximum": MAX_INSPECT_MATCHES, "default": 4,
+                                        "description": "Clamped cap on returned symbols."},
+                        "snippet_lines": {"type": "integer", "minimum": 1,
+                                          "maximum": MAX_INSPECT_SNIPPET_LINES,
+                                          "default": 200,
+                                          "description": "Clamped lines of bounded asm/disasm snippets to inline."},
                         "source_basename": {"type": "string",
-                                            "description": "Source basename for the inline-site sweep."},
+                                            "description": ("Source basename for the inline-site sweep; omission skips "
+                                                            "that sweep but preserves standalone pre-LTO blocks.")},
                         "max_llc_bc_files": {"type": "integer", "minimum": 0, "default": 4,
                                              "description": "Cap on .bc files llc-compiled for the pre-LTO view."},
                         "llc_on_bc": {"type": "boolean", "default": True,

@@ -38,7 +38,7 @@ enum class SourceMapError : std::uint16_t {
 
 /** One copied consumer/source schema plus its ordered required attributes. */
 struct ProviderSchemaView {
-    const BioseqCacheColumnSchemaV1* columns = nullptr;
+    const BioseqCacheColumnSchemaV2* columns = nullptr;
     std::size_t column_count = 0;
     const std::uint32_t* required_attnos = nullptr;
     std::size_t required_attno_count = 0;
@@ -52,7 +52,7 @@ struct ProviderContractView {
 };
 
 /** Locate one declared schema field by its one-based provider attno. */
-[[nodiscard]] inline const BioseqCacheColumnSchemaV1* find_provider_column(
+[[nodiscard]] inline const BioseqCacheColumnSchemaV2* find_provider_column(
     const ProviderSchemaView& schema,
     std::uint32_t attno) noexcept {
     if (schema.columns == nullptr) {
@@ -80,11 +80,11 @@ validate_provider_schema(const ProviderSchemaView& schema) noexcept {
     }
     for (std::size_t index = 0; index < schema.column_count; ++index) {
         const auto& column = schema.columns[index];
-        if (column.struct_size < sizeof(BioseqCacheColumnSchemaV1)
+        if (column.struct_size < sizeof(BioseqCacheColumnSchemaV2)
             || column.attno == 0
             || column.attno > schema.column_count) {
             return std::unexpected(
-                column.struct_size < sizeof(BioseqCacheColumnSchemaV1)
+                column.struct_size < sizeof(BioseqCacheColumnSchemaV2)
                     ? SourceMapError::StructSize
                     : SourceMapError::InvalidAttno);
         }
@@ -124,9 +124,9 @@ validate_provider_schema(const ProviderSchemaView& schema) noexcept {
 /** Compare the provider meaning and complete SQL metadata of two columns. */
 [[nodiscard]] constexpr std::expected<void, SourceMapError>
 validate_column_meaning(
-    const BioseqCacheColumnSchemaV1& consumer,
-    const BioseqCacheColumnSchemaV1& source,
-    const BioseqCacheColumnMapEntryV1& mapping) noexcept {
+    const BioseqCacheColumnSchemaV2& consumer,
+    const BioseqCacheColumnSchemaV2& source,
+    const BioseqCacheColumnMapEntryV2& mapping) noexcept {
     if (consumer.type_oid != source.type_oid
         || mapping.type_oid != consumer.type_oid) {
         return std::unexpected(SourceMapError::TypeMismatch);
@@ -152,7 +152,7 @@ validate_column_meaning(
 [[nodiscard]] inline std::expected<void, SourceMapError> validate_map_half(
     const ProviderSchemaView& consumer,
     const ProviderSchemaView& source,
-    const BioseqCacheColumnMapEntryV1* mappings,
+    const BioseqCacheColumnMapEntryV2* mappings,
     std::size_t mapping_count) noexcept {
     if (mapping_count != consumer.required_attno_count) {
         return std::unexpected(SourceMapError::MapCountMismatch);
@@ -162,7 +162,7 @@ validate_column_meaning(
     }
     for (std::size_t index = 0; index < mapping_count; ++index) {
         const auto& mapping = mappings[index];
-        if (mapping.struct_size < sizeof(BioseqCacheColumnMapEntryV1)) {
+        if (mapping.struct_size < sizeof(BioseqCacheColumnMapEntryV2)) {
             return std::unexpected(SourceMapError::StructSize);
         }
         if (mapping.flags != 0 || mapping.reserved != 0) {
@@ -225,8 +225,8 @@ validate_column_meaning(
 [[nodiscard]] inline std::expected<void, SourceMapError> validate_source_map(
     const ProviderContractView& consumer,
     const ProviderContractView& source,
-    const BioseqCacheSourceMappingV1& mapping) noexcept {
-    if (mapping.struct_size < sizeof(BioseqCacheSourceMappingV1)) {
+    const BioseqCacheSourceMappingV2& mapping) noexcept {
+    if (mapping.struct_size < sizeof(BioseqCacheSourceMappingV2)) {
         return std::unexpected(SourceMapError::StructSize);
     }
     if (mapping.flags != 0) {
@@ -334,10 +334,10 @@ inline void append_provider_digest_frame(
 
 /** Validate callback availability implied by provider flags. */
 [[nodiscard]] inline bool provider_registration_valid(
-    const BioseqCacheProviderV1* provider,
+    const BioseqCacheProviderV2* provider,
     std::uint32_t postgres_major) noexcept {
     if (provider == nullptr
-        || provider->struct_size < sizeof(BioseqCacheProviderV1)
+        || provider->struct_size < sizeof(BioseqCacheProviderV2)
         || provider->abi_version != kProviderAbiVersion
         || provider->postgres_major != postgres_major
         || provider->provider_id == 0

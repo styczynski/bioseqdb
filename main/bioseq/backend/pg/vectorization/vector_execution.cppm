@@ -33,6 +33,7 @@ module;
 export module bioseq.vector.execution;
 
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.vector.types;
 import bioseq.column.vector_compare;
 import bioseq.pg_utils.nodes;          // DOC0333 — pg_node_try_as_op_expr_family, pg_node_try_as, pg_is_const_var_binary_args
@@ -521,7 +522,8 @@ executeVectorizedExpr(VectorQual* vector_qual, ExprContext* expression_context)
 {
 	VectorColumn* evaluation_result;
 	{
-		MemoryContextScope ctx_guard{expression_context->ecxt_per_tuple_memory};
+		bioseq::pg_support::MemoryContextScope ctx_guard{
+			expression_context->ecxt_per_tuple_memory};
 		evaluation_result =
 			reinterpret_cast<VectorColumn*>(vector_qual->u.expr.fmgrInfo->fn_addr(vector_qual->u.expr.fcInfo));
 	}

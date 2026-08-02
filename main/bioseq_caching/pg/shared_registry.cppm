@@ -2173,9 +2173,15 @@ inline void register_shared_registry_exit_callback() noexcept {
   return result;
 }
 
+/** Observe boot-wide publication state without attaching or taking a lock. */
+[[nodiscard]] inline BootstrapState
+shared_registry_bootstrap_state() noexcept {
+  return shared_registry_detail::load_state();
+}
+
 [[nodiscard]] inline bool shared_registry_ready() noexcept {
   return shared_registry_detail::g_attachment &&
-         shared_registry_detail::load_state() == BootstrapState::Ready;
+         shared_registry_bootstrap_state() == BootstrapState::Ready;
 }
 
 [[nodiscard]] inline const SharedRegistryAttachmentV1 *

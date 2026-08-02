@@ -412,18 +412,28 @@ struct cpp_template_binding final {
             .key = direction + "jsonb.owning",
         };
     } else if (cpp_leaf(normalized.canonical) == "sql_bytea"
-               && !result
                && sql_type_is(sql_type, {"bytea"})) {
         binding = {
             .canonical_cpp_type = normalized.canonical,
-            .key = "argument.bytea.owning",
+            .key = direction + "bytea.owning",
         };
     } else if (cpp_leaf(normalized.canonical) == "sql_interval"
-               && result
                && sql_type_is(sql_type, {"interval"})) {
         binding = {
             .canonical_cpp_type = normalized.canonical,
-            .key = "result.interval.owning",
+            .key = direction + "interval.owning",
+        };
+    } else if (cpp_leaf(normalized.canonical) == "sql_int64_array"
+               && sql_type_is(sql_type, {"bigint[]"})) {
+        binding = {
+            .canonical_cpp_type = normalized.canonical,
+            .key = direction + "int64_array.owning",
+        };
+    } else if (cpp_leaf(normalized.canonical) == "sql_timestamptz"
+               && sql_type_is(sql_type, {"timestamptz"})) {
+        binding = {
+            .canonical_cpp_type = normalized.canonical,
+            .key = direction + "timestamptz.owning",
         };
     } else if (cpp_leaf(normalized.canonical) == "sql_tid"
                && !result
@@ -475,6 +485,13 @@ struct cpp_template_binding final {
                 || normalized.canonical == "oid")
                && sql_type_is(sql_type, {"oid", "regclass"})) {
         binding = {.canonical_cpp_type = "Oid",
+                   .key = direction + "oid.by_value["
+                       + canonical_sql_type(sql_type) + "]"};
+    } else if ((normalized.canonical == "std::uint32_t"
+                || normalized.canonical == "uint32_t"
+                || normalized.canonical == "uint32")
+               && sql_type_is(sql_type, {"oid", "regclass"})) {
+        binding = {.canonical_cpp_type = "std::uint32_t",
                    .key = direction + "oid.by_value["
                        + canonical_sql_type(sql_type) + "]"};
     } else if (normalized.canonical == "ArrayType*") {
@@ -666,20 +683,32 @@ struct cpp_template_binding final {
 
 [[nodiscard]] inline std::string fmgr_module_name(
         std::string_view source_module,
-        std::string_view owner_key) {
-    if (owner_key == "table_access_hooks") {
+        std::string_view owner_key,
+        const sql_graph& graph) {
+    if (graph.generated_module_prefix == "bioseq.sql.generated"
+        && owner_key == "table_access_hooks") {
         return "bioseq.table:sql_entrypoints";
     }
-    if (owner_key == "types_pg_compact_sequence") {
+    if (graph.generated_module_prefix == "bioseq.sql.generated"
+        && owner_key == "types_pg_compact_sequence") {
         return "bioseq.types.pg_compact_sequence:"
                "generated_sql_entrypoints";
     }
-    return "bioseq.sql.generated.production."
+    if (graph.generated_module_prefix == "bioseq.sql.generated") {
+        return "bioseq.sql.generated.production."
+            + std::string{owner_key} + ".entrypoints";
+    }
+    return graph.generated_module_prefix + "."
+        + (graph.compiler_profile.empty()
+               ? std::string{"production"}
+               : graph.compiler_profile)
+        + "."
         + std::string{owner_key} + ".entrypoints";
 }
 
 [[nodiscard]] inline std::string fmgr_owner_import(
-        std::string_view source_module) {
+        std::string_view source_module,
+        const sql_graph& graph) {
     if (source_module
         == "bioseq.storage.manager:sequence_storage_manager") {
         return "bioseq.storage.manager";
@@ -691,6 +720,12 @@ struct cpp_template_binding final {
     if (compact_sequence_owner_module(source_module)) {
         const std::size_t separator = source_module.find(':');
         return ":" + std::string{source_module.substr(separator + 1)};
+    }
+    if (graph.generated_module_prefix != "bioseq.sql.generated") {
+        const std::size_t separator = source_module.find(':');
+        if (separator != std::string_view::npos) {
+            return std::string{source_module.substr(0, separator)};
+        }
     }
     return std::string{source_module};
 }
@@ -1145,6 +1180,24 @@ struct cpp_template_binding final {
     return output.str();
 }
 
+[[nodiscard]] inline std::string render_global_module_fragment(
+        std::string_view prelude) {
+    if (prelude == "bioseq_common") {
+        return "module;\n\n"
+               "#include \"common.h\"\n\n";
+    }
+    if (prelude == "postgresql") {
+        return "module;\n\n"
+               "extern \"C\" {\n"
+               "#include \"postgres.h\"\n"
+               "#include \"fmgr.h\"\n"
+               "}\n\n";
+    }
+    throw std::runtime_error(
+        "unsupported generated fmgr prelude '"
+        + std::string{prelude} + "'");
+}
+
 [[nodiscard]] inline std::string render_module(
         rendered_fmgr_entrypoint_module& module,
         const std::map<
@@ -1158,16 +1211,19 @@ struct cpp_template_binding final {
         static_cast<void>(symbol);
         for (const normalized_entity* entity : entities) {
             owner_imports.insert(
-                fmgr_owner_import(entity->source.source_module));
+                fmgr_owner_import(
+                    entity->source.source_module, graph));
             const collected_result_row* row =
                 result_row_for(entity->source, graph);
             if (row == nullptr) continue;
-            if (!row->source_module.ends_with(".sql_rows")
+            if ((graph.generated_module_prefix
+                        == "bioseq.sql.generated"
+                    && !row->source_module.ends_with(".sql_rows"))
                 || row->source_module.contains(':')) {
                 throw std::runtime_error(
                     "generated fmgr result Row '"
                     + row->cpp_qualified_name
-                    + "' must be provided by an ordinary .sql_rows "
+                    + "' must be provided by an ordinary result-row "
                       "module");
             }
             if (row->source_module == module.module_name) {
@@ -1232,8 +1288,7 @@ struct cpp_template_binding final {
 
     std::ostringstream output;
     output
-        << "module;\n\n"
-        << "#include \"common.h\"\n\n"
+        << render_global_module_fragment(graph.fmgr_prelude)
         << "#include <array>\n"
         << "#include <cstdint>\n"
         << "#include <optional>\n"
@@ -1251,7 +1306,7 @@ struct cpp_template_binding final {
         output << "import bioseq.codegen.sql.annotation_model;\n";
     }
     output
-        << "import bioseq.pg_utils.sql_boundary;\n\n"
+        << "import " << graph.fmgr_boundary_module << ";\n\n"
         << body_text;
     return output.str();
 }
@@ -1898,7 +1953,10 @@ render_support_vector_registry_modules(
  * Render one configure-known primary module per natural C++ SQL owner module.
  */
 [[nodiscard]] inline std::vector<rendered_fmgr_entrypoint_module>
-render_fmgr_entrypoint_modules(const sql_graph& graph) {
+render_fmgr_entrypoint_modules(
+        const sql_graph& graph,
+        const std::vector<
+            std::pair<std::string, std::string>>& configured_owners) {
     using symbol_group = std::map<
         std::string,
         std::vector<const normalized_entity*>,
@@ -1909,11 +1967,28 @@ render_fmgr_entrypoint_modules(const sql_graph& graph) {
         std::set<std::string, std::less<>>,
         std::less<>>
         sources_by_owner;
+    std::map<std::string, std::string, std::less<>>
+        configured_owner_by_module;
+    std::set<std::string, std::less<>> configured_owner_keys;
+    for (const auto& [owner_key, source_module] :
+         configured_owners) {
+        if (!configured_owner_by_module.emplace(
+                source_module, owner_key).second
+            || !configured_owner_keys.emplace(owner_key).second) {
+            throw std::runtime_error(
+                "configured fmgr owner mapping is not one-to-one for '"
+                + owner_key + "'");
+        }
+    }
     for (const normalized_entity& entity : graph.entities) {
         if (!fmgr_detail::generated_c_routine(entity)) continue;
+        const auto configured_owner = configured_owner_by_module.find(
+            entity.source.source_module);
         const std::string owner_key =
-            fmgr_detail::fmgr_owner_key(
-                entity.source.source_module);
+            configured_owner == configured_owner_by_module.end()
+            ? fmgr_detail::fmgr_owner_key(
+                  entity.source.source_module)
+            : configured_owner->second;
         by_owner[owner_key]
             [entity.source.name].push_back(&entity);
         sources_by_owner[owner_key].insert(
@@ -1983,7 +2058,7 @@ render_fmgr_entrypoint_modules(const sql_graph& graph) {
             .source_module = source_module,
             .module_name =
                 fmgr_detail::fmgr_module_name(
-                    source_module, owner_key),
+                    source_module, owner_key, graph),
         };
         module.content =
             fmgr_detail::render_module(module, symbols, graph);
@@ -1998,7 +2073,21 @@ render_fmgr_entrypoint_modules(const sql_graph& graph) {
             fmgr_detail::render_vector_aggregate_registry(graph)) {
         result.push_back(std::move(*registry));
     }
+    for (const auto& [owner_key, source_module] :
+         configured_owners) {
+        if (!by_owner.contains(owner_key)) {
+            throw std::runtime_error(
+                "configured fmgr owner '" + owner_key
+                + "' has no generated routine in module '"
+                + source_module + "'");
+        }
+    }
     return result;
+}
+
+[[nodiscard]] inline std::vector<rendered_fmgr_entrypoint_module>
+render_fmgr_entrypoint_modules(const sql_graph& graph) {
+    return render_fmgr_entrypoint_modules(graph, {});
 }
 
 /**

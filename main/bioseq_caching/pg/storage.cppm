@@ -47,8 +47,11 @@ extern "C" {
 #include <cstring>
 #include <expected>
 #include <fcntl.h>
+#include <filesystem>
 #include <limits>
 #include <span>
+#include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <type_traits>
@@ -60,7 +63,9 @@ export module bioseq.cache.pg.storage;
 
 import bioseq.cache.core;
 import bioseq.cache.pg.shared_registry;
+import bioseq.common.durable_file_io;
 import bioseq.common.memory_budget;
+import bioseq.pg_sql_boundary;
 
 export namespace bioseq::cache::pg::storage {
 
@@ -348,8 +353,11 @@ struct StorageRuntimeSnapshot {
     std::uint64_t reserved_hot_bytes = 0;
     std::uint64_t fixed_hot_bytes = 0;
     std::uint64_t pending_hot_bytes = 0;
+    bool pending_hot_bytes_valid = false;
     std::uint64_t live_hot_bytes = 0;
     std::uint64_t reserved_file_bytes = 0;
+    std::uint64_t pending_file_bytes = 0;
+    bool pending_file_bytes_valid = false;
     std::uint64_t dsa_stored_bytes = 0;
     std::uint64_t file_stored_bytes = 0;
     std::uint64_t row_group_count = 0;
@@ -444,7 +452,13 @@ struct StorageBootstrapAttachTwiceSnapshot {
     std::uint64_t attaches_after = 0;
 };
 
-/** Force later block reservations to bypass DSA in testing builds only. */
+/**
+ * Force later block reservations onto the file tier in testing builds only.
+ *
+ * The override retains actual-space and configured/capacity ceiling checks,
+ * but waives the production free-space floor so file-tier tests do not depend
+ * on unrelated host disk occupancy.
+ */
 [[nodiscard]] bool set_test_force_file_tier(bool enabled) noexcept;
 
 /** Snapshot backing tiers without exposing paths or mutable ledger records. */
@@ -2023,31 +2037,52 @@ void clear_unreserved_ledger_slot(
     return StorageError::None;
 }
 
-[[nodiscard]] StorageError write_all_at(
+[[nodiscard]] inline ssize_t postgres_read_at(
+        void*,
+        int descriptor,
+        void* destination,
+        std::size_t bytes,
+        off_t offset) noexcept {
+    return pg_pread(descriptor, destination, bytes, offset);
+}
+
+[[nodiscard]] inline ssize_t postgres_write_at(
+        void*,
+        int descriptor,
+        const void* source,
+        std::size_t bytes,
+        off_t offset) noexcept {
+    return pg_pwrite(descriptor, source, bytes, offset);
+}
+
+inline void poll_postgres_interrupts(void*) noexcept {
+    CHECK_FOR_INTERRUPTS();
+}
+
+[[nodiscard]] inline constexpr
+bioseq::durable_file_io::positional_io_operations
+postgres_positional_io() noexcept {
+    return {
+        .context = nullptr,
+        .read_at = postgres_read_at,
+        .write_at = postgres_write_at,
+        .poll = poll_postgres_interrupts,
+    };
+}
+
+[[nodiscard]] inline StorageError write_all_at(
         int descriptor,
         std::span<const std::byte> bytes,
         std::uint64_t offset = 0) noexcept {
-    std::size_t written = 0;
-    while (written < bytes.size()) {
-        CHECK_FOR_INTERRUPTS();
-        if (offset > static_cast<std::uint64_t>(
-                (std::numeric_limits<off_t>::max)()) - written) {
-            return StorageError::InvalidArgument;
-        }
-        const ssize_t count = pg_pwrite(
-            descriptor,
-            bytes.data() + written,
-            bytes.size() - written,
-            static_cast<off_t>(offset + written));
-        if (count < 0 && errno == EINTR) {
-            continue;
-        }
-        if (count <= 0) {
-            return StorageError::WriteFailed;
-        }
-        written += static_cast<std::size_t>(count);
+    const auto written = bioseq::durable_file_io::positional_write_all(
+        descriptor, bytes, offset, postgres_positional_io());
+    if (written.has_value()) {
+        return StorageError::None;
     }
-    return StorageError::None;
+    return written.error().code
+            == bioseq::durable_file_io::file_io_errc::offset_overflow
+        ? StorageError::InvalidArgument
+        : StorageError::WriteFailed;
 }
 
 [[nodiscard]] StorageError store_file_block(
@@ -2116,34 +2151,23 @@ void clear_unreserved_ledger_slot(
     return StorageError::None;
 }
 
-[[nodiscard]] StorageError read_all_at(
+[[nodiscard]] inline StorageError read_all_at(
         int descriptor,
         std::uint64_t offset,
         std::span<std::byte> destination) noexcept {
-    std::size_t read = 0;
-    while (read < destination.size()) {
-        CHECK_FOR_INTERRUPTS();
-        if (offset > static_cast<std::uint64_t>((std::numeric_limits<off_t>::max)())
-            - read) {
-            return StorageError::InvalidArgument;
-        }
-        const ssize_t count = pg_pread(
-            descriptor,
-            destination.data() + read,
-            destination.size() - read,
-            static_cast<off_t>(offset + read));
-        if (count < 0 && errno == EINTR) {
-            continue;
-        }
-        if (count < 0) {
-            return StorageError::ReadFailed;
-        }
-        if (count == 0) {
-            return StorageError::ShortRead;
-        }
-        read += static_cast<std::size_t>(count);
+    const auto read = bioseq::durable_file_io::positional_read_exact(
+        descriptor, offset, destination, postgres_positional_io());
+    if (read.has_value()) {
+        return StorageError::None;
     }
-    return StorageError::None;
+    switch (read.error().code) {
+        case bioseq::durable_file_io::file_io_errc::offset_overflow:
+            return StorageError::InvalidArgument;
+        case bioseq::durable_file_io::file_io_errc::unexpected_end_of_file:
+            return StorageError::ShortRead;
+        default:
+            return StorageError::ReadFailed;
+    }
 }
 
 [[nodiscard]] StorageError read_file_block(
@@ -2158,7 +2182,7 @@ void clear_unreserved_ledger_slot(
             temporary, sizeof(temporary), final, sizeof(final))) {
         return StorageError::PathTooLong;
     }
-    int flags = O_RDONLY | O_CLOEXEC;
+    int flags = O_RDONLY | O_CLOEXEC | O_NONBLOCK;
 #if defined(O_NOFOLLOW)
     flags |= O_NOFOLLOW;
 #endif
@@ -2167,24 +2191,42 @@ void clear_unreserved_ledger_slot(
         return errno == ENOENT ? StorageError::NotFound : StorageError::OpenFailed;
     }
     StorageError error = StorageError::None;
+    bioseq::durable_file_io::regular_file_identity identity_before{};
+    bool captured_identity = false;
     PG_TRY();
     {
-        struct stat status{};
         const std::uint64_t end = reference.offset <=
                 (std::numeric_limits<std::uint64_t>::max)() - reference.length
             ? reference.offset + reference.length
             : (std::numeric_limits<std::uint64_t>::max)();
-        if (::fstat(descriptor, &status) != 0
-            || !S_ISREG(status.st_mode)
-            || status.st_uid != ::geteuid()
-            || status.st_nlink != 1
-            || (status.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)) !=
-                (S_IRUSR | S_IWUSR)
-            || status.st_size < 0
-            || static_cast<std::uint64_t>(status.st_size) < end) {
-            error = StorageError::UnsafePath;
-        } else {
-            error = read_all_at(descriptor, reference.offset, destination);
+        {
+            const auto captured =
+                bioseq::durable_file_io::capture_regular_file_identity(
+                    descriptor);
+            if (!captured.has_value()
+                || captured->owner != ::geteuid()
+                || captured->link_count != 1
+                || (captured->mode & (S_IRWXU | S_IRWXG | S_IRWXO))
+                    != (S_IRUSR | S_IWUSR)
+                || captured->size < end) {
+                error = StorageError::UnsafePath;
+            } else {
+                identity_before = *captured;
+                captured_identity = true;
+            }
+        }
+        if (error == StorageError::None) {
+            error = read_all_at(
+                descriptor, reference.offset, destination);
+        }
+        if (error == StorageError::None && captured_identity) {
+            const auto captured =
+                bioseq::durable_file_io::capture_regular_file_identity(
+                    descriptor);
+            if (!captured.has_value()
+                || *captured != identity_before) {
+                error = StorageError::ReadFailed;
+            }
         }
         if (CloseTransientFile(descriptor) != 0 &&
             error == StorageError::None) {
@@ -2337,6 +2379,220 @@ struct ManifestFileFinalization {
     std::array<BlockReferenceV1, kBlocksPerManifest> references{};
 };
 
+/**
+ * Publish one already-fsynced manifest file through source-neutral primitives.
+ *
+ * This helper contains every nontrivial C++ filesystem/descriptor owner and
+ * invokes no PostgreSQL function, so callers regain a destructor-free state
+ * before any PG cleanup or lock operation can longjmp.
+ *
+ * The cache lifecycle satisfies durable_file_io's serialized-writer
+ * precondition: staging names contain the backend identity, generation names
+ * are created only through no-replace publication, and janitor removal is
+ * admitted only after the corresponding ledger state becomes visible.
+ */
+[[nodiscard]] inline StorageError publish_manifest_file_no_replace(
+        std::string_view directory,
+        std::string_view temporary,
+        std::string_view final,
+        const bioseq::durable_file_io::regular_file_identity&
+            expected_identity) noexcept {
+    try {
+        auto directory_opened =
+            bioseq::durable_file_io::open_directory_descriptor(
+                std::filesystem::path{directory});
+        if (!directory_opened.has_value()) {
+            return StorageError::UnsafePath;
+        }
+        bioseq::durable_file_io::file_descriptor directory_descriptor =
+            std::move(*directory_opened);
+        const std::string temporary_name =
+            std::filesystem::path{temporary}.filename().string();
+        const std::string final_name =
+            std::filesystem::path{final}.filename().string();
+        const auto identity =
+            bioseq::durable_file_io::same_regular_file_identity_at(
+                directory_descriptor.get(),
+                temporary_name,
+                expected_identity);
+        if (!identity.has_value() || !*identity) {
+            return StorageError::UnsafePath;
+        }
+        const auto linked =
+            bioseq::durable_file_io::link_file_no_replace_at(
+                directory_descriptor.get(),
+                temporary_name,
+                directory_descriptor.get(),
+                final_name,
+                {},
+                &expected_identity);
+        if (!linked.has_value()) {
+            const auto temporary_removed =
+                bioseq::durable_file_io::remove_file_if_same_inode_at(
+                    directory_descriptor.get(),
+                    temporary_name,
+                    expected_identity);
+            const auto cleanup_synced =
+                bioseq::durable_file_io::fsync_directory_descriptor(
+                    directory_descriptor.get());
+            if (!temporary_removed.has_value()
+                || *temporary_removed
+                    != bioseq::durable_file_io::
+                        conditional_remove_disposition::removed
+                || !cleanup_synced.has_value()) {
+                return StorageError::UnsafePath;
+            }
+            if (linked.error().publication
+                    != bioseq::durable_file_io::publication_state::
+                        unchanged
+                || linked.error().code
+                    == bioseq::durable_file_io::file_io_errc::
+                        identity_changed) {
+                return StorageError::UnsafePath;
+            }
+            return linked.error().code
+                    == bioseq::durable_file_io::file_io_errc::
+                        destination_exists
+                ? StorageError::DuplicateGeneration
+                : StorageError::RenameFailed;
+        }
+        const auto temporary_removed =
+            bioseq::durable_file_io::remove_file_if_same_inode_at(
+                directory_descriptor.get(),
+                temporary_name,
+                expected_identity,
+                bioseq::durable_file_io::publication_state::
+                    visible_not_durable);
+        if (!temporary_removed.has_value()
+            || *temporary_removed
+                != bioseq::durable_file_io::
+                    conditional_remove_disposition::removed) {
+            const auto final_removed =
+                bioseq::durable_file_io::remove_file_if_same_inode_at(
+                    directory_descriptor.get(),
+                    final_name,
+                    expected_identity,
+                    bioseq::durable_file_io::publication_state::
+                        visible_not_durable);
+            const auto reconciled =
+                bioseq::durable_file_io::fsync_directory_descriptor(
+                    directory_descriptor.get(),
+                    {},
+                    bioseq::durable_file_io::publication_state::
+                        visible_not_durable);
+            if (!final_removed.has_value()
+                || *final_removed
+                    == bioseq::durable_file_io::
+                        conditional_remove_disposition::
+                            identity_mismatch
+                || !reconciled.has_value()) {
+                return StorageError::UnsafePath;
+            }
+            return StorageError::UnsafePath;
+        }
+        const auto synced =
+            bioseq::durable_file_io::fsync_directory_descriptor(
+                directory_descriptor.get(),
+                {},
+                bioseq::durable_file_io::publication_state::
+                    visible_not_durable);
+        if (!synced.has_value()) {
+            // A surfaced non-EINTR writeback error is final for this publish.
+            // A later fsync may return success merely because the kernel has
+            // already reported the error; it cannot erase the first failure.
+            const auto removed =
+                bioseq::durable_file_io::remove_file_if_same_inode_at(
+                    directory_descriptor.get(),
+                    final_name,
+                    expected_identity,
+                    bioseq::durable_file_io::publication_state::
+                        visible_not_durable);
+            const auto rollback_synced =
+                bioseq::durable_file_io::fsync_directory_descriptor(
+                    directory_descriptor.get());
+            if (!removed.has_value()
+                || *removed
+                    == bioseq::durable_file_io::
+                        conditional_remove_disposition::
+                            identity_mismatch
+                || !rollback_synced.has_value()) {
+                return StorageError::UnsafePath;
+            }
+            return StorageError::SyncFailed;
+        }
+        return StorageError::None;
+    } catch (...) {
+        return StorageError::UnsafePath;
+    }
+}
+
+[[nodiscard]] inline StorageError remove_cache_file_durably(
+        std::string_view path,
+        std::uint64_t maximum_link_count = 1,
+        const bioseq::durable_file_io::regular_file_identity*
+            expected_identity = nullptr) noexcept {
+    try {
+        const std::filesystem::path file_path{path};
+        const std::filesystem::path parent =
+            file_path.parent_path().empty()
+            ? std::filesystem::path{"."}
+            : file_path.parent_path();
+        const std::string name = file_path.filename().string();
+        auto directory_opened =
+            bioseq::durable_file_io::open_directory_descriptor(parent);
+        if (!directory_opened.has_value()) {
+            return StorageError::UnsafePath;
+        }
+        bioseq::durable_file_io::file_descriptor directory_descriptor =
+            std::move(*directory_opened);
+        const auto identity =
+            bioseq::durable_file_io::capture_regular_file_identity_at(
+                directory_descriptor.get(), name);
+        if (!identity.has_value()) {
+            if (identity.error().system_error != ENOENT) {
+                return StorageError::UnsafePath;
+            }
+            return bioseq::durable_file_io::fsync_directory_descriptor(
+                directory_descriptor.get()).has_value()
+                ? StorageError::None
+                : StorageError::UnsafePath;
+        }
+        if (identity->owner != ::geteuid()
+            || identity->link_count < 1
+            || identity->link_count > maximum_link_count
+            || (identity->mode & (S_IRWXU | S_IRWXG | S_IRWXO))
+                != (S_IRUSR | S_IWUSR)
+            || (expected_identity != nullptr
+                && (identity->device != expected_identity->device
+                    || identity->inode != expected_identity->inode))) {
+            return StorageError::UnsafePath;
+        }
+        const auto removed =
+            bioseq::durable_file_io::remove_file_if_same_inode_at(
+                directory_descriptor.get(),
+                name,
+                *identity,
+                bioseq::durable_file_io::publication_state::
+                    visible_not_durable);
+        const auto synced =
+            bioseq::durable_file_io::fsync_directory_descriptor(
+                directory_descriptor.get(),
+                {},
+                bioseq::durable_file_io::publication_state::
+                    visible_not_durable);
+        if (!removed.has_value()
+            || *removed
+                == bioseq::durable_file_io::
+                    conditional_remove_disposition::identity_mismatch
+            || !synced.has_value()) {
+            return StorageError::UnsafePath;
+        }
+        return StorageError::None;
+    } catch (...) {
+        return StorageError::UnsafePath;
+    }
+}
+
 /** Reject every forged/stale/duplicate capability before filesystem access. */
 [[nodiscard]] StorageError validate_manifest_tokens_before_io(
         const ManifestDescriptor& descriptor,
@@ -2440,7 +2696,7 @@ struct ManifestFileFinalization {
     }
 
     int destination_flags = O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC;
-    int source_flags = O_RDONLY | O_CLOEXEC;
+    int source_flags = O_RDONLY | O_CLOEXEC | O_NONBLOCK;
 #if defined(O_NOFOLLOW)
     destination_flags |= O_NOFOLLOW;
     source_flags |= O_NOFOLLOW;
@@ -2448,6 +2704,8 @@ struct ManifestFileFinalization {
     volatile int destination = -1;
     volatile int source = -1;
     std::uint64_t file_offset = 0;
+    bioseq::durable_file_io::regular_file_identity destination_identity{};
+    bool destination_identity_captured = false;
     PG_TRY();
     {
         destination = OpenTransientFilePerm(
@@ -2475,16 +2733,25 @@ struct ManifestFileFinalization {
                 result.error = StorageError::OpenFailed;
                 break;
             }
-            struct stat status{};
-            if (::fstat(source, &status) != 0 ||
-                !S_ISREG(status.st_mode) || status.st_uid != ::geteuid() ||
-                status.st_nlink != 1 ||
-                (status.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)) !=
-                    (S_IRUSR | S_IWUSR) ||
-                status.st_size < 0 ||
-                static_cast<std::uint64_t>(status.st_size) !=
-                    token.reference.length) {
-                result.error = StorageError::UnsafePath;
+            bioseq::durable_file_io::regular_file_identity
+                source_identity{};
+            bool source_identity_captured = false;
+            if (result.error == StorageError::None) {
+                const auto captured =
+                    bioseq::durable_file_io::capture_regular_file_identity(
+                        source);
+                if (!captured.has_value()
+                    || captured->owner != ::geteuid()
+                    || captured->link_count != 1
+                    || (captured->mode
+                        & (S_IRWXU | S_IRWXG | S_IRWXO))
+                        != (S_IRUSR | S_IWUSR)
+                    || captured->size != token.reference.length) {
+                    result.error = StorageError::UnsafePath;
+                } else {
+                    source_identity = *captured;
+                    source_identity_captured = true;
+                }
             }
             pg_crc32c checksum = 0;
             INIT_CRC32C(checksum);
@@ -2495,24 +2762,29 @@ struct ManifestFileFinalization {
                 const std::size_t chunk = static_cast<std::size_t>(std::min(
                     static_cast<std::uint64_t>(buffer.size()),
                     token.reference.length - copied));
-                const ssize_t count = pg_pread(
-                    source, buffer.data(), chunk, static_cast<off_t>(copied));
-                if (count < 0 && errno == EINTR) {
-                    continue;
-                }
-                if (count <= 0) {
-                    result.error = count == 0
-                        ? StorageError::ShortRead
-                        : StorageError::ReadFailed;
+                result.error = read_all_at(
+                    source,
+                    copied,
+                    std::span<std::byte>{buffer.data(), chunk});
+                if (result.error != StorageError::None) {
                     break;
                 }
-                const auto bytes_read = static_cast<std::size_t>(count);
-                COMP_CRC32C(checksum, buffer.data(), bytes_read);
+                COMP_CRC32C(checksum, buffer.data(), chunk);
                 result.error = write_all_at(
                     destination,
-                    std::span<const std::byte>{buffer.data(), bytes_read},
+                    std::span<const std::byte>{buffer.data(), chunk},
                     file_offset + copied);
-                copied += bytes_read;
+                copied += chunk;
+            }
+            if (result.error == StorageError::None
+                && source_identity_captured) {
+                const auto captured =
+                    bioseq::durable_file_io::capture_regular_file_identity(
+                        source);
+                if (!captured.has_value()
+                    || *captured != source_identity) {
+                    result.error = StorageError::ReadFailed;
+                }
             }
             FIN_CRC32C(checksum);
             if (result.error == StorageError::None &&
@@ -2539,6 +2811,27 @@ struct ManifestFileFinalization {
             }
             file_offset = *next;
         }
+        if (result.error == StorageError::None) {
+            const auto captured =
+                bioseq::durable_file_io::capture_regular_file_identity(
+                    destination);
+            if (!captured.has_value()
+                || captured->owner != ::geteuid()
+                || captured->link_count != 1
+                || (captured->mode & (S_IRWXU | S_IRWXG | S_IRWXO))
+                    != (S_IRUSR | S_IWUSR)
+                || captured->size != file_offset) {
+                result.error = StorageError::UnsafePath;
+            } else {
+                destination_identity = *captured;
+                destination_identity_captured = true;
+            }
+        }
+        if (result.error == StorageError::None
+            && !bioseq::durable_file_io::fsync_file_descriptor(
+                destination).has_value()) {
+            result.error = StorageError::SyncFailed;
+        }
         if (destination >= 0 && CloseTransientFile(destination) != 0 &&
             result.error == StorageError::None) {
             result.error = StorageError::SyncFailed;
@@ -2553,7 +2846,7 @@ struct ManifestFileFinalization {
         if (destination >= 0) {
             static_cast<void>(CloseTransientFile(destination));
         }
-        static_cast<void>(unlink_cache_file(temporary));
+        static_cast<void>(remove_cache_file_durably(temporary));
         for (const StoredBlockToken& token : blocks) {
             static_cast<void>(release_block_slot(
                 token.ledger_slot, token.sequence));
@@ -2562,25 +2855,22 @@ struct ManifestFileFinalization {
     }
     PG_END_TRY();
     if (result.error != StorageError::None) {
-        static_cast<void>(unlink_cache_file(temporary));
+        if (remove_cache_file_durably(temporary)
+            != StorageError::None) {
+            result.error = StorageError::UnsafePath;
+        }
         return result;
     }
-    if (fsync_fname_ext(temporary, false, false, WARNING) != 0) {
-        static_cast<void>(unlink_cache_file(temporary));
-        result.error = StorageError::SyncFailed;
-        return result;
-    }
-    if (::link(temporary, final) != 0) {
-        result.error = errno == EEXIST
-            ? StorageError::DuplicateGeneration
-            : StorageError::RenameFailed;
-        static_cast<void>(unlink_cache_file(temporary));
-        return result;
-    }
-    if (fsync_fname_ext(directory, true, false, WARNING) != 0) {
-        static_cast<void>(unlink_cache_file(final, 2));
-        static_cast<void>(unlink_cache_file(temporary));
-        result.error = StorageError::SyncFailed;
+    result.error = destination_identity_captured
+        ? publish_manifest_file_no_replace(
+            directory, temporary, final, destination_identity)
+        : StorageError::UnsafePath;
+    if (result.error != StorageError::None) {
+        if (remove_cache_file_durably(
+                temporary, 1, &destination_identity)
+            != StorageError::None) {
+            result.error = StorageError::UnsafePath;
+        }
         return result;
     }
 
@@ -2613,9 +2903,11 @@ struct ManifestFileFinalization {
     }
     LWLockRelease(g_storage_lock);
     if (!unchanged) {
-        static_cast<void>(unlink_cache_file(final, 2));
-        static_cast<void>(unlink_cache_file(temporary));
-        result.error = StorageError::StaleToken;
+        result.error = remove_cache_file_durably(
+                final, 1, &destination_identity)
+                == StorageError::None
+            ? StorageError::StaleToken
+            : StorageError::UnsafePath;
         return result;
     }
 
@@ -2627,10 +2919,16 @@ struct ManifestFileFinalization {
         if (build_staging_file_path(
                 database_oid, owner, token.reference.handle_or_file_id,
                 staging, sizeof(staging))) {
-            static_cast<void>(unlink_cache_file(staging));
+            if (remove_cache_file_durably(staging)
+                != StorageError::None) {
+                result.error = StorageError::UnsafePath;
+                return result;
+            }
+        } else {
+            result.error = StorageError::PathTooLong;
+            return result;
         }
     }
-    static_cast<void>(unlink_cache_file(temporary, 2));
     return result;
 }
 
@@ -3425,8 +3723,15 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
         : policy_ceiling;
     const std::uint64_t observed = pg_atomic_read_u64(
         &file_reserved_bytes());
-    const std::uint64_t free_floor = FileAdmissionPolicy::free_floor_bytes(
-        filesystem_bytes);
+    /*
+     * The explicit test-only override must exercise the file path even when
+     * unrelated host occupancy has already crossed the production reserve
+     * floor.  A zero floor still leaves the actual available bytes, configured
+     * file ceiling, and ten-percent filesystem-capacity ceiling below intact.
+     */
+    const std::uint64_t free_floor = force_file_tier
+        ? 0
+        : FileAdmissionPolicy::free_floor_bytes(filesystem_bytes);
     const std::uint64_t free_headroom = filesystem_available > free_floor
         ? filesystem_available - free_floor
         : 0;
@@ -3445,11 +3750,14 @@ StoreBlockResult store_block(std::span<const std::byte> bytes) {
     };
     BasicCacheAdmission file_admission{file_counter, file_budget};
     auto file_permit = file_admission.try_reserve(bytes.size());
-    if (!FileAdmissionPolicy::can_reserve(
+    const bool file_policy_allows_reservation =
+        FileAdmissionPolicy::can_reserve_with_free_floor(
             observed,
             bytes.size(),
             filesystem_bytes,
-            filesystem_available)
+            filesystem_available,
+            free_floor);
+    if (!file_policy_allows_reservation
         || !file_permit.has_value()) {
         clear_unreserved_ledger_slot(ledger_slot, sequence, owner);
         result.error = StorageError::FileTierFull;
@@ -3569,8 +3877,12 @@ PublishManifestResult publish_manifest(
         return result;
     }
 
-    const ManifestFileFinalization finalized = finalize_manifest_file(
-        descriptor, blocks, current);
+    const ManifestFileFinalization finalized =
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [descriptor_pointer = &descriptor, blocks, current] {
+                return finalize_manifest_file(
+                    *descriptor_pointer, blocks, current);
+            });
     if (finalized.error != StorageError::None) {
         result.error = finalized.error;
         return result;
@@ -4187,9 +4499,10 @@ StorageRuntimeSnapshot runtime_snapshot() noexcept {
     const auto registry = shared_registry::shared_registry_diagnostics();
     snapshot.bootstrap_state = registry.state;
     snapshot.bootstrap_ready = registry.state == BootstrapState::Ready;
-    if (g_shared == nullptr) {
+    if (g_shared == nullptr || !g_accounting || g_storage_lock == nullptr) {
         return snapshot;
     }
+    snapshot.pending_file_bytes_valid = true;
     snapshot.worker_lifecycle = static_cast<WorkerLifecycle>(
         pg_atomic_read_u32(&g_shared->worker_lifecycle));
     snapshot.correctness_readiness = static_cast<CacheCorrectnessReadiness>(
@@ -4206,10 +4519,13 @@ StorageRuntimeSnapshot runtime_snapshot() noexcept {
         : pg_atomic_read_u64(&g_registry_root->hot_live_bytes);
     const auto fixed_and_live = checked_add(
         snapshot.fixed_hot_bytes, snapshot.live_hot_bytes);
-    snapshot.pending_hot_bytes = fixed_and_live.has_value() &&
-            snapshot.reserved_hot_bytes >= *fixed_and_live
-        ? snapshot.reserved_hot_bytes - *fixed_and_live
-        : 0;
+    snapshot.pending_hot_bytes_valid =
+        fixed_and_live.has_value()
+        && snapshot.reserved_hot_bytes >= *fixed_and_live;
+    if (snapshot.pending_hot_bytes_valid) {
+        snapshot.pending_hot_bytes =
+            snapshot.reserved_hot_bytes - *fixed_and_live;
+    }
     snapshot.reserved_file_bytes = pg_atomic_read_u64(
         g_accounting.reserved_file_bytes);
     snapshot.hot_ceiling_bytes = g_shared->hot_ceiling_bytes;
@@ -4231,6 +4547,17 @@ StorageRuntimeSnapshot runtime_snapshot() noexcept {
         if (!entry.reservation_accounted ||
             entry.state == BlockLedgerState::Empty) {
             continue;
+        }
+        if (entry.state == BlockLedgerState::Reserved
+            && entry.reservation_tier == BlockBackingTierV1::File
+            && snapshot.pending_file_bytes_valid) {
+            const auto next_pending_file = checked_add(
+                snapshot.pending_file_bytes, entry.reserved_bytes);
+            if (next_pending_file.has_value()) {
+                snapshot.pending_file_bytes = *next_pending_file;
+            } else {
+                snapshot.pending_file_bytes_valid = false;
+            }
         }
         if (entry.reservation_tier == BlockBackingTierV1::Dsa) {
             snapshot.dsa_stored_bytes += entry.payload_bytes;
@@ -4505,175 +4832,233 @@ StorageTierTestSnapshot test_storage_tier_snapshot() noexcept {
     snapshot.fixed_hot_bytes = runtime.fixed_hot_bytes;
     snapshot.live_hot_bytes = runtime.live_hot_bytes;
     snapshot.pending_hot_bytes = runtime.pending_hot_bytes;
-    snapshot.coherent = snapshot.coherent &&
-        runtime.reserved_hot_bytes >= runtime.fixed_hot_bytes &&
-        dynamic_hot_reservations <= runtime.reserved_hot_bytes;
+    snapshot.coherent = snapshot.coherent
+        && runtime.pending_hot_bytes_valid
+        && runtime.pending_file_bytes_valid
+        && runtime.reserved_hot_bytes >= runtime.fixed_hot_bytes
+        && dynamic_hot_reservations <= runtime.reserved_hot_bytes;
     return snapshot;
 }
 
 } // namespace bioseq::cache::pg::storage
 
-namespace bioseq::cache::pg::storage::bootstrap_test_api {
+export namespace bioseq::cache::pg::storage::bootstrap_test_api {
 
 /** Test controls are private-cluster superuser operations only. */
 inline void require_superuser() {
     if (!superuser()) {
-        ereport(ERROR,
-            (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-             errmsg("bioseq_cache bootstrap test controls require superuser")));
+        bioseq::pg_utils::raise_sql_error(
+            ERRCODE_INSUFFICIENT_PRIVILEGE,
+            {
+                .message =
+                    "bioseq_cache bootstrap test controls require superuser",
+            });
     }
 }
 
-/** Convert one owned StringInfo JSON object to PostgreSQL jsonb. */
-[[nodiscard]] inline Datum finish_json(StringInfoData& json) {
-    const Datum result = DirectFunctionCall1(
-        jsonb_in, CStringGetDatum(json.data));
-    pfree(json.data);
-    return result;
+inline void append_json_member(
+        std::string& json,
+        std::string_view key,
+        std::string_view encoded_value) {
+    if (json.size() != 1) {
+        json.push_back(',');
+    }
+    json.push_back('"');
+    json.append(key);
+    json.append("\":");
+    json.append(encoded_value);
+}
+
+template<class Integer>
+    requires std::is_integral_v<Integer>
+inline void append_json_integer(
+        std::string& json,
+        std::string_view key,
+        Integer value) {
+    append_json_member(json, key, std::to_string(value));
+}
+
+inline void append_json_boolean(
+        std::string& json,
+        std::string_view key,
+        bool value) {
+    append_json_member(json, key, value ? "true" : "false");
+}
+
+/** Return one owning snapshot of shared bootstrap state. */
+[[nodiscard]] inline bioseq::pg_utils::sql_jsonb bootstrap_status() {
+    require_superuser();
+    const StorageBootstrapTestSnapshot snapshot =
+        test_storage_bootstrap_snapshot();
+    std::string json{"{"};
+    json.reserve(1'024);
+    append_json_integer(
+        json, "state", static_cast<std::uint32_t>(snapshot.state));
+    append_json_integer(
+        json, "failure", static_cast<std::uint32_t>(snapshot.failure));
+    append_json_integer(json, "boot_nonce", snapshot.boot_nonce);
+    append_json_integer(
+        json,
+        "initialization_attempts",
+        snapshot.initialization_attempt_count);
+    append_json_integer(json, "takeovers", snapshot.takeover_count);
+    append_json_integer(json, "cleanups", snapshot.cleanup_count);
+    append_json_integer(json, "attaches", snapshot.attach_count);
+    append_json_integer(
+        json,
+        "validation_failures",
+        snapshot.validation_failure_count);
+    append_json_integer(
+        json, "takeover_used", snapshot.takeover_used);
+    append_json_integer(
+        json,
+        "live_unpublished_areas",
+        snapshot.live_unpublished_area_count);
+    append_json_integer(
+        json,
+        "cleanup_handle_pinned",
+        snapshot.cleanup_handle_pinned);
+    append_json_boolean(
+        json,
+        "cleanup_handle_published",
+        snapshot.cleanup_handle_published);
+    append_json_boolean(
+        json,
+        "ready_handle_published",
+        snapshot.ready_handle_published);
+    append_json_boolean(
+        json, "root_published", snapshot.root_published);
+    append_json_boolean(
+        json, "storage_attached", snapshot.storage_attached);
+    append_json_boolean(
+        json, "mapping_pinned", snapshot.mapping_pinned);
+    append_json_boolean(
+        json,
+        "storage_metadata_in_dsa",
+        snapshot.storage_metadata_in_dsa);
+    append_json_boolean(
+        json,
+        "reusable_wait_cvs_in_dsa",
+        snapshot.reusable_wait_cvs_in_dsa);
+    append_json_integer(
+        json,
+        "reusable_wait_cv_count",
+        snapshot.reusable_wait_cv_count);
+    append_json_boolean(
+        json, "pause_reached", snapshot.pause_reached);
+    append_json_boolean(
+        json,
+        "defer_background_initializer",
+        snapshot.defer_background_initializer);
+    append_json_integer(
+        json,
+        "last_cleanup_handle",
+        snapshot.last_cleanup_handle);
+    append_json_boolean(
+        json,
+        "last_cleanup_was_pinned",
+        snapshot.last_cleanup_handle_was_pinned);
+    append_json_boolean(
+        json,
+        "last_cleanup_release_verified",
+        snapshot.last_cleanup_release_verified);
+    append_json_integer(
+        json,
+        "initializer_proc",
+        static_cast<std::uint32_t>(
+            snapshot.initializer.owner.proc_number));
+    append_json_integer(
+        json, "initializer_pid", snapshot.initializer.owner.pid);
+    append_json_integer(
+        json,
+        "initializer_nonce",
+        snapshot.initializer.owner.backend_nonce);
+    append_json_integer(
+        json,
+        "initializer_started_at",
+        snapshot.initializer.owner.backend_started_at_us);
+    append_json_integer(
+        json,
+        "initializer_claim",
+        snapshot.initializer.claim_sequence);
+    append_json_integer(
+        json,
+        "last_initializer_proc",
+        static_cast<std::uint32_t>(
+            snapshot.last_initializer.owner.proc_number));
+    append_json_integer(
+        json,
+        "last_initializer_pid",
+        snapshot.last_initializer.owner.pid);
+    append_json_integer(
+        json,
+        "last_initializer_nonce",
+        snapshot.last_initializer.owner.backend_nonce);
+    append_json_integer(
+        json,
+        "last_initializer_started_at",
+        snapshot.last_initializer.owner.backend_started_at_us);
+    append_json_integer(
+        json,
+        "last_initializer_claim",
+        snapshot.last_initializer.claim_sequence);
+    json.push_back('}');
+    return bioseq::pg_utils::sql_jsonb{std::move(json)};
+}
+
+/** Prove that repeated attachment selects one shared area and root. */
+[[nodiscard]] inline bioseq::pg_utils::sql_jsonb
+bootstrap_attach_twice() {
+    require_superuser();
+    const StorageBootstrapAttachTwiceSnapshot snapshot =
+        test_attach_storage_twice();
+    std::string json{"{"};
+    json.reserve(384);
+    append_json_boolean(
+        json, "first_attached", snapshot.first_attached);
+    append_json_boolean(
+        json, "second_attached", snapshot.second_attached);
+    append_json_boolean(json, "same_area", snapshot.same_area);
+    append_json_boolean(json, "same_root", snapshot.same_root);
+    append_json_boolean(
+        json, "mapping_pinned", snapshot.mapping_pinned);
+    append_json_integer(
+        json, "attempts_before", snapshot.attempts_before);
+    append_json_integer(
+        json, "attempts_after", snapshot.attempts_after);
+    append_json_integer(
+        json, "attaches_before", snapshot.attaches_before);
+    append_json_integer(
+        json, "attaches_after", snapshot.attaches_after);
+    json.push_back('}');
+    return bioseq::pg_utils::sql_jsonb{std::move(json)};
+}
+
+/** Corrupt one named bootstrap-manifest field for recovery testing. */
+[[nodiscard]] inline bool corrupt_bootstrap_manifest(
+        const std::string& name) {
+    require_superuser();
+    shared_registry::SharedRegistryTestManifestCorruptionV1 corruption{};
+    if (name == "magic") {
+        corruption =
+            shared_registry::SharedRegistryTestManifestCorruptionV1::Magic;
+    } else if (name == "abi") {
+        corruption = shared_registry::
+            SharedRegistryTestManifestCorruptionV1::AbiVersion;
+    } else if (name == "boot_nonce") {
+        corruption = shared_registry::
+            SharedRegistryTestManifestCorruptionV1::BootNonce;
+    } else {
+        bioseq::pg_utils::raise_sql_error(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            {
+                .message =
+                    "unknown bootstrap manifest corruption: " + name,
+            });
+    }
+    return test_corrupt_storage_bootstrap_manifest(corruption);
 }
 
 } // namespace bioseq::cache::pg::storage::bootstrap_test_api
 
-extern "C" {
-
-PGDLLEXPORT Datum bioseq_cache_test_bootstrap_status(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_bootstrap_status);
-Datum bioseq_cache_test_bootstrap_status(PG_FUNCTION_ARGS) {
-    using namespace bioseq::cache::pg::storage;
-    using namespace bioseq::cache::pg::storage::bootstrap_test_api;
-    require_superuser();
-    const StorageBootstrapTestSnapshot snapshot =
-        test_storage_bootstrap_snapshot();
-    StringInfoData json{};
-    initStringInfo(&json);
-    appendStringInfo(
-        &json,
-        "{\"state\":%u,\"failure\":%u,\"boot_nonce\":%llu,"
-        "\"initialization_attempts\":%llu,\"takeovers\":%llu,"
-        "\"cleanups\":%llu,\"attaches\":%llu,"
-        "\"validation_failures\":%llu,\"takeover_used\":%u,"
-        "\"live_unpublished_areas\":%u,"
-        "\"cleanup_handle_pinned\":%u,"
-        "\"cleanup_handle_published\":%s,"
-        "\"ready_handle_published\":%s,\"root_published\":%s,"
-        "\"storage_attached\":%s,\"mapping_pinned\":%s,"
-        "\"storage_metadata_in_dsa\":%s,"
-        "\"reusable_wait_cvs_in_dsa\":%s,"
-        "\"reusable_wait_cv_count\":%u,"
-        "\"pause_reached\":%s,"
-        "\"defer_background_initializer\":%s,"
-        "\"last_cleanup_handle\":%u,"
-        "\"last_cleanup_was_pinned\":%s,"
-        "\"last_cleanup_release_verified\":%s,"
-        "\"initializer_proc\":%u,\"initializer_pid\":%d,"
-        "\"initializer_nonce\":%llu,"
-        "\"initializer_started_at\":%lld,"
-        "\"initializer_claim\":%llu,"
-        "\"last_initializer_proc\":%u,"
-        "\"last_initializer_pid\":%d,"
-        "\"last_initializer_nonce\":%llu,"
-        "\"last_initializer_started_at\":%lld,"
-        "\"last_initializer_claim\":%llu}",
-        static_cast<std::uint32_t>(snapshot.state),
-        static_cast<std::uint32_t>(snapshot.failure),
-        static_cast<unsigned long long>(snapshot.boot_nonce),
-        static_cast<unsigned long long>(
-            snapshot.initialization_attempt_count),
-        static_cast<unsigned long long>(snapshot.takeover_count),
-        static_cast<unsigned long long>(snapshot.cleanup_count),
-        static_cast<unsigned long long>(snapshot.attach_count),
-        static_cast<unsigned long long>(snapshot.validation_failure_count),
-        snapshot.takeover_used,
-        snapshot.live_unpublished_area_count,
-        snapshot.cleanup_handle_pinned,
-        snapshot.cleanup_handle_published ? "true" : "false",
-        snapshot.ready_handle_published ? "true" : "false",
-        snapshot.root_published ? "true" : "false",
-        snapshot.storage_attached ? "true" : "false",
-        snapshot.mapping_pinned ? "true" : "false",
-        snapshot.storage_metadata_in_dsa ? "true" : "false",
-        snapshot.reusable_wait_cvs_in_dsa ? "true" : "false",
-        snapshot.reusable_wait_cv_count,
-        snapshot.pause_reached ? "true" : "false",
-        snapshot.defer_background_initializer ? "true" : "false",
-        snapshot.last_cleanup_handle,
-        snapshot.last_cleanup_handle_was_pinned ? "true" : "false",
-        snapshot.last_cleanup_release_verified ? "true" : "false",
-        snapshot.initializer.owner.proc_number,
-        snapshot.initializer.owner.pid,
-        static_cast<unsigned long long>(
-            snapshot.initializer.owner.backend_nonce),
-        static_cast<long long>(
-            snapshot.initializer.owner.backend_started_at_us),
-        static_cast<unsigned long long>(snapshot.initializer.claim_sequence),
-        snapshot.last_initializer.owner.proc_number,
-        snapshot.last_initializer.owner.pid,
-        static_cast<unsigned long long>(
-            snapshot.last_initializer.owner.backend_nonce),
-        static_cast<long long>(
-            snapshot.last_initializer.owner.backend_started_at_us),
-        static_cast<unsigned long long>(
-            snapshot.last_initializer.claim_sequence));
-    PG_RETURN_DATUM(finish_json(json));
-}
-
-PGDLLEXPORT Datum bioseq_cache_test_bootstrap_attach_twice(
-    PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_bootstrap_attach_twice);
-Datum bioseq_cache_test_bootstrap_attach_twice(PG_FUNCTION_ARGS) {
-    using namespace bioseq::cache::pg::storage;
-    using namespace bioseq::cache::pg::storage::bootstrap_test_api;
-    require_superuser();
-    const StorageBootstrapAttachTwiceSnapshot snapshot =
-        test_attach_storage_twice();
-    StringInfoData json{};
-    initStringInfo(&json);
-    appendStringInfo(
-        &json,
-        "{\"first_attached\":%s,\"second_attached\":%s,"
-        "\"same_area\":%s,\"same_root\":%s,"
-        "\"mapping_pinned\":%s,\"attempts_before\":%llu,"
-        "\"attempts_after\":%llu,\"attaches_before\":%llu,"
-        "\"attaches_after\":%llu}",
-        snapshot.first_attached ? "true" : "false",
-        snapshot.second_attached ? "true" : "false",
-        snapshot.same_area ? "true" : "false",
-        snapshot.same_root ? "true" : "false",
-        snapshot.mapping_pinned ? "true" : "false",
-        static_cast<unsigned long long>(snapshot.attempts_before),
-        static_cast<unsigned long long>(snapshot.attempts_after),
-        static_cast<unsigned long long>(snapshot.attaches_before),
-        static_cast<unsigned long long>(snapshot.attaches_after));
-    PG_RETURN_DATUM(finish_json(json));
-}
-
-PGDLLEXPORT Datum bioseq_cache_test_corrupt_bootstrap_manifest(
-    PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(bioseq_cache_test_corrupt_bootstrap_manifest);
-Datum bioseq_cache_test_corrupt_bootstrap_manifest(PG_FUNCTION_ARGS) {
-    using namespace bioseq::cache::pg;
-    using namespace bioseq::cache::pg::storage;
-    using namespace bioseq::cache::pg::storage::bootstrap_test_api;
-    require_superuser();
-    char* name = text_to_cstring(PG_GETARG_TEXT_PP(0));
-    shared_registry::SharedRegistryTestManifestCorruptionV1 corruption{};
-    if (std::strcmp(name, "magic") == 0) {
-        corruption =
-            shared_registry::SharedRegistryTestManifestCorruptionV1::Magic;
-    } else if (std::strcmp(name, "abi") == 0) {
-        corruption = shared_registry::
-            SharedRegistryTestManifestCorruptionV1::AbiVersion;
-    } else if (std::strcmp(name, "boot_nonce") == 0) {
-        corruption = shared_registry::
-            SharedRegistryTestManifestCorruptionV1::BootNonce;
-    } else {
-        ereport(ERROR,
-            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-             errmsg("unknown bootstrap manifest corruption: %s", name)));
-    }
-    pfree(name);
-    PG_RETURN_BOOL(test_corrupt_storage_bootstrap_manifest(corruption));
-}
-
-} // extern "C"
 #endif

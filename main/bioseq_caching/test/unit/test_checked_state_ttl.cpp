@@ -95,7 +95,8 @@ struct StateOperationExpectations {
 
 } // namespace
 
-TEST_CASE("checked cache arithmetic rejects every boundary overflow") {
+TEST_CASE("checked cache arithmetic rejects every boundary overflow",
+          "[cache][unit][checked-state-ttl]") {
     constexpr auto maximum = (std::numeric_limits<std::uint64_t>::max)();
 
     REQUIRE(checked_add(std::uint64_t{4}, std::uint64_t{7}) == 11);
@@ -114,7 +115,8 @@ TEST_CASE("checked cache arithmetic rejects every boundary overflow") {
         checked_narrow<std::uint8_t>(std::uint16_t{256}).has_value());
 }
 
-TEST_CASE("little-endian wire helpers are canonical and bounded") {
+TEST_CASE("little-endian wire helpers are canonical and bounded",
+          "[cache][unit][checked-state-ttl]") {
     std::vector<std::byte> bytes;
     append_little_endian(bytes, std::uint16_t{0x1234});
     append_little_endian(bytes, std::uint32_t{0x89abcdef});
@@ -135,7 +137,8 @@ TEST_CASE("little-endian wire helpers are canonical and bounded") {
     REQUIRE_FALSE(checked_subspan(bytes, 5, 2).has_value());
 }
 
-TEST_CASE("the normative cache state graph rejects every omitted edge") {
+TEST_CASE("the normative cache state graph rejects every omitted edge",
+          "[cache][unit][checked-state-ttl]") {
     constexpr std::array states{
         CacheEntryState::Absent,
         CacheEntryState::Claimed,
@@ -164,7 +167,8 @@ TEST_CASE("the normative cache state graph rejects every omitted edge") {
         CacheEntryState::Invalidated, CacheEntryState::Complete));
 }
 
-TEST_CASE("generation operations exhaust every state and preserve rejections") {
+TEST_CASE("generation operations exhaust every state and preserve rejections",
+          "[cache][unit][checked-state-ttl]") {
     constexpr std::array expectations{
         StateOperationExpectations{
             .state = CacheEntryState::Absent,
@@ -267,7 +271,8 @@ TEST_CASE("generation operations exhaust every state and preserve rejections") {
     }
 }
 
-TEST_CASE("generation identity prevents ABA publication and premature eviction") {
+TEST_CASE("generation identity prevents ABA publication and premature eviction",
+          "[cache][unit][checked-state-ttl]") {
     GenerationStateMachine state;
     REQUIRE_FALSE(state.claim(0, 1));
     REQUIRE(state.claim(7, 11));
@@ -298,7 +303,8 @@ TEST_CASE("generation identity prevents ABA publication and premature eviction")
     REQUIRE(state.failure() == CacheFailureCode::ProducerExited);
 }
 
-TEST_CASE("invalidation preserves old pins but rejects every new reader") {
+TEST_CASE("invalidation preserves old pins but rejects every new reader",
+          "[cache][unit][checked-state-ttl]") {
     GenerationStateMachine state;
     REQUIRE(state.claim(3, 4));
     REQUIRE(state.begin_build(3, 4));
@@ -312,7 +318,8 @@ TEST_CASE("invalidation preserves old pins but rejects every new reader") {
     REQUIRE(state.begin_evict(3, 4));
 }
 
-TEST_CASE("waiter and reader references drain exactly across terminal states") {
+TEST_CASE("waiter and reader references drain exactly across terminal states",
+          "[cache][unit][checked-state-ttl]") {
     GenerationStateMachine complete;
     REQUIRE(complete.claim(kTestGeneration, kTestClaimSequence));
     REQUIRE(complete.register_waiter(
@@ -353,7 +360,8 @@ TEST_CASE("waiter and reader references drain exactly across terminal states") {
     REQUIRE(failed.begin_evict(8, 12));
 }
 
-TEST_CASE("wait dependencies form a strictly descending claim DAG") {
+TEST_CASE("wait dependencies form a strictly descending claim DAG",
+          "[cache][unit][checked-state-ttl]") {
     const std::array<std::uint64_t, 3> owned{10, 20, 30};
     REQUIRE(claim_sequence_wait_allowed(9, owned));
     REQUIRE_FALSE(claim_sequence_wait_allowed(10, owned));
@@ -369,7 +377,8 @@ TEST_CASE("wait dependencies form a strictly descending claim DAG") {
     REQUIRE_FALSE(failure_allows_takeover(CacheFailureCode::CorruptResult));
 }
 
-TEST_CASE("TTL starts at completion and uses the stricter consumer policy") {
+TEST_CASE("TTL starts at completion and uses the stricter consumer policy",
+          "[cache][unit][checked-state-ttl]") {
     CacheTimestamps timestamps{.started_ns = 10, .completed_ns = 1'000};
 
     REQUIRE(eligible_inflight(0));
@@ -383,7 +392,8 @@ TEST_CASE("TTL starts at completion and uses the stricter consumer policy") {
         == (std::numeric_limits<std::uint64_t>::max)());
 }
 
-TEST_CASE("monotonic TTL boundaries reject wrap instead of inferring age") {
+TEST_CASE("monotonic TTL boundaries reject wrap instead of inferring age",
+          "[cache][unit][checked-state-ttl]") {
     constexpr auto maximum =
         (std::numeric_limits<std::uint64_t>::max)();
     constexpr std::uint64_t nanos_per_millisecond = 1'000'000;
@@ -432,7 +442,8 @@ TEST_CASE("monotonic TTL boundaries reject wrap instead of inferring age") {
     REQUIRE_FALSE(expired(incomplete, 0, 0, maximum));
 }
 
-TEST_CASE("zero TTL ABA recheck preserves only one waiter entitlement") {
+TEST_CASE("zero TTL ABA recheck preserves only one waiter entitlement",
+          "[cache][unit][checked-state-ttl]") {
     const CacheTimestamps timestamps{
         .started_ns = 1,
         .completed_ns = 500,

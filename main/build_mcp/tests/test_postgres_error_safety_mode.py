@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import sys
 import tempfile
@@ -148,6 +149,123 @@ class PostgresErrorSafetyModeContractTest(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_safety_tree_uses_configure_freshness_and_reseals(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary)
+            build_ninja = build_dir / "build.ninja"
+            build_ninja.write_text(
+                "# stale\n",
+                encoding="utf-8",
+            )
+            cache = build_dir / "CMakeCache.txt"
+            cache.write_text(
+                "REMOVED:STRING=stale\n",
+                encoding="utf-8",
+            )
+            cmake_files = build_dir / "CMakeFiles"
+            cmake_files.mkdir()
+            old_stamp = {
+                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_version": 1,
+                "inputs": {"state": "old"},
+                "inputs_sha256": "a" * 64,
+            }
+            new_stamp = {
+                "artifact_kind": server._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_version": 1,
+                "inputs": {"state": "new"},
+                "inputs_sha256": "b" * 64,
+            }
+            server._publish_cmake_configure_stamp(
+                build_dir,
+                old_stamp,
+            )
+            expected_cache = {
+                "BIOSEQ_BUILD_TESTS": "ON",
+                "BIOSEQ_TEST_INDEXES": "ON",
+            }
+            log = io.StringIO()
+
+            def configure(*_args: object, **_kwargs: object) -> int:
+                self.assertFalse(cache.exists())
+                self.assertFalse(cmake_files.exists())
+                build_ninja.write_text("# refreshed\n", encoding="utf-8")
+                cache.write_text(
+                    "BIOSEQ_BUILD_TESTS:BOOL=ON\n"
+                    "BIOSEQ_TEST_INDEXES:BOOL=ON\n",
+                    encoding="utf-8",
+                )
+                return 0
+
+            with (
+                mock.patch.object(
+                    server,
+                    "_postgres_error_safety_cache_contract",
+                    return_value=expected_cache,
+                ),
+                mock.patch.object(
+                    server,
+                    "_initial_clang_rt_cmake_args",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    server,
+                    "_cmake_executable_identity",
+                    return_value={"sha256": "1" * 64},
+                ),
+                mock.patch.object(
+                    server,
+                    "_cmake_configure_stamp_document",
+                    side_effect=[new_stamp, new_stamp],
+                ),
+                mock.patch.object(
+                    server,
+                    "_run_cmake_preset_configure",
+                    side_effect=configure,
+                ) as configure_mock,
+                mock.patch.object(
+                    server,
+                    "_postgres_error_safety_cache_matches",
+                    return_value=True,
+                ),
+                mock.patch.object(
+                    server,
+                    "_postgresql_discovery_cache_reset_args",
+                    return_value=(),
+                ),
+                mock.patch.object(
+                    server,
+                    "_clang_rt_cmake_cache_repairs",
+                    return_value=({}, []),
+                ),
+            ):
+                server._configure_postgres_error_safety_tree(
+                    "safety-preset",
+                    build_dir,
+                    log,
+                    1.0,
+                    {},
+                    None,
+                )
+
+            configure_mock.assert_called_once()
+            self.assertEqual(
+                server._cmake_configure_stamp_status(
+                    build_dir,
+                    new_stamp,
+                ),
+                (True, "configure inputs match"),
+            )
+            self.assertNotIn(
+                "REMOVED",
+                cache.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "verified CMake configure input seal=" + "b" * 64,
+                log.getvalue(),
+            )
 
     def test_candidate_target_is_non_all_and_owns_all_six_outputs(
             self) -> None:

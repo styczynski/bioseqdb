@@ -850,6 +850,27 @@ inline void run_guc_generator_contract_self_tests() {
                 "::bioseq::settings::string_probe"),
         "string-literal boot value lacks immutable static-lifetime authority");
 
+    string_probe.reset_plan_cache = true;
+    string_probe.authored_assign_hook =
+        "bioseq::settings::assign_string_probe";
+    string_probe.authority.hooks[1] =
+        "assign_string_probe_and_reset_plan_cache";
+    rendered_string =
+        render_primitive_guc_registration_contract_probe(string_probe);
+    const std::size_t authored_assign =
+        rendered_string.find(
+            "::bioseq::settings::assign_string_probe(new_value, extra);");
+    const std::size_t reset_call =
+        rendered_string.find("if (changed) ResetPlanCache();");
+    require(
+        rendered_string.contains(
+            "assign_string_probe_and_reset_plan_cache")
+            && rendered_string.contains("std::strcmp(")
+            && authored_assign != std::string::npos
+            && reset_call != std::string::npos
+            && authored_assign < reset_call,
+        "plan-cache reset wrapper does not compare, chain, then reset");
+
     require(
         !production_package.registry.content.contains(
             "test_force_paper_index_failure"),

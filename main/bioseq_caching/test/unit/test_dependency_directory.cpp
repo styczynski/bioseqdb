@@ -240,7 +240,8 @@ struct LockTrace {
   }
 };
 
-TEST_CASE("dependency directory sizing clamps logical and physical budgets") {
+TEST_CASE("dependency directory sizing clamps logical and physical budgets",
+          "[cache][unit][dependency-directory]") {
   CHECK(dependency_directory_logical_capacity_for_backends(0) == 4'096);
   CHECK(dependency_directory_logical_capacity_for_backends(7) == 4'096);
   CHECK(dependency_directory_logical_capacity_for_backends(8) == 4'096);
@@ -258,7 +259,8 @@ TEST_CASE("dependency directory sizing clamps logical and physical budgets") {
   CHECK(dependency_directory_physical_capacity(262'145) == 0);
 }
 
-TEST_CASE("dependency directory rejects every bounded config violation") {
+TEST_CASE("dependency directory rejects every bounded config violation",
+          "[cache][unit][dependency-directory]") {
   DependencyDirectoryConfigV1 config{};
 
   config.logical_capacity = 4'095;
@@ -299,7 +301,8 @@ TEST_CASE("dependency directory rejects every bounded config violation") {
   CHECK_FALSE(dependency_directory_preload_request(config));
 }
 
-TEST_CASE("valid partition quotas are exact nonzero and below the backstop") {
+TEST_CASE("valid partition quotas are exact nonzero and below the backstop",
+          "[cache][unit][dependency-directory]") {
   const std::array<DependencyDirectoryConfigV1, 3> configs{
       DependencyDirectoryConfigV1{
           .logical_capacity = 4'096,
@@ -336,7 +339,8 @@ TEST_CASE("valid partition quotas are exact nonzero and below the backstop") {
   }
 }
 
-TEST_CASE("dependency directory requires an exact aligned region") {
+TEST_CASE("dependency directory requires an exact aligned region",
+          "[cache][unit][dependency-directory]") {
   const DependencyDirectoryPreloadResultV1 preload =
       dependency_directory_preload_request();
   REQUIRE(preload);
@@ -367,7 +371,8 @@ TEST_CASE("dependency directory requires an exact aligned region") {
   CHECK(oversized.error == DependencyDirectoryErrorV1::RegionSizeMismatch);
 }
 
-TEST_CASE("attach validates the exact layout while holding each lock") {
+TEST_CASE("attach validates the exact layout while holding each lock",
+          "[cache][unit][dependency-directory]") {
   const DependencyDirectoryPreloadResultV1 preload =
       dependency_directory_preload_request();
   REQUIRE(preload);
@@ -405,7 +410,8 @@ TEST_CASE("attach validates the exact layout while holding each lock") {
         DependencyDirectoryErrorV1::InvalidArgument);
 }
 
-TEST_CASE("attach rejects ABI layout partition and record corruption") {
+TEST_CASE("attach rejects ABI layout partition and record corruption",
+          "[cache][unit][dependency-directory]") {
   SECTION("ABI") {
     DirectoryFixture fixture{};
     fixture.header()->abi_version += 1U;
@@ -451,7 +457,8 @@ TEST_CASE("attach rejects ABI layout partition and record corruption") {
   }
 }
 
-TEST_CASE("full equality reuses records and refcounts stop at configured caps") {
+TEST_CASE("full equality reuses records and refcounts stop at configured caps",
+          "[cache][unit][dependency-directory]") {
   DependencyDirectoryConfigV1 config{};
   config.backend_reference_limit = 2;
   config.generation_reference_limit = 1;
@@ -511,7 +518,8 @@ TEST_CASE("full equality reuses records and refcounts stop at configured caps") 
         DependencyDirectoryErrorV1::InvalidArgument);
 }
 
-TEST_CASE("logical quota rejects before the physical 70 percent backstop") {
+TEST_CASE("logical quota rejects before the physical 70 percent backstop",
+          "[cache][unit][dependency-directory]") {
   DependencyDirectoryConfigV1 config{};
   config.partition_count = 1;
   DirectoryFixture fixture{config};
@@ -550,7 +558,8 @@ TEST_CASE("logical quota rejects before the physical 70 percent backstop") {
   CHECK(stats.stats.reclaim_attempt_count == 0);
 }
 
-TEST_CASE("RETIRING reclaim preserves ABA identity and rolls back faults") {
+TEST_CASE("RETIRING reclaim preserves ABA identity and rolls back faults",
+          "[cache][unit][dependency-directory]") {
   SECTION("successful reclaim") {
     DirectoryFixture fixture{};
     auto acquired = acquire_dependency_reference(
@@ -627,7 +636,8 @@ TEST_CASE("RETIRING reclaim preserves ABA identity and rolls back faults") {
   }
 }
 
-TEST_CASE("physical identity is stored and incompatible acquisition fails closed") {
+TEST_CASE("physical identity is stored and incompatible acquisition fails closed",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   const PhysicalIdentityV1 identity = physical_identity(0x31);
   auto acquired = acquire_dependency_reference(
@@ -651,7 +661,8 @@ TEST_CASE("physical identity is stored and incompatible acquisition fails closed
       fixture.directory, acquired.reference, fixture.harness.callbacks()));
 }
 
-TEST_CASE("transition identity preserve rejects mismatch without mutation") {
+TEST_CASE("transition identity preserve rejects mismatch without mutation",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   const PhysicalIdentityV1 identity = physical_identity(0x41);
   auto acquired = acquire_dependency_reference(
@@ -696,7 +707,8 @@ TEST_CASE("transition identity preserve rejects mismatch without mutation") {
       fixture.directory, acquired.reference, fixture.harness.callbacks()));
 }
 
-TEST_CASE("committed identity replacement invalidates snapshots but not releases") {
+TEST_CASE("committed identity replacement invalidates snapshots but not releases",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   const PhysicalIdentityV1 old_identity = physical_identity(0x51);
   const PhysicalIdentityV1 new_identity = physical_identity(0x52);
@@ -756,7 +768,8 @@ TEST_CASE("committed identity replacement invalidates snapshots but not releases
       fixture.directory, owner.reference, fixture.harness.callbacks()));
 }
 
-TEST_CASE("known abort preserves the old physical identity") {
+TEST_CASE("known abort preserves the old physical identity",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   const PhysicalIdentityV1 old_identity = physical_identity(0x61);
   const PhysicalIdentityV1 new_identity = physical_identity(0x62);
@@ -812,7 +825,8 @@ TEST_CASE("known abort preserves the old physical identity") {
       fixture.directory, owner.reference, fixture.harness.callbacks()));
 }
 
-TEST_CASE("transition capabilities are linear and owner release is guarded") {
+TEST_CASE("transition capabilities are linear and owner release is guarded",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   auto first = acquire_dependency_reference(
       fixture.directory, reference_request(200), fixture.harness.callbacks());
@@ -904,7 +918,8 @@ TEST_CASE("transition capabilities are linear and owner release is guarded") {
       fixture.directory, second.reference, fixture.harness.callbacks()));
 }
 
-TEST_CASE("begin failure is no-mutation and invalid finish cannot decrement") {
+TEST_CASE("begin failure is no-mutation and invalid finish cannot decrement",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   auto acquired = acquire_dependency_reference(
       fixture.directory, reference_request(210), fixture.harness.callbacks());
@@ -940,7 +955,8 @@ TEST_CASE("begin failure is no-mutation and invalid finish cannot decrement") {
       fixture.harness.callbacks()));
 }
 
-TEST_CASE("terminal sequence failure decrements and wakes without stranding") {
+TEST_CASE("terminal sequence failure decrements and wakes without stranding",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   auto acquired = acquire_dependency_reference(
       fixture.directory, reference_request(220), fixture.harness.callbacks());
@@ -971,7 +987,8 @@ TEST_CASE("terminal sequence failure decrements and wakes without stranding") {
   CHECK(released.error == DependencyDirectoryErrorV1::EmergencyFallback);
 }
 
-TEST_CASE("terminal wake failure decrements and latches coarse fallback") {
+TEST_CASE("terminal wake failure decrements and latches coarse fallback",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   auto acquired = acquire_dependency_reference(
       fixture.directory, reference_request(230), fixture.harness.callbacks());
@@ -999,7 +1016,8 @@ TEST_CASE("terminal wake failure decrements and latches coarse fallback") {
   CHECK(stats.stats.emergency_fallback_count >= 1);
 }
 
-TEST_CASE("terminal epoch overflow still resolves the active transition") {
+TEST_CASE("terminal epoch overflow still resolves the active transition",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   auto acquired = acquire_dependency_reference(
       fixture.directory, reference_request(235), fixture.harness.callbacks());
@@ -1023,7 +1041,8 @@ TEST_CASE("terminal epoch overflow still resolves the active transition") {
   CHECK(fixture.harness.wake_calls == 1);
 }
 
-TEST_CASE("missing wake contract cannot mutate a terminal transition") {
+TEST_CASE("missing wake contract cannot mutate a terminal transition",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   auto acquired = acquire_dependency_reference(
       fixture.directory, reference_request(240), fixture.harness.callbacks());
@@ -1050,7 +1069,8 @@ TEST_CASE("missing wake contract cannot mutate a terminal transition") {
       fixture.harness.callbacks()));
 }
 
-TEST_CASE("copied transition replay fails open after the real finish") {
+TEST_CASE("copied transition replay fails open after the real finish",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   auto acquired = acquire_dependency_reference(
       fixture.directory, reference_request(250), fixture.harness.callbacks());
@@ -1075,7 +1095,8 @@ TEST_CASE("copied transition replay fails open after the real finish") {
   CHECK(fixture.record(acquired.reference)->transition_count == 0);
 }
 
-TEST_CASE("persisted generation entry releases its exact ABA reference") {
+TEST_CASE("persisted generation entry releases its exact ABA reference",
+          "[cache][unit][dependency-directory]") {
   DirectoryFixture fixture{};
   auto acquired = acquire_dependency_reference(
       fixture.directory,
@@ -1107,7 +1128,8 @@ TEST_CASE("persisted generation entry releases its exact ABA reference") {
   CHECK(replay.coarse_fallback_required);
 }
 
-TEST_CASE("cumulative diagnostic aggregation detects overflow") {
+TEST_CASE("cumulative diagnostic aggregation detects overflow",
+          "[cache][unit][dependency-directory]") {
   DependencyDirectoryConfigV1 config{};
   config.partition_count = 2;
   DirectoryFixture fixture{config};

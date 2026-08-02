@@ -21,6 +21,7 @@ module;
 export module bioseq.column.planner_hook;
 
 import bioseq.common.mlogging;
+import bioseq.pg.cache_provider;
 import bioseq.table;                      // custom/index scan planner API
 import bioseq.pg_utils;
 import bioseq.config;                    // DOC0322 §9.3 — bioseq::settings::enable_vectorization, bioseq::settings::enable_bioseq_index_scan GUCs
@@ -531,6 +532,8 @@ BioseqColumnPlannerHook(Query* parse,
 			bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() fast-return; vec={} idx={} cmd_not_select={} rtable_not_one={}",
 				bioseq::settings::enable_vectorization, bioseq::settings::enable_bioseq_index_scan,
 				(stmt->commandType != CMD_SELECT), (list_length(stmt->rtable) != 1));
+			bioseq::pg::cache_provider::
+				bioseq_cache_provider_after_planned_statement(stmt);
 			return stmt;
 		}
 
@@ -585,6 +588,8 @@ BioseqColumnPlannerHook(Query* parse,
 	PG_END_TRY();
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() returning");
 
+	bioseq::pg::cache_provider::
+		bioseq_cache_provider_after_planned_statement(stmt);
 	return stmt;
 }
 

@@ -68,7 +68,7 @@ static_assert(std::is_standard_layout_v<ObjectDefinitionMutationV1>);
 static_assert(kMaximumObjectDefinitionSpecificDependenciesV1 + 2U == 256U);
 
 TEST_CASE("object dependency keys cover every definition class and syscache",
-          "[cache][object-definition][keys]") {
+          "[cache][unit][object-definition][keys]") {
   constexpr std::array kinds{
       DependencyKind::Procedure,
       DependencyKind::Operator,
@@ -102,7 +102,7 @@ TEST_CASE("object dependency keys cover every definition class and syscache",
 }
 
 TEST_CASE("definition collector deduplicates and copies canonical guard plus keys",
-          "[cache][object-definition][canonical]") {
+          "[cache][unit][object-definition][canonical]") {
   ObjectDefinitionDependencyCollectorV1<8, 4> collector;
   REQUIRE(collector.initialize(17, 1) ==
           ObjectDefinitionDependencyErrorV1::None);
@@ -140,7 +140,7 @@ TEST_CASE("definition collector deduplicates and copies canonical guard plus key
 }
 
 TEST_CASE("rolled-back savepoint removes ordinary definition events",
-          "[cache][object-definition][savepoint]") {
+          "[cache][unit][object-definition][savepoint]") {
   ObjectDefinitionDependencyCollectorV1<8, 4> collector;
   REQUIRE(collector.initialize(17, 1) ==
           ObjectDefinitionDependencyErrorV1::None);
@@ -161,7 +161,7 @@ TEST_CASE("rolled-back savepoint removes ordinary definition events",
 }
 
 TEST_CASE("released savepoint composes old and current physical identity",
-          "[cache][object-definition][savepoint][physical]") {
+          "[cache][unit][object-definition][savepoint][physical]") {
   ObjectDefinitionDependencyCollectorV1<8, 4> collector;
   REQUIRE(collector.initialize(17, 1) ==
           ObjectDefinitionDependencyErrorV1::None);
@@ -196,7 +196,7 @@ TEST_CASE("released savepoint composes old and current physical identity",
 }
 
 TEST_CASE("savepoint rollback restores the parent physical transition",
-          "[cache][object-definition][savepoint][physical]") {
+          "[cache][unit][object-definition][savepoint][physical]") {
   ObjectDefinitionDependencyCollectorV1<8, 4> collector;
   REQUIRE(collector.initialize(17, 1) ==
           ObjectDefinitionDependencyErrorV1::None);
@@ -226,7 +226,7 @@ TEST_CASE("savepoint rollback restores the parent physical transition",
 }
 
 TEST_CASE("ambiguous physical history remains guard-only after rollback",
-          "[cache][object-definition][savepoint][fallback]") {
+          "[cache][unit][object-definition][savepoint][fallback]") {
   ObjectDefinitionDependencyCollectorV1<8, 4> collector;
   REQUIRE(collector.initialize(17, 1) ==
           ObjectDefinitionDependencyErrorV1::None);
@@ -257,7 +257,7 @@ TEST_CASE("ambiguous physical history remains guard-only after rollback",
 }
 
 TEST_CASE("specific capacity and output pressure fail closed to one guard",
-          "[cache][object-definition][capacity]") {
+          "[cache][unit][object-definition][capacity]") {
   SECTION("specific-key pressure") {
     ObjectDefinitionDependencyCollectorV1<2, 4> collector;
     REQUIRE(collector.initialize(17, 1) ==
@@ -305,7 +305,7 @@ TEST_CASE("specific capacity and output pressure fail closed to one guard",
 }
 
 TEST_CASE("child capacity overflow keeps the root guard after rollback",
-          "[cache][object-definition][capacity][savepoint]") {
+          "[cache][unit][object-definition][capacity][savepoint]") {
   ObjectDefinitionDependencyCollectorV1<2, 4> collector;
   REQUIRE(collector.initialize(17, 1) ==
           ObjectDefinitionDependencyErrorV1::None);
@@ -336,7 +336,7 @@ TEST_CASE("child capacity overflow keeps the root guard after rollback",
 }
 
 TEST_CASE("definition capture reserves both database epoch references",
-          "[cache][object-definition][capacity][canonical]") {
+          "[cache][unit][object-definition][capacity][canonical]") {
   ObjectDefinitionDependencyCollectorV1<> collector;
   REQUIRE(collector.initialize(17, 1) ==
           ObjectDefinitionDependencyErrorV1::None);
@@ -361,7 +361,7 @@ TEST_CASE("definition capture reserves both database epoch references",
 }
 
 TEST_CASE("invalid keys and savepoint tracking failures retain the guard",
-          "[cache][object-definition][fallback]") {
+          "[cache][unit][object-definition][fallback]") {
   SECTION("unsupported key") {
     ObjectDefinitionDependencyCollectorV1<4, 4> collector;
     REQUIRE(collector.initialize(17, 1) ==
@@ -401,7 +401,7 @@ TEST_CASE("invalid keys and savepoint tracking failures retain the guard",
 }
 
 TEST_CASE("reset removes the sticky guard and all transaction state",
-          "[cache][object-definition][reset]") {
+          "[cache][unit][object-definition][reset]") {
   ObjectDefinitionDependencyCollectorV1<2, 2> collector;
   REQUIRE(collector.initialize(17, 1) ==
           ObjectDefinitionDependencyErrorV1::None);

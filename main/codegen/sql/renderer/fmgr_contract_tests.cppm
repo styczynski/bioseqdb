@@ -1679,10 +1679,34 @@ inline void run_fmgr_renderer_contract_tests() {
             "bioseq::pg_utils::sql_bytea",
             "bytea",
             false);
+        const auto bytea_result = fmgr_detail::scalar_converter(
+            "bioseq::pg_utils::sql_bytea",
+            "bytea",
+            true);
+        const auto int64_array_result =
+            fmgr_detail::scalar_converter(
+                "bioseq::pg_utils::sql_int64_array",
+                "bigint[]",
+                true);
+        const auto nullable_oid_result =
+            fmgr_detail::scalar_converter(
+                "std::optional<std::uint32_t>",
+                "oid",
+                true);
         const auto nullable_interval_result =
             fmgr_detail::scalar_converter(
                 "std::optional<bioseq::pg_utils::sql_interval>",
                 "interval",
+                true);
+        const auto timestamptz_result =
+            fmgr_detail::scalar_converter(
+                "bioseq::pg_utils::sql_timestamptz",
+                "timestamptz",
+                true);
+        const auto nullable_timestamptz_result =
+            fmgr_detail::scalar_converter(
+                "std::optional<bioseq::pg_utils::sql_timestamptz>",
+                "timestamptz",
                 true);
         const auto tid_argument = fmgr_detail::scalar_converter(
             "bioseq::pg_utils::sql_tid",
@@ -1718,10 +1742,27 @@ inline void run_fmgr_renderer_contract_tests() {
                     == "result.jsonb.owning.nullable"
                 && bytea_argument.key
                     == "argument.bytea.owning"
+                && bytea_result.key
+                    == "result.bytea.owning"
+                && int64_array_result.key
+                    == "result.int64_array.owning"
+                && nullable_oid_result.key
+                    == "result.oid.by_value[oid].nullable"
                 && nullable_interval_result.key
                     == "result.interval.owning.nullable"
+                && timestamptz_result.key
+                    == "result.timestamptz.owning"
+                && nullable_timestamptz_result.key
+                    == "result.timestamptz.owning.nullable"
                 && tid_argument.key
                     == "argument.tid.by_value"
+                && infer_sql_type_from_cpp(
+                    "bioseq::pg_utils::sql_timestamptz")
+                    == "timestamptz"
+                && infer_sql_type_from_cpp(
+                    "std::optional<"
+                    "bioseq::pg_utils::sql_timestamptz>")
+                    == "timestamptz"
                 && infer_sql_type_from_cpp(
                     "bioseq::pg_utils::vector_operand<"
                     "bioseq::sql::pg::character, "
@@ -1758,18 +1799,6 @@ inline void run_fmgr_renderer_contract_tests() {
         require(
             rejected_ambiguous_array,
             "typed array converters reject ambiguous SQL ownership");
-        bool rejected_bytea_result = false;
-        try {
-            static_cast<void>(fmgr_detail::scalar_converter(
-                "bioseq::pg_utils::sql_bytea",
-                "bytea",
-                true));
-        } catch (const std::runtime_error&) {
-            rejected_bytea_result = true;
-        }
-        require(
-            rejected_bytea_result,
-            "input-only BYTEA values reject result ownership");
         require(
             fmgr_detail::expected_vector_associations().size() == 84,
             "closed vector registry has exactly 84 scalar associations");
@@ -2214,8 +2243,55 @@ inline void run_fmgr_renderer_contract_tests() {
             && module.module_name
                 == "bioseq.sql.generated.production.fixture.entrypoints"
             && module.source_module == "bioseq.fixture"
-            && module.content_sha256.size() == 64,
+            && module.content_sha256.size() == 64
+            && module.content.starts_with(
+                "module;\n\n"
+                "#include \"common.h\"\n\n"
+                "#include <array>\n"),
         "configure-stable owner identity");
+    sql_graph sibling_graph = graph;
+    sibling_graph.extension_name = "bioseq_cache";
+    sibling_graph.extension_schema = "bioseq_cache";
+    sibling_graph.generated_module_prefix =
+        "bioseq.cache.sql.generated";
+    sibling_graph.fmgr_boundary_module =
+        "bioseq.pg_sql_boundary";
+    sibling_graph.fmgr_prelude = "postgresql";
+    const std::vector<rendered_fmgr_entrypoint_module>
+        sibling_modules =
+            render_fmgr_entrypoint_modules(sibling_graph);
+    require(
+        sibling_modules.size() == 1
+            && sibling_modules.front().module_name
+                == "bioseq.cache.sql.generated.production."
+                   "fixture.entrypoints"
+            && sibling_modules.front().content.starts_with(
+                "module;\n\n"
+                "extern \"C\" {\n"
+                "#include \"postgres.h\"\n"
+                "#include \"fmgr.h\"\n"
+                "}\n\n"
+                "#include <array>\n")
+            && !sibling_modules.front().content.contains(
+                "#include \"common.h\""),
+        "sibling fmgr module uses only its configured PostgreSQL "
+        "global-module prelude");
+    const std::vector<rendered_fmgr_entrypoint_module>
+        configured_owner_modules =
+            render_fmgr_entrypoint_modules(
+                graph,
+                {{"fixture_override", "bioseq.fixture"}});
+    require(
+        configured_owner_modules.size() == 1
+            && configured_owner_modules.front().owner_key
+                == "fixture_override"
+            && configured_owner_modules.front().source_module
+                == "bioseq.fixture"
+            && configured_owner_modules.front().module_name
+                == "bioseq.sql.generated.production."
+                   "fixture_override.entrypoints",
+        "explicit fmgr ownership remains independent of the SQL "
+        "command model partition");
     require(module.wrappers.size() == 3, "three physical wrappers");
     require(
         module.content.contains("PG_FUNCTION_INFO_V1(mmsearch)")

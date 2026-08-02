@@ -1776,7 +1776,11 @@ retain_generation_vector_preserving_ticket(
       generation_references{};
   DependencyReferenceV1 generation_guard_reference{};
   std::uint32_t retained_count = 0;
-  const auto release_retained_references = [&]() noexcept {
+  const auto release_retained_references =
+      [registry,
+       &generation_references,
+       &generation_guard_reference,
+       &retained_count]() noexcept {
     for (std::uint32_t cleanup = 0; cleanup < retained_count; ++cleanup) {
       static_cast<void>(release_dependency_reference(
           registry->dependency, generation_references[cleanup],

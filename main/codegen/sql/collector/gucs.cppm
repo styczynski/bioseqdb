@@ -120,6 +120,8 @@ struct collected_guc {
     std::string long_description;
     std::string enum_cpp_name;
     std::vector<collected_guc_enum_value> enum_values;
+    bool reset_plan_cache{};
+    std::optional<std::string> authored_assign_hook;
     collected_guc_authority authority;
     collected_guc_live_authority generated_live_authority;
 };
@@ -1082,11 +1084,22 @@ struct parsed_ledger {
 }
 
 [[nodiscard]] inline std::string context_name(
-    const collected_entity& entity) {
+        const collected_entity& entity) {
     const std::string value = option_leaf(entity, "context", "user");
     if (value == "user") return "user_set";
     if (value == "superuser") return "superuser_set";
     return value;
+}
+
+[[nodiscard]] inline bool resets_plan_cache(
+        const collected_entity& entity) {
+    const std::string value =
+        option_leaf(entity, "plan_cache", "unchanged");
+    if (value == "unchanged") return false;
+    if (value == "reset") return true;
+    throw std::runtime_error(
+        "GUC '" + entity.cpp_qualified_name
+        + "' plan_cache policy must be unchanged or reset");
 }
 
 [[nodiscard]] inline std::optional<std::string> range_option(
@@ -2502,6 +2515,9 @@ make_generated_live_authority(
             .unit = row.unit,
             .short_description = entity.documentation.brief,
             .long_description = entity.documentation.details,
+            .reset_plan_cache =
+                guc_detail::resets_plan_cache(entity),
+            .authored_assign_hook = row.hooks[1],
             .authority = collected_guc_authority{
                 .source_owner = row.source_owner,
                 .group = row.group,
@@ -2519,6 +2535,10 @@ make_generated_live_authority(
                 .default_semantic = row.default_semantic,
             },
         };
+        if (guc.reset_plan_cache) {
+            guc.authority.hooks[1] =
+                "assign_" + guc.member + "_and_reset_plan_cache";
+        }
         guc.authority.enum_values.reserve(row.enum_values.size());
         for (const guc_detail::ledger_enum_value& value :
              row.enum_values) {

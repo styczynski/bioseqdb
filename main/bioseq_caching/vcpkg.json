@@ -2,6 +2,8 @@
   "name": "bioseq-cache",
   "version-string": "1.0.0",
   "dependencies": [
-    "catch2"
+    "catch2",
+    "simdjson",
+    "tbb"
   ]
 }

@@ -8,6 +8,7 @@ benchmark
 benchmarking-speedup
 bg-workers
 bioseq
+bioseq_cache
 block-aligner
 bugfix-plan
 bugfix-prompt

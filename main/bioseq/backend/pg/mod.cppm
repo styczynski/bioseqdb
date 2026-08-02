@@ -74,6 +74,7 @@ import bioseq.pg_utils.row_codec_runtime_test_support;
 #endif
 import bioseq.pg_utils.runtime_test_counters;
 import bioseq.pg_utils.sql_catalog_entities;
+import bioseq.pg.cache_provider;
 import bioseq.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import bioseq.sql.generated.core.storage_manager_sequence_storage_manager.entity_handles;
 import bioseq.sql.generated.core.storage_metadata_core.entity_handles;
@@ -2777,6 +2778,18 @@ template<int ColumnCount>
 void initialize_extension_cpp()
 {
 	static bool initialized = false;
+	if (initialized) {
+		bioseq_log<DBG, PG>("[bioseq] pg: _PG_init() skipped duplicate call");
+		return;
+	}
+
+	/*
+	 * Resolve DSO ownership before registering GUCs, CustomScan methods, or
+	 * hooks.  Publication is deferred until every ordinary initializer below
+	 * has succeeded, so a failed _PG_init never exposes a half-initialized
+	 * provider directory.
+	 */
+	bioseq::pg::cache_provider::bioseq_cache_provider_preflight();
 	bioseq_register_postgres_logging_sink({
 		.debug_logging_enabled = &bioseq::settings::logging,
 		.should_log_level = bioseq_pg_sink_should_log_level,
@@ -2785,11 +2798,6 @@ void initialize_extension_cpp()
 		.log_pg = bioseq_pg_sink_log_elevel,
 		.report = bioseq_pg_sink_report,
 	});
-	if (initialized) {
-		bioseq_log<DBG, PG>("[bioseq] pg: _PG_init() skipped duplicate call");
-		return;
-	}
-
 #if defined(BIOSEQ_TEST_INDEXES)
 	bioseq::sql::generated::test_indexes::register_gucs();
 #else
@@ -2804,6 +2812,7 @@ void initialize_extension_cpp()
 	bioseq_external_scan_init();
 #endif
 	install_letter_literal_validation_hook();
+	bioseq::pg::cache_provider::bioseq_cache_provider_publish_directory();
 	initialized = true;
 }
 

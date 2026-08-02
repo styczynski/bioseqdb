@@ -8,6 +8,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 
 #if defined(__APPLE__) || defined(__linux__)
 #  include <unistd.h>
@@ -40,6 +41,34 @@ struct MemorySnapshot {
     std::uint64_t system_available_bytes = 0;
     std::uint64_t system_total_bytes = 0;
 };
+
+/**
+ * Convert Darwin's disjoint free and inactive page queues to bytes.
+ *
+ * `vm_statistics64_data_t::speculative_count` is already included in
+ * `free_count`; accepting it here would double-count reclaimable capacity.
+ * A missing value is a fail-closed arithmetic or page-size observation.
+ */
+[[nodiscard]] inline std::optional<std::uint64_t>
+darwin_conservative_available_page_bytes(
+    std::uint64_t free_pages,
+    std::uint64_t inactive_pages,
+    std::uint64_t bytes_per_page) noexcept {
+    if (bytes_per_page == 0
+        || free_pages
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - inactive_pages) {
+        return std::nullopt;
+    }
+    const std::uint64_t available_pages =
+        free_pages + inactive_pages;
+    if (available_pages
+        > (std::numeric_limits<std::uint64_t>::max)()
+            / bytes_per_page) {
+        return std::nullopt;
+    }
+    return available_pages * bytes_per_page;
+}
 
 /** Return the operating-system page size, or a conservative fallback. */
 [[nodiscard]] inline std::size_t page_size() noexcept {
@@ -127,7 +156,7 @@ struct MemorySnapshot {
 #endif
 }
 
-/** Return memory allocatable without paging, or zero if unavailable. */
+/** Return a conservative OS-specific availability sample, or zero. */
 [[nodiscard]] inline std::uint64_t system_available_bytes() noexcept {
 #if defined(__APPLE__)
     const mach_port_t host = ::mach_host_self();
@@ -144,12 +173,11 @@ struct MemorySnapshot {
         != KERN_SUCCESS) {
         return 0;
     }
-    const std::uint64_t reclaimable_pages =
-        static_cast<std::uint64_t>(statistics.free_count)
-        + static_cast<std::uint64_t>(statistics.inactive_count)
-        + static_cast<std::uint64_t>(statistics.speculative_count)
-        + static_cast<std::uint64_t>(statistics.purgeable_count);
-    return reclaimable_pages * static_cast<std::uint64_t>(bytes_per_page);
+    return darwin_conservative_available_page_bytes(
+               static_cast<std::uint64_t>(statistics.free_count),
+               static_cast<std::uint64_t>(statistics.inactive_count),
+               static_cast<std::uint64_t>(bytes_per_page))
+        .value_or(0);
 #elif defined(__linux__)
     std::FILE* file = std::fopen("/proc/meminfo", "r");
     if (file == nullptr) {

@@ -501,6 +501,12 @@ inline void run_preparation_contract_self_tests() {
             {
                 "-resource-dir",
                 (root / "untrusted-resource-dir").string(),
+                "-save-temps",
+                "--save-temps",
+                "-save-temps=obj",
+                "--save-temps=obj",
+                "-DKEEP_SAVE_TEMPS=1",
+                "-g",
             }),
         make_command(
             toolchain, root, production_only),
@@ -555,6 +561,13 @@ inline void run_preparation_contract_self_tests() {
                 (root / "untrusted-resource-dir").string()),
         "owned compile database did not replace an untrusted raw "
         "resource directory with the selected Clang resource directory");
+    require(
+        !first.compile_database_json.contains("save-temps")
+            && first.compile_database_json.contains(
+                "\"-DKEEP_SAVE_TEMPS=1\"")
+            && first.compile_database_json.contains("\"-g\""),
+        "owned compile database retained a non-semantic compiler temporary "
+        "emission flag or removed an independent debug flag");
     require(
         first.pcm_manifest_json.contains(
             production_profile.string())
@@ -622,6 +635,245 @@ inline void run_preparation_contract_self_tests() {
             && first.relocatable_compilation_signature
                 == shuffled.relocatable_compilation_signature,
         "shuffled raw compile-database ordering changed PREPARE bytes");
+
+    const std::filesystem::path lane_a =
+        root / "build/lane-a";
+    const std::filesystem::path lane_b =
+        root / "build/lane-b";
+    const std::filesystem::path lane_c =
+        root / "build/lane-c";
+    const auto lane_commands =
+        [&toolchain,
+         &conditional_root,
+         &production_only,
+         &test_only,
+         &production_profile,
+         &test_profile](const std::filesystem::path& lane,
+            const std::filesystem::path& relative_include) {
+            const std::filesystem::path package_include =
+                lane / relative_include;
+            std::filesystem::create_directories(package_include);
+            const std::vector<std::string> lane_arguments{
+                "-isystem",
+                package_include.string(),
+            };
+            return std::vector<raw_command>{
+                make_command(
+                    toolchain,
+                    lane,
+                    conditional_root,
+                    lane_arguments),
+                make_command(
+                    toolchain,
+                    lane,
+                    production_only,
+                    lane_arguments),
+                make_command(
+                    toolchain,
+                    lane,
+                    test_only,
+                    lane_arguments),
+                make_command(
+                    toolchain,
+                    lane,
+                    production_profile,
+                    lane_arguments),
+                make_command(
+                    toolchain,
+                    lane,
+                    test_profile,
+                    lane_arguments),
+            };
+        };
+    const std::filesystem::path lane_a_database =
+        lane_a / "compile_commands.json";
+    const std::filesystem::path lane_b_database =
+        lane_b / "compile_commands.json";
+    write_file(
+        lane_a_database,
+        render_compile_database(lane_commands(
+            lane_a, "vcpkg_installed/include")));
+    write_file(
+        lane_b_database,
+        render_compile_database(lane_commands(
+            lane_b, "vcpkg_installed/include")));
+    const std::filesystem::path lane_a_pcm =
+        lane_a / "pcm/production";
+    const std::filesystem::path lane_b_pcm =
+        lane_b / "pcm/production";
+    const prepared_compilation_environment lane_a_prepared =
+        prepare(
+            toolchain,
+            {conditional_root},
+            lane_a_database,
+            lane_a_pcm);
+    const prepared_compilation_environment lane_b_prepared =
+        prepare(
+            toolchain,
+            {conditional_root},
+            lane_b_database,
+            lane_b_pcm);
+    const auto module_string_field =
+        [](const std::string& manifest,
+           std::string_view module,
+           std::string_view field) {
+            const std::string module_marker =
+                "\"name\": \"" + std::string{module} + "\"";
+            const std::size_t module_offset =
+                manifest.find(module_marker);
+            if (module_offset == std::string::npos) {
+                throw std::runtime_error(
+                    "PREPARE contract fixture cannot find module "
+                    + std::string{module});
+            }
+            const std::string field_marker =
+                "\"" + std::string{field} + "\": \"";
+            const std::size_t field_offset =
+                manifest.find(field_marker, module_offset);
+            if (field_offset == std::string::npos) {
+                throw std::runtime_error(
+                    "PREPARE contract fixture cannot find field "
+                    + std::string{field} + " for module "
+                    + std::string{module});
+            }
+            const std::size_t value_begin =
+                field_offset + field_marker.size();
+            const std::size_t value_end =
+                manifest.find('"', value_begin);
+            if (value_end == std::string::npos) {
+                throw std::runtime_error(
+                    "PREPARE contract fixture found an unterminated "
+                    "module field");
+            }
+            return manifest.substr(
+                value_begin, value_end - value_begin);
+        };
+    for (const std::string_view field : {
+             "relocatable_arguments_sha256",
+             "relocatable_command_input_sha256",
+             "relocatable_active_import_scan_database_sha256",
+             "relocatable_active_import_scan_result_sha256",
+             "relocatable_active_import_scan_diagnostics_sha256",
+             "relocatable_depfile_sha256",
+             "relocatable_dependency_content_sha256",
+             "relocatable_content_key",
+         }) {
+        require(
+            module_string_field(
+                lane_a_prepared.pcm_manifest_json,
+                "fixture.production_only",
+                field)
+                == module_string_field(
+                    lane_b_prepared.pcm_manifest_json,
+                    "fixture.production_only",
+                    field),
+            "lane-local build roots changed fixture.production_only "
+                + std::string{field});
+    }
+    require(
+        lane_a_prepared.compilation_signature
+            != lane_b_prepared.compilation_signature,
+        "lane-local build roots did not change physical PREPARE "
+        "provenance");
+    const auto project_lane =
+        [](std::string document,
+           const std::filesystem::path& lane) {
+            constexpr std::string_view logical{
+                "$BIOSEQ_BUILD_ROOT"};
+            for (const std::filesystem::path& spelling : {
+                     std::filesystem::weakly_canonical(lane),
+                     lane.lexically_normal(),
+                 }) {
+                const std::string physical =
+                    spelling.generic_string();
+                std::size_t offset = 0;
+                while ((offset = document.find(
+                            physical, offset))
+                       != std::string::npos) {
+                    document.replace(
+                        offset, physical.size(), logical);
+                    offset += logical.size();
+                }
+            }
+            return document;
+        };
+    const std::string lane_a_projected_database =
+        project_lane(
+            lane_a_prepared.compile_database_json, lane_a);
+    const std::string lane_b_projected_database =
+        project_lane(
+            lane_b_prepared.compile_database_json, lane_b);
+    if (lane_a_projected_database
+        != lane_b_projected_database) {
+        const auto [lane_a_mismatch, lane_b_mismatch] =
+            std::ranges::mismatch(
+                lane_a_projected_database,
+                lane_b_projected_database);
+        const std::size_t mismatch_offset =
+            static_cast<std::size_t>(
+                lane_a_mismatch
+                - lane_a_projected_database.begin());
+        const std::size_t excerpt_begin =
+            mismatch_offset > 40 ? mismatch_offset - 40 : 0;
+        require(
+            false,
+            "lane-local owned compile databases differ beyond their "
+            "exact build roots at offset "
+                + std::to_string(mismatch_offset)
+                + ": lane-a='"
+                + lane_a_projected_database.substr(
+                    excerpt_begin, 120)
+                + "' lane-b='"
+                + lane_b_projected_database.substr(
+                    excerpt_begin, 120)
+                + "'");
+    }
+    require(
+        lane_a_prepared.relocatable_compile_database_sha256
+            == lane_b_prepared.relocatable_compile_database_sha256,
+        "lane-local build roots changed the canonical owned compile "
+        "database");
+    require(
+        lane_a_prepared.relocatable_compilation_signature
+            == lane_b_prepared.relocatable_compilation_signature,
+        "lane-local build roots changed the canonical PREPARE "
+        "signature");
+    const std::filesystem::path lane_c_database =
+        lane_c / "compile_commands.json";
+    write_file(
+        lane_c_database,
+        render_compile_database(lane_commands(
+            lane_c, "other_include")));
+    const prepared_compilation_environment lane_c_prepared =
+        prepare(
+            toolchain,
+            {conditional_root},
+            lane_c_database,
+            lane_c / "pcm/production");
+    require(
+        lane_c_prepared.relocatable_compilation_signature
+            != lane_a_prepared.relocatable_compilation_signature,
+        "build-root normalization dropped a semantic lane-relative "
+        "argument path");
+    const std::filesystem::path lane_a_owned_database =
+        lane_a / "owned_compile_commands.json";
+    const std::filesystem::path lane_a_manifest =
+        lane_a / "pcm-manifest.json";
+    publish_prepared(
+        lane_a_prepared,
+        lane_a_owned_database,
+        lane_a_manifest);
+    const prepared_compilation_validation lane_a_validation =
+        validate(
+            toolchain,
+            {conditional_root},
+            lane_a_owned_database,
+            lane_a_pcm,
+            lane_a_manifest);
+    require(
+        lane_a_validation.relocatable_compilation_signature
+            == lane_a_prepared.relocatable_compilation_signature,
+        "validation did not preserve canonical build-lane provenance");
 
     const std::string original_production_only =
         read_file(production_only);
@@ -1442,7 +1694,7 @@ inline void run_preparation_contract_self_tests() {
     write_file(
         quoted_response,
         "\"-I" + include_with_spaces.string()
-            + "\" -DFROM_QUOTED_RESPONSE=1\n");
+            + "\" -DFROM_QUOTED_RESPONSE=1 --save-temps=obj\n");
     const std::filesystem::path quoted_database =
         invalid_database(
             "quoted-response",
@@ -1464,6 +1716,12 @@ inline void run_preparation_contract_self_tests() {
                 quoted_response))
             != quoted_prepared.dependencies.end(),
         "quoted response file is absent from PREPARE dependencies");
+    require(
+        !quoted_prepared.compile_database_json.contains("save-temps")
+            && quoted_prepared.compile_database_json.contains(
+                "\"-DFROM_QUOTED_RESPONSE=1\""),
+        "PREPARE did not expand and sanitize the response-file compiler "
+        "temporary emission flag");
     const prepared_compilation_environment quoted_control =
         prepare(
             toolchain,
@@ -1482,7 +1740,7 @@ inline void run_preparation_contract_self_tests() {
     write_file(
         quoted_response,
         "\"-I" + include_with_spaces.string()
-            + "\" -DFROM_QUOTED_RESPONSE=2\n");
+            + "\" -DFROM_QUOTED_RESPONSE=2 --save-temps=obj\n");
     const prepared_compilation_environment
         quoted_response_mutation =
             prepare(
@@ -1498,7 +1756,7 @@ inline void run_preparation_contract_self_tests() {
     write_file(
         quoted_response,
         "\"-I" + include_with_spaces.string()
-            + "\" -DFROM_QUOTED_RESPONSE=1\n");
+            + "\" -DFROM_QUOTED_RESPONSE=1 --save-temps=obj\n");
     write_file(
         response_header,
         "#define BIOSEQ_PREPARE_RESPONSE_FIXTURE 2\n");

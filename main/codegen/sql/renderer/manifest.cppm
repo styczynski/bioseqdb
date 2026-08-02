@@ -606,7 +606,15 @@ build_fmgr_ownership_inventory(
     const collected_entity& entity) {
     if (const option_value* option =
             manifest_option(entity, "null_input")) {
-        return manifest_enum_option(entity, "null_input");
+        const std::string policy =
+            manifest_enum_option(entity, "null_input");
+        if (policy == "strict" || policy == "called") {
+            return policy;
+        }
+        if (policy != "derived") {
+            throw std::runtime_error(
+                "function null_input must be derived, strict, or called");
+        }
     }
     const std::vector<const routine_parameter*> parameters =
         sql_parameters(entity);
@@ -809,7 +817,9 @@ manifest_statement_binding(
         }
     }
     const std::vector<std::string> retired_c_symbols =
-        safety::doc0388_retired_c_symbols();
+        graph.extension_name == "bioseq"
+        ? safety::doc0388_retired_c_symbols()
+        : std::vector<std::string>{};
     const std::vector<rendered_entity_handle_module>
         entity_handle_modules = render_entity_handle_modules(graph);
     std::size_t entity_handle_count = 0;
@@ -892,9 +902,28 @@ manifest_statement_binding(
     output << ",\n  \"compilation_signature\": ";
     detail::write_json_string(
         output, graph.compilation_signature);
+    if (graph.extension_name != "bioseq"
+        || graph.generated_module_prefix != "bioseq.sql.generated"
+        || graph.fmgr_boundary_module
+            != "bioseq.pg_utils.sql_boundary") {
+        output << ",\n"
+               << "  \"extension_name\": ";
+        detail::write_json_string(output, graph.extension_name);
+    }
     output << ",\n"
            << "  \"extension_schema\": ";
     detail::write_json_string(output, graph.extension_schema);
+    if (graph.extension_name != "bioseq"
+        || graph.generated_module_prefix != "bioseq.sql.generated"
+        || graph.fmgr_boundary_module
+            != "bioseq.pg_utils.sql_boundary") {
+        output << ",\n  \"generated_module_prefix\": ";
+        detail::write_json_string(
+            output, graph.generated_module_prefix);
+        output << ",\n  \"fmgr_boundary_module\": ";
+        detail::write_json_string(
+            output, graph.fmgr_boundary_module);
+    }
     output << ",\n  \"script_sha256\": ";
     detail::write_json_string(output, sha256_hex(artifact.sql));
     output << ",\n  \"statement_count\": " << artifact.statements.size()
@@ -1621,6 +1650,17 @@ manifest_statement_binding(
         output << ",\n      \"schema_mode\": ";
         detail::write_json_string(
             output, detail::manifest_schema_mode(entity.source));
+        if (graph.extension_name != "bioseq") {
+            output << ",\n      \"schema_provision\": ";
+            if (entity.source.kind == entity_kind::schema) {
+                detail::write_json_string(
+                    output,
+                    detail::manifest_enum_option(
+                        entity.source, "provision", "install_sql"));
+            } else {
+                output << "null";
+            }
+        }
         output << ",\n      \"name\": ";
         detail::write_json_string(output, entity.source.name);
         output << ",\n      \"routine_identity\": ";

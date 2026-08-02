@@ -2,8 +2,10 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -31,6 +33,73 @@ import bioseq.codegen.support;
 export namespace bioseq::codegen::sql {
 
 inline void run_generator_contract_self_tests() {
+    struct scoped_reviewed_source_root final {
+        std::filesystem::path base;
+        std::filesystem::path root;
+        std::optional<std::string> original;
+
+        scoped_reviewed_source_root() {
+            constexpr const char* variable =
+                "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT";
+            if (const char* value = std::getenv(variable)) {
+                original = value;
+            }
+            const std::string nonce = std::to_string(
+                std::chrono::steady_clock::now()
+                    .time_since_epoch()
+                    .count());
+            for (unsigned attempt = 0; attempt < 64; ++attempt) {
+                std::error_code error;
+                const std::filesystem::path candidate =
+                    std::filesystem::temp_directory_path()
+                    / ("bioseq-sql-reviewed-root-contract-" + nonce + "-"
+                       + std::to_string(attempt));
+                if (std::filesystem::create_directory(candidate, error)) {
+                    base = candidate;
+                    break;
+                }
+            }
+            if (base.empty()) {
+                throw std::runtime_error(
+                    "cannot create reviewed-source-root contract directory");
+            }
+            root = base / "source";
+            std::error_code directory_error;
+            std::filesystem::create_directories(
+                root / "bioseq_caching/pg/sql", directory_error);
+            if (directory_error) {
+                std::error_code cleanup_error;
+                std::filesystem::remove_all(base, cleanup_error);
+                throw std::runtime_error(
+                    "cannot create reviewed-source-root contract closure");
+            }
+            if (::setenv(variable, root.c_str(), 1) != 0) {
+                std::error_code cleanup_error;
+                std::filesystem::remove_all(base, cleanup_error);
+                throw std::runtime_error(
+                    "cannot set reviewed-source-root contract environment");
+            }
+        }
+
+        scoped_reviewed_source_root(
+            const scoped_reviewed_source_root&) = delete;
+        scoped_reviewed_source_root& operator=(
+            const scoped_reviewed_source_root&) = delete;
+
+        ~scoped_reviewed_source_root() noexcept {
+            constexpr const char* variable =
+                "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT";
+            if (original) {
+                static_cast<void>(
+                    ::setenv(variable, original->c_str(), 1));
+            } else {
+                static_cast<void>(::unsetenv(variable));
+            }
+            std::error_code error;
+            std::filesystem::remove_all(base, error);
+        }
+    };
+
     const auto require = [](bool condition, std::string_view message) {
         if (!condition) {
             throw std::runtime_error(
@@ -103,6 +172,24 @@ inline void run_generator_contract_self_tests() {
                 "non-normalized fixture"));
         },
         "not an already-normalized relative path");
+    {
+        const scoped_reviewed_source_root reviewed;
+        require(
+            detail::manifest_repository_path(
+                reviewed.root
+                    / "bioseq_caching/pg/sql/diagnostics.cppm",
+                "persisted cache source")
+                == "main/bioseq_caching/pg/sql/diagnostics.cppm",
+            "reviewed source roots normalize persisted cache sources");
+        require_failure(
+            [&reviewed] {
+                static_cast<void>(detail::manifest_repository_path(
+                    reviewed.base
+                        / "outside/bioseq_caching/pg/sql/diagnostics.cppm",
+                    "escaped persisted cache source"));
+            },
+            "cannot be reduced to the reviewed main source tree");
+    }
 
     sql_graph external_handler_graph;
     external_handler_graph.entities.push_back(normalized_entity{
@@ -182,6 +269,63 @@ struct [[bioseq_sql::table({
         collect_source_text(
             "derived_column.cppm", derived_column_source),
         "relocated_extension");
+    constexpr std::string_view sibling_context_source = R"CPP(
+export module fixture.sibling_context.sql_rows;
+namespace fixture {
+struct [[bioseq_sql::table]]
+cache_probe {
+    std::int64_t generation_id;
+};
+}
+)CPP";
+    const sql_graph sibling_context_graph = build_sql_graph(
+        collect_source_text(
+            "sibling_context.cppm", sibling_context_source),
+        "bioseq_cache",
+        "bioseq_cache",
+        "bioseq.cache.sql.generated",
+        "bioseq.pg_sql_boundary");
+    require(
+        sibling_context_graph.extension_name == "bioseq_cache"
+            && sibling_context_graph.extension_schema
+                == "bioseq_cache"
+            && std::ranges::any_of(
+                sibling_context_graph.entities,
+                [](const normalized_entity& entity) {
+                    return entity.source.kind == entity_kind::table
+                        && entity.source.schema == "$extension"
+                        && entity.installed_identity
+                            == "sql:table:bioseq_cache.cache_probe";
+                }),
+        "owner-derived sibling context binds unguarded annotations to "
+        "the configured extension identity");
+    const rendered_sql_artifact sibling_context_sql =
+        render_sql_graph(sibling_context_graph);
+    require(
+        std::ranges::any_of(
+            sibling_context_sql.statements,
+            [](const rendered_statement& statement) {
+                return statement.statement_kind
+                    == entity_kind::table;
+            }),
+        "a natural sibling owner renders physical SQL without a "
+        "migration-ledger binding");
+    require_failure(
+        [&sibling_context_graph] {
+            static_cast<void>(
+                render_physical_ledger(sibling_context_graph));
+        },
+        "cannot publish an empty physical ledger");
+    const std::string sibling_context_manifest =
+        render_graph_manifest(
+            sibling_context_graph, sibling_context_sql, {});
+    require(
+        sibling_context_manifest.contains(
+            "\"retired_c_symbol_count\": 0")
+            && sibling_context_manifest.contains(
+                "\"retired_c_symbols\": []"),
+        "a sibling extension manifest does not inherit the main "
+        "extension's retired fmgr symbol ledger");
     const rendered_sql_artifact derived_column_sql =
         render_sql_graph(derived_column_graph);
     const rendered_sql_artifact relocated_derived_column_sql =
@@ -4109,6 +4253,19 @@ inline constexpr bioseq::sql::schema_entity private_schema{};
         [&missing_ledger_command] {
             validate_final_physical_ledger_policy(
                 missing_ledger_command);
+        },
+        "requires an explicit physical ledger state");
+    command_line sibling_complete_command =
+        missing_ledger_command;
+    sibling_complete_command.extension_name = "bioseq_cache";
+    validate_final_physical_ledger_policy(
+        sibling_complete_command);
+    sibling_complete_command.require_checked_physical_ledger =
+        true;
+    require_failure(
+        [&sibling_complete_command] {
+            validate_final_physical_ledger_policy(
+                sibling_complete_command);
         },
         "requires an explicit physical ledger state");
     command_line checked_ledger_command =

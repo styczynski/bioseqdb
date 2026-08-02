@@ -678,7 +678,8 @@ parse_routine_metadata(
 /// Parses semicolon-terminated top-level PostgreSQL statements while preserving
 /// their exact source bytes.
 [[nodiscard]] inline install_script parse_install_script(
-    std::string_view source) {
+    std::string_view source,
+    std::string_view extension_name = "bioseq") {
     if (source.empty()) {
         throw std::runtime_error("install SQL is empty");
     }
@@ -688,10 +689,26 @@ parse_routine_metadata(
     if (source.find('\r') != std::string_view::npos) {
         throw std::runtime_error("install SQL must use LF newlines");
     }
+    if (extension_name.empty()
+        || !(extension_name.front() >= 'a'
+             && extension_name.front() <= 'z')
+        || !std::ranges::all_of(
+            extension_name.substr(1),
+            [](char item) {
+                return (item >= 'a' && item <= 'z')
+                    || (item >= '0' && item <= '9')
+                    || item == '_';
+            })) {
+        throw std::runtime_error(
+            "invalid extension name for install SQL parsing");
+    }
+    const std::string expected_guard =
+        "\\echo Use \"CREATE EXTENSION "
+        + std::string{extension_name}
+        + "\" to load this file. \\quit";
     const std::size_t guard_end = source.find('\n', source.find("\\echo"));
     if (!source.starts_with("-- complain if script is sourced in psql")
-        || source.find("\\echo Use \"CREATE EXTENSION bioseq\"") ==
-            std::string_view::npos
+        || source.find(expected_guard) == std::string_view::npos
         || guard_end == std::string_view::npos) {
         throw std::runtime_error(
             "install SQL is missing the canonical psql direct-load guard");

@@ -182,7 +182,9 @@ struct settings final {
     static inline bool update_index_on_insert = true;
 
     /** @brief Reads stored per-sequence indexes when they are available. */
-    [[bioseq_sql::guc]]
+    [[bioseq_sql::guc({
+        .plan_cache = bioseq::sql::plan_cache_policy::reset,
+    })]]
     static inline bool read_sequence_index = true;
 
     /**

@@ -30,6 +30,7 @@ export module bioseq.table.am_cache;
 
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 
 export namespace bioseq::storage {
 
@@ -108,7 +109,7 @@ const BioseqAmCache& bioseq_am_cache_for(Relation rel) {
         populate_seq_attnos(*existing, rel);
         return *existing;
     }
-    MemoryContextScope ctx{CacheMemoryContext};
+    bioseq::pg_support::MemoryContextScope ctx{CacheMemoryContext};
     void* raw = palloc0(sizeof(BioseqAmCache));
     auto* fresh = ::new (raw) BioseqAmCache{};
     populate_seq_attnos(*fresh, rel);

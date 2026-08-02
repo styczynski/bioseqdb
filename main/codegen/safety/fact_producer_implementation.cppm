@@ -3204,7 +3204,7 @@ class throw_expression_collector final
         || statement_contains(
             outer_region.try_branch, helper_call)
         || owning_module(helper_definition)
-            != "bioseq.pg_utils.error_bridge") {
+            != "bioseq.pg_support:error_boundary") {
         fact_failure(
             qualified_name(erased_definition),
             "outer PG_CATCH does not call the exact error-capture "
@@ -3430,7 +3430,7 @@ require_erased_bridge_definition(
     if (definition == nullptr
         || qualified_name(definition) != expected_name
         || owning_module(definition)
-            != "bioseq.pg_utils.error_bridge") {
+            != "bioseq.pg_support:error_boundary") {
         fact_failure(
             qualified_name(wrapper_definition),
             "erased bridge definition identity is unavailable");
@@ -3447,7 +3447,7 @@ require_erased_bridge_definition(
             context.getLangOpts(),
             true);
     if (!definition_location.source_file.ends_with(
-            "/bioseq/backend/pg/pg_utils/error_bridge.cppm")) {
+            "/main/common/pg_support/error_boundary.cppm")) {
         fact_failure(
             qualified_name(wrapper_definition),
             "erased bridge definition identity is unavailable");
@@ -3777,17 +3777,17 @@ bridge_evidence_for(
     std::string region_id;
     if (kind == bridge_kind::invoke_pg_as_cpp) {
         expected_name = "bioseq::pg_utils::invoke_pg_as_cpp";
-        expected_module = "bioseq.pg_utils.error_bridge";
+        expected_module = "bioseq.pg_support:error_boundary";
         expected_source_suffix =
-            "/bioseq/backend/pg/pg_utils/error_bridge.cppm";
+            "/main/common/pg_support/error_boundary.cppm";
         region_id =
             "bioseq.pg_utils.error_bridge/invoke_pg_as_cpp";
     } else if (kind == bridge_kind::sql_call_context) {
         expected_name =
             "bioseq::pg_utils::invoke_pg_across_transactions_as_cpp";
-        expected_module = "bioseq.pg_utils.error_bridge";
+        expected_module = "bioseq.pg_support:error_boundary";
         expected_source_suffix =
-            "/bioseq/backend/pg/pg_utils/error_bridge.cppm";
+            "/main/common/pg_support/error_boundary.cppm";
         region_id =
             "bioseq.pg_utils.error_bridge/"
             "invoke_pg_across_transactions_as_cpp";
@@ -3806,10 +3806,9 @@ bridge_evidence_for(
                 "reviewed implementation");
         }
         expected_name = implementation_name;
-        expected_module =
-            "bioseq.pg_utils.sql_boundary:context";
+        expected_module = "bioseq.pg_sql_boundary";
         expected_source_suffix =
-            "/bioseq/backend/pg/pg_utils/sql_boundary/context.cppm";
+            "/main/common/pg_sql_boundary/call_context_implementation.cpp";
         region_id =
             "bioseq.pg_utils.sql_boundary.context/"
             + implementation_name.substr(
@@ -3817,9 +3816,9 @@ bridge_evidence_for(
     } else if (kind == bridge_kind::generated_boundary_tail) {
         expected_name =
             "bioseq::pg_utils::invoke_sql_boundary";
-        expected_module = "bioseq.pg_utils.sql_boundary";
+        expected_module = "bioseq.pg_sql_boundary";
         expected_source_suffix =
-            "/bioseq/backend/pg/pg_utils/sql_boundary/index.cppm";
+            "/main/common/pg_sql_boundary/index.cppm";
         region_id =
             "bioseq.pg_utils.sql_boundary/rethrow_tail";
     } else {

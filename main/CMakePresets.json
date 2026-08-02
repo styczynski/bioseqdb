@@ -67,6 +67,8 @@
           "BIOSEQ_TEST_INDEXES": "OFF",
           "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
           "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext",
+          "Intl_INCLUDE_DIR": "/opt/homebrew/opt/gettext/include",
+          "Intl_LIBRARY": "/opt/homebrew/opt/gettext/lib/libintl.dylib",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",

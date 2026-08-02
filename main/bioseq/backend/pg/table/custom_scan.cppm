@@ -29,6 +29,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -174,6 +175,9 @@ struct BioseqScanFeatureFlags {
 struct PerScanAlignerState {
 	bioseq::simd::active_target::Minimap2Params params{};
 	BioseqScanFeatureFlags              features{};
+	bioseq::indexing::IndexReadRequirement index_read_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	bool                                read_sequence_index = false;
 	bool                                params_captured = false;
 
 	/*
@@ -2211,6 +2215,550 @@ build_params_from_gucs()
 	return params;
 }
 
+/*
+ * Versioned, self-describing result-semantic snapshot for BioseqScan.
+ *
+ * The payload is one named List embedded in CustomScan.custom_private:
+ *
+ *   ["semantic_payload", INT4(version), INT4(field_count), fields...]
+ *
+ * Every scalar is a typed PostgreSQL Const so copyObject(), prepared-plan
+ * storage, parallel plan transfer, and node serialization retain the exact
+ * value without any process-local C++ pointer.  Floating-point parameters are
+ * stored as their exact IEEE-754 binary32 bits in an INT8 Const.
+ */
+constexpr char kBioseqSemanticPayloadName[] = "semantic_payload";
+constexpr std::int32_t kBioseqSemanticPayloadFormatVersion = 1;
+constexpr std::int32_t kBioseqSemanticPayloadFieldCount = 42;
+constexpr int kBioseqSemanticPayloadHeaderNodes = 3;
+
+enum class BioseqSemanticField : int {
+	kmer_size = 0,
+	window_size,
+	max_gap,
+	max_gap_ref,
+	bandwidth,
+	max_chain_skip,
+	max_chain_iter,
+	min_seed_count,
+	min_chain_score,
+	chain_gap_scale,
+	chain_skip_scale,
+	mask_level,
+	mask_len,
+	pri_ratio,
+	best_n,
+	match_score,
+	mismatch_pen,
+	gap_open1,
+	gap_ext1,
+	gap_open2,
+	gap_ext2,
+	sc_ambi,
+	zdrop,
+	end_bonus,
+	max_occ,
+	mid_occ,
+	block_min_size,
+	block_max_size,
+	bandwidth_long,
+	chaining_algorithm,
+	base_alignment_algorithm,
+	minimizer_algorithm,
+	vulkan_enabled,
+	vulkan_seed_hits_enabled,
+	vulkan_index_cache_enabled,
+	vulkan_fused_frontend_enabled,
+	vulkan_gpu_index_build_enabled,
+	vulkan_extend_enabled,
+	vulkan_phase_c_tile_bp,
+	vulkan_phase_c_radix_bits,
+	read_sequence_index,
+	index_read_requirement,
+};
+
+static_assert(
+	static_cast<int>(BioseqSemanticField::index_read_requirement) + 1
+	== kBioseqSemanticPayloadFieldCount);
+
+struct FrozenBioseqScanSemantics {
+	bioseq::simd::active_target::Minimap2Params params{};
+	bool read_sequence_index = false;
+	bioseq::indexing::IndexReadRequirement index_read_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+};
+
+[[nodiscard]] static Const* make_semantic_int4_const(
+		const std::int32_t value) {
+	return makeConst(
+		INT4OID, -1, InvalidOid, sizeof(std::int32_t),
+		Int32GetDatum(value), false, true);
+}
+
+[[nodiscard]] static Const* make_semantic_int8_const(
+		const std::int64_t value) {
+	return makeConst(
+		INT8OID, -1, InvalidOid, sizeof(std::int64_t),
+		Int64GetDatum(value), false, FLOAT8PASSBYVAL);
+}
+
+[[nodiscard]] static Const* make_semantic_bool_const(const bool value) {
+	return makeConst(
+		BOOLOID, -1, InvalidOid, sizeof(bool),
+		BoolGetDatum(value), false, true);
+}
+
+[[nodiscard]] static Const* make_semantic_float_bits_const(
+		const float value) {
+	const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+	return make_semantic_int8_const(static_cast<std::int64_t>(bits));
+}
+
+[[nodiscard]] static List* make_bioseq_semantic_payload(
+		const FrozenBioseqScanSemantics& semantics) {
+	const auto& params = semantics.params;
+	List* payload = list_make3(
+		makeString(pstrdup(kBioseqSemanticPayloadName)),
+		make_semantic_int4_const(kBioseqSemanticPayloadFormatVersion),
+		make_semantic_int4_const(kBioseqSemanticPayloadFieldCount));
+	payload = lappend(payload, make_semantic_int8_const(params.kmer_size));
+	payload = lappend(payload, make_semantic_int8_const(params.window_size));
+	payload = lappend(payload, make_semantic_int8_const(params.max_gap));
+	payload = lappend(payload, make_semantic_int8_const(params.max_gap_ref));
+	payload = lappend(payload, make_semantic_int8_const(params.bandwidth));
+	payload = lappend(payload, make_semantic_int8_const(params.max_chain_skip));
+	payload = lappend(payload, make_semantic_int8_const(params.max_chain_iter));
+	payload = lappend(payload, make_semantic_int8_const(params.min_seed_count));
+	payload = lappend(payload, make_semantic_int8_const(params.min_chain_score));
+	payload = lappend(
+		payload, make_semantic_float_bits_const(params.chain_gap_scale));
+	payload = lappend(
+		payload, make_semantic_float_bits_const(params.chain_skip_scale));
+	payload = lappend(payload, make_semantic_float_bits_const(params.mask_level));
+	payload = lappend(payload, make_semantic_int8_const(params.mask_len));
+	payload = lappend(payload, make_semantic_float_bits_const(params.pri_ratio));
+	payload = lappend(payload, make_semantic_int8_const(params.best_n));
+	payload = lappend(payload, make_semantic_int8_const(params.match_score));
+	payload = lappend(payload, make_semantic_int8_const(params.mismatch_pen));
+	payload = lappend(payload, make_semantic_int8_const(params.gap_open1));
+	payload = lappend(payload, make_semantic_int8_const(params.gap_ext1));
+	payload = lappend(payload, make_semantic_int8_const(params.gap_open2));
+	payload = lappend(payload, make_semantic_int8_const(params.gap_ext2));
+	payload = lappend(payload, make_semantic_int8_const(params.sc_ambi));
+	payload = lappend(payload, make_semantic_int8_const(params.zdrop));
+	payload = lappend(payload, make_semantic_int8_const(params.end_bonus));
+	payload = lappend(payload, make_semantic_int8_const(params.max_occ));
+	payload = lappend(payload, make_semantic_int8_const(params.mid_occ));
+	payload = lappend(
+		payload,
+		make_semantic_int8_const(static_cast<std::int64_t>(
+			params.block_min_size)));
+	payload = lappend(
+		payload,
+		make_semantic_int8_const(static_cast<std::int64_t>(
+			params.block_max_size)));
+	payload = lappend(payload, make_semantic_int8_const(params.bandwidth_long));
+	payload = lappend(
+		payload,
+		make_semantic_int4_const(static_cast<std::int32_t>(
+			params.chaining_algorithm)));
+	payload = lappend(
+		payload,
+		make_semantic_int4_const(static_cast<std::int32_t>(
+			params.base_alignment_algorithm)));
+	payload = lappend(
+		payload,
+		make_semantic_int4_const(static_cast<std::int32_t>(
+			params.minimizer_algorithm)));
+	payload = lappend(payload, make_semantic_bool_const(params.vulkan_enabled));
+	payload = lappend(
+		payload,
+		make_semantic_bool_const(params.vulkan_seed_hits_enabled));
+	payload = lappend(
+		payload,
+		make_semantic_bool_const(params.vulkan_index_cache_enabled));
+	payload = lappend(
+		payload,
+		make_semantic_bool_const(params.vulkan_fused_frontend_enabled));
+	payload = lappend(
+		payload,
+		make_semantic_bool_const(params.vulkan_gpu_index_build_enabled));
+	payload = lappend(
+		payload,
+		make_semantic_bool_const(params.vulkan_extend_enabled));
+	payload = lappend(
+		payload,
+		make_semantic_int8_const(static_cast<std::int64_t>(
+			params.vulkan_phase_c_tile_bp)));
+	payload = lappend(
+		payload,
+		make_semantic_int8_const(static_cast<std::int64_t>(
+			params.vulkan_phase_c_radix_bits)));
+	payload = lappend(
+		payload,
+		make_semantic_bool_const(semantics.read_sequence_index));
+	payload = lappend(
+		payload,
+		make_semantic_int4_const(static_cast<std::int32_t>(
+			semantics.index_read_requirement)));
+	Assert(
+		list_length(payload)
+		== kBioseqSemanticPayloadHeaderNodes
+			+ kBioseqSemanticPayloadFieldCount);
+	return payload;
+}
+
+[[nodiscard]] static bool semantic_const_metadata_valid(
+		const Const* constant,
+		const Oid type_oid,
+		const int16_t type_length,
+		const bool by_value) noexcept {
+	return constant != nullptr
+		&& constant->consttype == type_oid
+		&& constant->consttypmod == -1
+		&& constant->constcollid == InvalidOid
+		&& constant->constlen == type_length
+		&& constant->constbyval == by_value
+		&& !constant->constisnull
+		&& (by_value
+			|| DatumGetPointer(constant->constvalue) != nullptr);
+}
+
+[[nodiscard]] static bool decode_semantic_int4(
+		const Node* node, std::int32_t* output) noexcept {
+	const Const* constant =
+		node != nullptr && IsA(node, Const)
+			? reinterpret_cast<const Const*>(node) : nullptr;
+	if (output == nullptr
+		|| !semantic_const_metadata_valid(
+			constant, INT4OID, sizeof(std::int32_t), true)) {
+		return false;
+	}
+	*output = DatumGetInt32(constant->constvalue);
+	return true;
+}
+
+[[nodiscard]] static bool decode_semantic_int8(
+		const Node* node, std::int64_t* output) noexcept {
+	const Const* constant =
+		node != nullptr && IsA(node, Const)
+			? reinterpret_cast<const Const*>(node) : nullptr;
+	if (output == nullptr
+		|| !semantic_const_metadata_valid(
+			constant, INT8OID, sizeof(std::int64_t), FLOAT8PASSBYVAL)) {
+		return false;
+	}
+	*output = DatumGetInt64(constant->constvalue);
+	return true;
+}
+
+[[nodiscard]] static bool decode_semantic_bool(
+		const Node* node, bool* output) noexcept {
+	const Const* constant =
+		node != nullptr && IsA(node, Const)
+			? reinterpret_cast<const Const*>(node) : nullptr;
+	if (output == nullptr
+		|| !semantic_const_metadata_valid(
+			constant, BOOLOID, sizeof(bool), true)
+		|| (constant->constvalue != BoolGetDatum(false)
+			&& constant->constvalue != BoolGetDatum(true))) {
+		return false;
+	}
+	*output = DatumGetBool(constant->constvalue);
+	return true;
+}
+
+[[nodiscard]] static const Node* semantic_field_node(
+		const List* payload, const BioseqSemanticField field) noexcept {
+	if (payload == nullptr) return nullptr;
+	const int index = kBioseqSemanticPayloadHeaderNodes
+		+ static_cast<int>(field);
+	return index >= 0 && index < list_length(payload)
+		? reinterpret_cast<const Node*>(list_nth(payload, index))
+		: nullptr;
+}
+
+[[nodiscard]] static bool decode_semantic_int32_field(
+		const List* payload,
+		const BioseqSemanticField field,
+		std::int32_t* output) noexcept {
+	std::int64_t decoded = 0;
+	if (!decode_semantic_int8(semantic_field_node(payload, field), &decoded)
+		|| decoded < (std::numeric_limits<std::int32_t>::min)()
+		|| decoded > (std::numeric_limits<std::int32_t>::max)()) {
+		return false;
+	}
+	*output = static_cast<std::int32_t>(decoded);
+	return true;
+}
+
+[[nodiscard]] static bool decode_semantic_size_field(
+		const List* payload,
+		const BioseqSemanticField field,
+		std::size_t* output) noexcept {
+	std::int64_t decoded = 0;
+	if (!decode_semantic_int8(semantic_field_node(payload, field), &decoded)
+		|| decoded < 0
+		|| static_cast<std::uint64_t>(decoded)
+			> static_cast<std::uint64_t>(
+				(std::numeric_limits<std::size_t>::max)())) {
+		return false;
+	}
+	*output = static_cast<std::size_t>(decoded);
+	return true;
+}
+
+[[nodiscard]] static bool decode_semantic_uint32_field(
+		const List* payload,
+		const BioseqSemanticField field,
+		std::uint32_t* output) noexcept {
+	std::int64_t decoded = 0;
+	if (!decode_semantic_int8(semantic_field_node(payload, field), &decoded)
+		|| decoded < 0
+		|| static_cast<std::uint64_t>(decoded)
+			> (std::numeric_limits<std::uint32_t>::max)()) {
+		return false;
+	}
+	*output = static_cast<std::uint32_t>(decoded);
+	return true;
+}
+
+[[nodiscard]] static bool decode_semantic_float_field(
+		const List* payload,
+		const BioseqSemanticField field,
+		float* output) noexcept {
+	std::int64_t decoded = 0;
+	if (!decode_semantic_int8(semantic_field_node(payload, field), &decoded)
+		|| decoded < 0
+		|| static_cast<std::uint64_t>(decoded)
+			> (std::numeric_limits<std::uint32_t>::max)()) {
+		return false;
+	}
+	*output = std::bit_cast<float>(static_cast<std::uint32_t>(decoded));
+	return true;
+}
+
+[[nodiscard]] static const List* find_bioseq_semantic_payload(
+		const List* custom_private) noexcept {
+	const List* found = nullptr;
+	for (const Node* candidate : PList<Node>(
+			const_cast<List*>(custom_private))) {
+		if (candidate == nullptr || !IsA(candidate, List)) continue;
+		const List* list = reinterpret_cast<const List*>(candidate);
+		const Node* name_node = list == NIL ? nullptr
+			: reinterpret_cast<const Node*>(linitial(list));
+		if (name_node == nullptr || !IsA(name_node, String)
+			|| strVal(name_node) == nullptr
+			|| std::strcmp(strVal(name_node), kBioseqSemanticPayloadName) != 0) {
+			continue;
+		}
+		if (found != nullptr) return nullptr;
+		found = list;
+	}
+	return found;
+}
+
+[[nodiscard]] static bool decode_bioseq_semantic_payload(
+		const List* custom_private,
+		FrozenBioseqScanSemantics* output) noexcept {
+	if (output == nullptr) return false;
+	const List* payload = find_bioseq_semantic_payload(custom_private);
+	if (payload == nullptr
+		|| list_length(payload)
+			!= kBioseqSemanticPayloadHeaderNodes
+				+ kBioseqSemanticPayloadFieldCount) {
+		return false;
+	}
+	std::int32_t version = 0;
+	std::int32_t field_count = 0;
+	if (!decode_semantic_int4(
+			reinterpret_cast<const Node*>(list_nth(payload, 1)), &version)
+		|| !decode_semantic_int4(
+			reinterpret_cast<const Node*>(list_nth(payload, 2)), &field_count)
+		|| version != kBioseqSemanticPayloadFormatVersion
+		|| field_count != kBioseqSemanticPayloadFieldCount) {
+		return false;
+	}
+
+	FrozenBioseqScanSemantics decoded{};
+	auto& params = decoded.params;
+	if (!decode_semantic_int32_field(
+			payload, BioseqSemanticField::kmer_size, &params.kmer_size)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::window_size, &params.window_size)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::max_gap, &params.max_gap)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::max_gap_ref, &params.max_gap_ref)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::bandwidth, &params.bandwidth)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::max_chain_skip,
+			&params.max_chain_skip)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::max_chain_iter,
+			&params.max_chain_iter)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::min_seed_count,
+			&params.min_seed_count)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::min_chain_score,
+			&params.min_chain_score)
+		|| !decode_semantic_float_field(
+			payload, BioseqSemanticField::chain_gap_scale,
+			&params.chain_gap_scale)
+		|| !decode_semantic_float_field(
+			payload, BioseqSemanticField::chain_skip_scale,
+			&params.chain_skip_scale)
+		|| !decode_semantic_float_field(
+			payload, BioseqSemanticField::mask_level, &params.mask_level)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::mask_len, &params.mask_len)
+		|| !decode_semantic_float_field(
+			payload, BioseqSemanticField::pri_ratio, &params.pri_ratio)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::best_n, &params.best_n)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::match_score, &params.match_score)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::mismatch_pen,
+			&params.mismatch_pen)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::gap_open1, &params.gap_open1)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::gap_ext1, &params.gap_ext1)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::gap_open2, &params.gap_open2)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::gap_ext2, &params.gap_ext2)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::sc_ambi, &params.sc_ambi)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::zdrop, &params.zdrop)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::end_bonus, &params.end_bonus)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::max_occ, &params.max_occ)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::mid_occ, &params.mid_occ)
+		|| !decode_semantic_size_field(
+			payload, BioseqSemanticField::block_min_size,
+			&params.block_min_size)
+		|| !decode_semantic_size_field(
+			payload, BioseqSemanticField::block_max_size,
+			&params.block_max_size)
+		|| !decode_semantic_int32_field(
+			payload, BioseqSemanticField::bandwidth_long,
+			&params.bandwidth_long)) {
+		return false;
+	}
+
+	std::int32_t chaining = 0;
+	std::int32_t base_alignment = 0;
+	std::int32_t minimizer = 0;
+	if (!decode_semantic_int4(
+			semantic_field_node(
+				payload, BioseqSemanticField::chaining_algorithm),
+			&chaining)
+		|| !decode_semantic_int4(
+			semantic_field_node(
+				payload, BioseqSemanticField::base_alignment_algorithm),
+			&base_alignment)
+		|| !decode_semantic_int4(
+			semantic_field_node(
+				payload, BioseqSemanticField::minimizer_algorithm),
+			&minimizer)) {
+		return false;
+	}
+	using Chaining =
+		bioseq::simd::active_target::ChainingAlgorithmType;
+	using BaseAlignment =
+		bioseq::simd::active_target::BaseAlignmentAlgorithmType;
+	using Minimizer =
+		bioseq::simd::active_target::MinimizerAlgorithmType;
+	switch (static_cast<Chaining>(chaining)) {
+		case Chaining::SCALAR_MM2:
+		case Chaining::SIMD_MM2:
+		case Chaining::RMQ:
+		case Chaining::VULKAN_TILED_DP:
+			params.chaining_algorithm = static_cast<Chaining>(chaining);
+			break;
+		default:
+			return false;
+	}
+	switch (static_cast<BaseAlignment>(base_alignment)) {
+		case BaseAlignment::KSW2:
+		case BaseAlignment::BLOCK_ALIGNER:
+		case BaseAlignment::KSW2_BATCHED:
+			params.base_alignment_algorithm =
+				static_cast<BaseAlignment>(base_alignment);
+			break;
+		default:
+			return false;
+	}
+	switch (static_cast<Minimizer>(minimizer)) {
+		case Minimizer::SCALAR:
+		case Minimizer::SIMD_MINIMAP2_SLOW:
+		case Minimizer::TWO_STACK_NTHASH:
+		case Minimizer::VULKAN_MINIMAP_INT:
+		case Minimizer::PAPER_NTHASH_SIMD:
+			params.minimizer_algorithm = static_cast<Minimizer>(minimizer);
+			break;
+		default:
+			return false;
+	}
+
+	if (!decode_semantic_bool(
+			semantic_field_node(
+				payload, BioseqSemanticField::vulkan_enabled),
+			&params.vulkan_enabled)
+		|| !decode_semantic_bool(
+			semantic_field_node(
+				payload, BioseqSemanticField::vulkan_seed_hits_enabled),
+			&params.vulkan_seed_hits_enabled)
+		|| !decode_semantic_bool(
+			semantic_field_node(
+				payload, BioseqSemanticField::vulkan_index_cache_enabled),
+			&params.vulkan_index_cache_enabled)
+		|| !decode_semantic_bool(
+			semantic_field_node(
+				payload, BioseqSemanticField::vulkan_fused_frontend_enabled),
+			&params.vulkan_fused_frontend_enabled)
+		|| !decode_semantic_bool(
+			semantic_field_node(
+				payload, BioseqSemanticField::vulkan_gpu_index_build_enabled),
+			&params.vulkan_gpu_index_build_enabled)
+		|| !decode_semantic_bool(
+			semantic_field_node(
+				payload, BioseqSemanticField::vulkan_extend_enabled),
+			&params.vulkan_extend_enabled)
+		|| !decode_semantic_uint32_field(
+			payload, BioseqSemanticField::vulkan_phase_c_tile_bp,
+			&params.vulkan_phase_c_tile_bp)
+		|| !decode_semantic_uint32_field(
+			payload, BioseqSemanticField::vulkan_phase_c_radix_bits,
+			&params.vulkan_phase_c_radix_bits)
+		|| !decode_semantic_bool(
+			semantic_field_node(
+				payload, BioseqSemanticField::read_sequence_index),
+			&decoded.read_sequence_index)) {
+		return false;
+	}
+	std::int32_t requirement = 0;
+	if (!decode_semantic_int4(
+			semantic_field_node(
+				payload, BioseqSemanticField::index_read_requirement),
+			&requirement)
+		|| !bioseq::indexing::index_read_requirement_ordinal_valid(
+			requirement)) {
+		return false;
+	}
+	decoded.index_read_requirement =
+		static_cast<bioseq::indexing::IndexReadRequirement>(requirement);
+	*output = decoded;
+	return true;
+}
+
 [[nodiscard]] static bool mmsearch_plans_admitted_packed_regions(
 		bioseq::simd::active_target::Minimap2Params const& params) noexcept {
 	using Algorithm = bioseq::simd::active_target::MinimizerAlgorithmType;
@@ -2859,6 +3407,343 @@ export const CustomScanMethods *
 bioseq_customscan_methods(void)
 {
 	return &BioseqColumnScanScanMethods;
+}
+
+export bool
+bioseq_customscan_has_valid_semantic_payload(
+		const CustomScan* scan) noexcept
+{
+	if (scan == nullptr || scan->methods != &BioseqColumnScanScanMethods) {
+		return false;
+	}
+	FrozenBioseqScanSemantics semantics{};
+	return decode_bioseq_semantic_payload(
+		scan->custom_private, &semantics);
+}
+
+export List*
+bioseq_customscan_cache_private_payload(const CustomScan* scan)
+{
+	if (!bioseq_customscan_has_valid_semantic_payload(scan)) {
+		return NIL;
+	}
+	auto* private_payload = static_cast<List*>(copyObject(
+		scan->custom_private));
+	List* locator_tag = nullptr;
+	for (Node* possible_tag : PList<Node>(private_payload)) {
+		if (possible_tag == nullptr || !IsA(possible_tag, List)) continue;
+		auto* tag = reinterpret_cast<List*>(possible_tag);
+		if (tag == NIL || !IsA(
+				reinterpret_cast<Node*>(linitial(tag)), Integer)
+			|| intVal(linitial(tag)) != kBioseqLocatorPassthroughMagic) {
+			continue;
+		}
+		if (locator_tag != nullptr || list_length(tag) != 4
+			|| !IsA(list_nth(tag, 1), Integer)
+			|| !IsA(list_nth(tag, 2), Integer)
+			|| !IsA(list_nth(tag, 3), Integer)
+			|| intVal(list_nth(tag, 1)) != kBioseqBatchJoinPlanVersion
+			|| intVal(list_nth(tag, 2)) <= 0
+			|| intVal(list_nth(tag, 3)) <= 0) {
+			return NIL;
+		}
+		locator_tag = tag;
+	}
+	if (locator_tag != nullptr) {
+		/* This token pairs a locator child with its parent only inside one
+		 * planned statement; the monotonic value is not result semantics. */
+		lfirst(list_nth_cell(locator_tag, 2)) = makeInteger(0);
+	}
+	return private_payload;
+}
+
+export const CustomScanMethods *
+bioseq_batch_join_customscan_methods(void)
+{
+	return &BioseqBatchJoinScanMethods;
+}
+
+namespace {
+
+[[nodiscard]] bool
+bioseq_batch_join_private_integer(
+		const List* nodes, const int index) noexcept
+{
+	if (nodes == nullptr || index < 0 || index >= list_length(nodes)) {
+		return false;
+	}
+	const Node* node = reinterpret_cast<const Node*>(
+		list_nth(nodes, index));
+	return node != nullptr && IsA(node, Integer);
+}
+
+[[nodiscard]] bool
+bioseq_batch_join_target_list_is_structural(
+		const List* target_list) noexcept
+{
+	if (target_list == nullptr) return false;
+	int expected_resno = 1;
+	for (const TargetEntry* entry : PList<TargetEntry>(
+			const_cast<List*>(target_list))) {
+		if (entry == nullptr || !IsA(entry, TargetEntry)
+			|| entry->expr == nullptr || entry->resno != expected_resno++) {
+			return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] bool
+bioseq_batch_join_descriptor_is_structural(
+		const CustomScan* scan, const int descriptor_index) noexcept
+{
+	if (scan == nullptr || descriptor_index < 0
+		|| descriptor_index >= list_length(scan->custom_private)) {
+		return false;
+	}
+	const Node* descriptor_node = reinterpret_cast<const Node*>(
+		list_nth(scan->custom_private, descriptor_index));
+	if (descriptor_node == nullptr || !IsA(descriptor_node, List)) {
+		return false;
+	}
+	const auto* descriptor = reinterpret_cast<const List*>(descriptor_node);
+	if (list_length(descriptor) != kBioseqMatchOwnerDescriptorFields) {
+		return false;
+	}
+	for (const int index : {
+			kMatchOwnerMagic, kMatchOwnerVersion, kMatchOwnerStableId,
+			kMatchOwnerLegacyTargetRelid}) {
+		if (!bioseq_batch_join_private_integer(descriptor, index)) {
+			return false;
+		}
+	}
+	const int stable_id = intVal(list_nth(
+		descriptor, kMatchOwnerStableId));
+	const Node* target_recipe = reinterpret_cast<const Node*>(list_nth(
+		descriptor, kMatchOwnerTargetRecipe));
+	const Node* base_lineage = reinterpret_cast<const Node*>(list_nth(
+		descriptor, kMatchOwnerBaseLineage));
+	return intVal(list_nth(descriptor, kMatchOwnerMagic))
+			== kBioseqMatchOwnerDescriptorMagic
+		&& intVal(list_nth(descriptor, kMatchOwnerVersion))
+			== kBioseqMatchOwnerDescriptorVersion
+		&& (stable_id == 0
+			|| stable_id == scan->scan.plan.plan_node_id)
+		&& target_recipe != nullptr
+		&& (base_lineage == nullptr || IsA(base_lineage, List))
+		&& bioseq_is_concrete_rte_varno(static_cast<Index>(intVal(
+			list_nth(descriptor, kMatchOwnerLegacyTargetRelid))));
+}
+
+} // namespace
+
+export bool
+bioseq_batch_join_customscan_has_valid_semantic_payload(
+		const CustomScan* scan) noexcept
+{
+	if (scan == nullptr || scan->methods != &BioseqBatchJoinScanMethods
+		|| scan->scan.scanrelid != 0
+		|| scan->scan.plan.plan_node_id < 0
+		|| outerPlan(&scan->scan.plan) != nullptr
+		|| innerPlan(&scan->scan.plan) != nullptr
+		|| scan->custom_exprs != NIL
+		|| bms_is_empty(scan->custom_relids)
+		|| !bioseq_batch_join_target_list_is_structural(
+			scan->scan.plan.targetlist)
+		|| !bioseq_batch_join_target_list_is_structural(
+			scan->custom_scan_tlist)
+		|| !bioseq_batch_join_private_integer(
+			scan->custom_private, 0)) {
+		return false;
+	}
+	const int version = intVal(linitial(scan->custom_private));
+	/* V4 shares the PostgreSQL method table but has a different one-child
+	 * executor ABI.  Exact source elision is deliberately V3-only until that
+	 * ABI gets its own complete recipe contract. */
+	if (version != kBioseqBatchJoinPlanVersion
+		|| list_length(scan->custom_private)
+			!= kBioseqBatchJoinPrivateFields
+		|| list_length(scan->custom_plans) != 2
+		|| !bioseq_batch_join_descriptor_is_structural(
+			scan, kBatchJoinMatchOwnerDescriptor)) {
+		return false;
+	}
+	for (const int index : {
+			kBatchJoinVersion, kBatchJoinToken,
+			kBatchJoinTargetRelationOid,
+			kBatchJoinTargetStorageSeqAttno,
+			kBatchJoinTargetSlotSeqResno,
+			kBatchJoinTargetSlotRownoResno,
+			kBatchJoinQuerySlotSeqResno,
+			kBatchJoinTargetColumnCount,
+			kBatchJoinQueryColumnCount,
+			kBatchJoinAlphabetCode,
+			kBatchJoinStorageUnitByteWidth,
+			kBatchJoinIndexReadRequirement}) {
+		if (!bioseq_batch_join_private_integer(
+				scan->custom_private, index)) {
+			return false;
+		}
+	}
+	const auto* target_child = reinterpret_cast<const CustomScan*>(
+		linitial(scan->custom_plans));
+	const Plan* query_child = static_cast<const Plan*>(
+		lsecond(scan->custom_plans));
+	const Node* sites = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinPlaceholderSites));
+	const Node* mmsearch = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinMmsearchExpr));
+	const Node* honest_startup_cost = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinHonestStartupCost));
+	const Node* honest_total_cost = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinHonestTotalCost));
+	const Node* incumbent_cost_floor = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinIncumbentCostFloor));
+	return target_child != nullptr && IsA(target_child, CustomScan)
+		&& target_child->methods == &BioseqColumnScanScanMethods
+		&& query_child != nullptr
+		&& intVal(list_nth(scan->custom_private, kBatchJoinToken)) > 0
+		&& OidIsValid(static_cast<Oid>(intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetRelationOid))))
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetStorageSeqAttno)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetSlotSeqResno)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetSlotRownoResno)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinQuerySlotSeqResno)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetColumnCount)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinQueryColumnCount)) > 0
+		&& bioseq::indexing::index_read_requirement_ordinal_valid(
+			intVal(list_nth(scan->custom_private,
+				kBatchJoinIndexReadRequirement)))
+		&& (sites == nullptr || IsA(sites, List))
+		&& mmsearch != nullptr && IsA(mmsearch, FuncExpr)
+		&& honest_startup_cost != nullptr
+		&& IsA(honest_startup_cost, Const)
+		&& honest_total_cost != nullptr
+		&& IsA(honest_total_cost, Const)
+		&& incumbent_cost_floor != nullptr
+		&& IsA(incumbent_cost_floor, Const);
+}
+
+export List*
+bioseq_batch_join_cache_plan_payload(const CustomScan* scan)
+{
+	if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
+		return NIL;
+	}
+	/* The token pairs one BatchJoin with its locator child only inside one
+	 * planned statement.  It is deliberately monotonic and therefore cannot
+	 * participate in a cross-planning cache identity.  Child plan semantics
+	 * are covered independently by the exact-plan provider walk. */
+	auto* private_payload = static_cast<List*>(copyObject(
+		scan->custom_private));
+	lfirst(list_nth_cell(private_payload, kBatchJoinToken)) = makeInteger(0);
+	for (const int cost_index : {
+			kBatchJoinHonestStartupCost,
+			kBatchJoinHonestTotalCost,
+			kBatchJoinIncumbentCostFloor}) {
+		/* Planner costs select a path but do not affect its result. */
+		lfirst(list_nth_cell(private_payload, cost_index)) = makeInteger(0);
+	}
+	return list_make5(
+		makeInteger(static_cast<int>(scan->flags)),
+		private_payload,
+		copyObject(scan->scan.plan.targetlist),
+		copyObject(scan->scan.plan.qual),
+		copyObject(scan->custom_scan_tlist));
+}
+
+export List*
+bioseq_batch_join_cache_semantic_snapshot(const CustomScan* scan)
+{
+	if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
+		return NIL;
+	}
+	auto* mmsearch = reinterpret_cast<FuncExpr*>(list_nth(
+		scan->custom_private, kBatchJoinMmsearchExpr));
+	bioseq::simd::active_target::Minimap2Params params =
+		build_params_from_gucs();
+	bioseq::indexing::IndexReadRequirement requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	(void)apply_aligner_options_override(
+		mmsearch, params, requirement, get_cached_stub_oids());
+	finalize_simd_chaining_policy(params);
+	if (static_cast<int>(requirement) != intVal(list_nth(
+			scan->custom_private, kBatchJoinIndexReadRequirement))) {
+		return NIL;
+	}
+
+	/* Match BeginCustomScan exactly: expensive result columns are enabled by
+	 * the finalized placeholder ABI, not by the post-setrefs target list. */
+	params.do_cigar = false;
+	params.compute_divergence = false;
+	params.compute_mapq = false;
+	params.compute_edit_distance = false;
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	const Node* sites_node = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinPlaceholderSites));
+	const List* sites = sites_node == nullptr
+		? NIL : reinterpret_cast<const List*>(sites_node);
+	Bitmapset* seen_resnos = nullptr;
+	for (const List* site : PList<List>(const_cast<List*>(sites))) {
+		if (site == nullptr || !IsA(site, List)
+			|| list_length(site) != kBioseqMatchHelperSiteFields) {
+			bms_free(seen_resnos);
+			return NIL;
+		}
+		for (const int index : {
+				kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+				kMatchSiteCollation, kMatchSiteBindingKind,
+				kMatchSitePhid, kMatchSiteStableId}) {
+			if (!bioseq_batch_join_private_integer(site, index)) {
+				bms_free(seen_resnos);
+				return NIL;
+			}
+		}
+		const int resno = intVal(list_nth(site, kMatchSiteResno));
+		const Oid funcid = static_cast<Oid>(intVal(list_nth(
+			site, kMatchSiteFuncid)));
+		const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
+			intVal(list_nth(site, kMatchSiteBindingKind)));
+		const int stable_id = intVal(list_nth(site, kMatchSiteStableId));
+		const Node* canonical_argument = reinterpret_cast<const Node*>(
+			list_nth(site, kMatchSiteCanonicalArgument));
+		if (resno <= 0
+			|| resno > list_length(scan->custom_scan_tlist)
+			|| bms_is_member(resno, seen_resnos)
+			|| !is_bioseq_projection_funcid(funcid, oids)
+			|| canonical_argument == nullptr
+			|| (binding_kind != BioseqMatchHelperBindingKind::exact_recipe
+				&& binding_kind
+					!= BioseqMatchHelperBindingKind::unique_lineage)
+			|| (stable_id != 0
+				&& stable_id != scan->scan.plan.plan_node_id)) {
+			bms_free(seen_resnos);
+			return NIL;
+		}
+		seen_resnos = bms_add_member(seen_resnos, resno);
+		params.do_cigar = params.do_cigar
+			|| funcid == oids.cigar_oid
+			|| funcid == oids.has_cigar_oid
+			|| funcid == oids.edit_oid;
+		params.compute_edit_distance = params.compute_edit_distance
+			|| funcid == oids.edit_oid;
+		params.compute_divergence = params.compute_divergence
+			|| funcid == oids.divergence_oid;
+		params.compute_mapq = params.compute_mapq
+			|| funcid == oids.mapq_oid;
+	}
+	bms_free(seen_resnos);
+	return make_bioseq_semantic_payload(FrozenBioseqScanSemantics{
+		.params = params,
+		.read_sequence_index = bioseq::settings::read_sequence_index,
+		.index_read_requirement = requirement,
+	});
 }
 
 /*
@@ -17397,6 +18282,45 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 		owned_mmsearch_exprs != NIL
 			? copyObject(owned_mmsearch_exprs) : NIL);
 
+	/*
+	 * Freeze every result-affecting BioseqScan setting only after applying
+	 * the primary mmsearch aligner_options override and the evaluated-target
+	 * index rule.  Executor, EXPLAIN, and cache-provider consumers decode this
+	 * payload; none of them reconstruct these values from live semantic GUCs.
+	 */
+	FrozenBioseqScanSemantics frozen_semantics{};
+	frozen_semantics.params = build_params_from_gucs();
+	bioseq::indexing::IndexReadRequirement planned_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	FuncExpr* primary_mmsearch = owned_mmsearch_exprs == NIL
+		? nullptr
+		: pg_node_try_as<FuncExpr>(
+			reinterpret_cast<Node*>(linitial(owned_mmsearch_exprs)));
+	(void)apply_aligner_options_override(
+		primary_mmsearch,
+		frozen_semantics.params,
+		planned_requirement,
+		get_cached_stub_oids());
+	finalize_simd_chaining_policy(frozen_semantics.params);
+	if (planner_owned_target_evaluated
+		&& planned_requirement
+			== bioseq::indexing::IndexReadRequirement::
+				require_compatible_persisted) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("a transformed mmsearch operand cannot require a persisted target index"),
+			 errhint("Use index_read_requirement=allow or require_absent; evaluated base-local operands run against their exact logical views.")));
+	}
+	frozen_semantics.index_read_requirement =
+		planner_owned_target_evaluated
+			? bioseq::indexing::IndexReadRequirement::require_absent
+			: planned_requirement;
+	frozen_semantics.read_sequence_index =
+		bioseq::settings::read_sequence_index;
+	cscan->custom_private = lappend(
+		cscan->custom_private,
+		make_bioseq_semantic_payload(frozen_semantics));
+
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScanPath_PlanCustomPath() returning");
 	return reinterpret_cast<Plan *>(cscan);
 }
@@ -22440,6 +23364,16 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	runtime.match_helper_sites = NIL;
 	runtime.stable_match_id = 0;
 	runtime.mmsearch_null_input = false;
+	FrozenBioseqScanSemantics frozen_semantics{};
+	if (!decode_bioseq_semantic_payload(
+			cscan->custom_private, &frozen_semantics)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqScan semantic payload is malformed"),
+			 errdetail("Expected semantic_payload format version %d with exactly %d typed fields.",
+				kBioseqSemanticPayloadFormatVersion,
+				kBioseqSemanticPayloadFieldCount)));
+	}
 	Node* base_match_target_recipe = initialize_base_match_owner_runtime(
 		cscan, cscanstate->ss.ss_currentRelation, runtime);
 	for (Node* private_node : PList<Node>(cscan->custom_private)) {
@@ -23329,10 +24263,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	}
 
 	/*
-	 * Build the per-scan Minimap2Params: start from a GUC snapshot, overlay
-	 * any aligner_options() overrides the user passed to mmsearch, then
-	 * flip conditional-pipeline flags based on which bioseq.* projections
-	 * the target list actually references.
+	 * Build the per-scan Minimap2Params from the planner-authored semantic
+	 * payload, then flip conditional-pipeline flags based on which bioseq.*
+	 * projections the finalized target list references.  The only live
+	 * aligner GUC read here is performance-only profiling.
 	 *
 	 * The resulting struct is pushed into the TupleDispatchBuffer so every
 	 * batch row inherits the same parameters, and copied into the per-scan
@@ -23356,30 +24290,37 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			 errmsg("bioseq alignment custom scans are parallel unsafe"),
 			 errdetail("statement execution attestation is backend-local and DSM aggregation is not implemented")));
 	}
-	bioseq::simd::active_target::Minimap2Params aligner_params = build_params_from_gucs();
-	bioseq::indexing::IndexReadRequirement primary_requirement =
-		bioseq::indexing::IndexReadRequirement::allow;
+	bioseq::simd::active_target::Minimap2Params aligner_params =
+		frozen_semantics.params;
+	/* Profiling is diagnostic/performance-only and deliberately remains live. */
+	aligner_params.enable_profiling =
+		bioseq::aligner::settings::enable_profiling;
+	/*
+	 * The explicitness bit selects only the prefilter execution backend and is
+	 * not a result-semantic field.  Recover it from the already-frozen
+	 * aligner_options Const without consulting any GUC; discard the decoded
+	 * semantic values because semantic_payload is authoritative.
+	 */
 	bool primary_vulkan_enabled_explicit = false;
+	auto explicitness_probe_params = aligner_params;
+	auto explicitness_probe_requirement =
+		frozen_semantics.index_read_requirement;
 	(void)apply_aligner_options_override(
 		primary_mmsearch_fe,
-		aligner_params,
-		primary_requirement,
+		explicitness_probe_params,
+		explicitness_probe_requirement,
 		scan_stub_oids,
 		&primary_vulkan_enabled_explicit);
 	finalize_simd_chaining_policy(aligner_params);
-	if (runtime.match_evaluated_submission
-		&& primary_requirement
-			== bioseq::indexing::IndexReadRequirement::
-				require_compatible_persisted) {
-		ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("a transformed mmsearch operand cannot require a persisted target index"),
-			 errhint("Use index_read_requirement=allow or require_absent; evaluated base-local operands run against their exact logical views.")));
-	}
 	const bioseq::indexing::IndexReadRequirement index_read_requirement =
-		runtime.match_evaluated_submission
-		? bioseq::indexing::IndexReadRequirement::require_absent
-		: primary_requirement;
+		frozen_semantics.index_read_requirement;
+	if (runtime.match_evaluated_submission
+		&& index_read_requirement
+			!= bioseq::indexing::IndexReadRequirement::require_absent) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqScan semantic payload has an invalid evaluated-target index policy")));
+	}
 	aligner_params.do_cigar           = features.uses_cigar || features.uses_edit;
 	aligner_params.compute_divergence = features.uses_divergence;
 	aligner_params.compute_mapq       = features.uses_mapq;
@@ -23488,6 +24429,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 
 	runtime.aligner_state.params          = aligner_params;
 	runtime.aligner_state.features        = features;
+	runtime.aligner_state.index_read_requirement =
+		index_read_requirement;
+	runtime.aligner_state.read_sequence_index =
+		frozen_semantics.read_sequence_index;
 	runtime.aligner_state.params_captured = true;
 
 	/*
@@ -23541,7 +24486,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	}
 	runtime.buffer.configure_params(aligner_params,
 							index_read_requirement,
-							features.has_mmsearch && bioseq::settings::read_sequence_index
+							features.has_mmsearch
+								&& frozen_semantics.read_sequence_index
 								&& !runtime.match_evaluated_submission,
 							resolved_user_relid,
 							scan_db_oid, scan_spc_oid, scan_relfile,
@@ -27011,7 +27957,8 @@ abandon_symbol_count_read_resources_after_error(
 static void
 populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 								   Relation main, int64_t rowno,
-								   Snapshot registered_snapshot)
+								   Snapshot registered_snapshot,
+								   const bool read_sequence_index)
 {
 	if (consts.symbol_count_sites.empty()) {
 		return;
@@ -27138,7 +28085,7 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 
 			/* (2) stored read — the ONLY thing read_sequence_index gates here. */
 			std::optional<std::int64_t> stored;
-			if (bioseq::settings::read_sequence_index && stub) {
+			if (read_sequence_index && stub) {
 				auto store = bsi::open_sequence_storage(
 						relid, rid.db_oid, rid.tablespace_oid,
 						rid.relfilenode, site.column_attno,
@@ -27962,7 +28909,9 @@ struct MmsearchRowEvaluation {
 			populate_symbol_count_placeholders(runtime.placeholder_consts,
 											   node->ss_currentRelation,
 											   next->sequence_rowno,
-											   bioseqScanState->snapshot);
+											   bioseqScanState->snapshot,
+											   runtime.aligner_state.
+												   read_sequence_index);
 
 			/* The alignment path retains locator stubs in its buffered row. Promote
 			 * only for this output projection, then restore the stable locator so a
@@ -28266,7 +29215,9 @@ struct MmsearchRowEvaluation {
 					}
 					populate_symbol_count_placeholders(runtime.placeholder_consts,
 											   node->ss_currentRelation, row_number,
-											   bioseqScanState->snapshot);
+											   bioseqScanState->snapshot,
+											   runtime.aligner_state.
+												   read_sequence_index);
 				}
 
 				ProjectionInfo* proj = ExecBuildProjectionInfo(
@@ -29217,6 +30168,25 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			: nullptr;
 	const PerScanAlignerState* aligner_snapshot =
 		(explain_runtime != nullptr) ? &explain_runtime->aligner_state : nullptr;
+	FrozenBioseqScanSemantics explain_frozen_semantics{};
+	const bool explain_semantics_valid =
+		aligner_snapshot != nullptr && aligner_snapshot->params_captured
+			? true
+			: decode_bioseq_semantic_payload(
+				cscan->custom_private, &explain_frozen_semantics);
+	const bool explain_read_sequence_index =
+		aligner_snapshot != nullptr && aligner_snapshot->params_captured
+			? aligner_snapshot->read_sequence_index
+			: explain_semantics_valid
+				? explain_frozen_semantics.read_sequence_index
+				: false;
+	const bioseq::indexing::IndexReadRequirement
+		explain_index_read_requirement =
+			aligner_snapshot != nullptr && aligner_snapshot->params_captured
+				? aligner_snapshot->index_read_requirement
+				: explain_semantics_valid
+					? explain_frozen_semantics.index_read_requirement
+					: bioseq::indexing::IndexReadRequirement::allow;
 
 	{
 		/*
@@ -29263,6 +30233,11 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		 */
 		if (features.has_mmsearch)
 		{
+			ExplainPropertyText(
+				"Bioseq Index Read Requirement",
+				bioseq::indexing::index_read_requirement_name(
+					explain_index_read_requirement).data(),
+				es);
 			if (evaluated_operand_owner) {
 				ExplainPropertyText(
 					"Bioseq Match Operand Evaluation",
@@ -29346,7 +30321,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 					ExplainPropertyText("Bioseq Recomputed",
 						"minimizers 100% (evaluated logical view requires index absence)",
 						es);
-				} else if (bioseq::settings::read_sequence_index) {
+				} else if (explain_read_sequence_index) {
 					fetched_pct    = index_presence * 100.0f;
 					recomputed_pct = (1.0f - index_presence) * 100.0f;
 					if (fetched_pct > 0.0f) {
@@ -29503,7 +30478,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			 * dispatch_buffer.cppm).  Surfaced as a header line above the
 			 * pipeline tree so it is not visually attached to any one stage.
 			 */
-			const bool sidecar_path_active = bioseq::settings::read_sequence_index;
+			const bool sidecar_path_active = explain_read_sequence_index;
 			const bool user_kw_differs =
 				sidecar_path_active &&
 				(params.kmer_size != 15 || params.window_size != 10);

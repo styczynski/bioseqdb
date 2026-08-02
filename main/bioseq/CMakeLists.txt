@@ -769,11 +769,11 @@ list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_RUNTIME_CORE_MODULES})
 # stay in BIOSEQ_NOPG_MODULES (so the PG glob still excludes them) but leave
 # BIOSEQ_NOPG_OWNED_MODULES so they are compiled exactly once, here, with no
 # runtime/TBB/logging/IO/PG edge. Isolated generated + provider metadata targets
-# link these leaves without inheriting the sequence graph.
+# link these leaves without inheriting the sequence graph. Checked arithmetic
+# is owned tree-wide by common/checked_arithmetic and is therefore not part of
+# the Bioseq source glob.
 set(BIOSEQ_SINK_CONTROL_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/sink_control.cppm")
-set(BIOSEQ_CHECKED_ARITHMETIC_MODULE
-  "${CMAKE_CURRENT_LIST_DIR}/backend/common/checked_arithmetic.cppm")
 # DOC0372 §369-374 — read_result + io_source protocol as a lightweight leaf so
 # external transfer / generated clients depend on the byte-source protocol
 # without the sequences/alphabets graph. The io/*.cppm glob captures it, so it
@@ -782,7 +782,6 @@ set(BIOSEQ_IO_SOURCE_CORE_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/io/source_core.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
   "${BIOSEQ_SINK_CONTROL_MODULE}"
-  "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}"
   "${BIOSEQ_IO_SOURCE_CORE_MODULE}")
 
 add_library(bioseq_sink_control_core STATIC)
@@ -794,16 +793,6 @@ target_compile_definitions(bioseq_sink_control_core PRIVATE NO_POSTGRES=1)
 target_sources(bioseq_sink_control_core
   PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES "${BIOSEQ_SINK_CONTROL_MODULE}")
-
-add_library(bioseq_checked_arithmetic_core STATIC)
-set_target_properties(bioseq_checked_arithmetic_core PROPERTIES
-  CXX_STANDARD 26 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON
-  CXX_MODULE_STD ON POSITION_INDEPENDENT_CODE ON
-  INTERPROCEDURAL_OPTIMIZATION FALSE)
-target_compile_definitions(bioseq_checked_arithmetic_core PRIVATE NO_POSTGRES=1)
-target_sources(bioseq_checked_arithmetic_core
-  PUBLIC FILE_SET CXX_MODULES BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-    FILES "${BIOSEQ_CHECKED_ARITHMETIC_MODULE}")
 
 add_library(bioseq_io_source_core STATIC)
 set_target_properties(bioseq_io_source_core PROPERTIES
@@ -1100,14 +1089,9 @@ set(BIOSEQ_SQL_COMPILE_CONTRACT_AUTHORED_PROVIDERS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/safety_runtime_probe.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_catalog_entities.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/aggregate.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/conversions.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/context.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/guc_storage.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/result_materialization.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/results.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/row_codec.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/values.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/sql_boundary/vector.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/sql_rows.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/io/sql_rows.cppm"
@@ -1446,26 +1430,6 @@ include(
 include(
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/RuntimeEvidence.cmake")
 
-# One compiler-native BMI of the authored annotation/value model is shared by
-# every Clang-built extension owner. The isolated GCC host generator builds
-# its own BMI from the same authored .cppm files.
-set(BIOSEQ_SQL_ANNOTATION_MODEL_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/entities.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/migration.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/options.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/validation.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/annotation_model/index.cppm")
-add_library(bioseq_sql_annotation_model STATIC)
-target_sources(bioseq_sql_annotation_model
-  PUBLIC FILE_SET CXX_MODULES
-    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}/../codegen"
-    FILES ${BIOSEQ_SQL_ANNOTATION_MODEL_MODULES})
-set_target_properties(bioseq_sql_annotation_model PROPERTIES
-  CXX_STANDARD 26
-  CXX_STANDARD_REQUIRED ON
-  CXX_EXTENSIONS ON
-  CXX_MODULE_STD ON
-  POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(bioseq_modules_nopg
   PUBLIC bioseq_sql_annotation_model)
 
@@ -3022,6 +2986,7 @@ endif()
 target_link_libraries(bioseq_sql_compile_contract_providers PUBLIC
   bioseq_modules_nopg
   bioseq_pg_support
+  bioseq_pg_sql_boundary
   bioseq_sql_annotation_model)
 set_target_properties(bioseq_sql_compile_contract_providers PROPERTIES
   CXX_STANDARD 26
@@ -3322,6 +3287,7 @@ add_dependencies(
   bioseq_sql_external_feature_contract
   bioseq_sql_production_determinism_self_test)
 
+find_package(Git REQUIRED)
 if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
     AND BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK)
   set(BIOSEQ_DOC0388_LEDGER_SCRIPT
@@ -3670,6 +3636,12 @@ AddCommonTargetX(
     "${BIOSEQ_SQL_GENERATED_INSTALL}"
   SQL_MANIFEST
     "${BIOSEQ_SQL_GENERATED_MANIFEST}"
+  DSO_CLOSURE_CONTRACT manifest
+  DSO_ABI_EXPORTS
+    Pg_magic_func
+    _PG_init
+    bioseq_scheduler_supervisor_main
+    bioseq_format6_parallel_scan_probe_worker_main
   ${_bioseq_sql_completion_target_option}
   PG_ENTRYPOINT_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod.cppm"
@@ -3710,6 +3682,7 @@ endif()
 target_link_libraries(postgresql_bioseq PRIVATE
   bioseq_cache_provider_api
   bioseq_pg_support
+  bioseq_pg_sql_boundary
   bioseq_sql_annotation_model)
 
 # Proofs consume the generator-owned scan/modmap closure, while the DSO link
@@ -3812,7 +3785,6 @@ endif()
 # The named target is available for an exact focused reproduction, while the
 # integration executable invokes the same command during a full test run.
 # Consequently build_only retains its compile-only contract.
-find_package(Git REQUIRED)
 get_target_property(
   BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE
   postgresql_bioseq
@@ -4053,6 +4025,12 @@ else()
     set(_bioseq_sql_runtime_active_profile production)
   endif()
   target_compile_definitions(postgresql_bioseq PRIVATE
+    BIOSEQ_SAFETY_RUNTIME_PROBES=1
+    "BIOSEQ_SAFETY_RUNTIME_PROFILE=\"${_bioseq_sql_runtime_active_profile}\"")
+  target_compile_definitions(bioseq_pg_support PRIVATE
+    BIOSEQ_SAFETY_RUNTIME_PROBES=1
+    "BIOSEQ_SAFETY_RUNTIME_PROFILE=\"${_bioseq_sql_runtime_active_profile}\"")
+  target_compile_definitions(bioseq_pg_sql_boundary PRIVATE
     BIOSEQ_SAFETY_RUNTIME_PROBES=1
     "BIOSEQ_SAFETY_RUNTIME_PROFILE=\"${_bioseq_sql_runtime_active_profile}\"")
 

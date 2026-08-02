@@ -4,10 +4,9 @@
 This importable module owns cluster state: unique data/socket/port allocation,
 init/start/createdb/bootstrap/stop, signal-safe primitives, configuration
 rendering, an explicit child-environment allowlist, and optional address-space
-containment. It is source-neutral: it knows nothing about the caching provider
-or the website generator. Consumers (main/cmake/run_private_postgres.py and the
-cache adapter main/bioseq_caching/test/run_private_provider_tests.py) supply
-their bootstrap/library/preload arguments through ClusterInputs.
+containment. It is source-neutral: it knows nothing about individual extensions
+or the website generator. Callers under main/cmake supply their bootstrap,
+library, and preload arguments through ClusterInputs.
 
 No lifecycle subprocess is unbounded: every invocation runs in its own process
 group with a validated deadline, and on expiry the whole group is SIGTERM'd,

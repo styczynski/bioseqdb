@@ -1,14 +1,26 @@
 module;
 
+#include <llvm/ADT/ArrayRef.h>
+#include <llvm/ADT/StringRef.h>
+#include <llvm/Support/Program.h>
+
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <vector>
+
+#ifndef BIOSEQ_PREPARE_TEST_CLANG_BINARY
+#error "Safety fact contracts require the configured Clang binary"
+#endif
 
 export module bioseq.codegen.safety:fact_producer_contract_tests;
 
@@ -85,12 +97,141 @@ inline void require_scan_failure(
     };
 }
 
+class temporary_bridge_root final {
+public:
+    temporary_bridge_root() {
+        const std::filesystem::path temporary_directory =
+            std::filesystem::temp_directory_path();
+        const auto nonce =
+            std::chrono::steady_clock::now()
+                .time_since_epoch()
+                .count();
+        for (std::size_t attempt = 0; attempt < 1024; ++attempt) {
+            const std::filesystem::path candidate =
+                temporary_directory
+                / ("bioseq_bridge_proof_contract_"
+                    + std::to_string(nonce)
+                    + "_" + std::to_string(attempt));
+            std::error_code create_error;
+            if (std::filesystem::create_directory(
+                    candidate, create_error)) {
+                root_ = candidate;
+                return;
+            }
+            if (create_error
+                && create_error
+                    != std::errc::file_exists) {
+                throw std::runtime_error(
+                    "cannot create bridge-proof temporary root: "
+                    + create_error.message());
+            }
+        }
+        throw std::runtime_error(
+            "cannot allocate a unique bridge-proof temporary root");
+    }
+
+    temporary_bridge_root(const temporary_bridge_root&) = delete;
+    temporary_bridge_root& operator=(
+        const temporary_bridge_root&) = delete;
+
+    ~temporary_bridge_root() {
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(root_, cleanup_error);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return root_;
+    }
+
+private:
+    std::filesystem::path root_;
+};
+
 struct bridge_fixture {
+    std::unique_ptr<temporary_bridge_root> root_owner;
     std::filesystem::path root;
     std::filesystem::path header_root;
     provenance_bundle provenance;
     std::vector<std::string> arguments;
+    std::vector<std::string> implementation_arguments;
 };
+
+[[nodiscard]] inline std::filesystem::path
+compile_bridge_primary_interface(
+    const std::filesystem::path& root) {
+    static constexpr std::string_view source = R"cpp(
+export module bioseq.pg_sql_boundary;
+export namespace bioseq::pg_utils {
+class sql_subtransaction final {
+public:
+    void commit();
+};
+}
+)cpp";
+    const std::filesystem::path source_path =
+        root / "main/common/pg_sql_boundary/primary_interface.cppm";
+    const std::filesystem::path pcm_path =
+        root / "pcm/bioseq.pg_sql_boundary.pcm";
+    const std::filesystem::path diagnostics_path =
+        root / "pcm/bioseq.pg_sql_boundary.stderr";
+    bioseq::codegen::write_if_different(source_path, source);
+    std::filesystem::create_directories(pcm_path.parent_path());
+
+    const std::string clang_binary = BIOSEQ_PREPARE_TEST_CLANG_BINARY;
+    const std::vector<std::string> arguments{
+        clang_binary,
+        "-std=c++26",
+        "-Xclang",
+        "-fbuiltin-headers-in-system-modules",
+        "-x",
+        "c++-module",
+        "--precompile",
+        source_path.string(),
+        "-o",
+        pcm_path.string(),
+    };
+    std::vector<llvm::StringRef> argument_refs;
+    argument_refs.reserve(arguments.size());
+    for (const std::string& argument : arguments) {
+        argument_refs.emplace_back(argument);
+    }
+    const std::string diagnostics_storage = diagnostics_path.string();
+    const std::array<std::optional<llvm::StringRef>, 3> redirects{
+        std::nullopt,
+        std::nullopt,
+        llvm::StringRef{diagnostics_storage},
+    };
+    std::string execution_error;
+    bool execution_failed = false;
+    const int status = llvm::sys::ExecuteAndWait(
+        clang_binary,
+        argument_refs,
+        std::nullopt,
+        llvm::ArrayRef<std::optional<llvm::StringRef>>{redirects},
+        30,
+        0,
+        &execution_error,
+        &execution_failed);
+    std::error_code size_error;
+    const std::uintmax_t pcm_size =
+        std::filesystem::file_size(pcm_path, size_error);
+    if (execution_failed || status != 0 || size_error || pcm_size == 0) {
+        const std::string diagnostics =
+            std::filesystem::is_regular_file(diagnostics_path)
+            ? bioseq::codegen::read_file(diagnostics_path)
+            : std::string{};
+        throw std::runtime_error(
+            "cannot compile bridge-proof primary interface BMI: status="
+            + std::to_string(status)
+            + (execution_error.empty()
+                ? std::string{}
+                : ", execution=" + execution_error)
+            + (diagnostics.empty()
+                ? std::string{}
+                : ", diagnostics=" + diagnostics));
+    }
+    return pcm_path;
+}
 
 [[nodiscard]] inline bridge_fixture make_bridge_fixture() {
     static constexpr std::string_view header = R"cpp(#pragma once
@@ -136,9 +277,8 @@ struct runtime_error : exception {
 };
 }
 )cpp";
-    const std::filesystem::path root =
-        std::filesystem::temp_directory_path()
-        / "bioseq_bridge_proof_contract";
+    auto root_owner = std::make_unique<temporary_bridge_root>();
+    const std::filesystem::path root = root_owner->path();
     const std::filesystem::path header_root =
         root / "postgresql_include";
     const std::filesystem::path standard_root =
@@ -240,16 +380,31 @@ struct runtime_error : exception {
             },
         },
     };
+    const std::filesystem::path primary_module_pcm =
+        compile_bridge_primary_interface(root);
+    std::vector<std::string> arguments{
+        "-I" + standard_root.string(),
+        "-I" + header_root.string(),
+        "-x",
+        "c++-module",
+    };
+    std::vector<std::string> implementation_arguments{
+        "-I" + standard_root.string(),
+        "-I" + header_root.string(),
+        "-x",
+        "c++",
+    };
+    implementation_arguments.emplace_back(
+        "-fmodule-file=bioseq.pg_sql_boundary="
+        + primary_module_pcm.string());
     return {
+        .root_owner = std::move(root_owner),
         .root = root,
         .header_root = header_root,
         .provenance = std::move(provenance),
-        .arguments = {
-            "-I" + standard_root.string(),
-            "-I" + header_root.string(),
-            "-x",
-            "c++-module",
-        },
+        .arguments = std::move(arguments),
+        .implementation_arguments =
+            std::move(implementation_arguments),
     };
 }
 
@@ -288,13 +443,13 @@ inline void run_bridge_proof_contracts() {
     bridge_fixture fixture = make_bridge_fixture();
     const std::filesystem::path context_path = module_path(
         fixture,
-        "bioseq/backend/pg/pg_utils/sql_boundary/context.cppm");
+        "main/common/pg_sql_boundary/call_context_implementation.cpp");
     const std::filesystem::path error_bridge_path = module_path(
         fixture,
-        "bioseq/backend/pg/pg_utils/error_bridge.cppm");
+        "main/common/pg_support/error_boundary.cppm");
     const std::filesystem::path boundary_path = module_path(
         fixture,
-        "bioseq/backend/pg/pg_utils/sql_boundary/index.cppm");
+        "main/common/pg_sql_boundary/index.cppm");
     const auto scan = [&](
         const std::filesystem::path& path,
         std::string_view source,
@@ -306,15 +461,22 @@ inline void run_bridge_proof_contracts() {
             profile,
             std::addressof(fixture.provenance));
     };
+    const auto scan_context = [&context_path, &fixture](
+        std::string_view source,
+        std::string_view profile) {
+        return scan_safety_flow_from_code(
+            context_path,
+            source,
+            fixture.implementation_arguments,
+            profile,
+            std::addressof(fixture.provenance));
+    };
 
     static constexpr std::string_view subtransaction_positive =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary:context;
-export namespace bioseq::pg_utils {
-struct sql_subtransaction {
-    void commit();
-};
+module bioseq.pg_sql_boundary;
+namespace bioseq::pg_utils {
 void sql_subtransaction::commit() {
     PG_TRY();
     {
@@ -328,8 +490,7 @@ void sql_subtransaction::commit() {
 }
 )cpp";
     if (!has_bridge_evidence(
-            scan(
-                context_path,
+            scan_context(
                 subtransaction_positive,
                 "bridge-subtransaction-positive"),
             bridge_kind::sql_subtransaction)) {
@@ -340,11 +501,8 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_decoy =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary:context;
-export namespace bioseq::pg_utils {
-struct sql_subtransaction {
-    void commit();
-};
+module bioseq.pg_sql_boundary;
+namespace bioseq::pg_utils {
 void sql_subtransaction::commit() {
     /* PG_TRY */
     ReleaseCurrentSubTransaction();
@@ -355,8 +513,7 @@ void sql_subtransaction::commit() {
 )cpp";
     require_scan_failure(
         [&] {
-            static_cast<void>(scan(
-                context_path,
+            static_cast<void>(scan_context(
                 subtransaction_decoy,
                 "bridge-subtransaction-decoy"));
         },
@@ -365,11 +522,8 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_multiple =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary:context;
-export namespace bioseq::pg_utils {
-struct sql_subtransaction {
-    void commit();
-};
+module bioseq.pg_sql_boundary;
+namespace bioseq::pg_utils {
 void sql_subtransaction::commit() {
     PG_TRY();
     {
@@ -391,8 +545,7 @@ void sql_subtransaction::commit() {
 )cpp";
     require_scan_failure(
         [&] {
-            static_cast<void>(scan(
-                context_path,
+            static_cast<void>(scan_context(
                 subtransaction_multiple,
                 "bridge-subtransaction-multiple"));
         },
@@ -407,11 +560,8 @@ void sql_subtransaction::commit() {
 #define PG_TRY() do { if (true) {
 #define PG_CATCH() } else {
 #define PG_END_TRY() } } while (false)
-export module bioseq.pg_utils.sql_boundary:context;
-export namespace bioseq::pg_utils {
-struct sql_subtransaction {
-    void commit();
-};
+module bioseq.pg_sql_boundary;
+namespace bioseq::pg_utils {
 void sql_subtransaction::commit() {
     PG_TRY();
     {
@@ -426,8 +576,7 @@ void sql_subtransaction::commit() {
 )cpp";
     require_scan_failure(
         [&] {
-            static_cast<void>(scan(
-                context_path,
+            static_cast<void>(scan_context(
                 subtransaction_redefined,
                 "bridge-subtransaction-redefined"));
         },
@@ -437,11 +586,8 @@ void sql_subtransaction::commit() {
         R"cpp(module;
 #include <utils/elog.h>
 #define PROJECT_TRY() PG_TRY()
-export module bioseq.pg_utils.sql_boundary:context;
-export namespace bioseq::pg_utils {
-struct sql_subtransaction {
-    void commit();
-};
+module bioseq.pg_sql_boundary;
+namespace bioseq::pg_utils {
 void sql_subtransaction::commit() {
     PROJECT_TRY();
     {
@@ -456,8 +602,7 @@ void sql_subtransaction::commit() {
 )cpp";
     require_scan_failure(
         [&] {
-            static_cast<void>(scan(
-                context_path,
+            static_cast<void>(scan_context(
                 subtransaction_wrapped,
                 "bridge-subtransaction-wrapped"));
         },
@@ -466,11 +611,8 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view subtransaction_catch =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary:context;
-export namespace bioseq::pg_utils {
-struct sql_subtransaction {
-    void commit();
-};
+module bioseq.pg_sql_boundary;
+namespace bioseq::pg_utils {
 void sql_subtransaction::commit() {
     PG_TRY();
     {
@@ -485,8 +627,7 @@ void sql_subtransaction::commit() {
 )cpp";
     require_scan_failure(
         [&] {
-            static_cast<void>(scan(
-                context_path,
+            static_cast<void>(scan_context(
                 subtransaction_catch,
                 "bridge-subtransaction-catch"));
         },
@@ -495,7 +636,7 @@ void sql_subtransaction::commit() {
     static constexpr std::string_view invoke_positive =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 using PgCppInvokeBody = void (*)(void*);
 struct pg_cpp_invoke_state {
@@ -648,7 +789,7 @@ void invoke_root() {
     static constexpr std::string_view call_context_positive =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 using PgCppInvokeBody = void (*)(void*);
 struct pg_cpp_invoke_state {
@@ -737,7 +878,7 @@ void call_context_root() {
     static constexpr std::string_view invoke_token_decoy =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 template<class F>
 void invoke_pg_as_cpp(F&& function) {
@@ -763,7 +904,7 @@ void invoke_root() {
     static constexpr std::string_view invoke_unprotected_erased =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 using PgCppInvokeBody = void (*)(void*);
 struct pg_cpp_invoke_state {
@@ -816,7 +957,7 @@ void invoke_root() {
         invoke_constexpr_init_escape =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.error_bridge;
+export module bioseq.pg_support:error_boundary;
 export namespace bioseq::pg_utils {
 using PgCppInvokeBody = void (*)(void*);
 struct pg_cpp_invoke_state {
@@ -875,7 +1016,7 @@ void invoke_root() {
 #include <exception>
 #include <functional>
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct PostgresErrorAsCpp {};
 template<class F>
@@ -907,7 +1048,7 @@ int boundary_root() {
     static constexpr std::string_view tail_token_decoy =
         R"cpp(module;
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 template<class F>
 int invoke_sql_boundary(F&&) {
@@ -935,7 +1076,7 @@ int boundary_root() {
 #include <exception>
 #include <functional>
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct PostgresErrorAsCpp {};
 template<class F>
@@ -968,7 +1109,7 @@ int boundary_root() {
 #include <exception>
 #include <functional>
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 export namespace bioseq::pg_utils {
 struct PostgresErrorAsCpp {};
 template<class F>
@@ -1020,7 +1161,7 @@ inline void run_runtime_probe_contracts() {
         "bioseq/runtime_probe_contract.cppm");
     const std::filesystem::path boundary_path = module_path(
         fixture,
-        "bioseq/backend/pg/pg_utils/sql_boundary/index.cppm");
+        "main/common/pg_sql_boundary/index.cppm");
     const auto scan = [&](
         std::string_view source,
         std::string_view profile) {
@@ -1247,7 +1388,7 @@ int generated_wrapper() {
 #include <stdexcept>
 #include <string_view>
 #include <utils/elog.h>
-export module bioseq.pg_utils.sql_boundary;
+export module bioseq.pg_sql_boundary;
 namespace bioseq::pg_utils::safety_runtime_probe {
 void record_site_visit(std::string_view) noexcept;
 bool consume_fault(std::string_view) noexcept;

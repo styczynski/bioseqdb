@@ -6,6 +6,7 @@ module;
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 export module bioseq.codegen.sql:model;
@@ -158,6 +159,7 @@ struct command_line {
     std::vector<configured_row_codec_output> row_codec_outputs;
     std::vector<configured_fmgr_entrypoint_output>
         fmgr_entrypoint_outputs;
+    std::vector<std::pair<std::string, std::string>> fmgr_owners;
     std::string prepare_authority;
     std::string compiler_profile;
     std::string clang_sha256;
@@ -165,7 +167,12 @@ struct command_line {
     std::string llvm_config_sha256;
     std::string compiler_module_inventory_sha256;
     std::string guc_active_profile{"production"};
+    std::string extension_name{"bioseq"};
     std::string extension_schema{"public"};
+    std::string generated_module_prefix{"bioseq.sql.generated"};
+    std::string fmgr_boundary_module{
+        "bioseq.pg_utils.sql_boundary"};
+    std::string fmgr_prelude{"bioseq_common"};
     bool update_golden{};
     bool require_complete_codegen{};
     bool require_checked_physical_ledger{};

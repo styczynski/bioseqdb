@@ -190,6 +190,7 @@ logical_vector_sql_type(std::string_view cpp_type) {
             logical_vector_sql_type(cpp_type)) {
         return *logical;
     }
+    if (contains("sql_timestamptz")) return "timestamptz";
     if (contains("bool")) return "boolean";
     if (contains("TimestampTz")) return "timestamptz";
     if (contains("Timestamp")) return "timestamp";
@@ -459,7 +460,7 @@ inline void validate_options(
                     "schema", "create", "volatility", "parallel",
                     "security", "leakproof", "cost", "rows",
                     "has_cost", "has_rows", "support",
-                    "configuration"});
+                    "configuration", "null_input"});
             case entity_kind::procedure:
                 return one_of(
                     name, {"schema", "create", "security"});
@@ -471,7 +472,7 @@ inline void validate_options(
                 return one_of(name, {
                     "sql_type", "default_value", "collation"});
             case entity_kind::schema:
-                return one_of(name, {"create"});
+                return one_of(name, {"create", "provision"});
             case entity_kind::sequence:
                 return one_of(name, {
                     "schema", "create", "increment", "minimum",
@@ -519,7 +520,9 @@ inline void validate_options(
                 return one_of(name, {"kind"});
             case entity_kind::guc:
                 return one_of(
-                    name, {"context", "flags", "minimum", "maximum"});
+                    name,
+                    {"context", "flags", "minimum", "maximum",
+                     "plan_cache"});
             case entity_kind::guc_value:
                 return one_of(name, {"omit", "aliases"});
             case entity_kind::primary_key:
@@ -984,6 +987,12 @@ struct aggregate_location {
         });
 }
 
+[[nodiscard]] inline bool result_row_module(
+        std::string_view module_name) noexcept {
+    return module_name.ends_with(".sql_rows")
+        || module_name.ends_with(".rows");
+}
+
 [[nodiscard]] inline collected_result_row collect_result_row(
     const aggregate_location& location,
     const collected_entity& owner) {
@@ -991,15 +1000,15 @@ struct aggregate_location {
         *location.aggregate;
     const std::string diagnostic =
         entity_diagnostic(owner.source_path, owner.source_range);
-    if (!location.unit->module_name.ends_with(".sql_rows")) {
+    if (!result_row_module(location.unit->module_name)) {
         throw std::runtime_error(
             diagnostic + ": result Row '" + aggregate.qualified_name
-            + "' must be declared in a .sql_rows module");
+            + "' must be declared in a .sql_rows or .rows module");
     }
     if (!aggregate.exported) {
         throw std::runtime_error(
             diagnostic + ": result Row '" + aggregate.qualified_name
-            + "' must be exported from its .sql_rows module");
+            + "' must be exported from its result-row module");
     }
     if (annotated_result_record(location)) {
         throw std::runtime_error(

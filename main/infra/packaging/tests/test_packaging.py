@@ -8,6 +8,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import runpy
 import stat
 import subprocess
 import tarfile
@@ -1432,6 +1434,257 @@ class PipelineOrchestrationTests(unittest.TestCase):
                 events,
                 ["start-cell", "build-package", "validate-built", "fail-cell"],
             )
+
+
+class BuildAndStageContractTests(unittest.TestCase):
+    def test_build_revalidates_complete_package_cmake_profile(self) -> None:
+        build_script = (
+            PACKAGING_ROOT / "scripts" / "build_and_stage.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("cmake_cache_matches_package_profile", build_script)
+        self.assertIn("require_package_cmake_profile", build_script)
+        invariant_body = build_script.split(
+            "package_cmake_invariants() {", maxsplit=1
+        )[1].split("\n}", maxsplit=1)[0]
+        configure_body = build_script.split(
+            '"${cmake_bin}" -S "${persistent_source_dir}"',
+            maxsplit=1,
+        )[1].split("\n  fi", maxsplit=1)[0]
+        configured_cache_keys = set(
+            re.findall(r"-D([A-Za-z0-9_]+)(?::[^=]+)?=", configure_body)
+        )
+        for key in configured_cache_keys:
+            with self.subTest(configured_cache_key=key):
+                self.assertRegex(
+                    invariant_body,
+                    rf"(?m)^\s*{re.escape(key)}\s+",
+                )
+        for key, value in (
+            ("CMAKE_BUILD_TYPE", "Release"),
+            ("CMAKE_C_COMPILER_LAUNCHER", "${compiler_launcher}"),
+            ("CMAKE_CXX_COMPILER_LAUNCHER", "${compiler_launcher}"),
+            ("CMAKE_C_FLAGS", '""'),
+            ("CMAKE_CXX_FLAGS", "-stdlib=libc++"),
+            (
+                "CMAKE_C_FLAGS_RELEASE",
+                "-O0 -DNDEBUG -fno-omit-frame-pointer",
+            ),
+            (
+                "CMAKE_CXX_FLAGS_RELEASE",
+                "-O0 -DNDEBUG -fno-omit-frame-pointer",
+            ),
+            (
+                "CMAKE_EXE_LINKER_FLAGS",
+                "-stdlib=libc++ -static-libstdc++ -static-libgcc",
+            ),
+            ("CMAKE_SKIP_RPATH", "ON"),
+            (
+                "BIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON",
+                "${libcxx_modules}",
+            ),
+            ("BIOSEQ_PACKAGE_LIBCXX_ARCHIVE", "${libcxx_archive}"),
+            (
+                "BIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE",
+                "${libcxxabi_archive}",
+            ),
+            (
+                "BIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE",
+                "${libunwind_archive}",
+            ),
+            ("BIOSEQ_PACKAGE_BUILD", "ON"),
+            ("BIOSEQ_BUILD_CORE", "ON"),
+            ("BIOSEQ_BUILD_CACHE", "ON"),
+            ("BIOSEQ_TEST_INDEXES", "OFF"),
+            ("BIOSEQ_CACHE_BUILD_TESTS", "OFF"),
+            ("BIOSEQ_CACHE_TESTING", "OFF"),
+        ):
+            with self.subTest(key=key):
+                self.assertRegex(
+                    build_script,
+                    rf"(?m)^\s*{key}\s+{re.escape(value)}\s*\\?$",
+                )
+
+        profile_check = build_script.index(
+            "\n  require_package_cmake_profile\n",
+            build_script.index(
+                'if [[ "${action}" == "build" ]]',
+                build_script.index("require_package_cmake_profile()"),
+            ),
+        )
+        build_targets = build_script.index(
+            "--target postgresql_bioseq postgresql_bioseq_cache",
+        )
+        self.assertLess(profile_check, build_targets)
+
+    def test_build_consumes_exact_generated_production_dso_inventory(self) -> None:
+        manifest_name = "bioseq-package-target-artifacts.tsv"
+        build_script = (
+            PACKAGING_ROOT / "scripts" / "build_and_stage.sh"
+        ).read_text(encoding="utf-8")
+        root_cmake = (MAIN_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+
+        self.assertIn(manifest_name, root_cmake)
+        self.assertIn(manifest_name, build_script)
+        for target, basename in (
+            ("postgresql_bioseq", "bioseq.so"),
+            ("postgresql_bioseq_cache", "bioseq_cache.so"),
+        ):
+            with self.subTest(target=target):
+                self.assertRegex(
+                    root_cmake,
+                    rf"{target}(?:\\t|\t)\$<TARGET_FILE:{target}>",
+                )
+                self.assertRegex(
+                    build_script,
+                    rf"(?m)^[^\n]*{target}[^\n]*{basename}[^\n]*$",
+                )
+
+        self.assertIn("IFS=$'\\t'", build_script)
+        self.assertRegex(
+            build_script,
+            (
+                r'\[\[[^\]\n]*\$\{#[A-Za-z_][A-Za-z0-9_]*\[@\]\}'
+                r'[^\]\n]*(?:==|-eq)[^\]\n]*"?2"?[^\]\n]*\]\]'
+            ),
+        )
+        self.assertNotIn("-name bioseq.so", build_script)
+        self.assertNotIn("-name bioseq_cache.so", build_script)
+
+    def test_test_support_dso_uses_shared_manifest_closure_validator(
+            self) -> None:
+        helper = (
+            MAIN_ROOT / "cmake" / "AddPostgreSQLExtension.cmake"
+        ).read_text(encoding="utf-8")
+        cache_cmake = (
+            MAIN_ROOT / "bioseq_caching" / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        bioseq_cmake = (
+            MAIN_ROOT / "bioseq" / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "function(bioseq_attach_extension_dso_closure TARGET_NAME)",
+            helper,
+        )
+        self.assertIn("--dso-only", helper)
+        self.assertIn('--dso-contract "${ARG_CONTRACT}"', helper)
+        self.assertIn("--require-complete-codegen", helper)
+        self.assertRegex(
+            helper,
+            (
+                r"if\(NOT DEFINED ARG_CONTRACT "
+                r"OR ARG_CONTRACT STREQUAL \"\"\)"
+                r"\s*set\(ARG_CONTRACT bioseq\)"
+            ),
+        )
+        self.assertNotIn("DSO_CLOSURE_CONTRACT manifest", bioseq_cmake)
+        self.assertRegex(
+            cache_cmake,
+            (
+                r"AddCommonTargetX\(\s*postgresql_bioseq_cache"
+                r"[\s\S]*?DSO_CLOSURE_CONTRACT manifest"
+                r"[\s\S]*?REQUIRE_COMPLETE_CODEGEN"
+            ),
+        )
+        self.assertRegex(
+            cache_cmake,
+            (
+                r"bioseq_attach_extension_dso_closure\(\s*"
+                r"postgresql_bioseq_cache_test_support[\s\S]*?"
+                r"BIOSEQ_SQL_BIOSEQ_CACHE_TEST_SUPPORT_GENERATED_MANIFEST"
+                r"[\s\S]*?CONTRACT manifest"
+                r"[\s\S]*?REQUIRE_COMPLETE_CODEGEN\)"
+            ),
+        )
+
+    def test_manifest_dso_contract_has_non_bioseq_self_test(self) -> None:
+        validator = (
+            MAIN_ROOT / "codegen" / "safety" / "validate_evidence.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'DSO_CLOSURE_CONTRACTS = frozenset({"bioseq", "manifest"})',
+            validator,
+        )
+        self.assertIn('contract: str = "bioseq"', validator)
+        self.assertIn('contract="manifest"', validator)
+        self.assertIn(
+            "Bioseq DSO defaults accepted a cache manifest",
+            validator,
+        )
+        self.assertIn(
+            "manifest DSO contract accepted an unowned fmgr export",
+            validator,
+        )
+        self.assertIn(
+            "full Bioseq evidence accepted the manifest DSO contract",
+            validator,
+        )
+
+    def test_install_enforces_cache_inclusive_exact_six_artifact_gate(self) -> None:
+        build_script = (
+            PACKAGING_ROOT / "scripts" / "build_and_stage.sh"
+        ).read_text(encoding="utf-8")
+        validator_namespace = runpy.run_path(
+            str(PACKAGING_ROOT / "scripts" / "validate_package.py")
+        )
+        expected_basenames = frozenset(
+            {
+                "bioseq.so",
+                "bioseq_cache.so",
+                "bioseq--1.0.sql",
+                "bioseq_cache--1.0.sql",
+                "bioseq.control",
+                "bioseq_cache.control",
+            }
+        )
+
+        self.assertEqual(
+            validator_namespace["REQUIRED_BASENAMES"],
+            expected_basenames,
+        )
+        install_index = build_script.index(
+            '"${cmake_bin}" --install "${build_dir}" --component bioseq'
+        )
+        validation_index = build_script.index("--staged-root", install_index)
+        inventory_index = build_script.index(
+            '"${package_metadata_dir}/package-files.list"',
+            validation_index,
+        )
+        exact_count_index = build_script.index(
+            '"6"',
+            inventory_index,
+        )
+        self.assertIn(
+            (
+                '[[ "$(wc -l < "${package_metadata_dir}/package-files.list")" '
+                '== "6" ]]'
+            ),
+            build_script,
+        )
+        self.assertLess(
+            install_index,
+            validation_index,
+        )
+        self.assertLess(
+            validation_index,
+            inventory_index,
+        )
+        self.assertLess(
+            inventory_index,
+            exact_count_index,
+        )
+        for option in (
+            "--pg-config",
+            "--postgres-major",
+            "--architecture",
+        ):
+            with self.subTest(option=option):
+                self.assertIn(
+                    option,
+                    build_script[validation_index:inventory_index],
+                )
 
 
 class ManifestAndLegacyTests(unittest.TestCase):

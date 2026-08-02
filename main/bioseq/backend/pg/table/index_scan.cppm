@@ -19,6 +19,7 @@ export module bioseq.table:index_scan;
 
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.table.types;
 import bioseq.table.scan_state;
 import bioseq.pg_utils.lists;
@@ -214,7 +215,8 @@ IndexNext(IndexScanState* node)
 static void
 EvalOrderByExpressions(IndexScanState* node, ExprContext* econtext)
 {
-    MemoryContextScope ctx_guard{econtext->ecxt_per_tuple_memory};
+    bioseq::pg_support::MemoryContextScope ctx_guard{
+        econtext->ecxt_per_tuple_memory};
 
     int orderby_index = 0;
     for (auto orderby_state : PList<ExprState>(node->indexorderbyorig))
@@ -277,7 +279,7 @@ reorderqueue_push(IndexScanState* node, TupleTableSlot* slot,
 {
     IndexScanDesc scandesc = node->iss_ScanDesc;
     EState* estate = node->ss.ps.state;
-    MemoryContextScope ctx_guard{estate->es_query_cxt};
+    bioseq::pg_support::MemoryContextScope ctx_guard{estate->es_query_cxt};
 
     ReorderTuple* rt = make0<ReorderTuple>();
     rt->htup = ExecCopySlotHeapTuple(slot);

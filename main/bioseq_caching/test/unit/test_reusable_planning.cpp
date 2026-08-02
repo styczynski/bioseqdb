@@ -8,18 +8,17 @@
 #include <vector>
 
 import bioseq.cache.core;
-import bioseq.cache.pg.reusable_planning;
 
 using namespace bioseq::cache;
 using namespace bioseq::cache::pg::reuse;
 
 namespace {
 
-BioseqCacheColumnSchemaV1 schema_column(
+BioseqCacheColumnSchemaV2 schema_column(
     std::uint32_t attno,
     std::uint64_t semantic_id) {
-    return BioseqCacheColumnSchemaV1{
-        .struct_size = sizeof(BioseqCacheColumnSchemaV1),
+    return BioseqCacheColumnSchemaV2{
+        .struct_size = sizeof(BioseqCacheColumnSchemaV2),
         .attno = attno,
         .semantic_id_high = 0x1234,
         .semantic_id_low = semantic_id,
@@ -89,7 +88,8 @@ void reactivate_once_release(
 
 } // namespace
 
-TEST_CASE("coverage canonical keys frame every security field") {
+TEST_CASE("coverage canonical keys frame every security field",
+          "[cache][unit][reusable-planning]") {
     const CoverageSecurityNamespaceV1 security = security_namespace();
     const std::array provider_bytes{
         std::byte{0xa1}, std::byte{0xb2}, std::byte{0xc3}};
@@ -161,7 +161,8 @@ TEST_CASE("coverage canonical keys frame every security field") {
         [](std::byte value) noexcept { return value == std::byte{0}; }));
 }
 
-TEST_CASE("coverage canonical keys reject omitted or malformed namespaces") {
+TEST_CASE("coverage canonical keys reject omitted or malformed namespaces",
+          "[cache][unit][reusable-planning]") {
     const std::array provider_bytes{std::byte{0x55}};
     std::array<std::byte, kCoverageCanonicalKeyFixedBytesV1 + 1> output{};
     const auto valid = security_namespace();
@@ -213,7 +214,8 @@ TEST_CASE("coverage canonical keys reject omitted or malformed namespaces") {
         [](std::byte value) noexcept { return value == std::byte{0x7f}; }));
 }
 
-TEST_CASE("coverage discovery collision-checks and bounds candidate buckets") {
+TEST_CASE("coverage discovery collision-checks and bounds candidate buckets",
+          "[cache][unit][reusable-planning]") {
     const std::array<std::byte, 3> requested_key{
         std::byte{1}, std::byte{2}, std::byte{3}};
     const std::array<std::byte, 3> collision_key{
@@ -279,7 +281,8 @@ TEST_CASE("coverage discovery collision-checks and bounds candidate buckets") {
         domain_digest, requested_key, domain_digest, requested_key));
 }
 
-TEST_CASE("candidate ordering is deterministic at every tie breaker") {
+TEST_CASE("candidate ordering is deterministic at every tie breaker",
+          "[cache][unit][reusable-planning]") {
     const std::array<std::byte, 1> key{std::byte{1}};
     CoverageCandidateViewV1 complete{
         .canonical_domain_key = key,
@@ -309,15 +312,16 @@ TEST_CASE("candidate ordering is deterministic at every tie breaker") {
     REQUIRE(candidate_precedes(digest_first, digest_last));
 }
 
-TEST_CASE("provider domain and decorated schema contracts are exact") {
+TEST_CASE("provider domain and decorated schema contracts are exact",
+          "[cache][unit][reusable-planning]") {
     const std::array boundary{
         schema_column(1, 101), schema_column(2, 102)};
     const std::array lineage{schema_column(1, 201)};
     const std::array<std::uint32_t, 2> required_boundary{2, 1};
     const std::array<std::uint32_t, 1> required_lineage{1};
 
-    BioseqCachePathDomainV1 domain{
-        .struct_size = sizeof(BioseqCachePathDomainV1),
+    BioseqCachePathDomainV2 domain{
+        .struct_size = sizeof(BioseqCachePathDomainV2),
         .provider_id = 7,
         .compatibility_family_id = 11,
         .capability_mask = 3,
@@ -340,15 +344,15 @@ TEST_CASE("provider domain and decorated schema contracts are exact") {
         == kProviderIndependentSecurityDigestV1);
 
     domain.struct_size = offsetof(
-        BioseqCachePathDomainV1,
+        BioseqCachePathDomainV2,
         provider_security_digest_format_version);
     REQUIRE(
         validate_path_domain(7, &domain).error()
         == ProviderContractErrorV1::StructSize);
-    domain.struct_size = sizeof(BioseqCachePathDomainV1);
+    domain.struct_size = sizeof(BioseqCachePathDomainV2);
 
-    BioseqCacheDecoratedPathV1 decorated{
-        .struct_size = sizeof(BioseqCacheDecoratedPathV1),
+    BioseqCacheDecoratedPathV2 decorated{
+        .struct_size = sizeof(BioseqCacheDecoratedPathV2),
         .flags = 0,
         .path = reinterpret_cast<::Path*>(0x1),
         .actual_boundary_columns = boundary.data(),
@@ -386,9 +390,10 @@ TEST_CASE("provider domain and decorated schema contracts are exact") {
     REQUIRE(provider_security_digest(domain).bytes[31] == 0xa5);
 }
 
-TEST_CASE("runtime recipe and digest sink reject malformed or oversized data") {
-    BioseqCachePlanDigestRecipeV1 recipe{
-        .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+TEST_CASE("runtime recipe and digest sink reject malformed or oversized data",
+          "[cache][unit][reusable-planning]") {
+    BioseqCachePlanDigestRecipeV2 recipe{
+        .struct_size = sizeof(BioseqCachePlanDigestRecipeV2),
         .flags = 0,
         .digest_format_version = kProviderRecipeFormatVersion,
         .reserved = 0,
@@ -410,14 +415,15 @@ TEST_CASE("runtime recipe and digest sink reject malformed or oversized data") {
     REQUIRE(buffer.failed);
 }
 
-TEST_CASE("finalized recipe and expected digest are accepted atomically") {
+TEST_CASE("finalized recipe and expected digest are accepted atomically",
+          "[cache][unit][reusable-planning]") {
     CacheDigest256 digest_a{};
     digest_a.bytes[0] = 0xa1;
     CacheDigest256 digest_b{};
     digest_b.bytes[0] = 0xb2;
 
-    BioseqCachePlanDigestRecipeV1 recipe{
-        .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+    BioseqCachePlanDigestRecipeV2 recipe{
+        .struct_size = sizeof(BioseqCachePlanDigestRecipeV2),
         .flags = 0,
         .digest_format_version = kProviderRecipeFormatVersion,
         .reserved = 0,
@@ -464,7 +470,8 @@ TEST_CASE("finalized recipe and expected digest are accepted atomically") {
     REQUIRE(exact_b->expected_generation_digest == digest_b);
 }
 
-TEST_CASE("branch ownership is occurrence-disjoint and SQL NULL correct") {
+TEST_CASE("branch ownership is occurrence-disjoint and SQL NULL correct",
+          "[cache][unit][reusable-planning]") {
     const std::array<bool, 3> valid{true, false, true};
     const std::array predicates{
         SqlBool::Unknown, SqlBool::TrueValue, SqlBool::TrueValue};
@@ -487,7 +494,8 @@ TEST_CASE("branch ownership is occurrence-disjoint and SQL NULL correct") {
         == CoverageBranchKindV1::Drop);
 }
 
-TEST_CASE("late fetch sink enforces one value and one terminal per reference") {
+TEST_CASE("late fetch sink enforces one value and one terminal per reference",
+          "[cache][unit][reusable-planning]") {
     std::array<std::uint8_t, 2> terminal{};
     std::array<std::uint8_t, 4> seen{};
     std::array<std::uintptr_t, 4> values{};
@@ -522,7 +530,8 @@ TEST_CASE("late fetch sink enforces one value and one terminal per reference") {
     REQUIRE_FALSE(late_fetch_complete_and_valid(state));
 }
 
-TEST_CASE("candidate cleanup exhausts reference kinds and reentrancy") {
+TEST_CASE("candidate cleanup exhausts reference kinds and reentrancy",
+          "[cache][unit][reusable-planning]") {
     ReleaseCounter counter{};
     CacheEntryId entry{};
     entry.generation = 9;
@@ -595,7 +604,8 @@ TEST_CASE("candidate cleanup exhausts reference kinds and reentrancy") {
         == CandidateReferenceKindV1::InFlightWaiter);
 }
 
-TEST_CASE("gate publication is one-way and exhaustive at its bounds") {
+TEST_CASE("gate publication is one-way and exhaustive at its bounds",
+          "[cache][unit][reusable-planning]") {
     ReuseGateFreezeV1 empty{};
     REQUIRE_FALSE(source_gate_is_valid(empty, 0));
     REQUIRE_FALSE(begin_gate_preflight(empty, 0));
@@ -634,14 +644,15 @@ TEST_CASE("gate publication is one-way and exhaustive at its bounds") {
     }
 }
 
-TEST_CASE("replacement plans retain independent frozen digests and gates") {
+TEST_CASE("replacement plans retain independent frozen digests and gates",
+          "[cache][unit][reusable-planning]") {
     CacheDigest256 digest_a{};
     digest_a.bytes[0] = 0xa1;
     CacheDigest256 digest_b{};
     digest_b.bytes[0] = 0xb2;
     CacheDigest256 live_configuration_digest = digest_a;
-    BioseqCachePlanDigestRecipeV1 recipe{
-        .struct_size = sizeof(BioseqCachePlanDigestRecipeV1),
+    BioseqCachePlanDigestRecipeV2 recipe{
+        .struct_size = sizeof(BioseqCachePlanDigestRecipeV2),
         .digest_format_version = kProviderRecipeFormatVersion,
         .plan_domain_nodes = reinterpret_cast<::List*>(0x1),
     };
@@ -699,7 +710,8 @@ TEST_CASE("replacement plans retain independent frozen digests and gates") {
     REQUIRE_FALSE(source_gate_is_valid(plan_a_gates, 1));
 }
 
-TEST_CASE("reuse waits obey descending owned claim order") {
+TEST_CASE("reuse waits obey descending owned claim order",
+          "[cache][unit][reusable-planning]") {
     const std::array<std::uint64_t, 3> owned{90, 70, 50};
     REQUIRE(claim_order_allows_wait(49, owned));
     REQUIRE_FALSE(claim_order_allows_wait(50, owned));
@@ -707,7 +719,8 @@ TEST_CASE("reuse waits obey descending owned claim order") {
     REQUIRE_FALSE(claim_order_allows_wait(0, owned));
 }
 
-TEST_CASE("fragment binding semantics ignore raw RTI and separate occurrences") {
+TEST_CASE("fragment binding semantics ignore raw RTI and separate occurrences",
+          "[cache][unit][reusable-planning]") {
     CoverageFragmentBindingSignatureV1 first{
         .provider_rte_occurrence_ordinal = 0,
         .provider_rte_occurrence_count = 2,

@@ -6803,12 +6803,72 @@ inline void inherit_natural_column_schemas(
 
 [[nodiscard]] inline sql_graph build_sql_graph(
     collected_program program,
-    std::string extension_schema = "public") {
+    std::string extension_schema = "public",
+    std::string extension_name = "bioseq",
+    std::string generated_module_prefix = "bioseq.sql.generated",
+    std::string fmgr_boundary_module =
+        "bioseq.pg_utils.sql_boundary",
+    std::string fmgr_prelude = "bioseq_common") {
     if (!detail::sql_identifier(extension_schema)
         || detail::reserved_sql_identifier(extension_schema)) {
         throw std::runtime_error(
             "invalid install-resolved extension schema '" + extension_schema
             + "'");
+    }
+    if (!detail::sql_identifier(extension_name)
+        || detail::reserved_sql_identifier(extension_name)) {
+        throw std::runtime_error(
+            "invalid extension name '" + extension_name + "'");
+    }
+    const auto valid_module_name = [](std::string_view value) {
+        if (value.empty() || value.front() == '.'
+            || value.back() == '.' || value.contains("..")) {
+            return false;
+        }
+        std::size_t begin = 0;
+        while (begin < value.size()) {
+            const std::size_t end = value.find('.', begin);
+            const std::string_view component = value.substr(
+                begin,
+                end == std::string_view::npos
+                    ? value.size() - begin
+                    : end - begin);
+            if (component.empty()
+                || !((component.front() >= 'a'
+                      && component.front() <= 'z')
+                     || (component.front() >= 'A'
+                         && component.front() <= 'Z')
+                     || component.front() == '_')
+                || !std::ranges::all_of(
+                    component.substr(1),
+                    [](char item) {
+                        return (item >= 'a' && item <= 'z')
+                            || (item >= 'A' && item <= 'Z')
+                            || (item >= '0' && item <= '9')
+                            || item == '_';
+                    })) {
+                return false;
+            }
+            if (end == std::string_view::npos) break;
+            begin = end + 1;
+        }
+        return true;
+    };
+    if (!valid_module_name(generated_module_prefix)) {
+        throw std::runtime_error(
+            "invalid generated module prefix '"
+            + generated_module_prefix + "'");
+    }
+    if (!valid_module_name(fmgr_boundary_module)) {
+        throw std::runtime_error(
+            "invalid fmgr boundary module '"
+            + fmgr_boundary_module + "'");
+    }
+    if (fmgr_prelude != "bioseq_common"
+        && fmgr_prelude != "postgresql") {
+        throw std::runtime_error(
+            "invalid fmgr prelude '" + fmgr_prelude
+            + "'; expected bioseq_common or postgresql");
     }
     detail::inherit_natural_column_schemas(program);
     std::vector<baseline_physical_statement>
@@ -6845,7 +6905,13 @@ inline void inherit_natural_column_schemas(
     validate_physical_statement_ownership(
         program, expected_baseline_physical_statements);
     sql_graph graph{
+        .extension_name = std::move(extension_name),
         .extension_schema = std::move(extension_schema),
+        .generated_module_prefix =
+            std::move(generated_module_prefix),
+        .fmgr_boundary_module =
+            std::move(fmgr_boundary_module),
+        .fmgr_prelude = std::move(fmgr_prelude),
         .compiler_profile = std::move(program.compiler_profile),
         .clang_version =
             std::move(program.module_graph.clang_version),

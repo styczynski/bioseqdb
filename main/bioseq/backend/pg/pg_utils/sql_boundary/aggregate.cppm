@@ -23,8 +23,8 @@ extern "C" {
 export module bioseq.pg_utils.sql_boundary:aggregate;
 
 import bioseq.pg_utils.error_bridge;
+import bioseq.pg_sql_boundary;
 import bioseq.vector.types;
-import :conversions;
 
 export namespace bioseq::pg_utils {
 

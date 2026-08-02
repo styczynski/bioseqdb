@@ -23,6 +23,7 @@ export module bioseq.storage.metadata:write_state_row_mask;
 import :core;            // FlushRowMaskCache, UpdateChunkGroupDeletedRows, BioseqColumnRowMask*RelationId
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
+import bioseq.pg_support;
 import bioseq.storage.metadata.sql_row_codecs;
 
 using row_mask_codec =
@@ -147,7 +148,8 @@ RowMaskInitWriteState(Oid relfilelocator,
 
 	row_mask_row* row_mask_write_state = nullptr;
 	{
-		MemoryContextScope context_guard(RowMaskStateCache.context());
+		bioseq::pg_support::MemoryContextScope context_guard(
+			RowMaskStateCache.context());
 		row_mask_write_state = InitRowMaskEntry(storage_id, row_mask);
 		stack_entry->row_mask_rows.append(row_mask_write_state);
 	}
