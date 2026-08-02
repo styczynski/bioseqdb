@@ -3421,6 +3421,267 @@ bioseq_customscan_has_valid_semantic_payload(
 		scan->custom_private, &semantics);
 }
 
+export const CustomScanMethods *
+bioseq_batch_join_customscan_methods(void)
+{
+	return &BioseqBatchJoinScanMethods;
+}
+
+namespace {
+
+[[nodiscard]] bool
+bioseq_batch_join_private_integer(
+		const List* nodes, const int index) noexcept
+{
+	if (nodes == nullptr || index < 0 || index >= list_length(nodes)) {
+		return false;
+	}
+	const Node* node = reinterpret_cast<const Node*>(
+		list_nth(nodes, index));
+	return node != nullptr && IsA(node, Integer);
+}
+
+[[nodiscard]] bool
+bioseq_batch_join_target_list_is_structural(
+		const List* target_list) noexcept
+{
+	if (target_list == nullptr) return false;
+	int expected_resno = 1;
+	for (const TargetEntry* entry : PList<TargetEntry>(
+			const_cast<List*>(target_list))) {
+		if (entry == nullptr || !IsA(entry, TargetEntry)
+			|| entry->expr == nullptr || entry->resno != expected_resno++) {
+			return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] bool
+bioseq_batch_join_descriptor_is_structural(
+		const CustomScan* scan, const int descriptor_index) noexcept
+{
+	if (scan == nullptr || descriptor_index < 0
+		|| descriptor_index >= list_length(scan->custom_private)) {
+		return false;
+	}
+	const Node* descriptor_node = reinterpret_cast<const Node*>(
+		list_nth(scan->custom_private, descriptor_index));
+	if (descriptor_node == nullptr || !IsA(descriptor_node, List)) {
+		return false;
+	}
+	const auto* descriptor = reinterpret_cast<const List*>(descriptor_node);
+	if (list_length(descriptor) != kBioseqMatchOwnerDescriptorFields) {
+		return false;
+	}
+	for (const int index : {
+			kMatchOwnerMagic, kMatchOwnerVersion, kMatchOwnerStableId,
+			kMatchOwnerLegacyTargetRelid}) {
+		if (!bioseq_batch_join_private_integer(descriptor, index)) {
+			return false;
+		}
+	}
+	const int stable_id = intVal(list_nth(
+		descriptor, kMatchOwnerStableId));
+	const Node* target_recipe = reinterpret_cast<const Node*>(list_nth(
+		descriptor, kMatchOwnerTargetRecipe));
+	const Node* base_lineage = reinterpret_cast<const Node*>(list_nth(
+		descriptor, kMatchOwnerBaseLineage));
+	return intVal(list_nth(descriptor, kMatchOwnerMagic))
+			== kBioseqMatchOwnerDescriptorMagic
+		&& intVal(list_nth(descriptor, kMatchOwnerVersion))
+			== kBioseqMatchOwnerDescriptorVersion
+		&& (stable_id == 0
+			|| stable_id == scan->scan.plan.plan_node_id)
+		&& target_recipe != nullptr
+		&& (base_lineage == nullptr || IsA(base_lineage, List))
+		&& bioseq_is_concrete_rte_varno(static_cast<Index>(intVal(
+			list_nth(descriptor, kMatchOwnerLegacyTargetRelid))));
+}
+
+} // namespace
+
+export bool
+bioseq_batch_join_customscan_has_valid_semantic_payload(
+		const CustomScan* scan) noexcept
+{
+	if (scan == nullptr || scan->methods != &BioseqBatchJoinScanMethods
+		|| scan->scan.scanrelid != 0
+		|| scan->scan.plan.plan_node_id < 0
+		|| outerPlan(&scan->scan.plan) != nullptr
+		|| innerPlan(&scan->scan.plan) != nullptr
+		|| scan->custom_exprs != NIL
+		|| bms_is_empty(scan->custom_relids)
+		|| !bioseq_batch_join_target_list_is_structural(
+			scan->scan.plan.targetlist)
+		|| !bioseq_batch_join_target_list_is_structural(
+			scan->custom_scan_tlist)
+		|| !bioseq_batch_join_private_integer(
+			scan->custom_private, 0)) {
+		return false;
+	}
+	const int version = intVal(linitial(scan->custom_private));
+	/* V4 shares the PostgreSQL method table but has a different one-child
+	 * executor ABI.  Exact source elision is deliberately V3-only until that
+	 * ABI gets its own complete recipe contract. */
+	if (version != kBioseqBatchJoinPlanVersion
+		|| list_length(scan->custom_private)
+			!= kBioseqBatchJoinPrivateFields
+		|| list_length(scan->custom_plans) != 2
+		|| !bioseq_batch_join_descriptor_is_structural(
+			scan, kBatchJoinMatchOwnerDescriptor)) {
+		return false;
+	}
+	for (const int index : {
+			kBatchJoinVersion, kBatchJoinToken,
+			kBatchJoinTargetRelationOid,
+			kBatchJoinTargetStorageSeqAttno,
+			kBatchJoinTargetSlotSeqResno,
+			kBatchJoinTargetSlotRownoResno,
+			kBatchJoinQuerySlotSeqResno,
+			kBatchJoinTargetColumnCount,
+			kBatchJoinQueryColumnCount,
+			kBatchJoinAlphabetCode,
+			kBatchJoinStorageUnitByteWidth,
+			kBatchJoinIndexReadRequirement}) {
+		if (!bioseq_batch_join_private_integer(
+				scan->custom_private, index)) {
+			return false;
+		}
+	}
+	const auto* target_child = reinterpret_cast<const CustomScan*>(
+		linitial(scan->custom_plans));
+	const Plan* query_child = static_cast<const Plan*>(
+		lsecond(scan->custom_plans));
+	const Node* sites = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinPlaceholderSites));
+	const Node* mmsearch = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinMmsearchExpr));
+	const Node* honest_startup_cost = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinHonestStartupCost));
+	const Node* honest_total_cost = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinHonestTotalCost));
+	const Node* incumbent_cost_floor = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinIncumbentCostFloor));
+	return target_child != nullptr && IsA(target_child, CustomScan)
+		&& target_child->methods == &BioseqColumnScanScanMethods
+		&& query_child != nullptr
+		&& intVal(list_nth(scan->custom_private, kBatchJoinToken)) > 0
+		&& OidIsValid(static_cast<Oid>(intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetRelationOid))))
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetStorageSeqAttno)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetSlotSeqResno)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetSlotRownoResno)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinQuerySlotSeqResno)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinTargetColumnCount)) > 0
+		&& intVal(list_nth(
+			scan->custom_private, kBatchJoinQueryColumnCount)) > 0
+		&& bioseq::indexing::index_read_requirement_ordinal_valid(
+			intVal(list_nth(scan->custom_private,
+				kBatchJoinIndexReadRequirement)))
+		&& (sites == nullptr || IsA(sites, List))
+		&& mmsearch != nullptr && IsA(mmsearch, FuncExpr)
+		&& honest_startup_cost != nullptr
+		&& IsA(honest_startup_cost, Const)
+		&& honest_total_cost != nullptr
+		&& IsA(honest_total_cost, Const)
+		&& incumbent_cost_floor != nullptr
+		&& IsA(incumbent_cost_floor, Const);
+}
+
+export List*
+bioseq_batch_join_cache_semantic_snapshot(const CustomScan* scan)
+{
+	if (!bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
+		return NIL;
+	}
+	auto* mmsearch = reinterpret_cast<FuncExpr*>(list_nth(
+		scan->custom_private, kBatchJoinMmsearchExpr));
+	bioseq::simd::active_target::Minimap2Params params =
+		build_params_from_gucs();
+	bioseq::indexing::IndexReadRequirement requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	(void)apply_aligner_options_override(
+		mmsearch, params, requirement, get_cached_stub_oids());
+	finalize_simd_chaining_policy(params);
+	if (static_cast<int>(requirement) != intVal(list_nth(
+			scan->custom_private, kBatchJoinIndexReadRequirement))) {
+		return NIL;
+	}
+
+	/* Match BeginCustomScan exactly: expensive result columns are enabled by
+	 * the finalized placeholder ABI, not by the post-setrefs target list. */
+	params.do_cigar = false;
+	params.compute_divergence = false;
+	params.compute_mapq = false;
+	params.compute_edit_distance = false;
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	const Node* sites_node = reinterpret_cast<const Node*>(list_nth(
+		scan->custom_private, kBatchJoinPlaceholderSites));
+	const List* sites = sites_node == nullptr
+		? NIL : reinterpret_cast<const List*>(sites_node);
+	Bitmapset* seen_resnos = nullptr;
+	for (const List* site : PList<List>(const_cast<List*>(sites))) {
+		if (site == nullptr || !IsA(site, List)
+			|| list_length(site) != kBioseqMatchHelperSiteFields) {
+			bms_free(seen_resnos);
+			return NIL;
+		}
+		for (const int index : {
+				kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+				kMatchSiteCollation, kMatchSiteBindingKind,
+				kMatchSitePhid, kMatchSiteStableId}) {
+			if (!bioseq_batch_join_private_integer(site, index)) {
+				bms_free(seen_resnos);
+				return NIL;
+			}
+		}
+		const int resno = intVal(list_nth(site, kMatchSiteResno));
+		const Oid funcid = static_cast<Oid>(intVal(list_nth(
+			site, kMatchSiteFuncid)));
+		const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
+			intVal(list_nth(site, kMatchSiteBindingKind)));
+		const int stable_id = intVal(list_nth(site, kMatchSiteStableId));
+		const Node* canonical_argument = reinterpret_cast<const Node*>(
+			list_nth(site, kMatchSiteCanonicalArgument));
+		if (resno <= 0
+			|| resno > list_length(scan->custom_scan_tlist)
+			|| bms_is_member(resno, seen_resnos)
+			|| !is_bioseq_projection_funcid(funcid, oids)
+			|| canonical_argument == nullptr
+			|| (binding_kind != BioseqMatchHelperBindingKind::exact_recipe
+				&& binding_kind
+					!= BioseqMatchHelperBindingKind::unique_lineage)
+			|| (stable_id != 0
+				&& stable_id != scan->scan.plan.plan_node_id)) {
+			bms_free(seen_resnos);
+			return NIL;
+		}
+		seen_resnos = bms_add_member(seen_resnos, resno);
+		params.do_cigar = params.do_cigar
+			|| funcid == oids.cigar_oid
+			|| funcid == oids.has_cigar_oid
+			|| funcid == oids.edit_oid;
+		params.compute_edit_distance = params.compute_edit_distance
+			|| funcid == oids.edit_oid;
+		params.compute_divergence = params.compute_divergence
+			|| funcid == oids.divergence_oid;
+		params.compute_mapq = params.compute_mapq
+			|| funcid == oids.mapq_oid;
+	}
+	bms_free(seen_resnos);
+	return make_bioseq_semantic_payload(FrozenBioseqScanSemantics{
+		.params = params,
+		.read_sequence_index = bioseq::settings::read_sequence_index,
+		.index_read_requirement = requirement,
+	});
+}
+
 /*
  * Walker context for bioseq_node_has_projection_or_mmsearch.
  */

@@ -20,6 +20,10 @@ export namespace bioseq::pg::cache_provider {
 inline constexpr std::uint32_t kBioseqScanProviderId = 0x42535153U;
 inline constexpr char kBioseqScanProviderName[] = "bioseq.scan.exact.v1";
 inline constexpr std::uint32_t kBioseqScanRecipeVersion = 1U;
+inline constexpr std::uint32_t kBioseqBatchJoinProviderId = 0x4253514aU;
+inline constexpr char kBioseqBatchJoinProviderName[] =
+    "bioseq.batch_join.exact.v1";
+inline constexpr std::uint32_t kBioseqBatchJoinRecipeVersion = 1U;
 
 namespace detail {
 
@@ -34,6 +38,12 @@ inline constexpr int kRecipeCustomExprs = 7;
 inline constexpr int kRecipeTargetList = 8;
 inline constexpr int kRecipeQual = 9;
 inline constexpr int kRecipeCustomPlans = 10;
+inline constexpr std::int32_t kBatchJoinRecipeMagic = 0x42534a31;
+inline constexpr std::int32_t kBatchJoinRecipeFieldCount = 2;
+inline constexpr int kBatchJoinRecipeNodeCount = 6;
+inline constexpr int kBatchJoinRecipePlanNodeId = 3;
+inline constexpr int kBatchJoinRecipeFinalizedScan = 4;
+inline constexpr int kBatchJoinRecipeSemanticSnapshot = 5;
 inline constexpr std::size_t kMaximumPlanWalkNodes = 4'096;
 inline constexpr std::uint32_t kMaximumPlanWalkDepth = 256;
 
@@ -76,6 +86,8 @@ void mix_digest_byte(
 
 [[nodiscard]] bool digest_recipe(
         const List* recipe,
+        std::uint32_t provider_id,
+        std::uint32_t recipe_version,
         std::array<std::uint8_t, bioseq::cache::kProviderDigestBytes>*
             output) {
     if (recipe == nullptr || output == nullptr) return false;
@@ -83,8 +95,8 @@ void mix_digest_byte(
     if (serialized == nullptr) return false;
     const std::size_t byte_count = std::strlen(serialized);
     std::array<std::uint64_t, 4> state{
-        0xcbf29ce484222325ULL ^ kBioseqScanProviderId,
-        0x84222325cbf29ce4ULL ^ kBioseqScanRecipeVersion,
+        0xcbf29ce484222325ULL ^ provider_id,
+        0x84222325cbf29ce4ULL ^ recipe_version,
         0x9e3779b185ebca87ULL,
         0xd6e8feb86659fd93ULL,
     };
@@ -184,7 +196,23 @@ void mix_digest_byte(
     return recipe;
 }
 
+[[nodiscard]] List* make_batch_join_recipe(
+        const CustomScan& scan,
+        List* semantic_snapshot) {
+    if (semantic_snapshot == NIL) return NIL;
+    List* recipe = list_make5(
+        makeInteger(kBatchJoinRecipeMagic),
+        makeInteger(static_cast<int>(kBioseqBatchJoinRecipeVersion)),
+        makeInteger(kBatchJoinRecipeFieldCount),
+        makeInteger(scan.scan.plan.plan_node_id),
+        copyObject(&scan));
+    recipe = lappend(recipe, copyObject(semantic_snapshot));
+    Assert(list_length(recipe) == kBatchJoinRecipeNodeCount);
+    return recipe;
+}
+
 struct PlanFinder {
+    const CustomScanMethods* methods = nullptr;
     std::int32_t plan_node_id = -1;
     Index scan_relid = 0;
     const CustomScan* match = nullptr;
@@ -206,7 +234,7 @@ struct PlanFinder {
         visited[visited_count++] = plan;
         if (IsA(plan, CustomScan)) {
             const auto* custom = reinterpret_cast<const CustomScan*>(plan);
-            if (custom->methods == bioseq_customscan_methods()
+            if (methods != nullptr && custom->methods == methods
                 && custom->scan.plan.plan_node_id == plan_node_id
                 && custom->scan.scanrelid == scan_relid) {
                 match = custom;
@@ -353,6 +381,51 @@ struct PlanFinder {
     return true;
 }
 
+[[nodiscard]] bool parse_batch_join_recipe_header(
+        const List* recipe,
+        std::int32_t* plan_node_id,
+        const CustomScan** finalized_scan,
+        const List** semantic_snapshot) noexcept {
+    std::int32_t magic = 0;
+    std::int32_t version = 0;
+    std::int32_t field_count = 0;
+    std::int32_t raw_plan_node_id = -1;
+    if (recipe == nullptr
+        || list_length(recipe) != kBatchJoinRecipeNodeCount
+        || !integer_node_value(recipe, 0, &magic)
+        || !integer_node_value(recipe, 1, &version)
+        || !integer_node_value(recipe, 2, &field_count)
+        || !integer_node_value(
+            recipe, kBatchJoinRecipePlanNodeId, &raw_plan_node_id)
+        || magic != kBatchJoinRecipeMagic
+        || version != static_cast<std::int32_t>(
+            kBioseqBatchJoinRecipeVersion)
+        || field_count != kBatchJoinRecipeFieldCount
+        || raw_plan_node_id < 0
+        || plan_node_id == nullptr
+        || finalized_scan == nullptr
+        || semantic_snapshot == nullptr) {
+        return false;
+    }
+    const Node* scan_node = reinterpret_cast<const Node*>(list_nth(
+        recipe, kBatchJoinRecipeFinalizedScan));
+    const Node* snapshot_node = reinterpret_cast<const Node*>(list_nth(
+        recipe, kBatchJoinRecipeSemanticSnapshot));
+    if (scan_node == nullptr || !IsA(scan_node, CustomScan)
+        || snapshot_node == nullptr || !IsA(snapshot_node, List)) {
+        return false;
+    }
+    const auto* scan = reinterpret_cast<const CustomScan*>(scan_node);
+    if (scan->scan.plan.plan_node_id != raw_plan_node_id
+        || !bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
+        return false;
+    }
+    *plan_node_id = raw_plan_node_id;
+    *finalized_scan = scan;
+    *semantic_snapshot = reinterpret_cast<const List*>(snapshot_node);
+    return true;
+}
+
 } // namespace detail
 
 [[nodiscard]] BioseqCacheStatusV2 bioseq_build_plan_digest_recipe(
@@ -374,7 +447,11 @@ struct PlanFinder {
     }
     List* recipe = detail::make_recipe(*scan, relation_oid);
     std::array<std::uint8_t, bioseq::cache::kProviderDigestBytes> digest{};
-    if (!detail::digest_recipe(recipe, &digest)) {
+    if (!detail::digest_recipe(
+            recipe,
+            kBioseqScanProviderId,
+            kBioseqScanRecipeVersion,
+            &digest)) {
         return BIOSEQ_CACHE_STATUS_ERROR;
     }
     output->struct_size = sizeof(*output);
@@ -411,6 +488,7 @@ bioseq_append_runtime_generation_digest(
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     detail::PlanFinder finder{
+        .methods = bioseq_customscan_methods(),
         .plan_node_id = plan_node_id,
         .scan_relid = scan_relid,
     };
@@ -427,7 +505,107 @@ bioseq_append_runtime_generation_digest(
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     std::array<std::uint8_t, bioseq::cache::kProviderDigestBytes> digest{};
-    if (!detail::digest_recipe(actual_recipe, &digest)) {
+    if (!detail::digest_recipe(
+            actual_recipe,
+            kBioseqScanProviderId,
+            kBioseqScanRecipeVersion,
+            &digest)) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    return detail::append_bytes(sink, digest.data(), digest.size())
+        ? BIOSEQ_CACHE_STATUS_OK
+        : BIOSEQ_CACHE_STATUS_ERROR;
+}
+
+[[nodiscard]] BioseqCacheStatusV2
+bioseq_batch_join_build_plan_digest_recipe(
+        PlannerInfo* root,
+        const Plan* provider_plan,
+        BioseqCachePlanDigestRecipeV2* output) {
+    static_cast<void>(root);
+    if (provider_plan == nullptr || output == nullptr
+        || output->struct_size < sizeof(*output)
+        || !IsA(provider_plan, CustomScan)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    const auto* scan = reinterpret_cast<const CustomScan*>(provider_plan);
+    if (scan->methods != bioseq_batch_join_customscan_methods()
+        || !bioseq_batch_join_customscan_has_valid_semantic_payload(scan)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    List* semantic_snapshot =
+        bioseq_batch_join_cache_semantic_snapshot(scan);
+    if (semantic_snapshot == NIL) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    List* recipe = detail::make_batch_join_recipe(
+        *scan, semantic_snapshot);
+    std::array<std::uint8_t, bioseq::cache::kProviderDigestBytes> digest{};
+    if (recipe == NIL || !detail::digest_recipe(
+            recipe,
+            kBioseqBatchJoinProviderId,
+            kBioseqBatchJoinRecipeVersion,
+            &digest)) {
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    output->struct_size = sizeof(*output);
+    output->flags = 0;
+    output->digest_format_version = kBioseqBatchJoinRecipeVersion;
+    output->reserved = 0;
+    output->plan_domain_nodes = recipe;
+    std::memcpy(
+        output->expected_generation_digest,
+        digest.data(),
+        digest.size());
+    return BIOSEQ_CACHE_STATUS_OK;
+}
+
+[[nodiscard]] BioseqCacheStatusV2
+bioseq_batch_join_append_runtime_generation_digest(
+        const List* plan_domain_nodes,
+        EState* estate,
+        BioseqCacheDigestSinkV2* sink) {
+    std::int32_t plan_node_id = -1;
+    const CustomScan* finalized_scan = nullptr;
+    const List* planned_semantics = nullptr;
+    if (!detail::parse_batch_join_recipe_header(
+            plan_domain_nodes,
+            &plan_node_id,
+            &finalized_scan,
+            &planned_semantics)
+        || finalized_scan == nullptr || planned_semantics == nullptr
+        || estate == nullptr || estate->es_plannedstmt == nullptr) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    detail::PlanFinder finder{
+        .methods = bioseq_batch_join_customscan_methods(),
+        .plan_node_id = plan_node_id,
+        .scan_relid = 0,
+    };
+    if (!finder.visit(estate->es_plannedstmt->planTree, 0)
+        || !finder.visit_list(estate->es_plannedstmt->subplans, 0)
+        || !finder.valid || finder.match_count != 1
+        || finder.match == nullptr
+        || !bioseq_batch_join_customscan_has_valid_semantic_payload(
+            finder.match)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    List* runtime_semantics =
+        bioseq_batch_join_cache_semantic_snapshot(finder.match);
+    if (runtime_semantics == NIL) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    List* actual_recipe = detail::make_batch_join_recipe(
+        *finder.match, runtime_semantics);
+    if (actual_recipe == NIL || !equal(actual_recipe, plan_domain_nodes)) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    std::array<std::uint8_t, bioseq::cache::kProviderDigestBytes> digest{};
+    if (!detail::digest_recipe(
+            actual_recipe,
+            kBioseqBatchJoinProviderId,
+            kBioseqBatchJoinRecipeVersion,
+            &digest)) {
         return BIOSEQ_CACHE_STATUS_ERROR;
     }
     return detail::append_bytes(sink, digest.data(), digest.size())
@@ -488,6 +666,102 @@ bioseq_append_runtime_generation_digest(
     return appended
         ? BIOSEQ_CACHE_STATUS_OK
         : BIOSEQ_CACHE_STATUS_ERROR;
+}
+
+[[nodiscard]] BioseqCacheStatusV2
+bioseq_batch_join_append_domain_digest(
+        const BioseqCachePathDomainV2* domain,
+        BioseqCacheDigestSinkV2* sink) {
+    if (domain == nullptr
+        || domain->provider_id != kBioseqBatchJoinProviderId) {
+        return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
+    }
+    constexpr std::array<std::uint8_t, 8> identity{
+        0x4a, 0x51, 0x53, 0x42,  // provider id, little endian
+        0x01, 0x00, 0x00, 0x00,  // recipe version
+    };
+    return detail::append_bytes(sink, identity.data(), identity.size())
+            && detail::append_bytes(
+                sink,
+                kBioseqBatchJoinProviderName,
+                sizeof(kBioseqBatchJoinProviderName) - 1U)
+        ? BIOSEQ_CACHE_STATUS_OK
+        : BIOSEQ_CACHE_STATUS_ERROR;
+}
+
+[[nodiscard]] BioseqCacheStatusV2
+bioseq_batch_join_append_generation_digest(
+        const BioseqCachePathDomainV2* domain,
+        BioseqCacheDigestSinkV2* sink) {
+    const BioseqCacheStatusV2 domain_status =
+        bioseq_batch_join_append_domain_digest(domain, sink);
+    if (domain_status != BIOSEQ_CACHE_STATUS_OK) {
+        return domain_status;
+    }
+    char* dependency = nodeToString(domain->dependency_nodes);
+    char* private_nodes = nodeToString(domain->provider_private_nodes);
+    if (dependency == nullptr || private_nodes == nullptr) {
+        if (dependency != nullptr) pfree(dependency);
+        if (private_nodes != nullptr) pfree(private_nodes);
+        return BIOSEQ_CACHE_STATUS_ERROR;
+    }
+    const std::size_t dependency_size = std::strlen(dependency);
+    const std::size_t private_size = std::strlen(private_nodes);
+    std::array<std::uint8_t, sizeof(std::uint64_t)> encoded_size{};
+    detail::encode_little_endian(
+        static_cast<std::uint64_t>(dependency_size), encoded_size);
+    bool appended = detail::append_bytes(
+        sink, encoded_size.data(), encoded_size.size())
+        && detail::append_bytes(sink, dependency, dependency_size);
+    detail::encode_little_endian(
+        static_cast<std::uint64_t>(private_size), encoded_size);
+    appended = appended
+        && detail::append_bytes(
+            sink, encoded_size.data(), encoded_size.size())
+        && detail::append_bytes(sink, private_nodes, private_size);
+    pfree(dependency);
+    pfree(private_nodes);
+    return appended
+        ? BIOSEQ_CACHE_STATUS_OK
+        : BIOSEQ_CACHE_STATUS_ERROR;
+}
+
+void bioseq_batch_join_explain_exact_domain(
+        List* plan_domain_nodes,
+        BioseqCacheExplainSinkV2* sink) {
+    if (sink == nullptr || sink->struct_size < sizeof(*sink)) return;
+    std::int32_t plan_node_id = -1;
+    const CustomScan* finalized_scan = nullptr;
+    const List* semantic_snapshot = nullptr;
+    const bool valid = detail::parse_batch_join_recipe_header(
+        plan_domain_nodes,
+        &plan_node_id,
+        &finalized_scan,
+        &semantic_snapshot);
+    if (sink->property_text != nullptr) {
+        sink->property_text(
+            sink->opaque,
+            "Bioseq Cache Provider",
+            kBioseqBatchJoinProviderName);
+    }
+    if (sink->property_uint64 != nullptr) {
+        sink->property_uint64(
+            sink->opaque,
+            "Bioseq Provider Recipe Version",
+            kBioseqBatchJoinRecipeVersion);
+        if (valid) {
+            sink->property_uint64(
+                sink->opaque,
+                "Bioseq Provider Plan Node",
+                static_cast<std::uint64_t>(plan_node_id));
+        }
+    }
+    if (sink->property_bool != nullptr) {
+        sink->property_bool(
+            sink->opaque, "Bioseq Exact Recipe Valid", valid);
+        sink->property_bool(
+            sink->opaque, "Bioseq Reusable Coverage", false);
+    }
 }
 
 void bioseq_explain_exact_domain(
