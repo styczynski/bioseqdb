@@ -19,6 +19,8 @@ export void bioseq_tableam_init(void);
 export const CustomScanMethods* bioseq_customscan_methods(void);
 export bool bioseq_customscan_has_valid_semantic_payload(
     const CustomScan* scan) noexcept;
+export List* bioseq_customscan_cache_private_payload(
+    const CustomScan* scan);
 export const CustomScanMethods* bioseq_batch_join_customscan_methods(void);
 export bool bioseq_batch_join_customscan_has_valid_semantic_payload(
     const CustomScan* scan) noexcept;

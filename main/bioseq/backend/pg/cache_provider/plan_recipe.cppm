@@ -174,6 +174,8 @@ void mix_digest_byte(
 [[nodiscard]] List* make_recipe(
         const CustomScan& scan,
         Oid relation_oid) {
+    List* private_payload = bioseq_customscan_cache_private_payload(&scan);
+    if (private_payload == NIL) return NIL;
     List* recipe = list_make5(
         makeInteger(kRecipeMagic),
         makeInteger(static_cast<int>(kBioseqScanRecipeVersion)),
@@ -182,8 +184,7 @@ void mix_digest_byte(
         makeInteger(static_cast<int>(scan.scan.scanrelid)));
     recipe = lappend(
         recipe, makeInteger(static_cast<int>(relation_oid)));
-    recipe = lappend(
-        recipe, copyObject(scan.custom_private));
+    recipe = lappend(recipe, private_payload);
     recipe = lappend(
         recipe, copyObject(scan.custom_exprs));
     recipe = lappend(
@@ -455,7 +456,7 @@ struct PlanFinder {
     }
     List* recipe = detail::make_recipe(*scan, relation_oid);
     std::array<std::uint8_t, bioseq::cache::kProviderDigestBytes> digest{};
-    if (!detail::digest_recipe(
+    if (recipe == NIL || !detail::digest_recipe(
             recipe,
             kBioseqScanProviderId,
             kBioseqScanRecipeVersion,
@@ -509,7 +510,7 @@ bioseq_append_runtime_generation_digest(
     }
     List* actual_recipe = detail::make_recipe(
         *finder.match, relation_oid);
-    if (!equal(actual_recipe, plan_domain_nodes)) {
+    if (actual_recipe == NIL || !equal(actual_recipe, plan_domain_nodes)) {
         return BIOSEQ_CACHE_STATUS_UNSUPPORTED;
     }
     std::array<std::uint8_t, bioseq::cache::kProviderDigestBytes> digest{};
@@ -734,13 +735,9 @@ void bioseq_batch_join_explain_exact_domain(
         BioseqCacheExplainSinkV2* sink) {
     if (sink == nullptr || sink->struct_size < sizeof(*sink)) return;
     std::int32_t plan_node_id = -1;
-    const CustomScan* finalized_scan = nullptr;
-    const List* semantic_snapshot = nullptr;
     const bool valid = detail::parse_batch_join_recipe_header(
         plan_domain_nodes,
-        &plan_node_id,
-        &finalized_scan,
-        &semantic_snapshot);
+        &plan_node_id);
     if (sink->property_text != nullptr) {
         sink->property_text(
             sink->opaque,

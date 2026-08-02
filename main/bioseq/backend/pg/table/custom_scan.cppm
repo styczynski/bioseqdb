@@ -3421,6 +3421,42 @@ bioseq_customscan_has_valid_semantic_payload(
 		scan->custom_private, &semantics);
 }
 
+export List*
+bioseq_customscan_cache_private_payload(const CustomScan* scan)
+{
+	if (!bioseq_customscan_has_valid_semantic_payload(scan)) {
+		return NIL;
+	}
+	auto* private_payload = static_cast<List*>(copyObject(
+		scan->custom_private));
+	List* locator_tag = nullptr;
+	for (Node* possible_tag : PList<Node>(private_payload)) {
+		if (possible_tag == nullptr || !IsA(possible_tag, List)) continue;
+		auto* tag = reinterpret_cast<List*>(possible_tag);
+		if (tag == NIL || !IsA(
+				reinterpret_cast<Node*>(linitial(tag)), Integer)
+			|| intVal(linitial(tag)) != kBioseqLocatorPassthroughMagic) {
+			continue;
+		}
+		if (locator_tag != nullptr || list_length(tag) != 4
+			|| !IsA(list_nth(tag, 1), Integer)
+			|| !IsA(list_nth(tag, 2), Integer)
+			|| !IsA(list_nth(tag, 3), Integer)
+			|| intVal(list_nth(tag, 1)) != kBioseqBatchJoinPlanVersion
+			|| intVal(list_nth(tag, 2)) <= 0
+			|| intVal(list_nth(tag, 3)) <= 0) {
+			return NIL;
+		}
+		locator_tag = tag;
+	}
+	if (locator_tag != nullptr) {
+		/* This token pairs a locator child with its parent only inside one
+		 * planned statement; the monotonic value is not result semantics. */
+		lfirst(list_nth_cell(locator_tag, 2)) = makeInteger(0);
+	}
+	return private_payload;
+}
+
 export const CustomScanMethods *
 bioseq_batch_join_customscan_methods(void)
 {
@@ -3607,6 +3643,13 @@ bioseq_batch_join_cache_plan_payload(const CustomScan* scan)
 	auto* private_payload = static_cast<List*>(copyObject(
 		scan->custom_private));
 	lfirst(list_nth_cell(private_payload, kBatchJoinToken)) = makeInteger(0);
+	for (const int cost_index : {
+			kBatchJoinHonestStartupCost,
+			kBatchJoinHonestTotalCost,
+			kBatchJoinIncumbentCostFloor}) {
+		/* Planner costs select a path but do not affect its result. */
+		lfirst(list_nth_cell(private_payload, cost_index)) = makeInteger(0);
+	}
 	return list_make5(
 		makeInteger(static_cast<int>(scan->flags)),
 		private_payload,
