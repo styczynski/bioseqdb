@@ -205,7 +205,7 @@ void mix_digest_byte(
         makeInteger(static_cast<int>(kBioseqBatchJoinRecipeVersion)),
         makeInteger(kBatchJoinRecipeFieldCount),
         makeInteger(scan.scan.plan.plan_node_id),
-        copyObject(&scan));
+        copyObject(const_cast<CustomScan*>(&scan)));
     recipe = lappend(recipe, copyObject(semantic_snapshot));
     Assert(list_length(recipe) == kBatchJoinRecipeNodeCount);
     return recipe;
