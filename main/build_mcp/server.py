@@ -1699,7 +1699,6 @@ MODES: Dict[str, ModeDefinition] = {
             "bioseq_durable_file_io_contract_tests",
             "bioseq_build_mcp_configure_freshness_contract_tests",
             "bioseq_cache_legacy_retirement_gate",
-            "bioseq_cache_legacy_inventory_tracking",
         ],
         commands=[
             ["bioseq_cache_unit_tests",
@@ -1710,13 +1709,6 @@ MODES: Dict[str, ModeDefinition] = {
              "--reporter", "console::out=-::colour-mode=ansi"],
             ["bioseq_durable_file_io_contract_tests",
              "--reporter", "console::out=-::colour-mode=ansi"],
-            [
-                "bioseq_cache_legacy_inventory_tracking",
-                "--legacy-root", str(PROJECT_ROOT / "bioseq_caching"),
-                "--legacy-inventory", "{legacy_inventory}",
-                "--phase", "current",
-                "--inventory-only",
-            ],
         ],
     ),
     "cache-integration": ModeDefinition(

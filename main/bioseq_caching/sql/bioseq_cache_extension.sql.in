@@ -1,3 +1,0 @@
-\echo Use "CREATE EXTENSION bioseq_cache" to load this file. \quit
-
-@BIOSEQ_CACHE_INSTALL_OBJECTS@

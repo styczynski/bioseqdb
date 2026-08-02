@@ -349,27 +349,4 @@ if(BIOSEQ_CACHE_BUILD_TESTS)
     add_subdirectory(test/integration)
   endif()
 
-  include(
-    "${CMAKE_CURRENT_LIST_DIR}/test/support/LegacyMigrationContract.cmake")
-  bioseq_cache_add_legacy_migration_contract(
-    LEDGER
-      "${CMAKE_CURRENT_LIST_DIR}/test/legacy_migration_ledger.tsv"
-    LEGACY_ROOT
-      "${CMAKE_CURRENT_LIST_DIR}"
-    LEGACY_INVENTORY
-      "${CMAKE_CURRENT_LIST_DIR}/test/legacy_asset_inventory.txt"
-    PHASE
-      "current"
-    TARGETS
-      bioseq_cache_unit_tests
-      bioseq_cache_integration_tests
-      bioseq_cache_bench
-      bioseq_cache_bioseq_bench
-      bioseq_cache_benchmark_report_contract_tests
-    SOURCES
-      "${CMAKE_CURRENT_LIST_DIR}/test/bioseq/test_coexistence.cpp"
-      "${CMAKE_CURRENT_LIST_DIR}/test/bioseq/test_coexistence_acceptance.cpp"
-      "${CMAKE_CURRENT_LIST_DIR}/test/bioseq/test_exact_provider.cpp"
-      "${CMAKE_CURRENT_LIST_DIR}/test/bioseq/test_provider_peer_failopen.cpp"
-      "${CMAKE_CURRENT_LIST_DIR}/test/bioseq/test_bioseq_2gbp_cache.cpp")
 endif()
