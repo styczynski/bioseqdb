@@ -65,6 +65,42 @@ std::tuple<size_t, std::array<size_t, max_lanes>> calculate_iteration_offsets(
 
 namespace sequence_iteration_internal {
 
+struct scalar_ring_geometry {
+	std::size_t slot_count = 0;
+	std::size_t scalar_count = 0;
+	bool valid = false;
+};
+
+/**
+ * A writer preloads exactly one current matrix (lane_count scalar rows).
+ * Delayed readers additionally retain floor(max_delay / letters_per_unit)
+ * unread rows; a row already loaded into delayed_lane_storage no longer needs
+ * a ring slot. This is therefore the smallest safe scalar-ring capacity.
+ */
+[[nodiscard]] inline constexpr scalar_ring_geometry
+calculate_scalar_ring_geometry(
+	const std::size_t lane_count,
+	const std::size_t max_delay,
+	const std::size_t letters_per_unit
+) noexcept {
+	if (lane_count == 0 || letters_per_unit == 0) return {};
+	const std::size_t history_rows = max_delay / letters_per_unit;
+	constexpr std::size_t size_max = static_cast<std::size_t>(-1);
+	if (history_rows > size_max - lane_count) return {};
+	const std::size_t slot_count = lane_count + history_rows;
+	if (slot_count > size_max / lane_count) return {};
+	return {slot_count, slot_count * lane_count, true};
+}
+
+static_assert(calculate_scalar_ring_geometry(4, 0, 16).slot_count == 4);
+static_assert(calculate_scalar_ring_geometry(4, 15, 16).slot_count == 4);
+static_assert(calculate_scalar_ring_geometry(4, 16, 16).slot_count == 5);
+static_assert(calculate_scalar_ring_geometry(4, 31, 16).slot_count == 5);
+static_assert(calculate_scalar_ring_geometry(4, 32, 16).slot_count == 6);
+static_assert(calculate_scalar_ring_geometry(4, 32, 16).scalar_count == 24);
+static_assert(!calculate_scalar_ring_geometry(
+	2, static_cast<std::size_t>(-1), 1).valid);
+
 /** Load one delayed row, return its current bases, then advance scalar storage. */
 template<
 	std::size_t DelayIndex,
@@ -109,6 +145,7 @@ template<
 	Handler& handler,
 	const Offsets& offsets,
 	D& d,
+	const hn::Mask<D>& full_mask,
 	hn::Mask<D>& main_mask,
 	hn::Vec<D> base_bp,
 	hn::Vec<D> bp_bitmask,
@@ -116,12 +153,21 @@ template<
 	const std::array<std::size_t, DelayCount>& delayed_active_lanes,
 	std::index_sequence<DelayIndices...>
 ) {
-	handler(
-		std::bool_constant<IsFull>{}, offsets, d, main_mask, base_bp,
-		hn::FirstN(d, delayed_active_lanes[DelayIndices])...,
-		load_delayed_bp_and_advance<DelayIndices, BitsPerChar>(
-			d, bp_bitmask, delayed_lane_storage,
-			std::integral_constant<std::size_t, DelayIndices>{})...);
+	if constexpr (IsFull) {
+		handler(
+			std::bool_constant<true>{}, offsets, d, full_mask, base_bp,
+			hn::FirstN(d, delayed_active_lanes[DelayIndices])...,
+			load_delayed_bp_and_advance<DelayIndices, BitsPerChar>(
+				d, bp_bitmask, delayed_lane_storage,
+				std::integral_constant<std::size_t, DelayIndices>{})...);
+	} else {
+		handler(
+			std::bool_constant<false>{}, offsets, d, main_mask, base_bp,
+			hn::FirstN(d, delayed_active_lanes[DelayIndices])...,
+			load_delayed_bp_and_advance<DelayIndices, BitsPerChar>(
+				d, bp_bitmask, delayed_lane_storage,
+				std::integral_constant<std::size_t, DelayIndices>{})...);
+	}
 }
 
 /**
@@ -148,12 +194,11 @@ template<
 	const std::size_t ring_slot_count,
 	const std::size_t lane_count,
 	const hn::Vec<D> bp_bitmask,
-	const hn::Mask<D> full_mask,
+	const hn::Mask<D>& full_mask,
 	const hn::Mask<D> left_mask,
 	const hn::Mask<D> none_mask,
 	std::array<std::size_t, DelayCount>& delayed_read_slots,
 	std::array<std::size_t, DelayCount>& delayed_countdowns,
-	const std::array<std::size_t, DelayCount>& delay_lengths,
 	std::array<std::array<Lane, MaxLanes>, DelayCount>& delayed_lane_storage,
 	std::array<std::size_t, DelayCount>& delayed_active_lanes,
 	std::array<std::int32_t, DelayCount>& delayed_partial_counters,
@@ -181,7 +226,7 @@ template<
 					ring_lane_storage.data() + source_offset,
 					lane_count,
 					delayed_lane_storage[delay_index].data());
-				delayed_countdowns[delay_index] = delay_lengths[delay_index];
+				delayed_countdowns[delay_index] = LettersPerUnit - 1;
 				delayed_read_slots[delay_index] =
 					(delayed_read_slots[delay_index] + 1) % ring_slot_count;
 				if constexpr (Mode == ITER_FULL_MATRIX) {
@@ -196,7 +241,7 @@ template<
 		}
 
 		invoke_delayed_handler<Mode == ITER_FULL_MATRIX, BitsPerChar>(
-			handler, offsets, d, main_mask, base_bp, bp_bitmask,
+			handler, offsets, d, full_mask, main_mask, base_bp, bp_bitmask,
 			delayed_lane_storage, delayed_active_lanes,
 			std::make_index_sequence<DelayCount>{});
 
@@ -271,14 +316,6 @@ iterate_sequence_bp_scalable_storage(
 
 	d_t d;
 	const std::size_t lane_count = hn::Lanes(d);
-	const std::size_t matrix_size = lane_count * lane_count;
-	const std::size_t ring_slot_count =
-		(int_div_ceil(
-			max_delay / traits::letters_per_unit, matrix_size).first + 1)
-		* matrix_size;
-	std::vector<lane_t> ring_lane_storage(
-		ring_slot_count * lane_count, lane_t{});
-
 	const auto [units_per_lane, offsets] =
 		calculate_iteration_offsets<max_lanes>(
 			seq.size(), lane_count, context_units);
@@ -293,6 +330,26 @@ iterate_sequence_bp_scalable_storage(
 		--full_chunks_count;
 		bps_last_chunk = lane_count * traits::letters_per_unit;
 	}
+	highway_kernel_invariant(
+		bps_last_chunk >= seq.padding() || bps_last_chunk == 0,
+		"Sanity check. This should never fail as we should have more basses "
+		"than are padded, otherwise all calculations are wrong.");
+
+	const auto ring_geometry = calculate_scalar_ring_geometry(
+		lane_count, max_delay, traits::letters_per_unit);
+	if (!ring_geometry.valid) [[unlikely]] {
+		highway_kernel_invariant(false,
+			"Scalable sequence history ring size overflow");
+		return;
+	}
+	const std::size_t ring_slot_count = ring_geometry.slot_count;
+	std::vector<lane_t> ring_lane_storage;
+	if (ring_geometry.scalar_count > ring_lane_storage.max_size()) [[unlikely]] {
+		highway_kernel_invariant(false,
+			"Scalable sequence history ring exceeds allocator max_size");
+		return;
+	}
+	ring_lane_storage.resize(ring_geometry.scalar_count, lane_t{});
 
 	const auto bp_bitmask = hn::Set(d, traits::char_mask);
 	const auto full_mask = hn::FirstN(d, lane_count);
@@ -306,8 +363,6 @@ iterate_sequence_bp_scalable_storage(
 
 	std::array<std::size_t, delay_count> delayed_read_slots{};
 	std::array<std::size_t, delay_count> delayed_countdowns{
-		static_cast<std::size_t>(delays)...};
-	const std::array<std::size_t, delay_count> delay_lengths{
 		static_cast<std::size_t>(delays)...};
 	std::array<std::array<lane_t, max_lanes>, delay_count>
 		delayed_lane_storage{};
@@ -347,7 +402,7 @@ iterate_sequence_bp_scalable_storage(
 					handler, offsets, d, row_lanes,
 					ring_lane_storage, ring_slot_count, lane_count,
 					bp_bitmask, full_mask, left_mask, none_mask,
-					delayed_read_slots, delayed_countdowns, delay_lengths,
+					delayed_read_slots, delayed_countdowns,
 					delayed_lane_storage, delayed_active_lanes,
 					delayed_partial_counters, left_active_lanes,
 					main_mask, main_counter, main_counter_only_left,
@@ -398,7 +453,7 @@ iterate_sequence_bp_scalable_storage(
 				handler, offsets, d, row_lanes,
 				ring_lane_storage, ring_slot_count, lane_count,
 				bp_bitmask, full_mask, left_mask, none_mask,
-				delayed_read_slots, delayed_countdowns, delay_lengths,
+				delayed_read_slots, delayed_countdowns,
 				delayed_lane_storage, delayed_active_lanes,
 				delayed_partial_counters, left_active_lanes,
 				main_mask, main_counter, main_counter_only_left,
@@ -431,6 +486,7 @@ template<
 	Handler& handler,
 	const Offsets& offsets,
 	D& d,
+	const hn::Mask<D>& full_mask,
 	hn::Mask<D>& main_mask,
 	const hn::Mask<D> left_mask,
 	const Lane bp_bitmask_value,
@@ -445,7 +501,8 @@ template<
 		return consume_stream_lane_row<
 			StreamIndex + 1, IsFull, NumStreams, BitsPerChar,
 			LettersPerUnit>(
-				handler, offsets, d, main_mask, left_mask, bp_bitmask_value,
+				handler, offsets, d, full_mask, main_mask, left_mask,
+				bp_bitmask_value,
 				stream_lanes, main_counter, main_counter_only_left,
 				main_counter_none, row_vectors..., row);
 	} else {
@@ -457,8 +514,13 @@ template<
 			 ++bp_index) {
 			const auto bp_values = And(row, bp_bitmask);
 			row = ShiftRight<BitsPerChar>(row);
-			handler(
-				std::bool_constant<IsFull>{}, offsets, d, main_mask, bp_values);
+			if constexpr (IsFull) {
+				handler(
+					std::bool_constant<true>{}, offsets, d, full_mask, bp_values);
+			} else {
+				handler(
+					std::bool_constant<false>{}, offsets, d, main_mask, bp_values);
+			}
 			if constexpr (!IsFull) {
 				++main_counter;
 				if (main_counter == main_counter_none) return true;
@@ -532,6 +594,10 @@ iterate_sequence_bp_streams_scalable_storage(
 		--full_chunks_count;
 		bps_last_chunk = lane_count * traits::letters_per_unit;
 	}
+	highway_kernel_invariant(
+		bps_last_chunk >= seq.padding() || bps_last_chunk == 0,
+		"Sanity check. bps_last_chunk should always cover at least "
+		"seq.padding().");
 
 	const lane_t bp_bitmask_value = traits::char_mask;
 	const auto full_mask = hn::FirstN(d, lane_count);
@@ -564,7 +630,8 @@ iterate_sequence_bp_streams_scalable_storage(
 			(void)consume_stream_lane_row<
 				0, true, NumStreams, traits::bits_per_char,
 				traits::letters_per_unit>(
-					handler, offsets, d, main_mask, left_mask, bp_bitmask_value,
+					handler, offsets, d, full_mask, main_mask, left_mask,
+					bp_bitmask_value,
 					stream_lanes, main_counter, main_counter_only_left,
 					main_counter_none);
 		}
@@ -598,7 +665,8 @@ iterate_sequence_bp_streams_scalable_storage(
 		if (consume_stream_lane_row<
 				0, false, NumStreams, traits::bits_per_char,
 				traits::letters_per_unit>(
-						handler, offsets, d, main_mask, left_mask, bp_bitmask_value,
+						handler, offsets, d, full_mask, main_mask, left_mask,
+						bp_bitmask_value,
 					stream_lanes, main_counter, main_counter_only_left,
 					main_counter_none)) {
 			finish(offsets, d, left_mask);
