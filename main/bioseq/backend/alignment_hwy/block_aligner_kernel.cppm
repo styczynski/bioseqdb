@@ -1883,30 +1883,6 @@ ba_try_packed_global_gap_certificate(
     }
 }
 
-[[nodiscard]] constexpr std::uint64_t block_aligner_config_identity(
-        const BlockAlignerParams& params,
-        std::uint64_t scoring_identity = 0,
-        bool strand_reversed = false) noexcept {
-    std::uint64_t hash = 1469598103934665603ULL;
-    const auto mix = [&hash](std::uint64_t value) constexpr {
-        hash ^= value;
-        hash *= 1099511628211ULL;
-    };
-    mix(static_cast<std::uint8_t>(params.gap_open));
-    mix(static_cast<std::uint8_t>(params.gap_extend));
-    mix(params.min_size);
-    mix(params.max_size);
-    mix(static_cast<std::uint32_t>(params.x_drop));
-    mix(static_cast<std::uint8_t>(params.mode));
-    mix(static_cast<std::uint8_t>(params.input_order));
-    mix(static_cast<std::uint8_t>(params.phase));
-    mix(params.trace);
-    mix(params.compute_edit_distance);
-    mix(scoring_identity);
-    mix(strand_reversed);
-    return hash;
-}
-
 inline void block_aligner_record_eligible(
         BlockAlignerExecutionProof& proof,
         const BlockAlignerParams& params,
@@ -2054,39 +2030,6 @@ public:
             query_start, query_end, target_start, target_end, plan);
     }
 
-    /// Commit the proof for a directly stitched certified gap.  The attempt
-    /// itself is side-effect free, so this is the sole eligible/executed
-    /// record for the logical Block call.
-    template<bool is_reversed>
-    static void record_certified_global_gap(
-            const BlockGlobalGapCertificatePlan& plan,
-            const BlockDiagonalCertificate& certificate,
-            BlockAlignerExecutionProof* execution_proof) noexcept {
-        if (execution_proof == nullptr) return;
-        if (!certificate.certified || certificate.symbols == 0u
-            || certificate.vector_batches == 0u
-            || certificate.edit_distance > certificate.symbols) {
-            block_aligner_invariant_failure(
-                "attempted to record an invalid packed gap certificate");
-        }
-        const std::uint64_t config_identity = block_aligner_config_identity(
-            plan.params, plan.scoring_identity, is_reversed);
-        block_aligner_record_eligible(
-            *execution_proof, plan.params,
-            static_cast<size_t>(certificate.symbols),
-            static_cast<size_t>(certificate.symbols),
-            config_identity);
-        BlockCoreMetrics metrics;
-        metrics.diagonal_certified = true;
-        metrics.diagonal_certificate_vector_batches =
-            certificate.vector_batches;
-        metrics.diagonal_certificate_symbols = certificate.symbols;
-        block_aligner_record_executed(
-            *execution_proof, plan.params,
-            hn::Lanes(BlockAlignerSimdTag{}), false, metrics,
-            config_identity);
-    }
-
     /// Run block aligner on a sub-region of the given sequences.
     /// Returns KswAlignResult as the pipeline's shared result storage ABI.
     ///
@@ -2164,8 +2107,9 @@ public:
                 coordinates_valid);
             std::abort();
         }
-        const std::uint64_t config_identity = block_aligner_config_identity(
-            params, scoring_matrix.block_semantic_identity(), is_reversed);
+        const std::uint64_t config_identity =
+            ::bioseq::simd::block_aligner_config_identity(
+                params, scoring_matrix.block_semantic_identity(), is_reversed);
         if (execution_proof != nullptr) {
             block_aligner_record_eligible(
                 *execution_proof, params, query_len, target_len,

@@ -102,11 +102,10 @@ template<typename D, typename VecT = hn::Vec<D>>
 [[always_inline]] inline VecT shift_left_insert(
     const D& d, VecT vec, VecT& lane0) noexcept
 {
-    constexpr size_t kElemBytes = sizeof(hn::TFromD<D>);
-    constexpr size_t kVecBytes  = hn::MaxLanes(D{}) * kElemBytes;
-    auto carry_out = hn::ShiftRightBytes<kVecBytes - kElemBytes>(d, vec);
-    auto shifted   = hn::Or(hn::ShiftLeftBytes<kElemBytes>(d, vec), lane0);
-    lane0 = carry_out;
+    const auto carry_out = hn::ExtractLane(vec, hn::Lanes(d) - 1u);
+    auto shifted = hn::SlideUpLanes(d, vec, 1u);
+    shifted = hn::IfThenElse(hn::FirstN(d, 1u), lane0, shifted);
+    lane0 = set_lane_zero(d, carry_out);
     return shifted;
 }
 
@@ -610,7 +609,6 @@ template<
     hn::ScalableTag<full_score_t>    fst;
 
     const size_t byte_lanes = hn::Lanes(pst);
-    constexpr size_t byte_lanes_max = hn::MaxLanes(hn::ScalableTag<partial_score_t>{});
     const size_t score_lanes = hn::Lanes(fst);
     constexpr size_t score_lanes_max = hn::MaxLanes(hn::ScalableTag<full_score_t>{});
 
@@ -656,16 +654,18 @@ template<
     const auto long_gap_cost_vec  = hn::Set(pst,
         static_cast<partial_score_t>(gap_open_long + gap_extend_long));
 
-    const auto wildcard_score_vec = [&]() {
-        const int8_t wc = scoring_matrix.wildcard_score();
-        if (wc == 0) {
-            if constexpr (is_dual)
-                return hn::Set(pst, static_cast<partial_score_t>(-gap_extend_long));
-            else
-                return hn::Set(pst, static_cast<partial_score_t>(-gap_extend));
+    const int8_t wildcard_score = scoring_matrix.wildcard_score();
+    auto wildcard_score_vec = hn::Set(
+        pst, static_cast<partial_score_t>(wildcard_score));
+    if (wildcard_score == 0) {
+        if constexpr (is_dual) {
+            wildcard_score_vec = hn::Set(
+                pst, static_cast<partial_score_t>(-gap_extend_long));
+        } else {
+            wildcard_score_vec = hn::Set(
+                pst, static_cast<partial_score_t>(-gap_extend));
         }
-        return hn::Set(pst, static_cast<partial_score_t>(wc));
-    }();
+    }
 
     // Backtrack direction constants
     const auto bt_dir_1 = hn::Set(pst, static_cast<partial_score_t>(1));
@@ -712,8 +712,8 @@ template<
     int band_vec_capacity = qlen < tlen ? qlen : tlen;
     band_vec_capacity = ((band_vec_capacity < band_width + 1
                             ? band_vec_capacity : band_width + 1)
-                         + static_cast<int>(byte_lanes_max) - 1)
-                        / static_cast<int>(byte_lanes_max) + 1;
+                         + static_cast<int>(byte_lanes) - 1)
+                        / static_cast<int>(byte_lanes) + 1;
 
     // --- State arena -------------------------------------------------------
     KswStateFor<mode> state(target_len, query_len, byte_lanes);

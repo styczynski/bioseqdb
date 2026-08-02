@@ -2222,6 +2222,7 @@ struct AlignOnePhase {
                         record_block_certified_global_gap(
                                 packed_gap_plan,
                                 packed_attempt.certificate,
+                                strand_reversed,
                                 block_execution_proof);
                         continue;
                     }

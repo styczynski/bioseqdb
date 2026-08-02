@@ -284,22 +284,22 @@ template <bool Reverse, sequence_alphabet Alphabet>
         params.compute_edit_distance && fill.kind == FillKind::GapBetween
             ? -1
             : params.zdrop;
-    const KswAlignResult result = [&]() {
-        if (params.gap_open1 == params.gap_open2
-            && params.gap_ext1 == params.gap_ext2) {
-            return ksw2_z2<Alphabet>(
-                Reverse, query_seq, target_seq, qs, qe, rs, re,
-                scoring_matrix,
-                KswZ2Params{
-                    .gap_open = static_cast<std::int8_t>(params.gap_open1),
-                    .gap_extend = static_cast<std::int8_t>(params.gap_ext1),
-                    .band_width = effective_bandwidth,
-                    .z_drop = effective_zdrop,
-                    .end_bonus = end_bonus_for_fill,
-                    .flags = flags,
-                });
-        }
-        return ksw2_d2<Alphabet>(
+    KswAlignResult result;
+    if (params.gap_open1 == params.gap_open2
+        && params.gap_ext1 == params.gap_ext2) {
+        result = ksw2_z2<Alphabet>(
+            Reverse, query_seq, target_seq, qs, qe, rs, re,
+            scoring_matrix,
+            KswZ2Params{
+                .gap_open = static_cast<std::int8_t>(params.gap_open1),
+                .gap_extend = static_cast<std::int8_t>(params.gap_ext1),
+                .band_width = effective_bandwidth,
+                .z_drop = effective_zdrop,
+                .end_bonus = end_bonus_for_fill,
+                .flags = flags,
+            });
+    } else {
+        result = ksw2_d2<Alphabet>(
             Reverse, query_seq, target_seq, qs, qe, rs, re,
             scoring_matrix,
             KswD2Params{
@@ -312,7 +312,7 @@ template <bool Reverse, sequence_alphabet Alphabet>
                 .end_bonus = end_bonus_for_fill,
                 .flags = flags,
             });
-    }();
+    }
 
     fill.zdropped = result.zdropped;
     if (fill.kind == FillKind::GapBetween) {
@@ -391,7 +391,7 @@ template <bool Reverse, sequence_alphabet Alphabet>
  * batching is preserved so a future fused-lanes DP can substitute
  * here without touching the bucketing or stitching infrastructure.
  */
-template <std::size_t Lanes, bool Reverse, sequence_alphabet Alphabet>
+template <bool Reverse, sequence_alphabet Alphabet>
 void ksw2_extz2_batched_inner(
     FillDescriptor*                    fills,
     std::size_t                        n_fills,
@@ -409,7 +409,7 @@ void ksw2_extz2_batched_inner(
     (void)bucket_max_bw;
     const std::int32_t align_bandwidth =
         static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
-    for (std::size_t l = 0; l < n_fills && l < Lanes; ++l) {
+    for (std::size_t l = 0; l < n_fills; ++l) {
         detail_ksw2_batched::run_single_fill<Reverse>(
             fills[l], query_seq, target_seq,
             scoring_matrix, params, align_bandwidth,
@@ -431,7 +431,8 @@ void execute_buckets(
     Ksw2BatchedExecutionProof*         execution_proof)
 {
     using D = hn::ScalableTag<std::int16_t>;
-    constexpr std::size_t Lanes = hn::MaxLanes(D{});
+    const D d;
+    const std::size_t lanes = hn::Lanes(d);
 
     const std::int32_t align_bandwidth =
         static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
@@ -456,21 +457,21 @@ void execute_buckets(
             }
             continue;
         }
-        for (std::size_t i = 0; i < bucket_fills.size(); i += Lanes) {
-            const std::size_t lane_count = std::min(Lanes,
+        for (std::size_t i = 0; i < bucket_fills.size(); i += lanes) {
+            const std::size_t lane_count = std::min(lanes,
                 bucket_fills.size() - i);
             if (execution_proof != nullptr) {
                 execution_proof->record_short_bucket_dispatch(
                     static_cast<std::uint64_t>(lane_count));
             }
             if (reverse) {
-                ksw2_extz2_batched_inner<Lanes, true, Alphabet>(
+                ksw2_extz2_batched_inner<true, Alphabet>(
                     bucket_fills.data() + i, lane_count,
                     query_seq, target_seq, scoring_matrix, params,
                     bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max,
                     execution_proof);
             } else {
-                ksw2_extz2_batched_inner<Lanes, false, Alphabet>(
+                ksw2_extz2_batched_inner<false, Alphabet>(
                     bucket_fills.data() + i, lane_count,
                     query_seq, target_seq, scoring_matrix, params,
                     bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max,

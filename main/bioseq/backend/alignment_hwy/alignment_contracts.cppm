@@ -493,6 +493,7 @@ enum class BlockAlignerContractError : std::uint8_t {
 inline void record_block_certified_global_gap(
         const BlockGlobalGapCertificatePlan& plan,
         const BlockDiagonalCertificate& certificate,
+        bool strand_reversed,
         BlockAlignerExecutionProof* execution_proof) noexcept {
     if (execution_proof == nullptr) return;
     if (!certificate.certified || certificate.symbols == 0u
@@ -504,7 +505,7 @@ inline void record_block_certified_global_gap(
 
     auto& proof = *execution_proof;
     const std::uint64_t identity = block_aligner_config_identity(
-        plan.params, plan.scoring_identity, false);
+        plan.params, plan.scoring_identity, strand_reversed);
 
     proof.add(proof.gap_eligible);
     proof.add(proof.global_calls);

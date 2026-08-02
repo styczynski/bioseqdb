@@ -835,6 +835,20 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
             plan);
     REQUIRE(reverse_attempt.decision
             == BlockPackedCertificateDecision::Certified);
+    BlockAlignerExecutionProof forward_certificate_proof;
+    record_block_certified_global_gap(
+        plan, reverse_attempt.certificate, false,
+        &forward_certificate_proof);
+    BlockAlignerExecutionProof reverse_certificate_proof;
+    record_block_certified_global_gap(
+        plan, reverse_attempt.certificate, true,
+        &reverse_certificate_proof);
+    CHECK(forward_certificate_proof.accepted());
+    CHECK(reverse_certificate_proof.accepted());
+    CHECK(forward_certificate_proof.config_identity_xor
+          != reverse_certificate_proof.config_identity_xor);
+    CHECK(forward_certificate_proof.config_identity_sum
+          != reverse_certificate_proof.config_identity_sum);
     const ReferenceRun reverse_forced =
         run_block_region_mode<true, false, dna4_u64>(
             reverse_query_source, reverse_target_source,
@@ -1471,13 +1485,15 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and proof is exac
     BlockAlignerExecutionProof first_proof;
     const KswAlignResult first = block_aligner_align_pair<false>(
         query_view, reference_view,
-        0, query_data.size(), 0, reference_data.size(), nw1, first_params,
+        0, query_data.size(), 0, reference_data.size(), nw1,
+        fixed_alignment_kernels<seq::dna4>(), first_params,
         BlockAlignerPhase::GapExtension, &first_proof);
     BlockAlignerExecutionProof changed_proof;
     const KswAlignResult changed = block_aligner_align_pair<false>(
         query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), nw1,
-        dormant_changed, BlockAlignerPhase::GapExtension, &changed_proof);
+        fixed_alignment_kernels<seq::dna4>(), dormant_changed,
+        BlockAlignerPhase::GapExtension, &changed_proof);
 
     CHECK(first.score == 7);
     CHECK(changed.score == first.score);
@@ -1496,7 +1512,8 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and proof is exac
     (void)block_aligner_align_pair<false>(
         query_view, reference_view,
         0, query_data.size(), 0, reference_data.size(), changed_scoring,
-        first_params, BlockAlignerPhase::GapExtension, &scoring_proof);
+        fixed_alignment_kernels<seq::dna4>(), first_params,
+        BlockAlignerPhase::GapExtension, &scoring_proof);
     CHECK(scoring_proof.config_identity_xor
           != first_proof.config_identity_xor);
     CHECK(scoring_proof.config_identity_sum
@@ -1511,12 +1528,14 @@ TEST_CASE("Block minimap projection ignores dormant KSW fields and proof is exac
     BlockAlignerExecutionProof left_proof;
     const KswAlignResult projected_left = block_aligner_align_pair<false>(
         query_view, reference_view,
-        0, query_data.size(), 0, reference_data.size(), nw1, first_params,
+        0, query_data.size(), 0, reference_data.size(), nw1,
+        fixed_alignment_kernels<seq::dna4>(), first_params,
         BlockAlignerPhase::LeftExtension, &left_proof);
     BlockAlignerExecutionProof right_proof;
     const KswAlignResult projected_right = block_aligner_align_pair<false>(
         query_view, reference_view,
-        0, query_data.size(), 0, reference_data.size(), nw1, first_params,
+        0, query_data.size(), 0, reference_data.size(), nw1,
+        fixed_alignment_kernels<seq::dna4>(), first_params,
         BlockAlignerPhase::RightExtension, &right_proof);
     CHECK(projected_left.score >= 0);
     CHECK(projected_right.score >= 0);

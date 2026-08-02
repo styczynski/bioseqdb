@@ -106,15 +106,15 @@ template <class D, class FillT>
 /**
  * @brief Per-lane sequence byte gather.
  *
- * Walks each fill's `(offset_field, step)` tuple, samples the
- * sequence byte at `offset_field + step`, and packs the bytes into
+ * Walks each fill's `(offset_field, length_field, step)` tuple, samples the
+ * sequence byte at the fill-relative step, and packs the bytes into
  * an int16_t-lane vector.  Lanes past `n_fills` receive zero (a benign
  * value — the surrounding code already masks them off via the
  * per-lane alive predicate).
  *
  * The `Reverse` template parameter distinguishes forward- and
  * reverse-strand fills; for `Reverse == true` the kernel substitutes
- * `(target_len - 1 - step)` for the per-step index so the same
+ * `(fill_len - 1 - step)` for the per-step index so the same
  * compact_sequence_range can serve both strand orientations without
  * the runtime branch shipped in today's `ksw2_align_pair<reverse>`.
  *
@@ -127,6 +127,7 @@ template <class D, bool Reverse, class FillT, class Range>
 [[gnu::always_inline]] inline hn::Vec<D> lane_gather_seq_byte(
     const FillT*                         fills,
     std::size_t                          offset_bytes,
+    std::size_t                          length_bytes,
     std::int32_t                         step,
     std::size_t                          n_fills,
     const compact_sequence_range<Range>& seq,
@@ -139,19 +140,20 @@ template <class D, bool Reverse, class FillT, class Range>
         if (l < n_fills) {
             const auto* base = reinterpret_cast<const std::uint8_t*>(fills + l);
             std::int32_t fill_offset;
+            std::int32_t fill_length;
             std::memcpy(&fill_offset, base + offset_bytes, sizeof(std::int32_t));
-            std::size_t pos;
-            if constexpr (Reverse) {
-                const std::int64_t reversed =
-                    static_cast<std::int64_t>(seq_len) - 1 -
-                    static_cast<std::int64_t>(fill_offset + step);
-                pos = reversed >= 0
-                    ? static_cast<std::size_t>(reversed)
-                    : std::size_t{0};
-            } else {
-                pos = static_cast<std::size_t>(fill_offset + step);
-            }
-            if (pos < seq_len) {
+            std::memcpy(&fill_length, base + length_bytes, sizeof(std::int32_t));
+            const bool step_in_fill = step >= 0 && fill_length > 0
+                && step < fill_length;
+            const std::int64_t relative_position = Reverse
+                ? static_cast<std::int64_t>(fill_length) - 1 - step
+                : static_cast<std::int64_t>(step);
+            const std::int64_t absolute_position =
+                static_cast<std::int64_t>(fill_offset) + relative_position;
+            if (step_in_fill && absolute_position >= 0
+                && static_cast<std::uint64_t>(absolute_position) < seq_len) {
+                const std::size_t pos = static_cast<std::size_t>(
+                    absolute_position);
                 // Use the compact range's iter<BP>() to extract a single
                 // sequence byte at the given position.
                 auto it = seq.template iter<BP>(seq.begin());
