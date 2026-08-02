@@ -4427,14 +4427,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "299cb34bf4e62dab5184ec191afa6fa06963cde4eb65ef2006574e3f263865d1",
+        "sha256": "90715812e8f9d93f321de78b8d9961bd3f426eccb67215622cdc7299da8263ae",
         "span": {
-          "byte_begin": 821017,
-          "byte_end": 825762,
+          "byte_begin": 823320,
+          "byte_end": 828065,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 20810,
-          "line_end": 20923
+          "line_begin": 20874,
+          "line_end": 20987
         }
       },
       "source_id": "S488",
@@ -4530,14 +4530,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "299cb34bf4e62dab5184ec191afa6fa06963cde4eb65ef2006574e3f263865d1",
+        "sha256": "90715812e8f9d93f321de78b8d9961bd3f426eccb67215622cdc7299da8263ae",
         "span": {
-          "byte_begin": 388924,
-          "byte_end": 394422,
+          "byte_begin": 391227,
+          "byte_end": 396725,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 9739,
-          "line_end": 9904
+          "line_begin": 9803,
+          "line_end": 9968
         }
       },
       "source_id": "S482",
@@ -6107,14 +6107,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "299cb34bf4e62dab5184ec191afa6fa06963cde4eb65ef2006574e3f263865d1",
+        "sha256": "90715812e8f9d93f321de78b8d9961bd3f426eccb67215622cdc7299da8263ae",
         "span": {
-          "byte_begin": 557962,
-          "byte_end": 570718,
+          "byte_begin": 560265,
+          "byte_end": 573021,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 14163,
-          "line_end": 14462
+          "line_begin": 14227,
+          "line_end": 14526
         }
       },
       "source_id": "S485",
@@ -6156,14 +6156,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "299cb34bf4e62dab5184ec191afa6fa06963cde4eb65ef2006574e3f263865d1",
+        "sha256": "90715812e8f9d93f321de78b8d9961bd3f426eccb67215622cdc7299da8263ae",
         "span": {
-          "byte_begin": 838145,
-          "byte_end": 839287,
+          "byte_begin": 840448,
+          "byte_end": 841590,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 21212,
-          "line_end": 21246
+          "line_begin": 21276,
+          "line_end": 21310
         }
       },
       "source_id": "S479",
