@@ -82,6 +82,15 @@ namespace detail {
     return output.str();
 }
 
+[[nodiscard]] inline std::uint64_t compiled_target_mask(
+    const target_manifest& inventory) noexcept {
+    std::uint64_t result = 0;
+    for (const target_spec& target : inventory.targets) {
+        result |= target.bit;
+    }
+    return result;
+}
+
 [[nodiscard]] inline std::string diagnostic_source_path(
     const std::filesystem::path& source) {
     const std::string value = source.generic_string();
@@ -451,6 +460,9 @@ collect_alignment_families(
            << "HWY_ATTR const HighwayTargetBinding* BindHighwayTarget() noexcept {\n"
            << "    static const HighwayKernelTable kernels = "
               "MakeHighwayKernelTable();\n"
+           << "    if (!kernels.complete()) {\n"
+           << "        return nullptr;\n"
+           << "    }\n"
            << "    static const HighwayTargetBinding binding{\n"
            << "        .target = HWY_TARGET,\n"
            << "        .target_name = hwy::TargetName(HWY_TARGET),\n"
@@ -463,37 +475,61 @@ collect_alignment_families(
     return output.str();
 }
 
-[[nodiscard]] inline std::string render_dispatch_registry(
+[[nodiscard]] inline std::string render_dispatch_registry_partition(
     const generation_plan& plan) {
-    std::uint64_t compiled_mask = 0;
-    for (const target_spec& target : plan.target_inventory.targets) {
-        compiled_mask |= target.bit;
-    }
     std::ostringstream output;
     output << dispatch_fragment(plan.target_inventory)
            << "// Generated single Highway dispatch registry; do not edit.\n"
-           << "module " << plan.source_inventory.dispatch_module << ";\n\n"
+           << "module " << plan.source_inventory.dispatch_module
+           << ":highway_registry;\n\n"
+           << "import " << plan.source_inventory.dispatch_module << ";\n"
            << "import " << plan.source_inventory.contract_module << ";\n";
     for (const target_spec& target : plan.target_inventory.targets) {
         output << "import " << generated_module_name(target) << ";\n";
     }
     output << "\nnamespace bioseq::simd_dispatch {\n\n"
-           << "HighwayDispatchInfo registered_highway_dispatch_info() noexcept {\n"
-           << "    return highway_dispatch_info(static_cast<std::int64_t>("
-           << compiled_mask << "ULL));\n"
-           << "}\n\n"
            << "HWY_EXPORT(BindHighwayTarget);\n\n"
            << "const HighwayTargetBinding& select_highway_target_once(\n"
               "    const HighwayDispatchInfo& plan) {\n"
+           << "    if (plan.planned_target == 0\n"
+              "        || (plan.runnable_targets & plan.planned_target) == 0) {\n"
+           << "        throw std::logic_error{\n"
+              "            \"Highway dispatch plan has no runnable planned target\"};\n"
+           << "    }\n"
            << "    hwy::GetChosenTarget().Update(\n"
               "        plan.cpu_supported_targets);\n"
            << "    const auto* binding = "
               "HWY_DYNAMIC_DISPATCH(BindHighwayTarget)();\n"
-           << "    if (binding == nullptr || binding->kernels == nullptr) {\n"
+           << "    if (binding == nullptr || binding->target == 0\n"
+              "        || binding->target_name == nullptr\n"
+              "        || binding->kernels == nullptr\n"
+              "        || !binding->kernels->complete()) {\n"
            << "        throw std::logic_error{"
               "\"Highway target binder returned an incomplete table\"};\n"
            << "    }\n"
+           << "    if (binding->target != plan.planned_target) {\n"
+           << "        throw std::logic_error{\n"
+              "            \"Highway dynamic dispatch disagrees with the planned target\"};\n"
+           << "    }\n"
            << "    return *binding;\n"
+           << "}\n\n"
+           << "}  // namespace bioseq::simd_dispatch\n";
+    return output.str();
+}
+
+[[nodiscard]] inline std::string render_dispatch_inventory(
+    const generation_plan& plan) {
+    const std::uint64_t compiled_mask =
+        compiled_target_mask(plan.target_inventory);
+    std::ostringstream output;
+    output << "module;\n\n"
+           << "#include <cstdint>\n\n"
+           << "// Generated cold Highway inventory; do not edit.\n"
+           << "module " << plan.source_inventory.contract_module << ";\n\n"
+           << "namespace bioseq::simd_dispatch {\n\n"
+           << "HighwayDispatchInfo registered_highway_dispatch_info() noexcept {\n"
+           << "    return highway_dispatch_info(static_cast<std::int64_t>("
+           << compiled_mask << "ULL));\n"
            << "}\n\n"
            << "}  // namespace bioseq::simd_dispatch\n";
     return output.str();
@@ -517,6 +553,10 @@ collect_alignment_families(
            << "    if (binding == nullptr || binding->kernels == nullptr) {\n"
            << "        throw std::logic_error{"
               "\"generated fixed-target test binding is incomplete\"};\n"
+           << "    }\n"
+           << "    if (!binding->kernels->complete()) {\n"
+           << "        throw std::logic_error{"
+              "\"generated fixed-target test table is incomplete\"};\n"
            << "    }\n"
            << "    return *binding;\n"
            << "}\n\n"
@@ -561,17 +601,31 @@ inline void validate_rendered_artifact(const generated_artifact& artifact) {
                 + std::string{spelling} + "'");
         }
     }
-    if (artifact.kind == artifact_kind::dispatch_registry) {
+    if (artifact.kind == artifact_kind::dispatch_registry_partition) {
         if (count_text(artifact.content, "HWY_EXPORT(") != 1
-            || count_text(artifact.content, "HWY_DYNAMIC_DISPATCH(") != 1) {
+            || count_text(artifact.content, "HWY_DYNAMIC_DISPATCH(") != 1
+            || artifact.content.contains(
+                "registered_highway_dispatch_info")) {
             throw std::runtime_error(
-                "generated dispatch registry must own exactly one export and dispatch");
+                "generated dispatch registry partition must own exactly one "
+                "export/dispatch and no cold inventory");
         }
     } else if (artifact.content.contains("HWY_EXPORT(")
                || artifact.content.contains("HWY_DYNAMIC_DISPATCH(")) {
         throw std::runtime_error(
             artifact.relative_path.string()
             + ": dispatch macros escaped the single generated registry");
+    }
+    if (artifact.kind
+            == artifact_kind::dispatch_inventory_implementation
+        && (!artifact.content.contains(
+                "registered_highway_dispatch_info() noexcept")
+            || artifact.content.contains("select_highway_target_once")
+            || artifact.content.contains("bioseq.highway.generated.")
+            || artifact.content.contains("HWY_TARGET"))) {
+        throw std::runtime_error(
+            "generated dispatch inventory must contain only the cold neutral "
+            "compiled-target binding");
     }
     if (artifact.kind == artifact_kind::primary
         && (artifact.content.contains("#include <hwy/")
@@ -637,10 +691,17 @@ inline void reject_symlink_destination(
         }
     }
     result.artifacts.push_back(generated_artifact{
-        .relative_path = "dispatch_registry.cppm",
-        .module_name = plan.source_inventory.dispatch_module,
-        .kind = artifact_kind::dispatch_registry,
-        .content = detail::render_dispatch_registry(plan),
+        .relative_path = "highway_registry.cppm",
+        .module_name =
+            plan.source_inventory.dispatch_module + ":highway_registry",
+        .kind = artifact_kind::dispatch_registry_partition,
+        .content = detail::render_dispatch_registry_partition(plan),
+    });
+    result.artifacts.push_back(generated_artifact{
+        .relative_path = "dispatch_inventory.cppm",
+        .module_name = plan.source_inventory.contract_module,
+        .kind = artifact_kind::dispatch_inventory_implementation,
+        .content = detail::render_dispatch_inventory(plan),
     });
     result.artifacts.push_back(generated_artifact{
         .relative_path = "test_support.cppm",
@@ -665,6 +726,8 @@ inline void reject_symlink_destination(
         }
         if (artifact.kind == artifact_kind::primary
             || artifact.kind == artifact_kind::partition
+            || artifact.kind
+                == artifact_kind::dispatch_registry_partition
             || artifact.kind == artifact_kind::test_support) {
             if (!providers.insert(artifact.module_name).second) {
                 throw std::runtime_error(

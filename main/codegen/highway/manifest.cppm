@@ -176,7 +176,10 @@ inline void require_field_count(
         case artifact_kind::primary: return "primary";
         case artifact_kind::binder: return "binder";
         case artifact_kind::partition: return "partition";
-        case artifact_kind::dispatch_registry: return "dispatch_registry";
+        case artifact_kind::dispatch_registry_partition:
+            return "dispatch_registry_partition";
+        case artifact_kind::dispatch_inventory_implementation:
+            return "dispatch_inventory_implementation";
         case artifact_kind::test_support: return "test_support";
     }
     return "unknown";

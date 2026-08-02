@@ -147,6 +147,7 @@ module;
 
 module bioseq.scheduler.dispatch_processor;
 
+import :highway_registry;
 import bioseq.common.mlogging;
 import bioseq.common.hashing;
 import bioseq.common.sequan_compat;
@@ -500,6 +501,7 @@ dispatch_process_sequences_typed(
         ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
     if (highway_binding.target == 0
         || highway_binding.kernels == nullptr
+        || !highway_binding.kernels->complete()
         || highway_binding.target != highway_plan.planned_target) {
         throw std::logic_error{
             "Highway runtime binding disagrees with the generated target plan"};

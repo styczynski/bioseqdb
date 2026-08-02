@@ -22,7 +22,7 @@ module;
 
 module bioseq.scheduler.dispatch_buffer_api;
 
-import bioseq.scheduler.dispatch_processor;
+import bioseq.highway.dispatch_contract;
 import bioseq.scheduler.dispatch_buffer;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;

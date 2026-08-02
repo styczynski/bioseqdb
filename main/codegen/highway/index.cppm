@@ -324,13 +324,13 @@ inline void run_contract_self_test() {
             .highway_digest =
                 "00000000000000000000000000000000"
                 "00000000000000000000000000000000",
-            .static_target_token = "HWY_SCALAR",
+            .static_target_token = "HWY_EMU128",
             .targets = {
                 target_spec{
                     .platform = "x86_64",
-                    .slug = "scalar",
-                    .token = "HWY_SCALAR",
-                    .name_space = "N_SCALAR",
+                    .slug = "emu128",
+                    .token = "HWY_EMU128",
+                    .name_space = "N_EMU128",
                     .bit = 1,
                 },
             },
@@ -346,14 +346,29 @@ inline void run_contract_self_test() {
     const auto registry = std::ranges::find_if(
         generated.artifacts,
         [](const generated_artifact& artifact) {
-            return artifact.kind == artifact_kind::dispatch_registry;
+            return artifact.kind
+                == artifact_kind::dispatch_registry_partition;
         });
-    if (generated.artifacts.size() != 4
+    const auto inventory = std::ranges::find_if(
+        generated.artifacts,
+        [](const generated_artifact& artifact) {
+            return artifact.kind
+                == artifact_kind::dispatch_inventory_implementation;
+        });
+    if (generated.artifacts.size() != 5
         || registry == generated.artifacts.end()
+        || inventory == generated.artifacts.end()
         || registry->content.find("HWY_DYNAMIC_DISPATCH(")
             == std::string::npos
+        || registry->content.find("registered_highway_dispatch_info")
+            != std::string::npos
+        || inventory->content.find("registered_highway_dispatch_info")
+            == std::string::npos
         || generated.artifact_manifest_json.find(
-               "\"path\":\"dispatch_registry.cppm\"")
+               "\"path\":\"highway_registry.cppm\"")
+            == std::string::npos
+        || generated.artifact_manifest_json.find(
+               "\"path\":\"dispatch_inventory.cppm\"")
             == std::string::npos
         || generated.artifact_manifest_json.find(
                "\"path\":\"test_support.cppm\"")

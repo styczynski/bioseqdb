@@ -23,7 +23,7 @@ export import bioseq.sequences.kmers.highway_contract;
 
 import bioseq.sequences.prefilters.sneaky_snake;
 import bioseq.sequences.chaining.simd;
-import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.grouped32_contract;
 
 export namespace bioseq::simd_dispatch {
 
@@ -145,6 +145,32 @@ struct HighwayKernelTable final {
     {
         return (available_kernels & required) == required;
     }
+
+    /** Fail closed unless every generated coarse family and typed table exists. */
+    [[nodiscard]] bool complete() const noexcept {
+        if (!available_kernels.all()
+            || minimizers.reference_minimap_int == nullptr
+            || minimizers.two_stack_nthash == nullptr
+            || minimizers.paper_nthash == nullptr
+            || common.sneaky_snake_simd_batch == nullptr
+            || chaining.chain_anchors_simd == nullptr
+            || indexing.validate_non_scatter_local32_w2 == nullptr
+            || alignment_by_alphabet.empty()) {
+            return false;
+        }
+        for (std::size_t index = 0;
+             index < alignment_by_alphabet.size();
+             ++index) {
+            const auto& entry = alignment_by_alphabet[index];
+            if (entry.typed_table == nullptr
+                || (index != 0u
+                    && alignment_by_alphabet[index - 1u].alphabet_code
+                        >= entry.alphabet_code)) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 /** Neutral value returned by each generated target's binder. */
@@ -163,6 +189,10 @@ static_assert(std::is_trivially_copyable_v<HighwayTargetBinding>);
  */
 [[nodiscard]] HighwayDispatchInfo highway_dispatch_info(
     std::int64_t compiled_targets) noexcept;
+
+/** Return cold metadata for the exact generated target inventory. */
+[[nodiscard]] HighwayDispatchInfo
+registered_highway_dispatch_info() noexcept;
 
 /** Format each single target bit in Highway priority order via TargetName(). */
 [[nodiscard]] std::vector<std::string_view> highway_target_names(

@@ -20,18 +20,14 @@ HighwayDispatchInfo highway_dispatch_info(
     const std::int64_t cpu_supported_targets = hwy::SupportedTargets();
     const std::int64_t runnable_targets =
         compiled_targets & cpu_supported_targets;
-
-    // Highway's dispatch priority is the least-significant runnable target
-    // bit. Do not use SupportedAndGeneratedTargets() here: this cold-path
-    // implementation unit is intentionally outside the generated registry
-    // and therefore need not have the registry's exact HWY_TARGETS policy.
-    // The generated compiled mask is the authority for what this binary can
-    // call, while SupportedTargets() remains the authority for CPU/OS support.
-    const auto runnable_bits = static_cast<std::uint64_t>(runnable_targets);
-    const std::int64_t planned_target = runnable_bits == 0
-        ? 0
-        : static_cast<std::int64_t>(
-            runnable_bits & (~runnable_bits + std::uint64_t{1}));
+    std::int64_t planned_target = 0;
+    for (const std::int64_t target :
+         hwy::SupportedAndGeneratedTargets()) {
+        if ((runnable_targets & target) != 0) {
+            planned_target = target;
+            break;
+        }
+    }
 
     return HighwayDispatchInfo{
         .compiled_targets = compiled_targets,

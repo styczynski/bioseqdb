@@ -482,6 +482,30 @@ inline void validate_prepare_command_line(prepare_command_line& command) {
     }
 }
 
+inline void validate_complete_table_target_policy(
+    const target_manifest& targets) {
+    const bool contains_scalar = std::ranges::any_of(
+        targets.targets,
+        [](const target_spec& target) {
+            return target.token == "HWY_SCALAR";
+        });
+    const bool contains_emu128 = std::ranges::any_of(
+        targets.targets,
+        [](const target_spec& target) {
+            return target.token == "HWY_EMU128";
+        });
+    if (contains_scalar) {
+        throw std::runtime_error(
+            "Highway target inventory must exclude HWY_SCALAR because the "
+            "complete kernel table requires at least eight SIMD lanes");
+    }
+    if (!contains_emu128) {
+        throw std::runtime_error(
+            "Highway target inventory must retain HWY_EMU128 as the portable "
+            "complete-table fallback");
+    }
+}
+
 inline void validate_inventories(
     const target_manifest& targets,
     const source_manifest& sources) {
@@ -518,6 +542,7 @@ inline void validate_inventories(
             || !detail::identifier(target.name_space)
             || !target.token.starts_with("HWY_")
             || !target.name_space.starts_with("N_")
+            || target.bit == 0u
             || (target.bit & (target.bit - 1U)) != 0) {
             throw std::runtime_error(
                 "invalid Highway target record for token '" + target.token + "'");
@@ -536,6 +561,7 @@ inline void validate_inventories(
                 "duplicate Highway target token or generated module identity");
         }
     }
+    validate_complete_table_target_policy(targets);
     if (!detail::identifier(targets.static_target_token)
         || !tokens.contains(targets.static_target_token)) {
         throw std::runtime_error(
@@ -544,7 +570,8 @@ inline void validate_inventories(
     }
 
     if (!detail::module_name(sources.contract_module)
-        || !detail::module_name(sources.dispatch_module)) {
+        || !detail::module_name(sources.dispatch_module)
+        || sources.contract_module == sources.dispatch_module) {
         throw std::runtime_error("invalid Highway contract or dispatch module name");
     }
 

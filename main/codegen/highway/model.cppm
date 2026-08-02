@@ -117,7 +117,8 @@ enum class artifact_kind : std::uint8_t {
     primary,
     binder,
     partition,
-    dispatch_registry,
+    dispatch_registry_partition,
+    dispatch_inventory_implementation,
     test_support,
 };
 

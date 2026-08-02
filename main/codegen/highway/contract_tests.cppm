@@ -73,20 +73,20 @@ inline void require_rejected(Function&& function, std::string_view message) {
             .highway_digest =
                 "00000000000000000000000000000000"
                 "00000000000000000000000000000000",
-            .static_target_token = "HWY_SCALAR",
+            .static_target_token = "HWY_EMU128",
             .targets = {
-                target_spec{
-                    .platform = "x86",
-                    .slug = "scalar",
-                    .token = "HWY_SCALAR",
-                    .name_space = "N_SCALAR",
-                    .bit = 1u,
-                },
                 target_spec{
                     .platform = "x86",
                     .slug = "emu128",
                     .token = "HWY_EMU128",
                     .name_space = "N_EMU128",
+                    .bit = 1u,
+                },
+                target_spec{
+                    .platform = "x86",
+                    .slug = "sse2",
+                    .token = "HWY_SSE2",
+                    .name_space = "N_SSE2",
                     .bit = 2u,
                 },
             },
@@ -233,17 +233,50 @@ inline void verify_slot_callable_ownership() {
         "a callable assigned to the wrong source owner is rejected");
 }
 
+inline void verify_complete_table_target_policy() {
+    const generation_plan valid = two_target_plan();
+    validate_complete_table_target_policy(valid.target_inventory);
+
+    generation_plan scalar = valid;
+    scalar.target_inventory.targets.push_back(target_spec{
+        .platform = "x86",
+        .slug = "scalar",
+        .token = "HWY_SCALAR",
+        .name_space = "N_SCALAR",
+        .bit = 4u,
+    });
+    require_rejected(
+        [&] {
+            validate_complete_table_target_policy(
+                scalar.target_inventory);
+        },
+        "the complete-table target policy rejects HWY_SCALAR");
+
+    generation_plan no_emu128 = valid;
+    no_emu128.target_inventory.targets.erase(
+        no_emu128.target_inventory.targets.begin());
+    no_emu128.target_inventory.static_target_token = "HWY_SSE2";
+    require_rejected(
+        [&] {
+            validate_complete_table_target_policy(
+                no_emu128.target_inventory);
+        },
+        "the complete-table target policy retains HWY_EMU128");
+}
+
 inline void verify_generated_closure() {
     const generation_result generated = render_generation(two_target_plan());
     require(
-        generated.artifacts.size() == 8u,
+        generated.artifacts.size() == 9u,
         "two targets and one source produce two primaries, binders, "
-        "partitions, one registry, and fixed-target test support");
+        "partitions, one private registry, one cold inventory, and "
+        "fixed-target test support");
 
     std::size_t primary_count = 0;
     std::size_t binder_count = 0;
     std::size_t partition_count = 0;
     std::size_t registry_count = 0;
+    std::size_t inventory_count = 0;
     std::size_t test_support_count = 0;
     std::size_t export_count = 0;
     std::size_t dispatch_count = 0;
@@ -257,7 +290,8 @@ inline void verify_generated_closure() {
         dispatch_count += occurrences(
             artifact.content, "HWY_DYNAMIC_DISPATCH(");
 
-        if (artifact.kind != artifact_kind::dispatch_registry) {
+        if (artifact.kind
+            != artifact_kind::dispatch_registry_partition) {
             require(
                 !artifact.content.contains("HWY_EXPORT(")
                     && !artifact.content.contains("HWY_DYNAMIC_DISPATCH("),
@@ -285,6 +319,7 @@ inline void verify_generated_closure() {
                 ++binder_count;
                 require(
                     artifact.content.contains("MakeHighwayKernelTable")
+                        && artifact.content.contains("kernels.complete()")
                         && artifact.content.contains(
                             "highway_kernel_set(HighwayKernelId::"
                             "prefilter_sneaky_snake_simd_batch)")
@@ -302,25 +337,49 @@ inline void verify_generated_closure() {
                             "import bioseq.fixture.neutral;"),
                     "each target/source partition fixes its target and rewrites the callable");
                 break;
-            case artifact_kind::dispatch_registry:
+            case artifact_kind::dispatch_registry_partition:
                 ++registry_count;
                 require(
                     occurrences(artifact.content, "HWY_EXPORT(") == 1u
                         && occurrences(
                             artifact.content, "HWY_DYNAMIC_DISPATCH(") == 1u
+                        && artifact.module_name
+                            == "bioseq.scheduler.dispatch_processor:highway_registry"
                         && artifact.content.contains(
-                            "registered_highway_dispatch_info()")
+                            "module bioseq.scheduler.dispatch_processor:highway_registry;")
                         && artifact.content.contains(
-                            "static_cast<std::int64_t>(3ULL)"),
-                    "the registry owns one dispatch and the exact compiled mask");
+                            "binding->kernels->complete()")
+                        && !artifact.content.contains(
+                            "registered_highway_dispatch_info"),
+                    "the private registry partition owns one dispatch and no "
+                    "cold inventory");
+                break;
+            case artifact_kind::dispatch_inventory_implementation:
+                ++inventory_count;
+                require(
+                    artifact.module_name
+                            == "bioseq.highway.dispatch_contract"
+                        && artifact.content.contains(
+                            "module bioseq.highway.dispatch_contract;")
+                        && artifact.content.contains(
+                            "registered_highway_dispatch_info() noexcept")
+                        && artifact.content.contains(
+                            "static_cast<std::int64_t>(3ULL)")
+                        && !artifact.content.contains("HWY_EXPORT(")
+                        && !artifact.content.contains(
+                            "HWY_DYNAMIC_DISPATCH(")
+                        && !artifact.content.contains(
+                            "bioseq.highway.generated."),
+                    "the cold contract implementation owns only the exact "
+                    "compiled mask");
                 break;
             case artifact_kind::test_support:
                 ++test_support_count;
                 require(
                     artifact.module_name == "bioseq.highway.test_support"
-                        && artifact.target_token == "HWY_SCALAR"
+                        && artifact.target_token == "HWY_EMU128"
                         && artifact.content.contains(
-                            "N_SCALAR::BindHighwayTarget()")
+                            "N_EMU128::BindHighwayTarget()")
                         && artifact.content.contains(
                             "highway_test_kernel_table()")
                         && !artifact.content.contains("HWY_DYNAMIC_DISPATCH("),
@@ -333,7 +392,7 @@ inline void verify_generated_closure() {
     require(
         primary_count == 2u && binder_count == 2u
             && partition_count == 2u && registry_count == 1u
-            && test_support_count == 1u,
+            && inventory_count == 1u && test_support_count == 1u,
         "the generated artifact-kind closure is exact");
     require(
         export_count == 1u && dispatch_count == 1u,
@@ -341,19 +400,21 @@ inline void verify_generated_closure() {
     require(
         target_source_closure
             == std::set<std::pair<std::string, std::string>>{
-                {"HWY_SCALAR", "prefilter"},
                 {"HWY_EMU128", "prefilter"},
+                {"HWY_SSE2", "prefilter"},
             },
         "every target has exactly one generated partition for every registered source");
     require(
         generated.artifact_manifest_json.contains(
-            "\"path\":\"dispatch_registry.cppm\"")
+            "\"path\":\"highway_registry.cppm\"")
+            && generated.artifact_manifest_json.contains(
+                "\"path\":\"dispatch_inventory.cppm\"")
             && generated.artifact_manifest_json.contains(
                 "\"path\":\"test_support.cppm\"")
             && generated.artifact_manifest_json.contains(
-                "\"path\":\"x86/scalar/fixture.cppm\"")
+                "\"path\":\"x86/emu128/fixture.cppm\"")
             && generated.artifact_manifest_json.contains(
-                "\"path\":\"x86/emu128/fixture.cppm\""),
+                "\"path\":\"x86/sse2/fixture.cppm\""),
         "the artifact manifest records the complete generated topology");
 }
 
@@ -436,6 +497,7 @@ inline void verify_typed_alignment_binder() {
 void run_highway_contract_self_tests() {
     contract_detail::verify_exact_structural_marker();
     contract_detail::verify_slot_callable_ownership();
+    contract_detail::verify_complete_table_target_policy();
     contract_detail::verify_generated_closure();
     contract_detail::verify_typed_alignment_binder();
 }
