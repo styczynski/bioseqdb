@@ -7,8 +7,6 @@
  */
 module;
 
-#include <hwy/highway.h>
-
 #include "common.h"
 
 #include <cstdint>
@@ -21,11 +19,7 @@ export module bioseq.sequences.cigar;
 
 import bioseq.common.mlogging;
 
-export {
-
-HWY_BEFORE_NAMESPACE();
-
-namespace bioseq::simd::HWY_NAMESPACE {
+export namespace bioseq::simd {
 
 // ============================================================================
 // CIGAR operation codes — matches minimap2 (minimap.h) and KSW2
@@ -196,8 +190,4 @@ private:
     size_t idx_ = 1;
 };
 
-}  // namespace bioseq::simd::HWY_NAMESPACE
-
-HWY_AFTER_NAMESPACE();
-
-}  // export
+}  // namespace bioseq::simd

@@ -9,10 +9,6 @@
  */
 module;
 
-#include <hwy/highway.h>
-
-#include "common.h"
-
 #include <algorithm>
 #include <bit>
 #include <cstddef>
@@ -20,18 +16,14 @@ module;
 #include <cstring>
 #include <limits>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 export module bioseq.sequences.prefilters.sneaky_snake;
 
 export import bioseq.sequences.prefilters.prefilter_types;
 
-export {
-
-HWY_BEFORE_NAMESPACE();
-namespace bioseq::simd::HWY_NAMESPACE {
-namespace hn = hwy::HWY_NAMESPACE;
-namespace prefilters = bioseq::sequences::prefilters;
+export namespace bioseq::sequences::prefilters {
 
 /// Production maze geometry shared by the CPU and Vulkan implementations.
 inline constexpr std::uint32_t sneaky_snake_default_submaze_width = 512u;
@@ -44,14 +36,21 @@ struct SneakySnakeOptions {
     std::uint32_t max_escape_segments = 0u;
 };
 
+static_assert(std::is_standard_layout_v<SneakySnakeOptions>);
+static_assert(std::is_trivially_copyable_v<SneakySnakeOptions>);
+static_assert(sizeof(SneakySnakeOptions) == 2u * sizeof(std::uint32_t));
+static_assert(alignof(SneakySnakeOptions) == alignof(std::uint32_t));
+static_assert(offsetof(SneakySnakeOptions, submaze_width) == 0u);
+static_assert(offsetof(SneakySnakeOptions, max_escape_segments) == 4u);
+
 namespace sneaky_snake_detail {
 
-[[nodiscard]] constexpr prefilters::PrefilterResult make_result(
+[[nodiscard]] constexpr PrefilterResult make_result(
     std::uint32_t lower_bound,
-    prefilters::PrefilterStatus status,
+    PrefilterStatus status,
     bool accepted) noexcept
 {
-    return prefilters::make_prefilter_result(lower_bound, status, accepted);
+    return make_prefilter_result(lower_bound, status, accepted);
 }
 
 [[nodiscard]] constexpr std::uint32_t effective_width(
@@ -153,93 +152,52 @@ namespace sneaky_snake_detail {
     return run;
 }
 
-template <class D>
-[[nodiscard]] inline std::uint32_t diagonal_run_highway(
-    D d,
-    std::span<const std::uint8_t> query,
-    std::span<const std::uint8_t> target,
-    std::uint32_t position,
-    std::uint32_t submaze_end,
-    std::uint32_t query_index) noexcept
-{
-    const hn::Repartition<std::uint8_t, D> byte_d;
-    const std::uint32_t target_remaining = submaze_end - position;
-    const std::uint32_t query_remaining = static_cast<std::uint32_t>(
-        query.size() - static_cast<std::size_t>(query_index));
-    const std::uint32_t run_limit = std::min(
-        target_remaining,
-        query_remaining);
-
-    const std::uint8_t* const query_data = query.data() + query_index;
-    const std::uint8_t* const target_data = target.data() + position;
-    if (run_limit == 0u || target_data[0] != query_data[0]) {
-        return 0u;
-    }
-
-    const std::uint32_t lanes = static_cast<std::uint32_t>(
-        hn::Lanes(byte_d));
-    std::uint32_t run = 1u;
-    while (run_limit - run >= 2u * lanes) {
-        const auto query_0 = hn::LoadU(byte_d, query_data + run);
-        const auto target_0 = hn::LoadU(byte_d, target_data + run);
-        const auto query_1 = hn::LoadU(byte_d, query_data + run + lanes);
-        const auto target_1 = hn::LoadU(byte_d, target_data + run + lanes);
-        const auto mismatch_0 = hn::Ne(query_0, target_0);
-        const auto mismatch_1 = hn::Ne(query_1, target_1);
-        if (!hn::AllFalse(byte_d, mismatch_0)) {
-            return run + static_cast<std::uint32_t>(
-                hn::FindFirstTrue(byte_d, mismatch_0));
-        }
-        if (!hn::AllFalse(byte_d, mismatch_1)) {
-            return run + lanes + static_cast<std::uint32_t>(
-                hn::FindFirstTrue(byte_d, mismatch_1));
-        }
-        run += 2u * lanes;
-    }
-    while (run_limit - run >= lanes) {
-        const auto mismatch = hn::Ne(
-            hn::LoadU(byte_d, query_data + run),
-            hn::LoadU(byte_d, target_data + run));
-        if (!hn::AllFalse(byte_d, mismatch)) {
-            return run + static_cast<std::uint32_t>(
-                hn::FindFirstTrue(byte_d, mismatch));
-        }
-        run += lanes;
-    }
-    while (run < run_limit
-           && target_data[run] == query_data[run]) {
-        ++run;
-    }
-    return run;
-}
-
-enum class CpuTraversal : std::uint8_t {
-    scalar,
-    highway,
-};
-
-template <CpuTraversal traversal, class D>
-[[nodiscard]] inline std::uint32_t diagonal_run_for(
-    D d,
-    std::span<const std::uint8_t> query,
-    std::span<const std::uint8_t> target,
-    std::uint32_t position,
-    std::uint32_t submaze_end,
-    std::uint32_t query_index) noexcept
-{
-    if constexpr (traversal == CpuTraversal::scalar) {
-        static_cast<void>(d);
+/** Scalar primitive policy for the target-neutral maze traversal. */
+struct ScalarTraversal final {
+    [[nodiscard]] std::uint32_t diagonal_run(
+        std::span<const std::uint8_t> query,
+        std::span<const std::uint8_t> target,
+        std::uint32_t position,
+        std::uint32_t submaze_end,
+        std::uint32_t query_index) const noexcept
+    {
         return diagonal_run_scalar(
             query, target, position, submaze_end, query_index);
-    } else {
-        return diagonal_run_highway(
-            d, query, target, position, submaze_end, query_index);
     }
-}
 
-template <CpuTraversal traversal, class D>
-[[nodiscard]] inline bool improve_diagonal_candidate(
-    D d,
+    template <class Consumer>
+    [[nodiscard]] bool visit_candidate_starts(
+        std::span<const std::uint8_t> query,
+        std::uint32_t filter_offset,
+        std::uint8_t filter_rank,
+        std::uint32_t position,
+        std::uint32_t lower,
+        std::uint32_t upper,
+        Consumer&& consume) const noexcept
+    {
+        for (std::uint32_t candidate = lower;
+             candidate <= upper;
+             ++candidate) {
+            if (candidate != position
+                && query[static_cast<std::size_t>(candidate) + filter_offset]
+                    == filter_rank
+                && consume(candidate)) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+/**
+ * Target-neutral SneakySnake maze control shared by scalar and generated
+ * fixed-target Highway policies. The policy owns only the two rank-scan
+ * primitives; maze geometry, escape accounting, and result semantics have one
+ * implementation in this facade.
+ */
+template <class Traversal>
+[[nodiscard]] inline bool improve_diagonal_candidate_with(
+    Traversal& traversal,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t position,
@@ -254,14 +212,14 @@ template <CpuTraversal traversal, class D>
         length - query_start);
     if (run_limit <= best) return false;
 
-    best = std::max(best, diagonal_run_for<traversal>(
-        d, query, target, position, submaze_end, query_start));
+    best = std::max(best, traversal.diagonal_run(
+        query, target, position, submaze_end, query_start));
     return best == remaining;
 }
 
-template <CpuTraversal traversal, class D>
-[[nodiscard]] inline std::uint32_t longest_diagonal_run_for(
-    D d,
+template <class Traversal>
+[[nodiscard]] inline std::uint32_t longest_diagonal_run_with(
+    Traversal& traversal,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t position,
@@ -269,8 +227,8 @@ template <CpuTraversal traversal, class D>
     std::uint32_t max_edits) noexcept
 {
     const std::uint32_t remaining = submaze_end - position;
-    std::uint32_t best = diagonal_run_for<traversal>(
-        d, query, target, position, submaze_end, position);
+    std::uint32_t best = traversal.diagonal_run(
+        query, target, position, submaze_end, position);
     if (best == remaining) {
         return best;
     }
@@ -290,66 +248,32 @@ template <CpuTraversal traversal, class D>
     const std::uint32_t upper = std::min(
         position + right,
         length - filter_offset - 1u);
-    std::uint32_t candidate = lower;
-
-    if constexpr (traversal == CpuTraversal::highway) {
-        using ByteD = hn::Repartition<std::uint8_t, D>;
-        const ByteD byte_d;
-        static_assert(hn::MaxLanes(ByteD{}) <= 64u);
-        const std::uint32_t lanes = static_cast<std::uint32_t>(
-            hn::Lanes(byte_d));
-        const auto wanted = hn::Set(byte_d, filter_rank);
-        while (candidate <= upper
-               && upper - candidate + 1u >= lanes) {
-            std::uint64_t matches = hn::BitsFromMask(
-                byte_d,
-                hn::Eq(
-                    hn::LoadU(
-                        byte_d,
-                        query.data() + candidate + filter_offset),
-                    wanted));
-            while (matches != 0u) {
-                const std::uint32_t lane = static_cast<std::uint32_t>(
-                    std::countr_zero(matches));
-                const std::uint32_t query_start = candidate + lane;
-                if (query_start != position
-                    && improve_diagonal_candidate<traversal>(
-                        d,
-                        query,
-                        target,
-                        position,
-                        submaze_end,
-                        query_start,
-                        best)) {
-                    return remaining;
-                }
-                matches &= matches - 1u;
-            }
-            candidate += lanes;
-        }
-    }
-
-    for (; candidate <= upper; ++candidate) {
-        if (candidate != position
-            && query[static_cast<std::size_t>(candidate) + filter_offset]
-                == filter_rank
-            && improve_diagonal_candidate<traversal>(
-                d,
+    const bool completed = traversal.visit_candidate_starts(
+        query,
+        filter_offset,
+        filter_rank,
+        position,
+        lower,
+        upper,
+        [&](const std::uint32_t candidate) noexcept {
+            return improve_diagonal_candidate_with(
+                traversal,
                 query,
                 target,
                 position,
                 submaze_end,
                 candidate,
-                best)) {
-            return remaining;
-        }
+                best);
+        });
+    if (completed) {
+        return remaining;
     }
     return best;
 }
 
-template <CpuTraversal traversal, class D>
-[[nodiscard]] inline prefilters::PrefilterResult equal_length_for(
-    D d,
+template <class Traversal>
+[[nodiscard]] inline PrefilterResult equal_length_with(
+    Traversal& traversal,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
@@ -357,7 +281,7 @@ template <CpuTraversal traversal, class D>
 {
     const std::uint32_t length = static_cast<std::uint32_t>(query.size());
     if (length == 0u) {
-        return make_result(0u, prefilters::PrefilterStatus::success, true);
+        return make_result(0u, PrefilterStatus::success, true);
     }
 
     const std::uint32_t width = effective_width(options);
@@ -374,8 +298,8 @@ template <CpuTraversal traversal, class D>
         std::uint32_t escapes = 0u;
 
         while (position < end && escapes < escape_limit) {
-            const std::uint32_t best = longest_diagonal_run_for<traversal>(
-                d, query, target, position, end, max_edits);
+            const std::uint32_t best = longest_diagonal_run_with(
+                traversal, query, target, position, end, max_edits);
             if (best == end - position) {
                 position = end;
                 break;
@@ -385,7 +309,7 @@ template <CpuTraversal traversal, class D>
             if (lower_bound > max_edits) {
                 return make_result(
                     lower_bound,
-                    prefilters::PrefilterStatus::success,
+                    PrefilterStatus::success,
                     false);
             }
             position += best + 1u;
@@ -395,14 +319,14 @@ template <CpuTraversal traversal, class D>
 
     return make_result(
         lower_bound,
-        prefilters::PrefilterStatus::success,
+        PrefilterStatus::success,
         lower_bound <= max_edits);
 }
 
 /// Evaluate one already-size-checked rank pair without repeating span limits.
-template <CpuTraversal traversal, class D>
-[[nodiscard]] inline prefilters::PrefilterResult bounded_for(
-    D d,
+template <class Traversal>
+[[nodiscard]] inline PrefilterResult bounded_with(
+    Traversal& traversal,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
@@ -416,29 +340,29 @@ template <CpuTraversal traversal, class D>
             : target_length - query_length;
         return make_result(
             difference,
-            prefilters::PrefilterStatus::conservative_unequal,
+            PrefilterStatus::conservative_unequal,
             difference <= max_edits);
     }
 
-    return equal_length_for<traversal>(
-        d, query, target, max_edits, options);
+    return equal_length_with(
+        traversal, query, target, max_edits, options);
 }
 
 /// Scalar traversal wrapper used by both public scalar entry points.
-[[nodiscard]] inline prefilters::PrefilterResult bounded_scalar(
+[[nodiscard]] inline PrefilterResult bounded_scalar(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
     SneakySnakeOptions options) noexcept
 {
-    return bounded_for<CpuTraversal::scalar>(
-        nullptr, query, target, max_edits, options);
+    ScalarTraversal traversal;
+    return bounded_with(traversal, query, target, max_edits, options);
 }
 
 } // namespace sneaky_snake_detail
 
 /// Scalar single-job entry point over rank spans.
-[[nodiscard]] inline prefilters::PrefilterResult sneaky_snake_scalar(
+[[nodiscard]] inline PrefilterResult sneaky_snake_scalar(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
@@ -447,7 +371,7 @@ template <CpuTraversal traversal, class D>
     constexpr std::size_t max_u32 = (std::numeric_limits<std::uint32_t>::max)();
     if (query.size() > max_u32 || target.size() > max_u32) {
         return sneaky_snake_detail::make_result(
-            0u, prefilters::PrefilterStatus::unsupported_conservative, true);
+            0u, PrefilterStatus::unsupported_conservative, true);
     }
 
     return sneaky_snake_detail::bounded_scalar(
@@ -455,16 +379,16 @@ template <CpuTraversal traversal, class D>
 }
 
 /// Scalar reference batch implementation over flat uint8 rank buffers.
-[[nodiscard]] inline std::vector<prefilters::PrefilterResult> sneaky_snake_scalar_batch(
-    const prefilters::PrefilterBatchInput& input,
+[[nodiscard]] inline std::vector<PrefilterResult> sneaky_snake_scalar_batch(
+    const PrefilterBatchInput& input,
     SneakySnakeOptions options = {})
 {
-    std::vector<prefilters::PrefilterResult> results(input.jobs.size());
+    std::vector<PrefilterResult> results(input.jobs.size());
     for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
-        const prefilters::PrefilterJob& job = input.jobs[index];
-        if (!prefilters::prefilter_job_in_bounds(input, job)) {
+        const PrefilterJob& job = input.jobs[index];
+        if (!prefilter_job_in_bounds(input, job)) {
             results[index] = sneaky_snake_detail::make_result(
-                0u, prefilters::PrefilterStatus::unsupported_conservative, true);
+                0u, PrefilterStatus::unsupported_conservative, true);
             continue;
         }
         results[index] = sneaky_snake_detail::bounded_scalar(
@@ -476,45 +400,4 @@ template <CpuTraversal traversal, class D>
     return results;
 }
 
-/// Highway batch implementation with contiguous byte-vector scans per job.
-template <class D>
-[[nodiscard]] inline std::vector<prefilters::PrefilterResult>
-sneaky_snake_simd_batch_for(
-    D d,
-    const prefilters::PrefilterBatchInput& input,
-    SneakySnakeOptions options = {})
-{
-    std::vector<prefilters::PrefilterResult> results(input.jobs.size());
-    for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
-        const prefilters::PrefilterJob& job = input.jobs[index];
-        if (!prefilters::prefilter_job_in_bounds(input, job)) {
-            results[index] = sneaky_snake_detail::make_result(
-                0u, prefilters::PrefilterStatus::unsupported_conservative, true);
-            continue;
-        }
-        results[index] = sneaky_snake_detail::bounded_for<
-            sneaky_snake_detail::CpuTraversal::highway>(
-                d,
-                input.query_ranks.subspan(
-                    job.query_offset, job.query_length),
-                input.target_ranks.subspan(
-                    job.target_offset, job.target_length),
-                job.max_edits,
-                options);
-    }
-    return results;
-}
-
-/// Active-target Highway entry point used by the pipeline and benchmarks.
-[[nodiscard]] inline std::vector<prefilters::PrefilterResult> sneaky_snake_simd_batch(
-    const prefilters::PrefilterBatchInput& input,
-    SneakySnakeOptions options = {})
-{
-    const hn::ScalableTag<std::uint8_t> d;
-    return sneaky_snake_simd_batch_for(d, input, options);
-}
-
-} // namespace bioseq::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
-
-} // export
+} // namespace bioseq::sequences::prefilters

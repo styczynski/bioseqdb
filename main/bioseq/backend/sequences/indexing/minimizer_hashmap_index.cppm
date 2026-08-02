@@ -45,6 +45,7 @@ export import bioseq.indexing.minimizer_direct_inverted_index;
 export import bioseq.indexing.minimizer_hashmap_format6;
 import bioseq.sequences;                             // sequence_custom_alphabet, compact_sequence_range for bounded Paper windows
 import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
+export import bioseq.sequences.kmers.highway_contract; // selected target's neutral minimizer table and packed-view ABI
 import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch F — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
 import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
 import bioseq.storage.scanner;                       // access-requirement policy
@@ -71,9 +72,9 @@ using bioseq::simd::HWY_NAMESPACE::sketch_collector;
 using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;   // DOC0345 Patch F
 using bioseq::storage::sequence_size_t;
 
-// Non-Highway ABI between indexing interfaces and the existing hashmap
-// implementation unit. No indexing module imports two_stacks: the .cpp owns
-// that import and maps its checked status/proof onto these plain ABI records.
+// Target-neutral ABI between indexing interfaces and the selected generated
+// minimizer table. The implementation unit maps checked family status/proof
+// onto these indexing-owned records without importing a Highway target module.
 enum class ExactSimdIndexStatus : std::uint8_t {
     ok = 0,
     invalid_window_size,
@@ -164,6 +165,7 @@ using ExactSimdIndexAppendRawFn =
     bool (*)(void*, const std::uint64_t*, std::size_t);
 
 struct ExactSimdIndexBridgeRequest {
+    const bioseq::minimizers::MinimizerKernels* kernels = nullptr;
     void* sequence_context = nullptr;
     ExactSimdIndexReadFragmentFn read_fragment = nullptr;
     ExactSimdIndexReleaseFragmentFn release_fragment = nullptr;
@@ -274,6 +276,7 @@ collect_exact_simd_index_range_or_throw(
         std::size_t runtime_w,
         std::size_t runtime_k,
         std::size_t emitted_position_base,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         std::string_view operation) {
     static_assert(std::same_as<typename MinimapSketchData::storage_t, std::uint64_t>);
 
@@ -282,6 +285,10 @@ collect_exact_simd_index_range_or_throw(
         throw ExactSimdIndexRuntimeError{
             ExactSimdIndexStatus::unsupported_alphabet, operation};
     } else {
+        if (kernels == nullptr || kernels->two_stack_nthash == nullptr) {
+            throw ExactSimdIndexRuntimeError{
+                ExactSimdIndexStatus::invalid_state, operation};
+        }
         if (lo_bp > hi_bp || hi_bp > sequence.bp_size()
             || hi_bp - lo_bp
                 > static_cast<sequence_size_t>(
@@ -315,6 +322,20 @@ collect_exact_simd_index_range_or_throw(
                 sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
             descriptor = owner->descriptor();
         }
+        if (descriptor.bp_length
+                != static_cast<std::size_t>(hi_bp - lo_bp)
+            || descriptor.storage_unit_byte_width != packed_width
+            || descriptor.bits_per_symbol
+                != bioseq::storage::lazy_rank_stream_traits<Alphabet>::
+                    logical_bits_per_symbol
+            || descriptor.leading_symbol_offset != 0u
+            || descriptor.bit_order
+                != bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                    packed_bit_order::least_significant_symbol_first
+            || (descriptor.bp_length != 0u && descriptor.units == nullptr)) {
+            throw ExactSimdIndexRuntimeError{
+                ExactSimdIndexStatus::invalid_range, operation};
+        }
 
         struct SequenceContext {
             const void* data{};
@@ -341,6 +362,7 @@ collect_exact_simd_index_range_or_throw(
 
         const ExactSimdIndexBridgeResult result = collect_exact_simd_index_erased(
             ExactSimdIndexBridgeRequest{
+                .kernels = kernels,
                 .sequence_context = &sequence_context,
                 .read_fragment = read_fragment,
                 .release_fragment = release_fragment,
@@ -649,6 +671,8 @@ struct PackedPaperNthashIndexExecutionProof {
 };
 
 struct PackedPaperNthashIndexBridgeRequest {
+    const bioseq::minimizers::MinimizerKernels* kernels = nullptr;
+    bioseq::minimizers::PackedSequenceKernelView sequence{};
     void* sequence_context = nullptr;
     void* collector_context = nullptr;
     PackedPaperNthashIndexAlphabet alphabet =
@@ -659,10 +683,8 @@ struct PackedPaperNthashIndexBridgeRequest {
     std::size_t local_bp_size = 0;
     std::size_t window_size = 0;
     std::size_t kmer_size = 0;
-    // When true, `sequence_context` names a validated canonical resident
-    // descriptor rather than an owning compact_sequence_range.  This keeps
-    // admitted/borrowed facade ownership outside the non-Highway ABI while
-    // allowing the implementation unit to execute the same checked kernel.
+    // Legacy context discriminator retained while direct bridge tests migrate
+    // to `sequence`; production always passes the neutral packed view above.
     bool sequence_context_is_resident_descriptor = false;
 };
 
@@ -699,6 +721,7 @@ collect_bounded_packed_paper_nthash_index_lazy(
         std::uint64_t local_bp_size,
         std::uint16_t window_size,
         std::uint16_t kmer_size,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         sketch_collector& collector,
         std::uint64_t* materialized_window_bp_out = nullptr) {
     if (materialized_window_bp_out != nullptr) {
@@ -708,6 +731,10 @@ collect_bounded_packed_paper_nthash_index_lazy(
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_alphabet);
     } else {
+        if (kernels == nullptr || kernels->paper_nthash == nullptr) {
+            return rejected_packed_paper_nthash_index_result(
+                PackedPaperNthashIndexStatus::invalid_state);
+        }
         if (lo_bp > hi_bp || hi_bp > sequence.bp_size()
             || local_bp_size != static_cast<std::uint64_t>(hi_bp - lo_bp)) {
             return rejected_packed_paper_nthash_index_result(
@@ -755,7 +782,12 @@ collect_bounded_packed_paper_nthash_index_lazy(
         }
         if (descriptor.bp_length != local_bp_size
             || descriptor.storage_unit_byte_width != packed_width
-            || descriptor.leading_symbol_offset != 0u) {
+            || descriptor.bits_per_symbol != 2u
+            || descriptor.leading_symbol_offset != 0u
+            || descriptor.bit_order
+                != bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                    packed_bit_order::least_significant_symbol_first
+            || (descriptor.bp_length != 0u && descriptor.units == nullptr)) {
             return rejected_packed_paper_nthash_index_result(
                 PackedPaperNthashIndexStatus::invalid_range);
         }
@@ -772,6 +804,19 @@ collect_bounded_packed_paper_nthash_index_lazy(
         }
         return collect_packed_paper_nthash_index_erased(
             PackedPaperNthashIndexBridgeRequest{
+                .kernels = kernels,
+                .sequence = bioseq::minimizers::PackedSequenceKernelView{
+                    .storage = reinterpret_cast<const std::byte*>(
+                        descriptor.units),
+                    .storage_units = descriptor.unit_count,
+                    .begin_symbol = 0u,
+                    .end_symbol = static_cast<std::size_t>(local_bp_size),
+                    .alphabet_code = static_cast<std::uint8_t>(
+                        bioseq::minimizers::PackedSequenceAlphabet::dna4),
+                    .bits_per_symbol = 2u,
+                    .storage_unit_bytes = packed_width,
+                    .final_segment = true,
+                },
                 .sequence_context = std::addressof(descriptor),
                 .collector_context = std::addressof(collector),
                 .alphabet = PackedPaperNthashIndexAlphabet::dna4,
@@ -16006,6 +16051,36 @@ struct PreparedGrouped32QueryReaderSimdRouteEvidence {
     bool saturated = false;
 };
 
+/// Target-neutral outcome of the grouped32 non-scatter validation kernel.
+/// The selected fixed-target implementation may decline short or unsupported
+/// spans; the reader then executes its unchanged scalar validation loop.
+enum class MinimizerGrouped32NonScatterValidation : std::uint8_t {
+    scalar_required,
+    accepted,
+    rejected,
+};
+
+/// Target-neutral evidence returned by one grouped32 validation attempt.
+/// No Highway descriptor, vector, or target-local type crosses this ABI.
+struct MinimizerGrouped32NonScatterValidationResult {
+    MinimizerGrouped32NonScatterValidation validation =
+        MinimizerGrouped32NonScatterValidation::scalar_required;
+    std::uint64_t vectorized_words = 0;
+    std::uint64_t selected_hwy_target = 0;
+    std::uint8_t selected_vector_stream_width = 0;
+};
+
+using MinimizerGrouped32ValidateNonScatterLocal32W2Kernel =
+    MinimizerGrouped32NonScatterValidationResult (*)(
+        std::span<const std::byte>,
+        const MinimizerGrouped32Control&,
+        const MinimizerPositionSegmentCore&) noexcept;
+
+static_assert(std::is_standard_layout_v<
+    MinimizerGrouped32NonScatterValidationResult>);
+static_assert(std::is_trivially_copyable_v<
+    MinimizerGrouped32NonScatterValidationResult>);
+
 /// Inactive two-phase query reader for the grouped-u32/segment-local32 wire.
 /// It owns every byte and identity field used after `begin`: callers first
 /// deliver the internally-selected control extents, then only the authorized
@@ -16048,29 +16123,6 @@ private:
         (std::numeric_limits<std::size_t>::max)();
     static constexpr std::size_t inline_query_hash_capacity = 64u;
 
-    enum class NonScatterSimdValidation : std::uint8_t {
-        scalar_required,
-        accepted,
-        rejected,
-    };
-
-    struct NonScatterSimdValidationResult {
-        NonScatterSimdValidation validation =
-            NonScatterSimdValidation::scalar_required;
-        std::uint64_t vectorized_words = 0;
-        std::uint64_t selected_hwy_target = 0;
-        std::uint8_t selected_vector_stream_width = 0;
-    };
-
-    /// Implemented in the existing module implementation unit so Highway and
-    /// vector_stream inline definitions never leak through this exported class
-    /// definition into importers such as the PostgreSQL module aggregate.
-    [[nodiscard]] static NonScatterSimdValidationResult
-    validate_non_scatter_local32_w2(
-        std::span<const std::byte> encoded_bytes,
-        const MinimizerGrouped32Control& control,
-        const MinimizerPositionSegmentCore& core) noexcept;
-
     struct SelectiveState {
         std::vector<std::uint32_t> query_hashes;
         std::array<std::uint32_t, inline_query_hash_capacity>
@@ -16099,6 +16151,10 @@ private:
     struct FullStreamModeTag {};
 
     MinimizerSketchBackend backend_ = MinimizerSketchBackend::Scalar;
+    // Bound by the scheduler from its already-selected immutable Highway
+    // table. A null kernel is the intentional non-scheduler scalar route.
+    MinimizerGrouped32ValidateNonScatterLocal32W2Kernel
+        validate_non_scatter_local32_w2_ = nullptr;
     std::optional<SelectiveState> selective_{std::in_place};
 
     PreparedGrouped32QueryReader() = default;
@@ -16280,6 +16336,8 @@ public:
             PreparedGrouped32QueryReader&& other) noexcept
         : AdmittedCore(std::move(static_cast<AdmittedCore&>(other))),
           backend_(other.backend_),
+          validate_non_scatter_local32_w2_(std::exchange(
+              other.validate_non_scatter_local32_w2_, nullptr)),
           selective_(std::move(other.selective_)) {
         other.head_ = {};
         other.manifest_ = {};
@@ -16313,7 +16371,9 @@ public:
             MinimizerSketchBackend backend,
             std::span<const std::byte> encoded_directory,
             std::span<const std::uint64_t> query_hashes,
-            std::uint64_t max_occ) {
+            std::uint64_t max_occ,
+            MinimizerGrouped32ValidateNonScatterLocal32W2Kernel
+                validate_non_scatter_local32_w2 = nullptr) {
         // Final positions use the ordinary minimizer-index ABI
         // `(global_bp << 1) | strand`.  PostgreSQL source identities are
         // restricted to non-negative BIGINT lengths, which also guarantees
@@ -16403,6 +16463,8 @@ public:
         if (!core) return std::unexpected(core.error());
 
         reader.backend_ = backend;
+        reader.validate_non_scatter_local32_w2_ =
+            validate_non_scatter_local32_w2;
         state.max_occ = max_occ;
 
         // The raw caller sequence is a transient sort/dedup buffer for larger
@@ -16611,7 +16673,9 @@ public:
 			MinimizerSketchBackend backend,
 			std::span<const std::byte> encoded_directory,
 			std::span<const std::uint64_t> query_hashes,
-			std::uint64_t max_occ) {
+			std::uint64_t max_occ,
+			MinimizerGrouped32ValidateNonScatterLocal32W2Kernel
+				validate_non_scatter_local32_w2 = nullptr) {
 		if (!sql_bigint_can_represent(manifest.target_length)) {
 			return std::unexpected(MinimizerGenerationWireError::bp_range);
 		}
@@ -16652,6 +16716,8 @@ public:
 			return std::unexpected(initialized.error());
 		}
 		reader.backend_ = backend;
+		reader.validate_non_scatter_local32_w2_ =
+			validate_non_scatter_local32_w2;
 		return reader;
 	}
 	[[nodiscard]] std::expected<void, MinimizerGenerationWireError>
@@ -17211,12 +17277,14 @@ PreparedGrouped32QueryReader::finish_load() {
             const bool scatter = query != no_query
                 && state.query_records[query].position_count != 0;
             if (!scatter) {
-                const NonScatterSimdValidationResult validation =
-                    validate_non_scatter_local32_w2(
-                        std::span<const std::byte>{
-                            load.encoded.get(), load.encoded_size},
-                        control,
-                        *core);
+                const MinimizerGrouped32NonScatterValidationResult
+                    validation = validate_non_scatter_local32_w2_ == nullptr
+                    ? MinimizerGrouped32NonScatterValidationResult{}
+                    : validate_non_scatter_local32_w2_(
+                          std::span<const std::byte>{
+                              load.encoded.get(), load.encoded_size},
+                          control,
+                          *core);
                 const auto add_evidence = [&state](
                         std::uint64_t& destination,
                         std::uint64_t increment) noexcept {
@@ -17255,7 +17323,8 @@ PreparedGrouped32QueryReader::finish_load() {
                         state.simd_route_evidence.vectorized_words,
                         validation.vectorized_words);
                     if (validation.validation
-                            == NonScatterSimdValidation::accepted) {
+                            == MinimizerGrouped32NonScatterValidation::
+                                accepted) {
                         add_evidence(
                             state.simd_route_evidence.accepted_spans, 1u);
                     } else {
@@ -17264,7 +17333,7 @@ PreparedGrouped32QueryReader::finish_load() {
                     }
                 }
                 if (validation.validation
-                        == NonScatterSimdValidation::accepted) {
+                        == MinimizerGrouped32NonScatterValidation::accepted) {
                     continue;
                 }
                 // Both `rejected` and `scalar_required` deliberately replay
@@ -21748,6 +21817,7 @@ private:
 
     sequence_type sequence_;
     MinimizerSketchBackend backend_ = MinimizerSketchBackend::Scalar;
+    const bioseq::minimizers::MinimizerKernels* kernels_ = nullptr;
     std::uint16_t window_size_ = 10;
     std::uint16_t kmer_size_ = 15;
     std::uint64_t scan_count_ = 0;
@@ -21850,6 +21920,7 @@ private:
                         collect_hi - emit_base,
                         window_size_,
                         kmer_size_,
+                        kernels_,
                         collector,
                         &materialized_window_bp);
                 peak_paper_materialized_window_bp_ = std::max(
@@ -21873,6 +21944,7 @@ private:
                         window_size_,
                         kmer_size_,
                         0u,
+                        kernels_,
                         "MPF generation replay");
                     exact_simd_proof_.combine(proof);
                     exact_simd_proof_present_ = true;
@@ -21926,10 +21998,12 @@ public:
     MpfFragmentGenerationReplayProducer(
             sequence_type sequence,
             MinimizerSketchBackend backend,
+            const bioseq::minimizers::MinimizerKernels* kernels,
             std::uint16_t window_size = 10,
             std::uint16_t kmer_size = 15) noexcept
         : sequence_(sequence),
           backend_(backend),
+          kernels_(kernels),
           window_size_(window_size),
           kmer_size_(kmer_size) {}
 
@@ -21982,6 +22056,15 @@ public:
             && backend_ != MinimizerSketchBackend::ExactSimd
             && backend_ != MinimizerSketchBackend::PaperNtHashSimd
             && backend_ != MinimizerSketchBackend::VulkanSegment) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
+        if ((backend_ == MinimizerSketchBackend::ExactSimd
+                && (kernels_ == nullptr
+                    || kernels_->two_stack_nthash == nullptr))
+            || (backend_ == MinimizerSketchBackend::PaperNtHashSimd
+                && (kernels_ == nullptr
+                    || kernels_->paper_nthash == nullptr))) {
             return std::unexpected(
                 MinimizerGenerationWireError::compatibility_mismatch);
         }
@@ -22147,9 +22230,10 @@ struct MinimizersPerFragmentIndex {
     template <sequence_alphabet Alphabet>
     [[nodiscard]] static auto make_generation_replay_producer(
             bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
-            MinimizerSketchBackend backend) {
+            MinimizerSketchBackend backend,
+            const bioseq::minimizers::MinimizerKernels* kernels) {
         return MpfFragmentGenerationReplayProducer<Alphabet>{
-            sequence, backend};
+            sequence, backend, kernels};
     }
 
     /// Concrete MPF construction seam. Live v2 routing remains unchanged;
@@ -22161,6 +22245,7 @@ struct MinimizersPerFragmentIndex {
     encode_persisted_generation(
             bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             MinimizerSketchBackend backend,
+            const bioseq::minimizers::MinimizerKernels* kernels,
             Sink& sink,
             const MinimizerGenerationEncodeOptions& options,
             const MinimizerGenerationFixedWidthLimits& limits = {},
@@ -22172,7 +22257,8 @@ struct MinimizersPerFragmentIndex {
             return std::unexpected(
                 MinimizerGenerationWireError::compatibility_mismatch);
         }
-        auto producer = make_generation_replay_producer(sequence, backend);
+        auto producer = make_generation_replay_producer(
+            sequence, backend, kernels);
         auto encoded = encode_minimizer_generation(
             producer, sink, options, limits);
         MpfGenerationExecutionEvidence evidence =
@@ -22207,6 +22293,7 @@ struct MinimizersPerFragmentIndex {
         S& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         MpfGenerationExecutionEvidence* execution_evidence_out = nullptr) {
         constexpr std::size_t w = 10, k = 15;                                  // pinned, == sidecar today
         constexpr std::size_t frag_bp    = 32'768u;
@@ -22215,6 +22302,18 @@ struct MinimizersPerFragmentIndex {
             "fragment-core-local positions must fit the 28-bit MinimapSketchData field");
         const sequence_size_t total_bp = seq.bp_size();
         const std::size_t nfrag = (std::size_t)((total_bp + frag_bp - 1) / frag_bp);
+        if (backend == MinimizerSketchBackend::ExactSimd
+            && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
+            throw ExactSimdIndexRuntimeError{
+                ExactSimdIndexStatus::invalid_state,
+                "minimizers_per_fragment build"};
+        }
+        if (backend == MinimizerSketchBackend::PaperNtHashSimd
+            && (kernels == nullptr || kernels->paper_nthash == nullptr)) {
+            throw PackedPaperNthashIndexRuntimeError{
+                PackedPaperNthashIndexStatus::invalid_state,
+                "minimizers_per_fragment build"};
+        }
         if (execution_evidence_out != nullptr) {
             *execution_evidence_out = {};
             execution_evidence_out->selected_backend = backend;
@@ -22341,7 +22440,7 @@ struct MinimizersPerFragmentIndex {
         }
 
         auto build_fragment_blob =
-            [seq, backend, total_bp, execution_evidence_out](std::size_t fragment_no,
+            [seq, backend, kernels, total_bp, execution_evidence_out](std::size_t fragment_no,
                                      sketch_collector& collector,
                                      std::vector<MinimapSketchData>& core,
                                      std::vector<char>& out_blob) {
@@ -22372,6 +22471,7 @@ struct MinimizersPerFragmentIndex {
                     if (backend == MinimizerSketchBackend::ExactSimd) {
                         const auto proof = collect_exact_simd_index_range_or_throw(
                             collector, seq, coll_lo, coll_hi, w, k, 0u,
+                            kernels,
                             "minimizers_per_fragment build");
                         if (execution_evidence_out != nullptr) {
                             ++execution_evidence_out->exact_simd_core_runs;
@@ -22389,7 +22489,7 @@ struct MinimizersPerFragmentIndex {
                         const auto result =
                             collect_bounded_packed_paper_nthash_index_lazy(
                                 seq, coll_lo, coll_hi, collect_bp,
-                                w, k, collector);
+                                w, k, kernels, collector);
                         if (result.status
                                 != PackedPaperNthashIndexStatus::ok) {
                             throw PackedPaperNthashIndexRuntimeError{
@@ -22527,24 +22627,25 @@ struct MinimizersPerFragmentIndex {
     static void build(
             S& storage,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
-        build(storage, seq, MinimizerSketchBackend::Scalar);
+        build(storage, seq, MinimizerSketchBackend::Scalar, nullptr);
     }
 
     template <sequence_alphabet Alphabet>
     static void rebuild(
         S& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
-        MinimizerSketchBackend backend)
+        MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels)
     {
         storage.clear_entity();
-        build(storage, seq, backend);
+        build(storage, seq, backend, kernels);
     }
 
     template <sequence_alphabet Alphabet>
     static void rebuild(
             S& storage,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
-        rebuild(storage, seq, MinimizerSketchBackend::Scalar);
+        rebuild(storage, seq, MinimizerSketchBackend::Scalar, nullptr);
     }
 
     /// query-time: materialise the single pipeline IndexT for one target SEGMENT.

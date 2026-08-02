@@ -74,6 +74,7 @@ import bioseq.sql_guc_settings;
 import bioseq.vector.types;        // VectorColumn, VectorTupleTableSlot, CreateVectorTupleTableSlot, ...
 import bioseq.vector.execution;    // CreateVectorizedExprList, ConstructVectorizedQualList, ExecuteVectorizedQual
 import bioseq.common.mlogging;
+import bioseq.highway.dispatch_contract;
 import bioseq.pg.external.path_builder_slot;  // DOC0372 — TryAddBioseqExternalScanPaths (always-owned slot)
 import bioseq.storage.metadata;
 import bioseq.table.types;
@@ -173,7 +174,7 @@ struct BioseqScanFeatureFlags {
  * The Minimap2Params struct lives in bioseq::simd::active_target.
  */
 struct PerScanAlignerState {
-	bioseq::simd::active_target::Minimap2Params params{};
+	bioseq::simd::Minimap2Params params{};
 	BioseqScanFeatureFlags              features{};
 	bioseq::indexing::IndexReadRequirement index_read_requirement =
 		bioseq::indexing::IndexReadRequirement::allow;
@@ -182,13 +183,13 @@ struct PerScanAlignerState {
 
 	/*
 	 * Structured pipeline description captured at BeginCustomScan via
-	 * `bioseq::simd::active_target::pipe::describe_pipeline_for(...)`.  Populated
+	 * `bioseq::simd::pipe::describe_pipeline_for(...)`.  Populated
 	 * once per scan (cold path) and consumed by
 	 * `BioseqColumnScan_ExplainCustomScan` to render the per-stage breakdown
 	 * without hardcoded knowledge of which parameters belong to which
 	 * stage (DOC0249 §11, §12.2).
 	 */
-	std::optional<bioseq::simd::active_target::pipe::PipelineDescription> pipeline_desc{};
+	std::optional<bioseq::simd::pipe::PipelineDescription> pipeline_desc{};
 };
 
 /*
@@ -2158,10 +2159,10 @@ explain_detect_typmod_coalesce(List* qual, const BioseqStubOids& oids)
  * FuncExpr. Keeping the two passes separate makes the precedence order
  * obvious: GUC → aligner_options() override → size-heuristic → pipeline.
  */
-[[nodiscard]] static bioseq::simd::active_target::Minimap2Params
+[[nodiscard]] static bioseq::simd::Minimap2Params
 build_params_from_gucs()
 {
-	bioseq::simd::active_target::Minimap2Params params;
+	bioseq::simd::Minimap2Params params;
 	params.kmer_size        = bioseq::aligner::settings::kmer_size;
 	params.window_size      = bioseq::aligner::settings::window_size;
 	params.max_gap          = bioseq::aligner::settings::max_gap;
@@ -2192,13 +2193,13 @@ build_params_from_gucs()
 	params.block_max_size   = static_cast<size_t>(bioseq::aligner::settings::block_max_size);
 	params.bandwidth_long   = bioseq::aligner::settings::bandwidth_long;
 	params.chaining_algorithm =
-		static_cast<bioseq::simd::active_target::ChainingAlgorithmType>(
+		static_cast<bioseq::simd::ChainingAlgorithmType>(
 			static_cast<int>(bioseq::aligner::settings::chaining_algorithm.value()));
 	params.base_alignment_algorithm =
-		static_cast<bioseq::simd::active_target::BaseAlignmentAlgorithmType>(
+		static_cast<bioseq::simd::BaseAlignmentAlgorithmType>(
 			static_cast<int>(bioseq::aligner::settings::base_alignment_algorithm.value()));
 	params.minimizer_algorithm =
-		static_cast<bioseq::simd::active_target::MinimizerAlgorithmType>(
+		static_cast<bioseq::simd::MinimizerAlgorithmType>(
 			static_cast<int>(bioseq::aligner::settings::minimizer_algorithm.value()));
 	params.enable_profiling = bioseq::aligner::settings::enable_profiling;
 	params.vulkan_enabled = bioseq::aligner::settings::vulkan_enabled;
@@ -2282,7 +2283,7 @@ static_assert(
 	== kBioseqSemanticPayloadFieldCount);
 
 struct FrozenBioseqScanSemantics {
-	bioseq::simd::active_target::Minimap2Params params{};
+	bioseq::simd::Minimap2Params params{};
 	bool read_sequence_index = false;
 	bioseq::indexing::IndexReadRequirement index_read_requirement =
 		bioseq::indexing::IndexReadRequirement::allow;
@@ -2671,11 +2672,11 @@ struct FrozenBioseqScanSemantics {
 		return false;
 	}
 	using Chaining =
-		bioseq::simd::active_target::ChainingAlgorithmType;
+		bioseq::simd::ChainingAlgorithmType;
 	using BaseAlignment =
-		bioseq::simd::active_target::BaseAlignmentAlgorithmType;
+		bioseq::simd::BaseAlignmentAlgorithmType;
 	using Minimizer =
-		bioseq::simd::active_target::MinimizerAlgorithmType;
+		bioseq::simd::MinimizerAlgorithmType;
 	switch (static_cast<Chaining>(chaining)) {
 		case Chaining::SCALAR_MM2:
 		case Chaining::SIMD_MM2:
@@ -2760,8 +2761,8 @@ struct FrozenBioseqScanSemantics {
 }
 
 [[nodiscard]] static bool mmsearch_plans_admitted_packed_regions(
-		bioseq::simd::active_target::Minimap2Params const& params) noexcept {
-	using Algorithm = bioseq::simd::active_target::MinimizerAlgorithmType;
+		bioseq::simd::Minimap2Params const& params) noexcept {
+	using Algorithm = bioseq::simd::MinimizerAlgorithmType;
 	switch (params.minimizer_algorithm) {
 		case Algorithm::SCALAR:
 		case Algorithm::SIMD_MINIMAP2_SLOW:
@@ -2919,7 +2920,7 @@ bounded_batch_fallback_options_are_supported(
  */
 [[nodiscard]] static bool
 apply_aligner_options_override(FuncExpr* mmsearch_fe,
-							   bioseq::simd::active_target::Minimap2Params& params,
+							   bioseq::simd::Minimap2Params& params,
 							   bioseq::indexing::IndexReadRequirement& index_read_requirement,
 							   const BioseqStubOids& oids,
 							   bool* vulkan_enabled_explicit = nullptr)
@@ -3047,7 +3048,7 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		const std::int32_t raw = *options.chaining_algorithm;
 		if (raw >= 0 && raw <= 3) {
 			params.chaining_algorithm =
-				static_cast<bioseq::simd::active_target::ChainingAlgorithmType>(raw);
+				static_cast<bioseq::simd::ChainingAlgorithmType>(raw);
 		} else {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3059,7 +3060,7 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 			*options.base_alignment_algorithm;
 		if (raw >= 0 && raw <= 1) {
 			params.base_alignment_algorithm =
-				static_cast<bioseq::simd::active_target::BaseAlignmentAlgorithmType>(raw);
+				static_cast<bioseq::simd::BaseAlignmentAlgorithmType>(raw);
 		} else {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3071,7 +3072,7 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		const std::int32_t raw = *options.minimizer_algorithm;
 		if (raw >= 0 && raw <= 4) {
 			params.minimizer_algorithm =
-				static_cast<bioseq::simd::active_target::MinimizerAlgorithmType>(raw);
+				static_cast<bioseq::simd::MinimizerAlgorithmType>(raw);
 		} else {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -3120,10 +3121,10 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
  */
 static void
 finalize_simd_chaining_policy(
-	bioseq::simd::active_target::Minimap2Params& params)
+	bioseq::simd::Minimap2Params& params)
 {
-	using bioseq::simd::active_target::ChainingAlgorithmType;
-	using bioseq::simd::active_target::SimdChainingPolicy;
+	using bioseq::simd::ChainingAlgorithmType;
+	using bioseq::simd::SimdChainingPolicy;
 	switch (params.chaining_algorithm) {
 		case ChainingAlgorithmType::SIMD_MM2:
 			params.simd_chaining_policy =
@@ -14623,7 +14624,7 @@ static void per_row_record_path_identity(
 		builder, target_expression);
 	const std::uint32_t query_producer = slice_project_add_producer(
 		builder, query_expression);
-	bioseq::simd::active_target::Minimap2Params planned_params =
+	bioseq::simd::Minimap2Params planned_params =
 		build_params_from_gucs();
 	bioseq::indexing::IndexReadRequirement planned_requirement =
 		bioseq::indexing::IndexReadRequirement::allow;
@@ -15006,7 +15007,7 @@ BioseqBatchJoinSetJoinPathlistHook(
 	}
 	/* Decode options before choosing the raw two-child or transformed
 	 * one-child ownership shape. */
-	bioseq::simd::active_target::Minimap2Params planned_params =
+	bioseq::simd::Minimap2Params planned_params =
 		build_params_from_gucs();
 	bioseq::indexing::IndexReadRequirement planned_requirement =
 		bioseq::indexing::IndexReadRequirement::allow;
@@ -17033,7 +17034,7 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 				exact = false;
 				break;
 			}
-			bioseq::simd::active_target::Minimap2Params option_probe =
+			bioseq::simd::Minimap2Params option_probe =
 				build_params_from_gucs();
 			bioseq::indexing::IndexReadRequirement requirement_probe =
 				bioseq::indexing::IndexReadRequirement::allow;
@@ -17266,7 +17267,7 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		const std::uint64_t admitted_bytes =
 			bioseq::parallelism::saturating_add(
 				target_symbols, query_symbols);
-		bioseq::simd::active_target::Minimap2Params planned_params =
+		bioseq::simd::Minimap2Params planned_params =
 			build_params_from_gucs();
 		bioseq::indexing::IndexReadRequirement planned_requirement =
 			bioseq::indexing::IndexReadRequirement::allow;
@@ -23965,7 +23966,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			 errmsg("bioseq alignment custom scans are parallel unsafe"),
 			 errdetail("statement execution attestation is backend-local and DSM aggregation is not implemented")));
 	}
-	bioseq::simd::active_target::Minimap2Params aligner_params =
+	bioseq::simd::Minimap2Params aligner_params =
 		frozen_semantics.params;
 	/* Profiling is diagnostic/performance-only and deliberately remains live. */
 	aligner_params.enable_profiling =
@@ -24013,9 +24014,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			runtime.edit_exclusive_upper_bound - 1);
 		const bool existing_vulkan_route =
 			aligner_params.chaining_algorithm
-				== bioseq::simd::active_target::ChainingAlgorithmType::VULKAN_TILED_DP
+				== bioseq::simd::ChainingAlgorithmType::VULKAN_TILED_DP
 			|| aligner_params.minimizer_algorithm
-				== bioseq::simd::active_target::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+				== bioseq::simd::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
 			|| aligner_params.vulkan_seed_hits_enabled
 			|| aligner_params.vulkan_fused_frontend_enabled
 			|| aligner_params.vulkan_gpu_index_build_enabled
@@ -24030,10 +24031,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				: bioseq::prefilter_stats::PrefilterBackendType::SCALAR);
 	}
 	const bool selected_vulkan =
-		bioseq::simd::active_target::pipe::vulkan_components_requested(
+		bioseq::simd::pipe::vulkan_components_requested(
 			aligner_params);
 	const bool selected_vulkan_accelerator =
-		bioseq::simd::active_target::pipe::vulkan_accelerator_requested(
+		bioseq::simd::pipe::vulkan_accelerator_requested(
 			aligner_params);
 	const bool executable_scan =
 		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0;
@@ -24132,7 +24133,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		const auto empty_target_view =
 			bioseq::storage::as_lazy_sequence_view(empty_target_owner);
 		runtime.aligner_state.pipeline_desc =
-			bioseq::simd::active_target::pipe::describe_pipeline_for(
+			bioseq::simd::pipe::describe_pipeline_for(
 				aligner_params, empty_query_view, empty_target_view);
 	}
 
@@ -24603,9 +24604,9 @@ var_injector(Node *node, VarInjectorCtx *injector_context)
  */
 static void
 populate_placeholder_consts(BioseqPlaceholderConsts& consts,
-							const bioseq::simd::active_target::MatchResult& match)
+							const bioseq::simd::MatchResult& match)
 {
-	using bioseq::simd::active_target::format_cigar;
+	using bioseq::simd::format_cigar;
 	// DOC0274 §1.8 — MatchResult absolute coordinates / lengths are
 	// `sequence_size_t` (uint64; minimap_port.cppm:334). They are projected
 	// through BIGINT (int8) placeholders so positions / lengths in sequences
@@ -25450,7 +25451,7 @@ static void batch_join_materialize_queries(
 static void batch_join_set_placeholder_value(
 		TupleTableSlot* slot,
 		const BioseqBatchJoinPlaceholderSite& site,
-		const bioseq::simd::active_target::MatchResult& match,
+		const bioseq::simd::MatchResult& match,
 		const BioseqStubOids& oids,
 		MemoryContext output_context) {
 	if (slot == nullptr || site.resno <= 0
@@ -25509,7 +25510,7 @@ static void batch_join_set_placeholder_value(
 		value = Float4GetDatum(match.divergence);
 	} else if (site.funcid == oids.cigar_oid) {
 		const std::string cigar =
-			bioseq::simd::active_target::format_cigar(match.cigar);
+			bioseq::simd::format_cigar(match.cigar);
 		MemoryContext previous = MemoryContextSwitchTo(output_context);
 		value = CStringGetTextDatum(cigar.c_str());
 		MemoryContextSwitchTo(previous);
@@ -25951,7 +25952,7 @@ static void BioseqBatchJoin_BeginCustomScan(
 		/* Re-decode the catalog composite before any child initialization.  This
 		 * catches catalog drift and proves the ordinal marker was not altered
 		 * between planning and execution. */
-		bioseq::simd::active_target::Minimap2Params prevalidated_params =
+		bioseq::simd::Minimap2Params prevalidated_params =
 			build_params_from_gucs();
 		bioseq::indexing::IndexReadRequirement decoded_requirement =
 			bioseq::indexing::IndexReadRequirement::allow;
@@ -26273,7 +26274,7 @@ static void BioseqBatchJoin_BeginCustomScan(
 		runtime->query_storage_unit_byte_width =
 			query_sequence_type_params.storage_unit_byte_width;
 
-		bioseq::simd::active_target::Minimap2Params params =
+		bioseq::simd::Minimap2Params params =
 			build_params_from_gucs();
 		bioseq::indexing::IndexReadRequirement requirement =
 			bioseq::indexing::IndexReadRequirement::allow;
@@ -27062,7 +27063,7 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	}
 	bms_free(placeholder_resnos);
 
-	bioseq::simd::active_target::Minimap2Params params =
+	bioseq::simd::Minimap2Params params =
 		build_params_from_gucs();
 	bioseq::indexing::IndexReadRequirement decoded_requirement =
 		bioseq::indexing::IndexReadRequirement::allow;
@@ -29508,6 +29509,38 @@ ExplainPrefilterExecutionProof(
 }
 
 static void
+AppendHighwayTargetNames(
+    std::string& destination,
+    const std::int64_t mask)
+{
+    const auto names = bioseq::simd_dispatch::highway_target_names(mask);
+    if (names.empty()) {
+        destination = "none";
+        return;
+    }
+    for (const std::string_view name : names) {
+        if (!destination.empty()) destination += ", ";
+        destination.append(name);
+    }
+}
+
+[[nodiscard]] static std::string
+HighwayTargetNames(const std::int64_t mask)
+{
+    std::string names;
+    AppendHighwayTargetNames(names, mask);
+    return names;
+}
+
+[[nodiscard]] static std::string
+HighwayTargetName(const std::int64_t target)
+{
+    if (target == 0) return "none";
+    const auto names = bioseq::simd_dispatch::highway_target_names(target);
+    return names.empty() ? std::string{"none"} : std::string{names.front()};
+}
+
+static void
 ExplainPipelineExecutionStats(
 	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
 	ExplainState* es)
@@ -29549,6 +29582,40 @@ ExplainPipelineExecutionStats(
 			stats.mixed_persisted_identity ? "true" : "false",
 			operational.operational_identity_conflict ? "true" : "false",
 			operational.stats_saturated ? "true" : "false");
+		if (stats.environment.highway_compiled_targets != 0
+			|| stats.environment.highway_cpu_supported_targets != 0
+			|| stats.environment.highway_runnable_targets != 0) {
+			const std::string compiled = HighwayTargetNames(
+				stats.environment.highway_compiled_targets);
+			const std::string supported = HighwayTargetNames(
+				stats.environment.highway_cpu_supported_targets);
+			const std::string runnable = HighwayTargetNames(
+				stats.environment.highway_runnable_targets);
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str,
+				"* Highway CPU-Supported Architectures: %s\n",
+				supported.c_str());
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str,
+				"* Highway Compiled Architectures: %s\n",
+				compiled.c_str());
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str,
+				"* Highway Runnable Architectures: %s\n",
+				runnable.c_str());
+		}
+		if (stats.environment.highway_executed_target_mixed) {
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfoString(es->str,
+				"* Highway Executed Architecture: mixed\n");
+		} else if (stats.environment.highway_executed_target != 0) {
+			const std::string executed = HighwayTargetName(
+				stats.environment.highway_executed_target);
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str,
+				"* Highway Executed Architecture: %s\n",
+				executed.c_str());
+		}
 		if (stats.unattested_alignment_jobs != 0) {
 			appendStringInfoSpaces(es->str, es->indent * 2);
 			appendStringInfo(es->str,
@@ -29647,6 +29714,34 @@ ExplainPipelineExecutionStats(
 		operational.operational_identity_conflict, es);
 	ExplainPropertyBool(
 		"Stats Saturated", operational.stats_saturated, es);
+	if (stats.environment.highway_compiled_targets != 0
+		|| stats.environment.highway_cpu_supported_targets != 0
+		|| stats.environment.highway_runnable_targets != 0) {
+		const std::string compiled = HighwayTargetNames(
+			stats.environment.highway_compiled_targets);
+		const std::string supported = HighwayTargetNames(
+			stats.environment.highway_cpu_supported_targets);
+		const std::string runnable = HighwayTargetNames(
+			stats.environment.highway_runnable_targets);
+		ExplainOpenGroup(
+			"Highway SIMD Dispatch", "Highway SIMD Dispatch", true, es);
+		ExplainPropertyText(
+			"CPU-Supported Architectures", supported.c_str(), es);
+		ExplainPropertyText(
+			"Compiled Architectures", compiled.c_str(), es);
+		ExplainPropertyText(
+			"Runnable Architectures", runnable.c_str(), es);
+		if (stats.environment.highway_executed_target_mixed) {
+			ExplainPropertyText("Executed Architecture", "mixed", es);
+		} else if (stats.environment.highway_executed_target != 0) {
+			const std::string executed = HighwayTargetName(
+				stats.environment.highway_executed_target);
+			ExplainPropertyText(
+				"Executed Architecture", executed.c_str(), es);
+		}
+		ExplainCloseGroup(
+			"Highway SIMD Dispatch", "Highway SIMD Dispatch", true, es);
+	}
 	ExplainPropertyUInteger("Target Rows", nullptr,
 		operational.target_rows, es);
 	ExplainPropertyUInteger("Persisted Index Rows", nullptr,
@@ -30095,12 +30190,22 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		&& aligner_snapshot->params_captured
 		&& aligner_snapshot->features.has_mmsearch)
 	{
-		using bioseq::simd::active_target::ChainingAlgorithmType;
-		using bioseq::simd::active_target::BaseAlignmentAlgorithmType;
-		using bioseq::simd::active_target::chaining_algorithm_name;
-		using bioseq::simd::active_target::base_alignment_algorithm_name;
+		using bioseq::simd::ChainingAlgorithmType;
+		using bioseq::simd::BaseAlignmentAlgorithmType;
+		using bioseq::simd::chaining_algorithm_name;
+		using bioseq::simd::base_alignment_algorithm_name;
 		const auto& params = aligner_snapshot->params;
 		const auto& features = aligner_snapshot->features;
+		const auto highway_plan =
+			bioseq::scheduler::highway_dispatch_info_for_plan();
+		const std::string highway_planned_architecture =
+			HighwayTargetName(highway_plan.planned_target);
+		const std::string highway_cpu_supported_architectures =
+			HighwayTargetNames(highway_plan.cpu_supported_targets);
+		const std::string highway_compiled_architectures =
+			HighwayTargetNames(highway_plan.compiled_targets);
+		const std::string highway_runnable_architectures =
+			HighwayTargetNames(highway_plan.runnable_targets);
 
 		/*
 		 * Renderer driven by the structured `PipelineDescription` populated at
@@ -30145,6 +30250,22 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 					static_cast<unsigned long long>(
 						pipeline_scheduler.index_memory_reserved_bytes));
 				++es->indent;
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str,
+					"Highway Planned Architecture: %s\n",
+					highway_planned_architecture.c_str());
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str,
+					"Highway CPU-Supported Architectures: %s\n",
+					highway_cpu_supported_architectures.c_str());
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str,
+					"Highway Compiled Architectures: %s\n",
+					highway_compiled_architectures.c_str());
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str,
+					"Highway Runnable Architectures: %s\n",
+					highway_runnable_architectures.c_str());
 
 			/*
 			 * Sidecar-divergence warning: when the prebuilt-index path is
@@ -30195,6 +30316,23 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 								(es->indent + 1) * 2);
 							appendStringInfo(es->str, "[%s: %s]\n",
 								p.name.c_str(), p.value.c_str());
+						}
+						for (std::size_t kernel_index = 0;
+							kernel_index < bioseq::simd_dispatch::highway_kernel_count;
+							++kernel_index) {
+							if (!stage.algorithm->highway_kernels[kernel_index]) {
+								continue;
+							}
+							const auto kernel = static_cast<
+								bioseq::simd_dispatch::HighwayKernelId>(kernel_index);
+							const std::string_view function =
+								bioseq::simd_dispatch::highway_kernel_name(kernel);
+							appendStringInfoSpaces(es->str,
+								(es->indent + 1) * 2);
+							appendStringInfo(es->str,
+								"Highway Function: %.*s [planned architecture: %s]\n",
+								static_cast<int>(function.size()), function.data(),
+								highway_planned_architecture.c_str());
 						}
 					} else {
 						appendStringInfo(es->str, "| %s — %s\n",
@@ -30298,6 +30436,18 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			ExplainPropertyUInteger("Index Memory Reserved Bytes", NULL,
 				static_cast<uint64_t>(
 					pipeline_scheduler.index_memory_reserved_bytes), es);
+			ExplainOpenGroup(
+				"Highway SIMD Dispatch", "Highway SIMD Dispatch", true, es);
+			ExplainPropertyText("Planned Architecture",
+				highway_planned_architecture.c_str(), es);
+			ExplainPropertyText("CPU-Supported Architectures",
+				highway_cpu_supported_architectures.c_str(), es);
+			ExplainPropertyText("Compiled Architectures",
+				highway_compiled_architectures.c_str(), es);
+			ExplainPropertyText("Runnable Architectures",
+				highway_runnable_architectures.c_str(), es);
+			ExplainCloseGroup(
+				"Highway SIMD Dispatch", "Highway SIMD Dispatch", true, es);
 			if (has_pipeline_desc) {
 				ExplainOpenGroup("Pipeline Stages", "Pipeline Stages", false, es);
 				for (const auto& stage :
@@ -30325,6 +30475,32 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 						for (const auto& p : stage.algorithm->computed_properties) {
 							ExplainPropertyText(p.name.c_str(),
 								p.value.c_str(), es);
+						}
+						if (stage.algorithm->highway_kernels.any()) {
+							ExplainOpenGroup(
+								"Highway Functions", "Highway Functions", false, es);
+							for (std::size_t kernel_index = 0;
+								kernel_index
+									< bioseq::simd_dispatch::highway_kernel_count;
+								++kernel_index) {
+								if (!stage.algorithm->highway_kernels[kernel_index]) {
+									continue;
+								}
+								const auto kernel = static_cast<
+									bioseq::simd_dispatch::HighwayKernelId>(kernel_index);
+								const std::string_view function =
+									bioseq::simd_dispatch::highway_kernel_name(kernel);
+								const std::string function_text{function};
+								ExplainOpenGroup("Highway Function", nullptr, true, es);
+								ExplainPropertyText(
+									"Function", function_text.c_str(), es);
+								ExplainPropertyText(
+									"Planned Architecture",
+									highway_planned_architecture.c_str(), es);
+								ExplainCloseGroup("Highway Function", nullptr, true, es);
+							}
+							ExplainCloseGroup(
+								"Highway Functions", "Highway Functions", false, es);
 						}
 					} else if (stage.extra_description.has_value()) {
 						ExplainPropertyText("Description",

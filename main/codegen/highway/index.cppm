@@ -324,6 +324,7 @@ inline void run_contract_self_test() {
             .highway_digest =
                 "00000000000000000000000000000000"
                 "00000000000000000000000000000000",
+            .static_target_token = "HWY_SCALAR",
             .targets = {
                 target_spec{
                     .platform = "x86_64",
@@ -347,12 +348,15 @@ inline void run_contract_self_test() {
         [](const generated_artifact& artifact) {
             return artifact.kind == artifact_kind::dispatch_registry;
         });
-    if (generated.artifacts.size() != 3
+    if (generated.artifacts.size() != 4
         || registry == generated.artifacts.end()
         || registry->content.find("HWY_DYNAMIC_DISPATCH(")
             == std::string::npos
         || generated.artifact_manifest_json.find(
                "\"path\":\"dispatch_registry.cppm\"")
+            == std::string::npos
+        || generated.artifact_manifest_json.find(
+               "\"path\":\"test_support.cppm\"")
             == std::string::npos) {
         throw std::runtime_error(
             "Highway generator self-test failed deterministic topology contract");
