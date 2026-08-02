@@ -244,7 +244,8 @@ function(bioseq_doc0377_private_packed_scope_names
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm")
     set(_bioseq_scopes
       consume_two_stack_nthash_fragment
-      collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked)
+      collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
+      run_fragmented_impl)
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
     set(_bioseq_scopes
@@ -336,6 +337,10 @@ function(bioseq_doc0377_private_packed_line_allowed
             "constexpr std::size_t lpu = traits::letters_per_unit;"
           OR "${_bioseq_line}" STREQUAL
             ": resident.read_cptr(resident.cbegin());"))
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "run_fragmented_impl"
+        AND "${_bioseq_line}" STREQUAL
+          "constexpr std::size_t letters_per_unit = traits::letters_per_unit;")
       set(_bioseq_allowed TRUE)
     endif()
   elseif("${_bioseq_source}" STREQUAL
@@ -1198,6 +1203,11 @@ bioseq_add_highway_codegen(
   CONTRACT_MODULE bioseq.highway.dispatch_contract
   DISPATCH_MODULE bioseq.scheduler.dispatch_processor
   HIGHWAY_VERSION 1.3.0
+  # Block Aligner requires at least eight lanes. EMU128 remains the portable
+  # generated fallback; scalar is not advertised as a complete target table.
+  POLICY_DEFINITIONS
+    HWY_COMPILE_ALL_ATTAINABLE=1
+    HWY_DISABLED_TARGETS=HWY_SCALAR
   COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"
   PCM_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}/pcm"
   SOURCE_RECORDS
@@ -1215,9 +1225,9 @@ bioseq_add_highway_codegen(
     "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils,alignment_lanes"
     "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|simd_utils,alignment_utils,alignment_lanes"
     "ksw2_batched|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils,alignment_lanes"
-    "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm|bioseq.highway.sources.prefilter|prefilter|common|"
-    "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|"
-    "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|"
+    "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm|bioseq.highway.sources.prefilter|prefilter|common|simd_utils"
+    "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|simd_utils"
+    "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|simd_utils"
   SLOT_RECORDS
     "minimizer_reference|minimizers|reference_minimap_int|&::bioseq::simd::{target_namespace}::reference_minimap_int"
     "minimizer_two_stack|minimizers|two_stack_nthash|&::bioseq::simd::{target_namespace}::two_stack_nthash"
@@ -1241,6 +1251,7 @@ bioseq_add_highway_codegen(
   OUTPUT_TARGET_IMPLEMENTATIONS
     BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS
   OUTPUT_DISPATCH_REGISTRY BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY
+  OUTPUT_DISPATCH_INVENTORY BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY
   OUTPUT_TEST_PRIMARY_MODULE BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE
   OUTPUT_TEST_IMPLEMENTATIONS BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS
   OUTPUT_TEST_SUPPORT BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT
@@ -4023,20 +4034,25 @@ set_source_files_properties(
   ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES}
   ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
   "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
+  "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PROPERTIES GENERATED TRUE)
 set_source_files_properties(
   ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
   "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
+  "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PROPERTIES COMPILE_OPTIONS "-x;c++")
 target_sources(postgresql_bioseq
   PRIVATE
     ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
     "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
+    "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PRIVATE FILE_SET bioseq_highway_generated_primaries
     TYPE CXX_MODULES
     BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
     FILES ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES})
 target_link_libraries(postgresql_bioseq PRIVATE
+  bioseq_highway_target_policy)
+target_link_libraries(bioseq_modules_nopg PRIVATE
   bioseq_highway_target_policy)
 add_dependencies(postgresql_bioseq bioseq_highway_target_modules)
 

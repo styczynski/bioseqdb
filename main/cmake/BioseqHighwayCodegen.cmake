@@ -274,7 +274,7 @@ function(_bioseq_highway_probe_targets)
   endif()
 
   string(REGEX MATCHALL
-    "BIOSEQ_HIGHWAY_TARGET_RECORD\\(\"[A-Z0-9_]+\",[ \\t]*\"[A-Z0-9_]+\",[ \\t]*\"[^\"]+\"\\)"
+    "BIOSEQ_HIGHWAY_TARGET_RECORD\\([ \\t]*\"[A-Z0-9_]+\",[ \\t]*\"[A-Z0-9_]+\",[ \\t]*\"[^\"]+\"[ \\t]*\\)"
     _raw_records "${_probe_output}")
   if(NOT _raw_records)
     _bioseq_highway_fail(
@@ -282,7 +282,7 @@ function(_bioseq_highway_probe_targets)
   endif()
 
   string(REGEX MATCHALL
-    "BIOSEQ_HIGHWAY_STATIC_RECORD\\(\"[A-Z0-9_]+\",[ \\t]*\"[^\"]+\"\\)"
+    "BIOSEQ_HIGHWAY_STATIC_RECORD\\([ \\t]*\"[A-Z0-9_]+\",[ \\t]*\"[^\"]+\"[ \\t]*\\)"
     _raw_static_records "${_probe_output}")
   list(LENGTH _raw_static_records _raw_static_record_count)
   if(NOT _raw_static_record_count EQUAL 1)
@@ -291,7 +291,7 @@ function(_bioseq_highway_probe_targets)
   endif()
   list(GET _raw_static_records 0 _raw_static_record)
   if(NOT _raw_static_record MATCHES
-      "^BIOSEQ_HIGHWAY_STATIC_RECORD\\(\"([A-Z0-9_]+)\",[ \\t]*\"([^\"]+)\"\\)$")
+      "^BIOSEQ_HIGHWAY_STATIC_RECORD\\([ \\t]*\"([A-Z0-9_]+)\",[ \\t]*\"([^\"]+)\"[ \\t]*\\)$")
     _bioseq_highway_fail(
       "malformed static target record '${_raw_static_record}'")
   endif()
@@ -319,8 +319,8 @@ function(_bioseq_highway_probe_targets)
   set(_namespace_bits)
   foreach(_raw_record IN LISTS _raw_records)
     string(CONCAT _record_pattern
-      "^BIOSEQ_HIGHWAY_TARGET_RECORD\\(\"([A-Z0-9_]+)\",[ \\t]*"
-      "\"([A-Z0-9_]+)\",[ \\t]*\"([^\"]+)\"\\)$")
+      "^BIOSEQ_HIGHWAY_TARGET_RECORD\\([ \\t]*\"([A-Z0-9_]+)\",[ \\t]*"
+      "\"([A-Z0-9_]+)\",[ \\t]*\"([^\"]+)\"[ \\t]*\\)$")
     if(NOT _raw_record MATCHES
         "${_record_pattern}")
       _bioseq_highway_fail("malformed target record '${_raw_record}'")
@@ -508,7 +508,8 @@ endfunction()
 #   OUTPUT_MODULES generated_modules
 #   OUTPUT_PRIMARY_MODULES generated_target_primaries
 #   OUTPUT_TARGET_IMPLEMENTATIONS generated_target_implementations
-#   OUTPUT_DISPATCH_REGISTRY generated_dispatch_registry
+#   OUTPUT_DISPATCH_REGISTRY generated_highway_registry
+#   OUTPUT_DISPATCH_INVENTORY generated_dispatch_inventory
 #   OUTPUT_TEST_PRIMARY_MODULE generated_static_test_primary
 #   OUTPUT_TEST_IMPLEMENTATIONS generated_static_test_implementations
 #   OUTPUT_TEST_SUPPORT generated_static_test_support
@@ -539,6 +540,7 @@ function(bioseq_add_highway_codegen)
     OUTPUT_PRIMARY_MODULES
     OUTPUT_TARGET_IMPLEMENTATIONS
     OUTPUT_DISPATCH_REGISTRY
+    OUTPUT_DISPATCH_INVENTORY
     OUTPUT_TEST_PRIMARY_MODULE
     OUTPUT_TEST_IMPLEMENTATIONS
     OUTPUT_TEST_SUPPORT
@@ -1119,7 +1121,8 @@ function(bioseq_add_highway_codegen)
       endif()
     endforeach()
   endforeach()
-  set(_dispatch_registry "${_output_root}/dispatch_registry.cppm")
+  set(_dispatch_registry "${_output_root}/highway_registry.cppm")
+  set(_dispatch_inventory "${_output_root}/dispatch_inventory.cppm")
   set(_test_support "${_output_root}/test_support.cppm")
   if(NOT _generated_test_primary_module
       OR NOT _generated_test_implementations)
@@ -1130,6 +1133,7 @@ function(bioseq_add_highway_codegen)
     ${_generated_primary_modules}
     ${_generated_target_implementations}
     "${_dispatch_registry}"
+    "${_dispatch_inventory}"
     "${_test_support}")
   list(REMOVE_DUPLICATES _generated_modules)
   set_source_files_properties(${_generated_modules} PROPERTIES GENERATED TRUE)
@@ -1248,6 +1252,7 @@ function(bioseq_add_highway_codegen)
       "${ARG_OUTPUT_PRIMARY_MODULES}|${_generated_primary_modules}"
       "${ARG_OUTPUT_TARGET_IMPLEMENTATIONS}|${_generated_target_implementations}"
       "${ARG_OUTPUT_DISPATCH_REGISTRY}|${_dispatch_registry}"
+      "${ARG_OUTPUT_DISPATCH_INVENTORY}|${_dispatch_inventory}"
       "${ARG_OUTPUT_TEST_PRIMARY_MODULE}|${_generated_test_primary_module}"
       "${ARG_OUTPUT_TEST_IMPLEMENTATIONS}|${_generated_test_implementations}"
       "${ARG_OUTPUT_TEST_SUPPORT}|${_test_support}"
