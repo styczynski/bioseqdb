@@ -607,6 +607,14 @@ constexpr int indirect = 9;
             return declaration->name;
         });
     std::ranges::sort(selected_child_names);
+    std::string selected_child_inventory{"["};
+    for (std::size_t index = 0;
+         index < selected_child_names.size();
+         ++index) {
+        if (index != 0) selected_child_inventory += ", ";
+        selected_child_inventory += "'" + selected_child_names[index] + "'";
+    }
+    selected_child_inventory += "]";
     require(
         selected_child_names == std::vector<std::string>{
             "branch_false",
@@ -616,8 +624,12 @@ constexpr int indirect = 9;
             "scalar_type",
             "table",
         },
-        "token-slice collection did not return exactly the direct namespace "
-        "children from both raw conditional branches");
+        std::string{
+            "token-slice collection did not return exactly the direct namespace "
+            "children from both raw conditional branches; observed sorted "
+            "inventory ("}
+            + std::to_string(selected_child_names.size()) + "): "
+            + selected_child_inventory);
     require(
         std::ranges::all_of(
             selected_children,
@@ -695,6 +707,12 @@ constexpr int indirect = 9;
         "token-slice shared attribute segment geometry is not removable");
 
     const declaration_record& map_value = selected_child("map_value");
+    require(
+        map_value.name == "map_value"
+            && source_text(token_slice_source, map_value.name_range)
+                == "map_value",
+        "token-slice function template head leaked its template parameter "
+        "into declaration identity");
     require(
         map_value.kind == declaration_kind::function
             && map_value.payload_kind
@@ -796,6 +814,22 @@ constexpr int indirect = 9;
             && !branch_else->active
             && !branch_endif->active,
         "token-slice preprocessor range/depth/activity facts changed");
+
+    constexpr std::string_view final_token_source =
+        "namespace final_token { constexpr int retained = 1; }";
+    const translation_unit final_token_slice = scan_token_slice(
+        "final_token_contract.cppm", final_token_source);
+    const auto retained = std::ranges::find(
+        final_token_slice.declarations,
+        "retained",
+        &declaration_record::name);
+    require(
+        !final_token_slice.tokens.empty()
+            && final_token_slice.tokens.back().spelling == "}"
+            && retained != final_token_slice.declarations.end()
+            && retained->enclosing_qualified_name == "final_token",
+        "token-slice raw lexer discarded a valid final token at the "
+        "buffer end");
 
     constexpr std::string_view probe_source = R"CPP(
 export module fixture.declaration_probe;

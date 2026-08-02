@@ -402,7 +402,7 @@ lex_source(std::string_view source) {
     clang::Token token;
     while (true) {
         const bool end = lexer.LexFromRawLexer(token);
-        if (end || token.is(clang::tok::eof)) {
+        if (token.is(clang::tok::eof)) {
             break;
         }
         if (token.is(clang::tok::comment)) {
@@ -428,6 +428,10 @@ lex_source(std::string_view source) {
             .spelling = spelling,
             .range = positions.range(begin, end_offset),
         });
+        // LexFromRawLexer reports whether its next-character pointer reached
+        // the buffer end. The token returned by that call is still valid, so
+        // retain it before stopping (notably a final `}` without a newline).
+        if (end) break;
     }
     return result;
 }
@@ -2961,20 +2965,46 @@ previous_identifier_token(
     std::optional<std::size_t> using_keyword;
     std::optional<std::size_t> record_keyword;
     std::optional<std::size_t> namespace_keyword;
+    int classification_parentheses = 0;
+    int classification_brackets = 0;
+    int classification_angles = 0;
     for (std::size_t cursor = begin; cursor < head_end; ++cursor) {
         if (attribute_ends[cursor] > cursor) {
             cursor = attribute_ends[cursor] - 1;
             continue;
         }
         const std::string_view spelling = tokens[cursor].spelling;
-        if (spelling == "using" && !using_keyword) {
-            using_keyword = cursor;
-        } else if ((spelling == "struct" || spelling == "class"
-                    || spelling == "union" || spelling == "enum")
-                   && !record_keyword) {
-            record_keyword = cursor;
-        } else if (spelling == "namespace" && !namespace_keyword) {
-            namespace_keyword = cursor;
+        const bool declaration_level = classification_parentheses == 0
+            && classification_brackets == 0
+            && classification_angles == 0;
+        if (declaration_level) {
+            if (spelling == "using" && !using_keyword) {
+                using_keyword = cursor;
+            } else if ((spelling == "struct" || spelling == "class"
+                        || spelling == "union" || spelling == "enum")
+                       && !record_keyword) {
+                record_keyword = cursor;
+            } else if (spelling == "namespace"
+                       && !namespace_keyword) {
+                namespace_keyword = cursor;
+            }
+        }
+        if (spelling == "(") {
+            ++classification_parentheses;
+        } else if (spelling == ")") {
+            --classification_parentheses;
+        } else if (spelling == "[") {
+            ++classification_brackets;
+        } else if (spelling == "]") {
+            --classification_brackets;
+        } else if (spelling == "<"
+                   && (cursor == begin
+                       || tokens[cursor - 1].spelling != "operator")) {
+            ++classification_angles;
+        } else if (spelling == ">" && classification_angles != 0) {
+            --classification_angles;
+        } else if (spelling == ">>" && classification_angles >= 2) {
+            classification_angles -= 2;
         }
     }
 
@@ -8395,11 +8425,109 @@ load_compile_database(const std::filesystem::path& path) {
     const std::string effective_profile = compiler_profile.empty()
         ? std::string{"production"}
         : std::string{compiler_profile};
+    const std::vector<clang::tooling::CompileCommand> all_commands =
+        database->getAllCompileCommands();
+    std::vector<std::filesystem::path> prepared_roots;
+    prepared_roots.reserve(all_commands.size());
+    for (const clang::tooling::CompileCommand& command : all_commands) {
+        if (!clang_backend::command_is_satisfiable(command)) {
+            throw std::runtime_error(
+                "declaration-probe owned compile database has an "
+                "unsatisfiable root command");
+        }
+        prepared_roots.push_back(
+            clang_backend::absolute_normalized_path(
+                clang_backend::absolute_command_path(
+                    command.Directory, command.Filename)));
+    }
+    std::ranges::sort(prepared_roots);
+    if (prepared_roots.empty()
+        || std::ranges::adjacent_find(prepared_roots)
+            != prepared_roots.end()) {
+        throw std::runtime_error(
+            "declaration-probe owned compile database has an empty or "
+            "duplicate root inventory");
+    }
     clang_backend::validate_owned_compile_database(
         *database,
-        {signature_identity},
+        prepared_roots,
         effective_profile,
         pcm_root);
+
+    std::map<std::string, std::filesystem::path, std::less<>>
+        prepared_pcm_by_module;
+    std::set<std::filesystem::path> prepared_pcm_paths;
+    const auto add_prepared_pcm =
+        [&](std::string module_name,
+            const std::filesystem::path& configured_pcm) {
+            const std::filesystem::path prepared_pcm =
+                clang_backend::absolute_normalized_path(configured_pcm);
+            if (module_name.empty()
+                || !clang_backend::path_within_root(
+                    prepared_pcm, pcm_root)
+                || !std::filesystem::is_regular_file(prepared_pcm)) {
+                throw std::runtime_error(
+                    "declaration-probe PCM mapping is missing or outside "
+                    "the prepared authority root");
+            }
+            const auto [position, inserted] =
+                prepared_pcm_by_module.emplace(
+                    std::move(module_name), prepared_pcm);
+            if (!inserted && position->second != prepared_pcm) {
+                throw std::runtime_error(
+                    "declaration-probe prepared module has conflicting PCM mappings");
+            }
+            if (inserted
+                && !prepared_pcm_paths.insert(prepared_pcm).second) {
+                throw std::runtime_error(
+                    "declaration-probe prepared modules alias one PCM");
+            }
+        };
+    for (const clang::tooling::CompileCommand& command : all_commands) {
+        const std::filesystem::path source =
+            clang_backend::absolute_normalized_path(
+                clang_backend::absolute_command_path(
+                    command.Directory, command.Filename));
+        const clang_backend::lexical_module_description provider =
+            clang_backend::describe_module_provider(source);
+        if (provider.provided_module.empty()) {
+            throw std::runtime_error(
+                source.string()
+                + ": declaration-probe prepared root provides no named module");
+        }
+        std::optional<std::filesystem::path> output_pcm;
+        for (const std::string& argument : command.CommandLine) {
+            if (argument.starts_with("-fmodule-output=")) {
+                if (output_pcm) {
+                    throw std::runtime_error(
+                        "declaration-probe prepared root has multiple PCM outputs");
+                }
+                output_pcm = argument.substr(
+                    std::string_view{"-fmodule-output="}.size());
+            } else if (argument.starts_with("-fmodule-file=")) {
+                const std::string_view mapping =
+                    std::string_view{argument}.substr(
+                        std::string_view{"-fmodule-file="}.size());
+                const std::size_t separator = mapping.find('=');
+                if (separator == std::string_view::npos
+                    || separator == 0
+                    || separator + 1 == mapping.size()) {
+                    throw std::runtime_error(
+                        "declaration-probe prepared root has a malformed PCM mapping");
+                }
+                add_prepared_pcm(
+                    std::string{mapping.substr(0, separator)},
+                    std::filesystem::path{
+                        std::string{mapping.substr(separator + 1)}});
+            }
+        }
+        if (!output_pcm) {
+            throw std::runtime_error(
+                "declaration-probe prepared root has no PCM output");
+        }
+        add_prepared_pcm(
+            provider.provided_module, *output_pcm);
+    }
     const std::vector<clang::tooling::CompileCommand> donor_commands =
         database->getCompileCommands(signature_identity.string());
     const auto donor = std::ranges::find_if(
@@ -8410,27 +8538,50 @@ load_compile_database(const std::filesystem::path& path) {
             signature_identity.string()
             + ": owned compile database has no satisfiable signature-donor command");
     }
-    std::optional<std::filesystem::path> donor_pcm;
-    for (const std::string& argument : donor->CommandLine) {
-        if (argument.starts_with("-fmodule-output=")) {
-            if (donor_pcm) {
-                throw std::runtime_error(
-                    "signature-donor command has multiple PCM outputs");
-            }
-            donor_pcm = argument.substr(
-                std::string_view{"-fmodule-output="}.size());
-        }
-    }
-    if (!donor_pcm) {
+    if (!prepared_pcm_by_module.contains(
+            signature.source_module.provided_module)) {
         throw std::runtime_error(
             "signature-donor command has no prepared PCM output");
     }
     clang::tooling::CompileCommand probe_command =
         clang_backend::retarget_compile_command(
             *donor, signature_identity, probe_identity);
-    probe_command.CommandLine.push_back(
-        "-fmodule-file=" + signature.source_module.provided_module
-        + "=" + donor_pcm->string());
+    std::map<std::string, std::filesystem::path, std::less<>>
+        existing_probe_mappings;
+    for (const std::string& argument : probe_command.CommandLine) {
+        if (!argument.starts_with("-fmodule-file=")) continue;
+        const std::string_view mapping =
+            std::string_view{argument}.substr(
+                std::string_view{"-fmodule-file="}.size());
+        const std::size_t separator = mapping.find('=');
+        if (separator == std::string_view::npos
+            || separator == 0
+            || separator + 1 == mapping.size()
+            || !existing_probe_mappings.emplace(
+                    std::string{mapping.substr(0, separator)},
+                    clang_backend::absolute_normalized_path(
+                        std::filesystem::path{
+                            std::string{mapping.substr(separator + 1)}}))
+                    .second) {
+            throw std::runtime_error(
+                "signature-donor command has a malformed or duplicate PCM mapping");
+        }
+    }
+    for (const auto& [module_name, prepared_pcm] :
+         prepared_pcm_by_module) {
+        if (const auto existing = existing_probe_mappings.find(module_name);
+            existing != existing_probe_mappings.end()) {
+            if (existing->second != prepared_pcm) {
+                throw std::runtime_error(
+                    "signature-donor command has a stale PCM mapping for '"
+                    + module_name + "'");
+            }
+            continue;
+        }
+        probe_command.CommandLine.push_back(
+            "-fmodule-file=" + module_name + "="
+            + prepared_pcm.string());
+    }
     const clang_backend::scoped_compile_database_cwd cwd{
         compile_database};
     const clang::tooling::CommandLineArguments adjusted =
@@ -8560,6 +8711,45 @@ load_compile_database(const std::filesystem::path& path) {
     return CLANG_VERSION_STRING;
 }
 
+namespace {
+
+inline constexpr std::string_view dependency_authority_suffix{
+    ";canonical-token-import-sha256="};
+
+[[nodiscard]] bool base_preparation_authority(
+    std::string_view authority) noexcept {
+    return authority == "support" || authority == "core"
+        || authority == "final" || authority == "safety";
+}
+
+[[nodiscard]] bool lowercase_sha256(std::string_view digest) noexcept {
+    return digest.size() == 64
+        && std::ranges::all_of(
+            digest,
+            [](const char value) {
+                return (value >= '0' && value <= '9')
+                    || (value >= 'a' && value <= 'f');
+            });
+}
+
+[[nodiscard]] bool valid_preparation_authority(
+    std::string_view authority) noexcept {
+    const std::size_t suffix = authority.find(
+        dependency_authority_suffix);
+    if (suffix == std::string_view::npos) {
+        return base_preparation_authority(authority);
+    }
+    return base_preparation_authority(authority.substr(0, suffix))
+        && authority.find(
+               dependency_authority_suffix,
+               suffix + dependency_authority_suffix.size())
+            == std::string_view::npos
+        && lowercase_sha256(authority.substr(
+            suffix + dependency_authority_suffix.size()));
+}
+
+}  // namespace
+
 [[nodiscard]] prepared_compilation_environment
 prepare_compilation_environment(
     const std::vector<std::filesystem::path>& source_paths,
@@ -8585,8 +8775,7 @@ prepare_compilation_environment(
         throw std::runtime_error(
             "Clang preparation received an unknown compiler profile");
     }
-    if (authority != "support" && authority != "core"
-        && authority != "final" && authority != "safety") {
+    if (!valid_preparation_authority(authority)) {
         throw std::runtime_error(
             "Clang preparation received an unknown authority");
     }
@@ -9910,16 +10099,6 @@ prepare_compilation_environment(
 
 namespace {
 
-inline constexpr std::string_view
-    dependency_authority_definition_prefix{
-        "-DBIOSEQ_CODEGEN_DEPENDENCY_AUTHORITY_SHA256="};
-
-// The reserved definition is intentionally part of every prepared provider's
-// normalized base arguments. Existing v1 manifest argument hashes, PCM
-// content keys, owned-database hashes, and physical/relocatable compilation
-// signatures therefore seal canonical raw-token/import evidence without
-// weakening or adding an alternate manifest-validation mode.
-
 [[nodiscard]] std::string normalized_dependency_import(
     std::string_view imported,
     std::string_view provided_module,
@@ -10177,17 +10356,29 @@ derive_dependency_compilation_authority(
     };
 }
 
+[[nodiscard]] std::string dependency_compilation_manifest_authority(
+    std::string_view base_authority,
+    const dependency_compilation_authority& authority) {
+    if (!base_preparation_authority(base_authority)
+        || !lowercase_sha256(
+            authority.canonical_token_import_sha256)) {
+        throw std::runtime_error(
+            "dependency-only manifest authority is incomplete");
+    }
+    return std::string{base_authority}
+        + std::string{dependency_authority_suffix}
+        + authority.canonical_token_import_sha256;
+}
+
 void validate_dependency_compilation_authority_seal(
     const dependency_compilation_authority& authority,
     const std::filesystem::path& compile_database) {
     if (authority.root_source_paths.empty()
-        || authority.canonical_token_import_sha256.size() != 64) {
+        || !lowercase_sha256(
+            authority.canonical_token_import_sha256)) {
         throw std::runtime_error(
             "dependency-only compilation authority is incomplete");
     }
-    const std::string expected_definition =
-        std::string{dependency_authority_definition_prefix}
-        + authority.canonical_token_import_sha256;
     std::unique_ptr<clang::tooling::CompilationDatabase> database =
         clang_backend::load_compile_database(compile_database);
     const std::vector<clang::tooling::CompileCommand> all_commands =
@@ -10205,22 +10396,6 @@ void validate_dependency_compilation_authority_seal(
         if (!actual_roots.insert(source).second) {
             throw std::runtime_error(
                 "dependency-only owned compile database duplicates a root command");
-        }
-        std::size_t matching_definitions = 0;
-        for (const std::string& argument : command.CommandLine) {
-            if (argument.starts_with(
-                    dependency_authority_definition_prefix)) {
-                if (argument != expected_definition) {
-                    throw std::runtime_error(
-                        "dependency-only canonical token/import authority is stale");
-                }
-                ++matching_definitions;
-            }
-        }
-        if (matching_definitions != 1) {
-            throw std::runtime_error(
-                "dependency-only root command has no unique canonical "
-                "token/import authority seal: " + source.string());
         }
     }
     const std::set<std::filesystem::path> expected_roots{
@@ -10313,9 +10488,9 @@ prepare_dependency_compilation_environment(
             signature_source,
             raw_compile_database,
             compiler_profile);
-    const std::string authority_definition =
-        std::string{dependency_authority_definition_prefix}
-        + dependency_authority.canonical_token_import_sha256;
+    const std::string manifest_authority =
+        dependency_compilation_manifest_authority(
+            authority, dependency_authority);
 
     std::unique_ptr<clang::tooling::CompilationDatabase> raw_database =
         clang_backend::load_compile_database(raw_compile_database);
@@ -10330,22 +10505,6 @@ prepare_dependency_compilation_environment(
                 canonical_sources, command_source)) {
             continue;
         }
-        for (std::size_t index = 0;
-             index < command.CommandLine.size();
-             ++index) {
-            const std::string_view argument = command.CommandLine[index];
-            if (argument.starts_with(
-                    dependency_authority_definition_prefix)
-                || (argument == "-D"
-                    && index + 1 < command.CommandLine.size()
-                    && std::string_view{command.CommandLine[index + 1]}
-                           .starts_with(
-                               "BIOSEQ_CODEGEN_DEPENDENCY_AUTHORITY_SHA256="))) {
-                throw std::runtime_error(
-                    "raw compile database uses the reserved dependency-only authority definition");
-            }
-        }
-        command.CommandLine.push_back(authority_definition);
         sealed_commands.push_back(std::move(command));
     }
     const auto command_less =
@@ -10422,7 +10581,7 @@ prepare_dependency_compilation_environment(
             expected_compiler_module_inventory_sha256,
             pcm_root,
             compiler_profile,
-            authority);
+            manifest_authority);
     prepared.dependencies.push_back(
         clang_backend::absolute_normalized_path(
             raw_compile_database));

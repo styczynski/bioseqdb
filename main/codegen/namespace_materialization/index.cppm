@@ -424,7 +424,8 @@ inline void validate_configure_handshake(
             command.llvm_config_sha256,
             command.compiler_module_inventory_sha256,
             "production",
-            "core");
+            clang_structural::dependency_compilation_manifest_authority(
+                "core", dependency_authority));
     const previous_publication previous = read_previous_publication(
         command.artifact_manifest,
         command.output_root,

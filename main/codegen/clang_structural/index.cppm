@@ -175,8 +175,15 @@ derive_dependency_compilation_authority(
     const std::filesystem::path& compile_database,
     std::string_view compiler_profile);
 
-/// Requires every derived dependency root command to carry the exact current
-/// canonical token/import digest sealed by dependency-only PREPARE.
+/// Combines a normal PREPARE authority with the canonical token/import digest
+/// using the existing inert manifest authority field.
+[[nodiscard]] std::string dependency_compilation_manifest_authority(
+    std::string_view base_authority,
+    const dependency_compilation_authority& authority);
+
+/// Requires the isolated owned database to contain exactly the currently
+/// derived dependency roots. Digest staleness is checked by passing
+/// `dependency_compilation_manifest_authority` to manifest validation.
 void validate_dependency_compilation_authority_seal(
     const dependency_compilation_authority& authority,
     const std::filesystem::path& compile_database);
