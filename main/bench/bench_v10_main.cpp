@@ -58,6 +58,7 @@ import bioseq.sequences.chaining.utils;
 import bioseq.alignment.block_aligner;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
+import bioseq.highway.test_support;
 import bioseq.storage.lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
 import bioseq.instr;
 import bioseq.parallelism.memory_admission;
@@ -89,22 +90,22 @@ namespace {
 
 using bioseq::bench_framework::ParamMap;
 using bioseq::bench_framework::RunConstraints;
-using bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-using bioseq::simd::HWY_NAMESPACE::MatchResult;
-using bioseq::simd::HWY_NAMESPACE::MatchResultBiologicalFingerprint;
-using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
-using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+using bioseq::simd::BaseAlignmentAlgorithmType;
+using bioseq::simd::ChainingAlgorithmType;
+using bioseq::simd::MatchResult;
+using bioseq::simd::MatchResultBiologicalFingerprint;
+using bioseq::simd::MatchResultCollection;
+using bioseq::simd::Minimap2Params;
+using bioseq::simd::MinimizerAlgorithmType;
 using bioseq::prefilter_stats::PrefilterBackendType;
 using bioseq::prefilter_stats::PrefilterExecutionProof;
-using bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
-using bioseq::simd::HWY_NAMESPACE::TwoStackExecutionProof;
-using bioseq::simd::HWY_NAMESPACE::PackedPaperNthashExecutionProof;
-using bioseq::simd::HWY_NAMESPACE::SimdChainingExecutionProof;
-using bioseq::simd::HWY_NAMESPACE::BlockAlignerExecutionProof;
-using bioseq::simd::HWY_NAMESPACE::ScalarPipelineExecutionProof;
-using bioseq::simd::HWY_NAMESPACE::Ksw2BatchedExecutionProof;
+using bioseq::simd::PartialVulkanExecutionProof;
+using bioseq::simd::TwoStackExecutionProof;
+using bioseq::simd::PackedPaperNthashExecutionProof;
+using bioseq::chaining::SimdChainingExecutionProof;
+using bioseq::simd::BlockAlignerExecutionProof;
+using bioseq::simd::ScalarPipelineExecutionProof;
+using bioseq::simd::Ksw2BatchedExecutionProof;
 using bioseq::chaining::SimdChainingPolicy;
 namespace gen = bioseq::sequences::generation;
 using bench_generator_t = gen::alphabet_sequence_generator<seq::dna4, std::uint32_t>;
@@ -1719,6 +1720,29 @@ struct AlgorithmDispatch {
     return false;
 }
 
+/// Bind the generated fixed-target provider used by standalone benchmarks.
+/// Production owns runtime target selection; this harness instead records the
+/// single generated test root as every dispatch-mask dimension so route proof
+/// remains complete without performing another Highway dispatch in a leaf.
+void bind_fixed_benchmark_highway_target(Minimap2Params& params) {
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    if (binding.target == 0) {
+        throw std::logic_error{
+            "generated fixed-target benchmark binding has no target"};
+    }
+    params.highway_kernels = binding.kernels;
+    params.highway_dispatch = {
+        .compiled_targets = binding.target,
+        .cpu_supported_targets = binding.target,
+        .runnable_targets = binding.target,
+        .planned_target = binding.target,
+    };
+    params.highway_executed_target = binding.target;
+    // Frozen scheduler-registry code: DNA4 is alignment alphabet entry zero.
+    params.alphabet_code = 0u;
+}
+
 [[nodiscard]] AlgorithmDispatch dispatch_algorithm(std::string_view algo,
                                                     std::int32_t kmer_override,
                                                     std::uint32_t max_edits = 40u) {
@@ -1888,6 +1912,9 @@ struct AlgorithmDispatch {
             algo == "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited"
                 ? SimdChainingPolicy::exact_visited
                 : SimdChainingPolicy::bounded_batch_approximate;
+    }
+    if (!dispatch.is_minimap2_reference) {
+        bind_fixed_benchmark_highway_target(dispatch.params);
     }
     return dispatch;
 }
@@ -2863,7 +2890,7 @@ static_assert([] {
 [[nodiscard]] constexpr bool scalar_minimizer_dimensions_absent(
         const ScalarPipelineExecutionProof& proof) noexcept {
     using ScalarMinimizerExecutionProof =
-        bioseq::simd::HWY_NAMESPACE::ScalarMinimizerExecutionProof;
+        bioseq::simd::ScalarMinimizerExecutionProof;
     return proof.query_minimizers == ScalarMinimizerExecutionProof{}
         && proof.target_minimizers == ScalarMinimizerExecutionProof{};
 }
@@ -2942,7 +2969,7 @@ static_assert([] {
     proof.record_seed_lookup(7u);
     proof.record_scalar_chain(11u);
     proof.record_ksw2_call(
-        bioseq::simd::HWY_NAMESPACE::ScalarKsw2Phase::gap, 3u, 5u);
+        bioseq::simd::ScalarKsw2Phase::gap, 3u, 5u);
     if (!scalar_seed_dimension_accepted(proof, true)
         || !scalar_chain_dimension_accepted(proof, true)
         || !scalar_ksw2_dimension_accepted(proof, true)
@@ -3595,10 +3622,10 @@ static_assert([] {
                     // production segmented entry point; the unsegmented port can
                     // select a query-sized position layout and correctly rejects
                     // the 500-Mbp target rather than truncating coordinates.
-                    results = bioseq::simd::HWY_NAMESPACE::minimap_port_segmented(
+                    results = bioseq::simd::minimap_port_segmented(
                         bench_query_view, bench_target_view, dispatch.params);
                 } else {
-                    results = bioseq::simd::HWY_NAMESPACE::minimap_port(
+                    results = bioseq::simd::minimap_port(
                         bench_query_view, bench_target_view, dispatch.params);
                 }
             }
@@ -3908,7 +3935,7 @@ struct UniquePrimaryView {
     const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_query);
     const auto target_view = bioseq::storage::as_lazy_sequence_view(lazy_target);
     MatchResultCollection results =
-        bioseq::simd::HWY_NAMESPACE::minimap_port(
+        bioseq::simd::minimap_port(
             query_view, target_view, dispatch.params);
     try {
         route_proof_accepted = require_selected_route_execution(

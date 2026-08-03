@@ -50,10 +50,10 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::bench::HWY_NAMESPACE {
 
-using bioseq::simd::HWY_NAMESPACE::CigarOp;
-using bioseq::simd::HWY_NAMESPACE::MatchResult;
-using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
-using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+using bioseq::simd::CigarOp;
+using bioseq::simd::MatchResult;
+using bioseq::simd::MatchResultCollection;
+using bioseq::simd::Minimap2Params;
 
 /**
  * @brief Convert a compact_sequence_range to an ACGT string (no NUL in the
@@ -185,7 +185,7 @@ inline void apply_params(mm_idxopt_t& idx_opt, mm_mapopt_t& map_opt,
         const std::vector<uint32_t> packed_cigar(
             native_region.p->cigar,
             native_region.p->cigar + native_region.p->n_cigar);
-        bioseq::simd::HWY_NAMESPACE::append_cigar(mr.cigar, packed_cigar);
+        bioseq::simd::append_cigar(mr.cigar, packed_cigar);
     }
     return mr;
 }
