@@ -167,9 +167,9 @@ function(bioseq_add_highway_gcc_canary)
       "-DBIOSEQ_GCC_CANARY_MODULES_SHA256=${_gcc_modules_sha256}"
       "-DBIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256=${_gcc_module_sources_sha256}"
       -P "${_runner}"
-    DEPENDS "${ARG_GENERATION_TARGET}"
     COMMENT
       "Compiling generated namespace-materialization IUs with isolated Homebrew GCC 16"
     VERBATIM
     USES_TERMINAL)
+  add_dependencies("${ARG_TARGET}" "${ARG_GENERATION_TARGET}")
 endfunction()

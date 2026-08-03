@@ -20,6 +20,14 @@ foreach(_checked IN ITEMS
     message(FATAL_ERROR "missing Highway GCC canary contract file: ${${_checked}}")
   endif()
 endforeach()
+file(READ "${_canary_module}" _canary_module_source)
+string(FIND "${_canary_module_source}"
+  "add_dependencies("
+  _generation_dependency_offset)
+if(_generation_dependency_offset EQUAL -1)
+  message(FATAL_ERROR
+    "Highway GCC canary must explicitly depend on Clang-host generation")
+endif()
 
 function(_expect_script_failure name source expected)
   set(_script "${TEST_ROOT}/${name}.cmake")
