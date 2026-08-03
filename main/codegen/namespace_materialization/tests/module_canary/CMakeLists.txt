@@ -120,7 +120,15 @@ if(BIOSEQ_HIGHWAY_GCC_CANARY)
     SOURCE_ROOT
       "${_bioseq_namespace_materialization_canary_dir}/highway_canary"
     HIGHWAY_INCLUDE_ROOT
-      "${_bioseq_gcc_canary_highway_include_root}")
+      "${_bioseq_gcc_canary_highway_include_root}"
+    GENERATION_TARGET
+      "${_bioseq_namespace_materialization_canary_codegen}"
+    GENERATED_ROOT
+      "${_bioseq_namespace_materialization_canary_generated_root}"
+    PRIMARY "${_bioseq_namespace_materialization_canary_primary}"
+    DRIVER
+      "${_bioseq_namespace_materialization_canary_dir}/driver.cppm"
+    MAIN "${_bioseq_namespace_materialization_canary_dir}/main.cpp")
 endif()
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)

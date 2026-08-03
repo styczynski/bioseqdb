@@ -28,6 +28,37 @@ if(_header_authentication_offset EQUAL -1)
   message(FATAL_ERROR
     "Highway GCC canary must authenticate its complete Highway header closure")
 endif()
+foreach(_driver_closure_contract IN ITEMS
+    "_bioseq_highway_gcc_canary_driver_closure"
+    "-print-prog-name=cc1plus"
+    "-print-prog-name=collect2"
+    "-dumpspecs"
+    "libstdc++.dylib"
+    "libstdc++.a"
+    "libgcc_s.1.1.dylib"
+    "libgcc.a"
+    "libgcc_eh.a"
+    "include/c++/*")
+  string(FIND "${_canary_module_source}" "${_driver_closure_contract}"
+    _driver_closure_offset)
+  if(_driver_closure_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary lost driver closure evidence "
+      "${_driver_closure_contract}")
+  endif()
+endforeach()
+foreach(_outer_generic_contract IN ITEMS
+    "GENERATION_TARGET"
+    "GENERATED_ROOT"
+    "add_dependencies")
+  string(FIND "${_canary_module_source}" "${_outer_generic_contract}"
+    _outer_generic_offset)
+  if(_outer_generic_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary lost generic closure dependency "
+      "${_outer_generic_contract}")
+  endif()
+endforeach()
 
 function(_expect_script_failure name source expected)
   set(_script "${TEST_ROOT}/${name}.cmake")
@@ -174,8 +205,16 @@ foreach(_required_text IN ITEMS
     "BIOSEQ_GCC_CANARY_HIGHWAY_INCLUDE_ROOT"
     "BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST"
     "HWY_NEON_WITHOUT_AES"
+    "HWY_NEON"
     "HWY_SSE2"
+    "HWY_SSE4"
     "HWY_EMU128"
+    "target_attribute_shapes.cppm.in"
+    "attribute_shapes.cppm"
+    "typed_flat_api.cppm"
+    "instance_3.cppm"
+    "bioseq_namespace_materialization_gcc_module_canary"
+    "bioseq_gcc_canary_closure"
     "highway_registry.cppm"
     "runtime.cpp"
     "BASE_DIRS"
@@ -184,6 +223,15 @@ foreach(_required_text IN ITEMS
   if(_required_offset EQUAL -1)
     message(FATAL_ERROR
       "nested GCC canary lost required closure text: ${_required_text}")
+  endif()
+endforeach()
+foreach(_target_policy IN ITEMS
+    [=["${SIMD_TARGET_TOKEN} | HWY_EMU128"]=]
+    [=["${SIMD_TARGET_TOKEN} | ${ATTRIBUTED_TARGET_TOKEN} | HWY_EMU128"]=])
+  string(FIND "${_nested}" "${_target_policy}" _target_policy_offset)
+  if(_target_policy_offset EQUAL -1)
+    message(FATAL_ERROR
+      "nested GCC canary lost exact target policy ${_target_policy}")
   endif()
 endforeach()
 string(FIND "${_nested}" "find_package(" _find_package_offset)
@@ -199,6 +247,7 @@ set(_canary_source_root
 file(READ "${_canary_source_root}/registry.cppm.in" _registry_source)
 foreach(_primary_import IN ITEMS
     "import @SIMD_TARGET_MODULE@;"
+    "import @ATTRIBUTED_TARGET_MODULE@;"
     "import @FALLBACK_TARGET_MODULE@;")
   string(FIND "${_registry_source}" "${_primary_import}" _import_offset)
   if(_import_offset EQUAL -1)
@@ -216,6 +265,22 @@ if(NOT _export_count EQUAL 1 OR NOT _dispatch_count EQUAL 1)
   message(FATAL_ERROR
     "Highway GCC canary must own exactly one literal binder dispatch registry")
 endif()
+string(FIND "${_registry_source}"
+  "#define HWY_DISABLED_TARGETS (~(@SIMD_TARGET_TOKEN@ | HWY_EMU128))"
+  _registry_runtime_mask)
+string(FIND "${_registry_source}"
+  "&@ATTRIBUTED_TARGET_NAMESPACE@::BindHighwayTarget"
+  _attributed_link_anchor)
+if(_registry_runtime_mask EQUAL -1 OR _attributed_link_anchor EQUAL -1)
+  message(FATAL_ERROR
+    "Highway GCC registry must exclude but link-anchor the attributed target")
+endif()
+string(FIND "${_registry_source}" "@ATTRIBUTED_TARGET_TOKEN@"
+  _attributed_registry_token)
+if(NOT _attributed_registry_token EQUAL -1)
+  message(FATAL_ERROR
+    "Highway GCC attributed token leaked into the runtime export registry")
+endif()
 file(READ "${_canary_source_root}/target_kernel.cppm.in" _kernel_source)
 foreach(_operation IN ITEMS "hn::LoadU" "hn::Add" "hn::StoreU" "HWY_ATTR")
   string(FIND "${_kernel_source}" "${_operation}" _operation_offset)
@@ -224,6 +289,34 @@ foreach(_operation IN ITEMS "hn::LoadU" "hn::Add" "hn::StoreU" "HWY_ATTR")
       "Highway GCC canary kernel lost real Highway operation ${_operation}")
   endif()
 endforeach()
+file(READ "${_canary_source_root}/target_attribute_shapes.cppm.in"
+  _attribute_source)
+foreach(_attribute_contract IN ITEMS
+    "sizeof(HWY_TARGET_STR) > 1"
+    "hn::AESRound"
+    "AttributeFunctionTemplate"
+    "AttributeWorker(const std::uint32_t input)"
+    "operator()() const"
+    "member() const"
+    "member_template"
+    "HighwayAttributeCoverage"
+    ") HWY_ATTR constexpr"
+    "[] HWY_ATTR"
+    "[]<class Value>(const Value value) HWY_ATTR")
+  string(FIND "${_attribute_source}" "${_attribute_contract}"
+    _attribute_offset)
+  if(_attribute_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC attributed probe lost ${_attribute_contract}")
+  endif()
+endforeach()
+string(REGEX MATCHALL "AttributeTargetOnlyAES"
+  _attribute_aes_matches "${_attribute_source}")
+list(LENGTH _attribute_aes_matches _attribute_aes_count)
+if(NOT _attribute_aes_count EQUAL 1)
+  message(FATAL_ERROR
+    "Highway GCC target-only AES probe must remain defined and uncalled")
+endif()
 file(GLOB _canary_sources LIST_DIRECTORIES FALSE
   "${_canary_source_root}/*")
 foreach(_canary_source IN LISTS _canary_sources)
@@ -247,6 +340,22 @@ foreach(_runtime_contract IN ITEMS
       "Highway GCC canary runtime lost ABI contract ${_runtime_contract}")
   endif()
 endforeach()
+string(FIND "${_runtime_source}"
+  "#define HWY_DISABLED_TARGETS (~(@SIMD_TARGET_TOKEN@ | HWY_EMU128))"
+  _runtime_mask_offset)
+string(FIND "${_runtime_source}"
+  "return @SIMD_TARGET_TOKEN@ | HWY_EMU128;"
+  _supported_mask_offset)
+if(_runtime_mask_offset EQUAL -1 OR _supported_mask_offset EQUAL -1)
+  message(FATAL_ERROR
+    "Highway GCC runtime must remain conservative baseline plus EMU128")
+endif()
+string(FIND "${_runtime_source}" "@ATTRIBUTED_TARGET_TOKEN@"
+  _attributed_runtime_token)
+if(NOT _attributed_runtime_token EQUAL -1)
+  message(FATAL_ERROR
+    "Highway GCC attributed token leaked into SupportedTargets")
+endif()
 
 file(READ "${_runner}" _runner_source)
 foreach(_sealed_argument IN ITEMS
@@ -258,21 +367,32 @@ foreach(_sealed_argument IN ITEMS
     "-DCMAKE_CXX_MODULE_STD:BOOL=OFF"
     "bioseq_verify_gcc16_toolchain_identity"
     "file(REMOVE_RECURSE"
-    "--unset=CPATH"
-    "--unset=CPLUS_INCLUDE_PATH"
-    "--unset=LIBRARY_PATH"
-    "--unset=COMPILER_PATH"
-    "--unset=GCC_EXEC_PREFIX"
-    "--unset=VCPKG_ROOT"
-    "--unset=DYLD_INSERT_LIBRARIES"
+    "/usr/bin/env"
+    "-i"
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
     "--verbose"
-    "_canary_executable"
-    "bioseq-highway-gcc-canary: first=")
+    "bioseq_gcc_canary_closure"
+    "/usr/bin/otool -L"
+    "libc"
+    "libhwy"
+    "unexpected non-system dependency"
+    "_bioseq_highway_gcc_audit_macho")
   string(FIND "${_runner_source}" "${_sealed_argument}" _sealed_offset)
   if(_sealed_offset EQUAL -1)
     message(FATAL_ERROR
       "Highway GCC canary runner lost sealed argument: ${_sealed_argument}")
+  endif()
+endforeach()
+foreach(_forbidden_runner_text IN ITEMS
+    "--unset="
+    "_canary_output"
+    "checksum=976")
+  string(FIND "${_runner_source}" "${_forbidden_runner_text}"
+    _forbidden_runner_offset)
+  if(NOT _forbidden_runner_offset EQUAL -1)
+    message(FATAL_ERROR
+      "build-only GCC canary runner retained runtime/denylist text: "
+      "${_forbidden_runner_text}")
   endif()
 endforeach()
 string(FIND "${_nested}" "-fpermissive" _permissive_offset)

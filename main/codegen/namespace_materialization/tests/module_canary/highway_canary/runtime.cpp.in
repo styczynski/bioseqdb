@@ -22,6 +22,8 @@ namespace hwy {
 HWY_DLLEXPORT std::int64_t SupportedTargets() {
   // Both entries are portable on the authenticated native-Darwin host: the
   // mandatory baseline SIMD target and Highway's software EMU128 fallback.
+  // The nonempty-HWY_TARGET_STR probe is compiled and link-anchored elsewhere
+  // but intentionally excluded from this runtime/export policy.
   return @SIMD_TARGET_TOKEN@ | HWY_EMU128;
 }
 

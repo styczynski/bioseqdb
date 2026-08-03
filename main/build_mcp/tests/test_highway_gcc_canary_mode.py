@@ -76,7 +76,10 @@ class HighwayGccCanaryModeContractTest(unittest.TestCase):
         self.assertIn("paired Homebrew gcc/g++ >= 16.1", docs)
         self.assertIn("libstdc++.modules.json", docs)
         self.assertIn("sole HWY_EXPORT/HWY_DYNAMIC_DISPATCH", docs)
-        self.assertIn("sealed Highway headers", docs)
+        self.assertIn("third compile-only attributed target probe", docs)
+        self.assertIn("sealed Highway/libstdc++ headers", docs)
+        self.assertIn("audited GCC dyld runtimes", docs)
+        self.assertIn("executes neither binary", docs)
         self.assertIn(
             "only the GCC Highway module/attribute/dispatch boundary",
             docs,

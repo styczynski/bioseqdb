@@ -9,6 +9,9 @@ import :highway_registry;
 namespace bioseq::highway_gcc_canary {
 
 [[nodiscard]] CanaryRun run_imported_binder_canary() noexcept {
+  if (!attributed_binder_is_linked()) {
+    return {};
+  }
   constexpr std::uint32_t count = 16;
   std::uint32_t input[count]{};
   std::uint32_t first_output[count]{};

@@ -1,0 +1,100 @@
+module;
+
+// This private partition is compile/link evidence only. Its target is absent
+// from the runtime registry mask and from hwy::SupportedTargets().
+#define HWY_COMPILE_ALL_ATTAINABLE 1
+#define HWY_DISABLED_TARGETS (~(@TARGET_POLICY_MASK@))
+#define HWY_HEADER_ONLY 1
+#define HWY_STATIC_DEFINE 1
+#define TOOLCHAIN_MISS_SYS_AUXV_H 1
+#define TOOLCHAIN_MISS_ASM_HWCAP_H 1
+#include <hwy/detect_targets.h>
+#undef HWY_TARGET
+#define HWY_TARGET @TARGET_TOKEN@
+#include <hwy/highway.h>
+
+#include <cstdint>
+
+module @TARGET_MODULE@:attribute_shapes;
+
+#ifndef HWY_TARGET_STR
+#error "compile-only Highway target must publish a target attribute string"
+#endif
+#if !HWY_HAS_ATTRIBUTE(target)
+#error "authenticated GCC must support the target function attribute"
+#endif
+static_assert(sizeof(HWY_TARGET_STR) > 1,
+              "compile-only Highway target string must be nonempty");
+static_assert(HWY_TARGET == @TARGET_TOKEN@);
+
+namespace bioseq::highway_gcc_canary::HWY_NAMESPACE {
+namespace hn = hwy::HWY_NAMESPACE;
+
+// Deliberately uncalled: parsing and code generation must accept an operation
+// that distinguishes NEON(+aes)/SSE4(+aes) from the runtime baseline target.
+HWY_ATTR void AttributeTargetOnlyAES(
+    const std::uint8_t* input,
+    std::uint8_t* output) noexcept {
+  const hn::ScalableTag<std::uint8_t> d;
+  const auto state = hn::LoadU(d, input);
+  const auto key = hn::Set(d, std::uint8_t{0x5a});
+  hn::StoreU(hn::AESRound(state, key), d, output);
+}
+
+template <class Value>
+HWY_ATTR Value AttributeFunctionTemplate(const Value value) noexcept {
+  return value + Value{1};
+}
+
+struct AttributeWorker final {
+  std::uint32_t value;
+
+  HWY_ATTR AttributeWorker(const std::uint32_t input) noexcept
+      : value(input) {}
+
+  HWY_ATTR std::uint32_t operator()() const noexcept {
+    return value + std::uint32_t{2};
+  }
+
+  HWY_ATTR std::uint32_t member() const noexcept {
+    return value + std::uint32_t{3};
+  }
+
+  template <class Value>
+  HWY_ATTR Value member_template(const Value input) const noexcept {
+    return input + static_cast<Value>(value);
+  }
+};
+
+HWY_ATTR std::uint32_t AttributeFreeFunction(
+    const std::uint32_t value) noexcept {
+  return value + std::uint32_t{4};
+}
+
+// Named attributed driver forces code generation for every representative
+// placement emitted by body_with_highway_attributes().
+HWY_ATTR std::uint32_t HighwayAttributeCoverage(
+    const std::uint32_t input) noexcept {
+  AttributeWorker worker{input};
+  const auto local = [](const std::uint32_t value) HWY_ATTR constexpr
+      [[gnu::always_inline]] -> std::uint32_t {
+    return value + std::uint32_t{5};
+  };
+  const auto no_parameters = [] HWY_ATTR {
+    return std::uint32_t{6};
+  };
+  const auto generic = []<class Value>(const Value value) HWY_ATTR {
+    return value + Value{7};
+  };
+
+  return AttributeFunctionTemplate(input)
+      + worker()
+      + worker.member()
+      + worker.member_template(input)
+      + AttributeFreeFunction(input)
+      + local(input)
+      + no_parameters()
+      + generic(input);
+}
+
+}  // namespace bioseq::highway_gcc_canary::HWY_NAMESPACE
