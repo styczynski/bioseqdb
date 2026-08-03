@@ -921,6 +921,11 @@ inline void require_prepare_document(
             "core", entry_authority.dependency);
     clang_structural::validate_dependency_compilation_authority_seal(
         entry_authority.dependency, compile_database);
+    const std::vector<prepare_file_snapshot>
+        pre_validation_completion_snapshot =
+            capture_prepare_file_snapshot(
+                prepared.completion_authority_files,
+                "completion authority dependency");
     const clang_structural::prepared_compilation_validation validated =
         clang_structural::validate_prepared_compilation_environment(
             entry_authority.dependency.root_source_paths,
@@ -937,6 +942,16 @@ inline void require_prepare_document(
             command.compiler_module_inventory_sha256,
             "production",
             manifest_authority);
+    const std::vector<prepare_file_snapshot>
+        completion_authority_snapshot =
+            capture_prepare_file_snapshot(
+                prepared.completion_authority_files,
+                "completion authority dependency");
+    if (completion_authority_snapshot
+        != pre_validation_completion_snapshot) {
+        throw std::runtime_error(
+            "PREPARE dependency identity or bytes changed during validation");
+    }
     if (validated.compilation_signature
             != prepared.compilation_signature
         || validated.relocatable_compilation_signature
@@ -958,11 +973,6 @@ inline void require_prepare_document(
         throw std::runtime_error(
             "on-disk PREPARE database or manifest differs from the built environment");
     }
-    const std::vector<prepare_file_snapshot>
-        completion_authority_snapshot =
-            capture_prepare_file_snapshot(
-                prepared.completion_authority_files,
-                "completion authority dependency");
     write_prepare_output(
         command, output_authority, command.action_trace, action_trace);
     static_cast<void>(
@@ -980,13 +990,6 @@ inline void require_prepare_document(
         prepare_publication_checkpoint::before_completion_stamp);
     revalidate_prepare_entry_authority(
         command, output_authority, entry_authority, &prepared);
-    if (capture_prepare_file_snapshot(
-            prepared.completion_authority_files,
-            "completion authority dependency")
-        != completion_authority_snapshot) {
-        throw std::runtime_error(
-            "PREPARE dependency identity or bytes changed before completion");
-    }
     require_prepare_document(
         command,
         output_authority,
@@ -1026,6 +1029,13 @@ inline void require_prepare_document(
             + "\nprepare_action_trace_sha256="
             + sha256_hex(action_trace)
             + "\n";
+    if (capture_prepare_file_snapshot(
+            prepared.completion_authority_files,
+            "completion authority dependency")
+        != completion_authority_snapshot) {
+        throw std::runtime_error(
+            "PREPARE dependency identity or bytes changed before completion");
+    }
     write_prepare_output(
         command,
         output_authority,
