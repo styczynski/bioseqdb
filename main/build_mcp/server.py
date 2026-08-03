@@ -1684,18 +1684,25 @@ MODES: Dict[str, ModeDefinition] = {
             "Compile and link a generated-style conservative two-target Highway "
             "dispatch table, a third compile-only attributed target probe, and "
             "the generic namespace-materialization closure. The sole "
-            "HWY_EXPORT/HWY_DYNAMIC_DISPATCH registry runs in an isolated "
-            "empty-environment, no-vcpkg-toolchain Ninja sub-build with an "
-            "authenticated paired Homebrew gcc/g++ >= 16.1, "
+            "HWY_EXPORT/HWY_DYNAMIC_DISPATCH registry is compiled and linked in "
+            "an isolated empty-environment, no-vcpkg-toolchain Ninja sub-build "
+            "with an authenticated paired Homebrew gcc/g++ >= 16.1, "
             "libstdc++.modules.json, sealed Highway/libstdc++ headers, and "
-            "audited GCC dyld runtimes. This build-only mode executes neither "
+            "audited GCC dyld runtimes. With build_only=true it executes neither "
             "binary and proves only the GCC Highway module/attribute/dispatch "
-            "boundary, not the full external-api build or production DSO."
+            "boundary. With build_only=false the local builder additionally "
+            "executes the imported-binder canary and records both selected "
+            "target IDs and names. Neither form proves the full external-api "
+            "build or production DSO."
         ),
         is_verb_plular=False,
         targets=["bioseq_highway_gcc_canary"],
-        commands=[],
+        commands=[["bioseq_highway_gcc_module_canary"]],
         preset_override="highway-gcc-canary",
+        binary_subdir=(
+            "codegen/namespace_materialization/tests/module_canary/"
+            "highway-gcc-canary/nested/bin"
+        ),
         required_cache_variables={
             "BIOSEQ_HIGHWAY_GCC_CANARY": "ON",
             "BIOSEQ_BUILD_CORE": "ON",
@@ -1705,7 +1712,7 @@ MODES: Dict[str, ModeDefinition] = {
             "BIOSEQ_BUILD_WEBSITE": "OFF",
             "BUILD_TESTING": "OFF",
         },
-        requires_build_only=True,
+        requires_build_only=False,
     ),
     "bench": ModeDefinition(
         lock_group="bench",
@@ -2001,6 +2008,7 @@ FIXED_BUILD_ONLY_MODES: frozenset[str] = frozenset(
 # any provisioning, synchronization, or worker dispatch occurs.
 REMOTE_RUN_REJECTED_MODES: Set[str] = {
     "website",
+    "highway-gcc-canary",
     POSTGRES_ERROR_SAFETY_MODE,
     PACKAGE_LINUX_MODE,
     *FIXED_BUILD_ONLY_MODES,

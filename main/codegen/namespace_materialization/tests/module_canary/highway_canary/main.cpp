@@ -11,9 +11,12 @@ int main() {
     return 1;
   }
   printf(
-      "bioseq-highway-gcc-canary: first=%s second=%s checksum=%u\n",
+      "bioseq-highway-gcc-canary: first=%s(0x%llx) "
+      "second=%s(0x%llx) checksum=%u\n",
       result.first_name,
+      static_cast<unsigned long long>(result.first_target),
       result.second_name,
+      static_cast<unsigned long long>(result.second_target),
       static_cast<unsigned int>(result.checksum));
   return 0;
 }

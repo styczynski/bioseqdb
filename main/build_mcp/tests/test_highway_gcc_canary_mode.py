@@ -4,7 +4,6 @@ import json
 import sys
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 BUILD_MCP_DIR = Path(__file__).resolve().parents[1]
@@ -15,6 +14,14 @@ import server  # noqa: E402
 
 
 MODE = "highway-gcc-canary"
+NESTED_BINARY_SUBDIR = (
+    "codegen/namespace_materialization/tests/module_canary/"
+    "highway-gcc-canary/nested/bin"
+)
+HIGHWAY_CANARY_MAIN = (
+    "codegen/namespace_materialization/tests/module_canary/"
+    "highway_canary/main.cpp"
+)
 EXPECTED_CACHE = {
     "BIOSEQ_HIGHWAY_GCC_CANARY": "ON",
     "BIOSEQ_BUILD_CORE": "ON",
@@ -47,17 +54,23 @@ class HighwayGccCanaryPresetContractTest(unittest.TestCase):
         )
         self.assertEqual(self.preset["cacheVariables"], EXPECTED_CACHE)
         self.assertIn("no-vcpkg", self.preset["description"])
+        self.assertIn("build_only=false", self.preset["description"])
+        self.assertIn("selected target IDs", self.preset["description"])
         self.assertIn("not the full external-api", self.preset["description"])
 
 
 class HighwayGccCanaryModeContractTest(unittest.TestCase):
-    def test_mode_is_fixed_local_build_only(self) -> None:
+    def test_mode_owns_compile_only_and_runtime_receipts(self) -> None:
         details = server.MODES[MODE]
-        self.assertTrue(details.requires_build_only)
+        self.assertFalse(details.requires_build_only)
         self.assertEqual(details.lock_group, "tests")
         self.assertEqual(details.preset_override, MODE)
         self.assertEqual(details.targets, ["bioseq_highway_gcc_canary"])
-        self.assertEqual(details.commands, [])
+        self.assertEqual(
+            details.commands,
+            [["bioseq_highway_gcc_module_canary"]],
+        )
+        self.assertEqual(details.binary_subdir, NESTED_BINARY_SUBDIR)
         self.assertEqual(details.post_build_targets, ())
         self.assertFalse(details.install_extension)
         self.assertEqual(details.required_cache_variables, EXPECTED_CACHE)
@@ -67,7 +80,11 @@ class HighwayGccCanaryModeContractTest(unittest.TestCase):
             server.build_dir_for(MODE, False),
             MAIN_DIR / "build" / MODE,
         )
-        self.assertIn(MODE, server.FIXED_BUILD_ONLY_MODES)
+        self.assertEqual(
+            server.bin_dir_for(MODE, False),
+            MAIN_DIR / "build" / MODE / NESTED_BINARY_SUBDIR,
+        )
+        self.assertNotIn(MODE, server.FIXED_BUILD_ONLY_MODES)
         self.assertIn(MODE, server.REMOTE_RUN_REJECTED_MODES)
         self.assertNotIn(MODE, server.REMOTE_RUN_BUILD_MODES)
 
@@ -79,37 +96,29 @@ class HighwayGccCanaryModeContractTest(unittest.TestCase):
         self.assertIn("third compile-only attributed target probe", docs)
         self.assertIn("sealed Highway/libstdc++ headers", docs)
         self.assertIn("audited GCC dyld runtimes", docs)
+        self.assertIn("build_only=true", docs)
+        self.assertIn("build_only=false", docs)
         self.assertIn("executes neither binary", docs)
+        self.assertIn("executes the imported-binder canary", docs)
+        self.assertIn("both selected target IDs and names", docs)
         self.assertIn(
-            "only the GCC Highway module/attribute/dispatch boundary",
+            "GCC Highway module/attribute/dispatch boundary",
             docs,
         )
-        self.assertIn("not the full external-api build or production DSO", docs)
+        self.assertIn("Neither form proves the full external-api", docs)
 
-    def test_public_entry_rejects_runtime_and_debug_forms(self) -> None:
-        invalid_requests = (
-            {},
-            {"build_only": True, "debug_supplied": True},
-            {"build_only": True, "debug": True},
-            {"build_only": True, "filter_supplied": True},
-            {"build_only": True, "bench_filter": {"tags": ["x"]}},
-            {"build_only": True, "debug_report_supplied": True},
-            {"build_only": True, "debug_report": True},
-            {"build_only": True, "bench_e2e_config": "config.json"},
+    def test_runtime_output_records_numeric_target_ids(self) -> None:
+        source = (MAIN_DIR / HIGHWAY_CANARY_MAIN).read_text()
+        self.assertIn("first=%s(0x%llx)", source)
+        self.assertIn("second=%s(0x%llx)", source)
+        self.assertIn(
+            "static_cast<unsigned long long>(result.first_target)",
+            source,
         )
-        with mock.patch.object(
-            server,
-            "_refuse_root_build_identity",
-            return_value=None,
-        ), mock.patch.object(
-            server,
-            "_ensure_build_worker_timesharing_policy",
-        ):
-            for request in invalid_requests:
-                with self.subTest(request=request):
-                    message = server.tool_start_build(MODE, **request)
-                    self.assertIn("fixed local compile gate", message)
-                    self.assertIn("requires build_only=true", message)
+        self.assertIn(
+            "static_cast<unsigned long long>(result.second_target)",
+            source,
+        )
 
     def test_local_schema_includes_mode_but_remote_schema_does_not(self) -> None:
         local_schema = next(
