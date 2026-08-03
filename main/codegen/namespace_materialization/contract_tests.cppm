@@ -1127,16 +1127,31 @@ inline void verify_alias_probe_provenance_placement() {
                 == clang_structural::declaration_kind::alias,
         "alias probe fixture has one structural alias declaration");
     generation_plan plan{.source_text = std::string{source}};
-    owned_declaration entry{
+    binding_record binding{
         .declaration = sliced.declarations.front(),
+        .role = axis_role::identity,
+        .group = "abi",
+        .cases = {replacement_case{
+            .label = "selected",
+            .spelling = "long",
+            .ordinal = 0u,
+        }},
     };
-    const materialization_coordinate coordinate{.ordinal = 7u};
-    const std::string rendered = render_entry_head(
-        plan, entry, coordinate, true);
+    const materialization_coordinate coordinate{
+        .ordinal = 7u,
+        .assignments = {axis_case_assignment{
+            .group = "abi",
+            .role = axis_role::identity,
+            .case_label = "selected",
+            .case_ordinal = 0u,
+        }},
+    };
+    const std::string rendered = render_binding_declaration(
+        plan, binding, coordinate, true);
     const std::string expected =
         "using scalar_type [[bioseq::template_flatten_provenance(\""
-        + entry.declaration.provenance_id
-        + "\", \"7\")]] = int";
+        + binding.declaration.provenance_id
+        + "\", \"7\")]] = long;\n";
     require(
         rendered == expected && !rendered.starts_with("[["),
         "alias declaration probes place provenance after the alias name");
