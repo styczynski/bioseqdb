@@ -7200,6 +7200,9 @@ void execute_clang(
     }
 }
 
+[[nodiscard]] std::filesystem::path weakly_canonical_path(
+    const std::filesystem::path& path);
+
 [[nodiscard]] std::vector<std::filesystem::path>
 parse_make_depfile(
     const std::filesystem::path& depfile,
@@ -7235,7 +7238,14 @@ parse_make_depfile(
         if (dependency.is_relative()) {
             dependency = command_directory / dependency;
         }
-        result.push_back(dependency.lexically_normal());
+        dependency = weakly_canonical_path(
+            dependency.lexically_normal());
+        if (!std::filesystem::is_regular_file(dependency)) {
+            throw std::runtime_error(
+                "Clang depfile dependency is not a regular file: "
+                + dependency.string());
+        }
+        result.push_back(std::move(dependency));
         token.clear();
     };
     for (std::size_t index = separator + 1;
@@ -7360,9 +7370,6 @@ parse_make_depfile(
     }
     return sha256_hex(material);
 }
-
-[[nodiscard]] std::filesystem::path weakly_canonical_path(
-    const std::filesystem::path& path);
 
 [[nodiscard]] std::string directory_content_hash(
     const std::filesystem::path& root,

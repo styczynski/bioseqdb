@@ -1289,6 +1289,14 @@ inline int invoke() {
         guard_root / "donor.cppm";
     const std::filesystem::path guard_provider =
         guard_root / "provider.cppm";
+    const std::filesystem::path guard_header =
+        guard_root / "dependency_guard_header.hpp";
+    const std::filesystem::path guard_header_alias =
+        guard_root / "dependency_guard_header_alias.hpp";
+    const std::filesystem::path guard_distinct_header =
+        guard_root / "dependency_guard_distinct_header.hpp";
+    const std::filesystem::path guard_distinct_alias =
+        guard_root / "dependency_guard_distinct_alias.hpp";
     const std::filesystem::path guard_raw_database =
         guard_root / "compile_commands.json";
     const std::filesystem::path guard_pcm_root =
@@ -1314,7 +1322,13 @@ inline int invoke() {
         "export module fixture.dependency_guard.donor;\n"
         "export int dependency_guard_donor();\n");
     write_file(
+        guard_header,
+        "#pragma once\n"
+        "inline constexpr int dependency_guard_header_value = 7;\n");
+    write_file(
         guard_provider,
+        "module;\n"
+        "#include \"dependency_guard_header.hpp\"\n"
         "export module fixture.dependency_guard.provider;\n"
         "export int dependency_guard_provider();\n");
     require(
@@ -1440,6 +1454,47 @@ inline int invoke() {
         "cold dependency-only action trace did not prove one canonical "
         "token scan and zero canonical semantic actions");
 
+    const auto rewrite_guard_depfile_identity =
+        [&](const std::filesystem::path& from,
+            const std::filesystem::path& to) {
+            std::size_t rewritten = 0u;
+            const std::filesystem::path dependency_root =
+                guard_pcm_root / ".dependencies";
+            for (const std::filesystem::directory_entry& entry :
+                 std::filesystem::directory_iterator{dependency_root}) {
+                if (!entry.is_regular_file()
+                    || entry.path().extension() != ".d") {
+                    continue;
+                }
+                std::string document = read_file(entry.path());
+                const std::string source = from.string();
+                const std::string replacement = to.string();
+                std::size_t position = 0u;
+                bool changed = false;
+                while ((position = document.find(source, position))
+                       != std::string::npos) {
+                    document.replace(
+                        position, source.size(), replacement);
+                    position += replacement.size();
+                    changed = true;
+                }
+                if (changed) {
+                    write_file(entry.path(), document);
+                    ++rewritten;
+                }
+            }
+            return rewritten;
+        };
+    std::error_code guard_alias_error;
+    std::filesystem::create_symlink(
+        guard_header, guard_header_alias, guard_alias_error);
+    require(
+        !guard_alias_error
+            && rewrite_guard_depfile_identity(
+                   guard_header, guard_header_alias) == 1u,
+        "dependency-only guard could not rewrite one cached depfile "
+        "through a same-file symlink alias");
+
     write_file(
         guard_action_trace,
         replace_json_string_field(
@@ -1525,6 +1580,26 @@ inline int invoke() {
                 == 0u,
         "warm dependency-only action trace did not preserve the "
         "canonical Sema exclusion proof");
+
+    write_file(
+        guard_distinct_header,
+        "#pragma once\n"
+        "inline constexpr int dependency_guard_header_value = 9;\n");
+    guard_alias_error.clear();
+    std::filesystem::create_symlink(
+        guard_distinct_header,
+        guard_distinct_alias,
+        guard_alias_error);
+    require(
+        !guard_alias_error
+            && rewrite_guard_depfile_identity(
+                   guard_header_alias, guard_distinct_alias) == 1u,
+        "dependency-only guard could not install a distinct-file depfile "
+        "alias");
+    require_failure(
+        [&] { static_cast<void>(prepare_guard()); },
+        "dependency scan and PCM compilation disagree",
+        "distinct compiler depfile identity");
 
     const std::filesystem::path source_root = root / "sources";
     const std::filesystem::path conditional_root =
