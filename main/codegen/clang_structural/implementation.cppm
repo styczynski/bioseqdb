@@ -7099,6 +7099,20 @@ struct module_build_record {
     std::vector<std::filesystem::path> discovered_dependencies;
 };
 
+struct active_import_artifact_paths {
+    std::filesystem::path database;
+    std::filesystem::path result;
+    std::filesystem::path object;
+    std::filesystem::path diagnostics;
+};
+
+struct pcm_artifact_paths {
+    std::filesystem::path pcm;
+    std::filesystem::path object;
+    std::filesystem::path depfile;
+    std::filesystem::path provenance;
+};
+
 [[nodiscard]] std::string render_pcm_provenance(
     const module_build_record& record,
     std::string_view clang_binary_sha256,
@@ -7739,6 +7753,460 @@ struct compiler_module_inventory {
         path.is_absolute() ? path : std::filesystem::absolute(path));
 }
 
+[[nodiscard]] std::string relocatable_argument_material(
+    const std::vector<std::string>& arguments,
+    const relocation_context& relocation,
+    std::string_view clang_binary_sha256);
+
+[[nodiscard]] std::filesystem::path ensure_preparation_root(
+    const std::filesystem::path& configured_root) {
+    std::error_code error;
+    const std::filesystem::file_status status =
+        std::filesystem::symlink_status(configured_root, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot inspect PREPARE PCM root: "
+            + configured_root.string());
+    }
+    if (!std::filesystem::exists(status)) {
+        std::filesystem::create_directories(configured_root, error);
+        if (error) {
+            throw std::runtime_error(
+                "cannot create PREPARE PCM root: "
+                + configured_root.string());
+        }
+    }
+    error.clear();
+    if (!std::filesystem::is_directory(configured_root, error)
+        || error) {
+        throw std::runtime_error(
+            "PREPARE PCM root is not a directory: "
+            + configured_root.string());
+    }
+    const std::filesystem::path root =
+        weakly_canonical_path(configured_root);
+    if (!root.is_absolute()
+        || !std::filesystem::is_directory(root)) {
+        throw std::runtime_error(
+            "PREPARE PCM root has no canonical directory identity: "
+            + configured_root.string());
+    }
+    return root;
+}
+
+[[nodiscard]] std::filesystem::path ensure_owned_directory(
+    const std::filesystem::path& canonical_root,
+    std::string_view component) {
+    const std::filesystem::path relative{std::string{component}};
+    if (component.empty() || relative.has_root_path()
+        || relative.has_parent_path() || relative == "."
+        || relative == "..") {
+        throw std::runtime_error(
+            "PREPARE owned directory must be one path component");
+    }
+    const std::filesystem::path directory =
+        canonical_root / relative;
+    std::error_code error;
+    const std::filesystem::file_status status =
+        std::filesystem::symlink_status(directory, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot inspect PREPARE owned directory: "
+            + directory.string());
+    }
+    if (std::filesystem::exists(status)) {
+        if (std::filesystem::is_symlink(status)
+            || !std::filesystem::is_directory(status)) {
+            throw std::runtime_error(
+                "PREPARE owned directory is a symlink or non-directory: "
+                + directory.string());
+        }
+    } else {
+        if (!std::filesystem::create_directory(directory, error)
+            || error) {
+            throw std::runtime_error(
+                "cannot create PREPARE owned directory: "
+                + directory.string());
+        }
+    }
+    if (weakly_canonical_path(directory)
+        != directory.lexically_normal()) {
+        throw std::runtime_error(
+            "PREPARE owned directory escaped its authority root: "
+            + directory.string());
+    }
+    return directory;
+}
+
+[[nodiscard]] std::filesystem::path validate_existing_owned_directory(
+    const std::filesystem::path& canonical_root,
+    std::string_view component) {
+    const std::filesystem::path relative{std::string{component}};
+    if (component.empty() || relative.has_root_path()
+        || relative.has_parent_path()) {
+        throw std::runtime_error(
+            "PREPARE owned directory must be one path component");
+    }
+    const std::filesystem::path directory =
+        canonical_root / relative;
+    std::error_code error;
+    const std::filesystem::file_status status =
+        std::filesystem::symlink_status(directory, error);
+    if (error || std::filesystem::is_symlink(status)
+        || !std::filesystem::is_directory(status)
+        || weakly_canonical_path(directory)
+            != directory.lexically_normal()) {
+        throw std::runtime_error(
+            "PREPARE owned directory is missing, linked, or foreign: "
+            + directory.string());
+    }
+    return directory;
+}
+
+void validate_owned_leaf(
+    const std::filesystem::path& canonical_root,
+    const std::filesystem::path& path,
+    std::string_view role) {
+    const std::filesystem::path normalized =
+        path.lexically_normal();
+    const std::filesystem::path parent =
+        normalized.parent_path();
+    const std::filesystem::path canonical_parent =
+        weakly_canonical_path(parent);
+    std::error_code error;
+    const std::filesystem::file_status parent_status =
+        std::filesystem::symlink_status(parent, error);
+    if (error || std::filesystem::is_symlink(parent_status)
+        || !std::filesystem::is_directory(parent_status)
+        || canonical_parent != parent
+        || (parent != canonical_root
+            && !path_within_root(parent, canonical_root))) {
+        throw std::runtime_error(
+            std::string{role}
+            + " parent is outside the PREPARE authority root: "
+            + path.string());
+    }
+    error.clear();
+    const std::filesystem::file_status status =
+        std::filesystem::symlink_status(normalized, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot inspect " + std::string{role} + ": "
+            + path.string());
+    }
+    if (std::filesystem::exists(status)
+        && (std::filesystem::is_symlink(status)
+            || !std::filesystem::is_regular_file(status))) {
+        throw std::runtime_error(
+            std::string{role}
+            + " is a symlink or non-regular file: "
+            + path.string());
+    }
+}
+
+[[nodiscard]] bool owned_regular_file_exists(
+    const std::filesystem::path& canonical_root,
+    const std::filesystem::path& path,
+    std::string_view role) {
+    validate_owned_leaf(canonical_root, path, role);
+    std::error_code error;
+    const std::filesystem::file_status status =
+        std::filesystem::symlink_status(path, error);
+    return !error && std::filesystem::is_regular_file(status);
+}
+
+void remove_owned_leaf_if_present(
+    const std::filesystem::path& canonical_root,
+    const std::filesystem::path& path,
+    std::string_view role) {
+    validate_owned_leaf(canonical_root, path, role);
+    std::error_code error;
+    if (!std::filesystem::remove(path, error) && error) {
+        throw std::runtime_error(
+            "cannot remove stale " + std::string{role} + ": "
+            + path.string());
+    }
+}
+
+class scoped_artifact_cleanup {
+  public:
+    explicit scoped_artifact_cleanup(std::filesystem::path path)
+        : path_(std::move(path)) {}
+
+    scoped_artifact_cleanup(const scoped_artifact_cleanup&) = delete;
+    scoped_artifact_cleanup& operator=(
+        const scoped_artifact_cleanup&) = delete;
+
+    ~scoped_artifact_cleanup() {
+        if (!active_) return;
+        std::error_code ignored;
+        std::filesystem::remove(path_, ignored);
+    }
+
+    void release() noexcept { active_ = false; }
+
+  private:
+    std::filesystem::path path_;
+    bool active_{true};
+};
+
+[[nodiscard]] std::filesystem::path create_owned_staging_file(
+    const std::filesystem::path& canonical_root,
+    const std::filesystem::path& target,
+    std::string_view role) {
+    validate_owned_leaf(canonical_root, target, role);
+    const std::string model =
+        (target.parent_path()
+         / (target.filename().string() + ".stage-%%%%%%"))
+            .string();
+    int descriptor = -1;
+    llvm::SmallString<512> storage;
+    if (const std::error_code error =
+            llvm::sys::fs::createUniqueFile(
+                model, descriptor, storage)) {
+        throw std::runtime_error(
+            "cannot create staged " + std::string{role} + ": "
+            + error.message());
+    }
+    llvm::raw_fd_ostream close_descriptor{descriptor, true};
+    close_descriptor.close();
+    const std::filesystem::path staged{storage.str().str()};
+    validate_owned_leaf(canonical_root, staged, role);
+    return staged;
+}
+
+void publish_owned_staging_file(
+    const std::filesystem::path& canonical_root,
+    const std::filesystem::path& staged,
+    const std::filesystem::path& target,
+    std::string_view role,
+    bool require_absent = false) {
+    validate_owned_leaf(canonical_root, staged, role);
+    validate_owned_leaf(canonical_root, target, role);
+    if (!std::filesystem::is_regular_file(staged)) {
+        throw std::runtime_error(
+            "staged " + std::string{role}
+            + " is not a regular file: " + staged.string());
+    }
+    if (require_absent
+        && owned_regular_file_exists(
+            canonical_root, target, role)) {
+        throw std::runtime_error(
+            std::string{role}
+            + " commit marker already exists: " + target.string());
+    }
+    std::error_code error;
+    std::filesystem::rename(staged, target, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot atomically publish " + std::string{role}
+            + ": " + error.message());
+    }
+    validate_owned_leaf(canonical_root, target, role);
+    if (!std::filesystem::is_regular_file(target)) {
+        throw std::runtime_error(
+            "published " + std::string{role}
+            + " is not a regular file: " + target.string());
+    }
+}
+
+void atomic_write_owned_file(
+    const std::filesystem::path& canonical_root,
+    const std::filesystem::path& target,
+    std::string_view document,
+    std::string_view role,
+    bool require_absent = false) {
+    if (!require_absent
+        && owned_regular_file_exists(
+            canonical_root, target, role)
+        && read_file(target) == document) {
+        return;
+    }
+    const std::filesystem::path staged =
+        create_owned_staging_file(canonical_root, target, role);
+    scoped_artifact_cleanup cleanup{staged};
+    std::error_code error;
+    llvm::raw_fd_ostream output{
+        staged.string(), error, llvm::sys::fs::OF_None};
+    if (error) {
+        throw std::runtime_error(
+            "cannot open staged " + std::string{role}
+            + ": " + error.message());
+    }
+    output << llvm::StringRef{document.data(), document.size()};
+    output.close();
+    if (output.has_error()) {
+        throw std::runtime_error(
+            "cannot write staged " + std::string{role});
+    }
+    publish_owned_staging_file(
+        canonical_root,
+        staged,
+        target,
+        role,
+        require_absent);
+    cleanup.release();
+}
+
+[[nodiscard]] active_import_artifact_paths
+derive_active_import_artifact_paths(
+    const std::filesystem::path& scan_root,
+    std::string_view module_name,
+    const std::filesystem::path& source_path,
+    const std::vector<std::string>& base_arguments,
+    const relocation_context& relocation,
+    std::string_view clang_binary_sha256,
+    std::string_view clang_scan_deps_sha256) {
+    std::string key_material =
+        std::string{module_name} + "\n"
+        + relocatable_path_spelling(source_path, relocation)
+        + "\n" + std::string{clang_scan_deps_sha256} + "\n";
+    key_material += relocatable_argument_material(
+        base_arguments, relocation, clang_binary_sha256);
+    const std::string basename =
+        safe_module_filename(module_name) + "-"
+        + sha256_hex(key_material).substr(0, 20);
+    return {
+        .database =
+            scan_root / (basename + ".compile_commands.json"),
+        .result = scan_root / (basename + ".p1689.json"),
+        .object = scan_root / (basename + ".o"),
+        .diagnostics =
+            scan_root / (basename + ".diagnostics.txt"),
+    };
+}
+
+[[nodiscard]] std::string predependency_material(
+    std::string_view compiler_profile,
+    std::string_view module_name,
+    std::string_view source_sha256,
+    std::string_view argument_sha256,
+    std::string_view command_input_sha256,
+    std::string_view scan_database_sha256,
+    std::string_view scan_result_sha256,
+    std::string_view scan_diagnostics_sha256,
+    std::string_view clang_binary_sha256,
+    std::string_view clang_scan_deps_sha256,
+    const std::vector<std::pair<std::string, std::string>>& imports) {
+    std::string material =
+        std::string{MODULE_PREPARATION_POLICY_VERSION}
+        + "\n" + std::string{CLANG_VERSION_STRING}
+        + "\n" + std::string{clang_binary_sha256}
+        + "\n" + std::string{clang_scan_deps_sha256}
+        + "\n" + std::string{compiler_profile}
+        + "\n" + std::string{module_name}
+        + "\n" + std::string{source_sha256}
+        + "\n" + std::string{argument_sha256}
+        + "\n" + std::string{command_input_sha256}
+        + "\n" + std::string{scan_database_sha256}
+        + "\n" + std::string{scan_result_sha256}
+        + "\n" + std::string{scan_diagnostics_sha256};
+    for (const auto& [imported, content_key] : imports) {
+        material += "\n" + imported + "=" + content_key;
+    }
+    return material;
+}
+
+[[nodiscard]] std::filesystem::path derive_make_depfile_path(
+    const std::filesystem::path& dependency_root,
+    std::string_view module_name,
+    std::string_view relocatable_predependency_material) {
+    return dependency_root
+        / (safe_module_filename(module_name) + "-"
+           + sha256_hex(relocatable_predependency_material).substr(
+               0, 20)
+           + ".d");
+}
+
+[[nodiscard]] pcm_artifact_paths derive_pcm_artifact_paths(
+    const std::filesystem::path& pcm_root,
+    std::string_view module_name,
+    std::string_view relocatable_content_key) {
+    const std::filesystem::path pcm =
+        pcm_root
+        / (safe_module_filename(module_name) + "-"
+           + std::string{relocatable_content_key.substr(0, 20)}
+           + ".pcm");
+    return {
+        .pcm = pcm,
+        .object = pcm.string() + ".o",
+        .depfile = pcm.string() + ".d",
+        .provenance = pcm.string() + ".provenance",
+    };
+}
+
+[[nodiscard]] std::vector<std::string> derive_owned_arguments(
+    std::vector<std::string> direct_arguments,
+    const std::filesystem::path& source_spelling,
+    const pcm_artifact_paths& artifacts) {
+    direct_arguments.push_back(
+        "-fmodule-output=" + artifacts.pcm.string());
+    direct_arguments.emplace_back("-fmodules-reduced-bmi");
+    direct_arguments.emplace_back("-c");
+    direct_arguments.push_back(source_spelling.string());
+    direct_arguments.emplace_back("-o");
+    direct_arguments.push_back(artifacts.object.string());
+    direct_arguments.emplace_back("-MD");
+    direct_arguments.emplace_back("-MF");
+    direct_arguments.push_back(artifacts.depfile.string());
+    direct_arguments.emplace_back("-MT");
+    direct_arguments.push_back(artifacts.depfile.string());
+    return direct_arguments;
+}
+
+void validate_pcm_artifact_leaves(
+    const std::filesystem::path& pcm_root,
+    const pcm_artifact_paths& artifacts) {
+    validate_owned_leaf(pcm_root, artifacts.pcm, "PCM output");
+    validate_owned_leaf(pcm_root, artifacts.object, "PCM object output");
+    validate_owned_leaf(
+        pcm_root, artifacts.depfile, "PCM dependency output");
+    validate_owned_leaf(
+        pcm_root, artifacts.provenance, "PCM provenance output");
+}
+
+void remove_pcm_artifact_tuple(
+    const std::filesystem::path& pcm_root,
+    const pcm_artifact_paths& artifacts) {
+    validate_pcm_artifact_leaves(pcm_root, artifacts);
+    remove_owned_leaf_if_present(
+        pcm_root, artifacts.provenance, "PCM provenance output");
+    remove_owned_leaf_if_present(
+        pcm_root, artifacts.depfile, "PCM dependency output");
+    remove_owned_leaf_if_present(
+        pcm_root, artifacts.object, "PCM object output");
+    remove_owned_leaf_if_present(
+        pcm_root, artifacts.pcm, "PCM output");
+}
+
+class scoped_pcm_publication {
+  public:
+    explicit scoped_pcm_publication(pcm_artifact_paths artifacts)
+        : artifacts_(std::move(artifacts)) {}
+
+    scoped_pcm_publication(const scoped_pcm_publication&) = delete;
+    scoped_pcm_publication& operator=(
+        const scoped_pcm_publication&) = delete;
+
+    ~scoped_pcm_publication() {
+        if (!active_) return;
+        for (const std::filesystem::path& path : {
+                 artifacts_.provenance,
+                 artifacts_.depfile,
+                 artifacts_.object,
+                 artifacts_.pcm}) {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    }
+
+    void commit() noexcept { active_ = false; }
+
+  private:
+    pcm_artifact_paths artifacts_;
+    bool active_{true};
+};
+
 [[nodiscard]] std::filesystem::path derive_relocation_root(
     const std::vector<std::filesystem::path>& source_paths,
     const std::filesystem::path& compile_database,
@@ -8199,30 +8667,32 @@ void scan_active_module_imports(
     const std::filesystem::path& scan_root,
     const relocation_context& relocation,
     std::vector<preparation_action_record>& observed_actions) {
-    std::string key_material =
-        record.module_name + "\n"
-        + relocatable_path_spelling(
-            record.source_path, relocation)
-        + "\n" + clang_scan_deps_sha256 + "\n";
-    key_material += relocatable_argument_material(
-        record.base_arguments,
-        relocation,
-        clang_binary_sha256);
-    const std::string scan_key = sha256_hex(key_material);
-    const std::string basename =
-        safe_module_filename(record.module_name) + "-"
-        + scan_key.substr(0, 20);
-    const std::filesystem::path database_path =
-        scan_root / (basename + ".compile_commands.json");
-    const std::filesystem::path result_path =
-        scan_root / (basename + ".p1689.json");
-    const std::filesystem::path object_path =
-        scan_root / (basename + ".o");
-    const std::filesystem::path diagnostics_path =
-        scan_root / (basename + ".diagnostics.txt");
-    record.dependency_scan_database_path = database_path;
-    record.dependency_scan_result_path = result_path;
-    record.dependency_scan_diagnostics_path = diagnostics_path;
+    const active_import_artifact_paths artifacts =
+        derive_active_import_artifact_paths(
+            scan_root,
+            record.module_name,
+            record.source_path,
+            record.base_arguments,
+            relocation,
+            clang_binary_sha256,
+            clang_scan_deps_sha256);
+    const std::filesystem::path pcm_root =
+        scan_root.parent_path();
+    validate_owned_leaf(
+        pcm_root, artifacts.database, "P1689 scan database");
+    validate_owned_leaf(
+        pcm_root, artifacts.result, "P1689 scan result");
+    validate_owned_leaf(
+        pcm_root, artifacts.object, "P1689 scan object");
+    validate_owned_leaf(
+        pcm_root, artifacts.diagnostics, "P1689 diagnostics");
+    remove_owned_leaf_if_present(
+        pcm_root, artifacts.object, "P1689 scan object");
+    [[maybe_unused]] scoped_artifact_cleanup object_cleanup{
+        artifacts.object};
+    record.dependency_scan_database_path = artifacts.database;
+    record.dependency_scan_result_path = artifacts.result;
+    record.dependency_scan_diagnostics_path = artifacts.diagnostics;
     std::ostringstream database;
     database
         << "[\n  {\n    \"directory\": \""
@@ -8235,7 +8705,7 @@ void scan_active_module_imports(
     scan_command.emplace_back("-c");
     scan_command.push_back(record.source_path.string());
     scan_command.emplace_back("-o");
-    scan_command.push_back(object_path.string());
+    scan_command.push_back(artifacts.object.string());
     for (std::size_t index = 0;
          index < scan_command.size(); ++index) {
         if (index != 0) database << ", ";
@@ -8244,7 +8714,11 @@ void scan_active_module_imports(
     }
     database << "]\n  }\n]\n";
     const std::string database_document = database.str();
-    write_if_different(database_path, database_document);
+    atomic_write_owned_file(
+        pcm_root,
+        artifacts.database,
+        database_document,
+        "P1689 scan database");
     record.dependency_scan_database_sha256 =
         sha256_hex(database_document);
     record.relocatable_dependency_scan_database_sha256 =
@@ -8253,14 +8727,23 @@ void scan_active_module_imports(
             relocation,
             record.base_arguments.front(),
             clang_binary_sha256);
+    const std::filesystem::path staged_result =
+        create_owned_staging_file(
+            pcm_root, artifacts.result, "P1689 scan result");
+    scoped_artifact_cleanup result_cleanup{staged_result};
+    const std::filesystem::path staged_diagnostics =
+        create_owned_staging_file(
+            pcm_root, artifacts.diagnostics, "P1689 diagnostics");
+    scoped_artifact_cleanup diagnostics_cleanup{
+        staged_diagnostics};
     const std::vector<std::string> arguments{
         clang_scan_deps.string(),
-        "-compilation-database=" + database_path.string(),
+        "-compilation-database=" + artifacts.database.string(),
         "-format=p1689",
         "-j",
         "1",
         "-o",
-        result_path.string(),
+        staged_result.string(),
     };
     execute_clang(
         clang_scan_deps,
@@ -8268,31 +8751,33 @@ void scan_active_module_imports(
         record.command.Directory,
         record.module_name,
         "P1689 dependency discovery",
-        diagnostics_path);
-    if (std::filesystem::is_symlink(diagnostics_path)
-        || (std::filesystem::exists(diagnostics_path)
-            && !std::filesystem::is_regular_file(
-                diagnostics_path))) {
-        throw std::runtime_error(
-            "clang-scan-deps diagnostics path is not a regular file "
-            "for module '" + record.module_name + "'");
-    }
-    if (!std::filesystem::exists(diagnostics_path)) {
-        write_if_different(diagnostics_path, "");
-    }
-    const std::string diagnostics = read_file(diagnostics_path);
+        staged_diagnostics);
+    publish_owned_staging_file(
+        pcm_root,
+        staged_result,
+        artifacts.result,
+        "P1689 scan result");
+    result_cleanup.release();
+    publish_owned_staging_file(
+        pcm_root,
+        staged_diagnostics,
+        artifacts.diagnostics,
+        "P1689 diagnostics");
+    diagnostics_cleanup.release();
+    const std::string diagnostics =
+        read_file(artifacts.diagnostics);
     record.dependency_scan_diagnostics_sha256 =
         sha256_hex(diagnostics);
     record.relocatable_dependency_scan_diagnostics_sha256 =
         relocatable_document_hash(
             diagnostics, relocation);
     record.dependency_scan_result_sha256 =
-        sha256_hex(read_file(result_path));
+        sha256_hex(read_file(artifacts.result));
     record.relocatable_dependency_scan_result_sha256 =
         relocatable_document_hash(
-            read_file(result_path), relocation);
+            read_file(artifacts.result), relocation);
     record.description.imports = parse_p1689_imports(
-        result_path,
+        artifacts.result,
         record.module_name,
         record.source_path,
         record.command.Directory);
@@ -8321,16 +8806,12 @@ void scan_make_dependencies(module_build_record& record) {
             "linked-Clang make dependency scan has incomplete inputs for '"
             + record.module_name + "'");
     }
-    if (std::filesystem::is_symlink(record.depfile_path)
-        || (std::filesystem::exists(record.depfile_path)
-            && !std::filesystem::is_regular_file(
-                record.depfile_path))) {
-        throw std::runtime_error(
-            "linked-Clang make dependency path is not a regular file for '"
-            + record.module_name + "'");
-    }
-    std::filesystem::create_directories(
-        record.depfile_path.parent_path());
+    const std::filesystem::path pcm_root =
+        record.depfile_path.parent_path().parent_path();
+    validate_owned_leaf(
+        pcm_root,
+        record.depfile_path,
+        "linked-Clang make dependency output");
     const std::filesystem::path scan_object =
         record.depfile_path.string() + ".scan.o";
     std::vector<std::string> arguments = record.direct_arguments;
@@ -8359,14 +8840,11 @@ void scan_make_dependencies(module_build_record& record) {
             "linked-Clang make dependency scan failed for module '"
             + record.module_name + "'");
     }
-    write_if_different(record.depfile_path, *make_output);
-    if (std::filesystem::is_symlink(record.depfile_path)
-        || !std::filesystem::is_regular_file(
-            record.depfile_path)) {
-        throw std::runtime_error(
-            "linked-Clang make dependency scan did not publish a "
-            "regular depfile for module '" + record.module_name + "'");
-    }
+    atomic_write_owned_file(
+        pcm_root,
+        record.depfile_path,
+        *make_output,
+        "linked-Clang make dependency output");
     // `write_if_different` intentionally preserves mtimes. A dependency-only
     // miss caused by a newer input must nevertheless become a validated warm
     // cache hit after this successful scan, even when the dependency bytes are
@@ -9044,10 +9522,8 @@ prepare_compilation_environment(
                 + source.string());
         }
     }
-    std::filesystem::create_directories(
-        configured_pcm_root);
     const std::filesystem::path pcm_root =
-        clang_backend::weakly_canonical_path(
+        clang_backend::ensure_preparation_root(
             configured_pcm_root);
     const std::filesystem::path relocation_root =
         clang_backend::derive_relocation_root(
@@ -9072,8 +9548,11 @@ prepare_compilation_environment(
     const std::string clang_scan_deps_sha256 =
         sha256_hex(read_file(clang_scan_deps));
     const std::filesystem::path import_scan_root =
-        pcm_root / ".module-dependency-scan";
-    std::filesystem::create_directories(import_scan_root);
+        clang_backend::ensure_owned_directory(
+            pcm_root, ".module-dependency-scan");
+    const std::filesystem::path depfile_root =
+        clang_backend::ensure_owned_directory(
+            pcm_root, ".dependencies");
 
     const std::vector<clang::tooling::CompileCommand> all_commands =
         database->getAllCompileCommands();
@@ -9451,9 +9930,6 @@ prepare_compilation_environment(
         dependency_hash_cache;
     std::unordered_map<std::string, std::string>
         relocatable_dependency_hash_cache;
-    const std::filesystem::path depfile_root =
-        pcm_root / ".dependencies";
-    std::filesystem::create_directories(depfile_root);
     for (const std::string& module_name : build_order) {
         clang_backend::module_build_record& record =
             modules.at(module_name);
@@ -9477,37 +9953,10 @@ prepare_compilation_environment(
                 record.base_arguments,
                 relocation,
                 clang_binary_sha256);
-        std::string content_material =
-            std::string{
-                clang_backend::MODULE_PREPARATION_POLICY_VERSION}
-            + "\n" + std::string{CLANG_VERSION_STRING}
-            + "\n" + clang_binary_sha256
-            + "\n" + clang_scan_deps_sha256
-            + "\n" + std::string{compiler_profile}
-            + "\n" + record.module_name
-            + "\n" + record.source_sha256
-            + "\n" + record.argument_sha256
-            + "\n" + record.command_input_sha256
-            + "\n" + record.dependency_scan_database_sha256
-            + "\n" + record.dependency_scan_result_sha256
-            + "\n" + record.dependency_scan_diagnostics_sha256;
-        std::string relocatable_content_material =
-            std::string{
-                clang_backend::MODULE_PREPARATION_POLICY_VERSION}
-            + "\n" + std::string{CLANG_VERSION_STRING}
-            + "\n" + clang_binary_sha256
-            + "\n" + clang_scan_deps_sha256
-            + "\n" + std::string{compiler_profile}
-            + "\n" + record.module_name
-            + "\n" + record.relocatable_source_sha256
-            + "\n" + record.relocatable_argument_sha256
-            + "\n" + record.relocatable_command_input_sha256
-            + "\n"
-            + record.relocatable_dependency_scan_database_sha256
-            + "\n"
-            + record.relocatable_dependency_scan_result_sha256
-            + "\n"
-            + record.relocatable_dependency_scan_diagnostics_sha256;
+        std::vector<std::pair<std::string, std::string>>
+            physical_import_keys;
+        std::vector<std::pair<std::string, std::string>>
+            relocatable_import_keys;
         for (const std::string& imported :
              record.description.imports) {
             const clang_backend::module_build_record& dependency =
@@ -9518,18 +9967,46 @@ prepare_compilation_environment(
                     "Clang module topological order is incomplete for '"
                     + record.module_name + "'");
             }
-            content_material +=
-                "\n" + imported + "=" + dependency.content_key;
-            relocatable_content_material +=
-                "\n" + imported + "="
-                + dependency.relocatable_content_key;
+            physical_import_keys.emplace_back(
+                imported, dependency.content_key);
+            relocatable_import_keys.emplace_back(
+                imported, dependency.relocatable_content_key);
         }
-        const std::string dependency_scan_key =
-            sha256_hex(relocatable_content_material);
-        record.depfile_path = depfile_root
-            / (clang_backend::safe_module_filename(module_name)
-               + "-" + dependency_scan_key.substr(0, 20)
-               + ".d");
+        const std::string content_material =
+            clang_backend::predependency_material(
+                compiler_profile,
+                record.module_name,
+                record.source_sha256,
+                record.argument_sha256,
+                record.command_input_sha256,
+                record.dependency_scan_database_sha256,
+                record.dependency_scan_result_sha256,
+                record.dependency_scan_diagnostics_sha256,
+                clang_binary_sha256,
+                clang_scan_deps_sha256,
+                physical_import_keys);
+        const std::string relocatable_content_material =
+            clang_backend::predependency_material(
+                compiler_profile,
+                record.module_name,
+                record.relocatable_source_sha256,
+                record.relocatable_argument_sha256,
+                record.relocatable_command_input_sha256,
+                record.relocatable_dependency_scan_database_sha256,
+                record.relocatable_dependency_scan_result_sha256,
+                record.relocatable_dependency_scan_diagnostics_sha256,
+                clang_binary_sha256,
+                clang_scan_deps_sha256,
+                relocatable_import_keys);
+        record.depfile_path =
+            clang_backend::derive_make_depfile_path(
+                depfile_root,
+                module_name,
+                relocatable_content_material);
+        clang_backend::validate_owned_leaf(
+            pcm_root,
+            record.depfile_path,
+            "linked-Clang make dependency output");
         record.direct_arguments = record.base_arguments;
         std::set<std::string, std::less<>> mapped_modules;
         std::vector<std::string> mapping_order;
@@ -9620,14 +10097,15 @@ prepare_compilation_environment(
             relocatable_content_material
             + "\ndependencies="
             + record.relocatable_dependency_sha256);
-        record.pcm_path = pcm_root
-            / (clang_backend::safe_module_filename(module_name)
-               + "-" + record.relocatable_content_key.substr(0, 20)
-               + ".pcm");
-        record.pcm_depfile_path =
-            record.pcm_path.string() + ".d";
+        const clang_backend::pcm_artifact_paths pcm_artifacts =
+            clang_backend::derive_pcm_artifact_paths(
+                pcm_root,
+                module_name,
+                record.relocatable_content_key);
+        record.pcm_path = pcm_artifacts.pcm;
+        record.pcm_depfile_path = pcm_artifacts.depfile;
         record.pcm_provenance_path =
-            record.pcm_path.string() + ".provenance";
+            pcm_artifacts.provenance;
         for (const std::filesystem::path& dependency :
              record.discovered_dependencies) {
             if (!clang_backend::generated_pcm_dependency(
@@ -9635,68 +10113,89 @@ prepare_compilation_environment(
                 dependencies.push_back(dependency);
             }
         }
-        record.owned_arguments = record.direct_arguments;
-        record.owned_arguments.push_back(
-            "-fmodule-output=" + record.pcm_path.string());
-        record.owned_arguments.emplace_back(
-            "-fmodules-reduced-bmi");
-        record.owned_arguments.emplace_back("-c");
-        record.owned_arguments.push_back(
-            record.source_path.string());
-        const std::filesystem::path object_path =
-            record.pcm_path.string() + ".o";
-        record.owned_arguments.emplace_back("-o");
-        record.owned_arguments.push_back(object_path.string());
-        record.owned_arguments.emplace_back("-MD");
-        record.owned_arguments.emplace_back("-MF");
-        record.owned_arguments.push_back(
-            record.pcm_depfile_path.string());
-        record.owned_arguments.emplace_back("-MT");
-        record.owned_arguments.push_back(
-            record.pcm_depfile_path.string());
+        record.owned_arguments =
+            clang_backend::derive_owned_arguments(
+                record.direct_arguments,
+                record.source_path,
+                pcm_artifacts);
 
+        clang_backend::validate_pcm_artifact_leaves(
+            pcm_root, pcm_artifacts);
+        bool pcm_cache_hit = false;
+        const bool pcm_exists =
+            clang_backend::owned_regular_file_exists(
+                pcm_root, pcm_artifacts.pcm, "PCM output");
+        const bool provenance_exists =
+            clang_backend::owned_regular_file_exists(
+                pcm_root,
+                pcm_artifacts.provenance,
+                "PCM provenance output");
         std::error_code size_error;
-        const std::uintmax_t existing_size =
-            std::filesystem::file_size(
-                record.pcm_path, size_error);
-        const bool pcm_cache_hit =
-            !size_error && existing_size != 0;
-        if (!pcm_cache_hit) {
-            if (std::filesystem::is_symlink(
-                    record.pcm_depfile_path)
-                || (std::filesystem::exists(
-                        record.pcm_depfile_path)
-                    && !std::filesystem::is_regular_file(
-                        record.pcm_depfile_path))) {
-                throw std::runtime_error(
-                    "PCM compilation dependency path is not a regular "
-                    "file for '" + module_name + "'");
+        const std::uintmax_t existing_size = pcm_exists
+            ? std::filesystem::file_size(
+                  pcm_artifacts.pcm, size_error)
+            : 0;
+        if (pcm_exists && provenance_exists
+            && !size_error && existing_size != 0) {
+            record.pcm_sha256 =
+                sha256_hex(read_file(pcm_artifacts.pcm));
+            const std::string expected_provenance =
+                clang_backend::render_pcm_provenance(
+                    record,
+                    clang_binary_sha256,
+                    clang_scan_deps_sha256,
+                    record.pcm_sha256);
+            const std::string persisted_provenance =
+                read_file(pcm_artifacts.provenance);
+            if (persisted_provenance == expected_provenance) {
+                record.pcm_provenance_sha256 =
+                    sha256_hex(persisted_provenance);
+                pcm_cache_hit = true;
             }
+        }
+        if (!pcm_cache_hit) {
+            // An unprovenanced, empty, or stale tuple is an interrupted
+            // publication, not a cache hit. Remove only the exact derived
+            // siblings and rebuild from an absent state.
+            clang_backend::remove_pcm_artifact_tuple(
+                pcm_root, pcm_artifacts);
+            clang_backend::scoped_pcm_publication publication{
+                pcm_artifacts};
             clang_backend::execute_clang(
                 clang_binary,
                 record.owned_arguments,
                 record.command.Directory,
                 module_name,
                 "PCM compilation");
+            clang_backend::validate_pcm_artifact_leaves(
+                pcm_root, pcm_artifacts);
             size_error.clear();
             const std::uintmax_t built_size =
                 std::filesystem::file_size(
-                    record.pcm_path, size_error);
-            if (size_error || built_size == 0) {
+                    pcm_artifacts.pcm, size_error);
+            if (size_error || built_size == 0
+                || !clang_backend::owned_regular_file_exists(
+                    pcm_root,
+                    pcm_artifacts.depfile,
+                    "PCM dependency output")) {
                 throw std::runtime_error(
-                    "Clang reported success without publishing PCM for '"
+                    "Clang reported success without fresh PCM and depfile for '"
                     + module_name + "'");
             }
             const std::vector<std::filesystem::path>
                 compiled_dependencies =
                 clang_backend::parse_make_depfile(
-                    record.pcm_depfile_path,
+                    pcm_artifacts.depfile,
                     record.command.Directory);
+            std::unordered_map<std::string, std::string>
+                compiled_dependency_hash_cache;
+            std::unordered_map<std::string, std::string>
+                compiled_relocatable_dependency_hash_cache;
             const std::string compiled_dependency_sha256 =
                 clang_backend::dependency_content_hash(
                     compiled_dependencies,
                     pcm_root,
-                    dependency_hash_cache);
+                    compiled_dependency_hash_cache);
             const std::string
                 compiled_relocatable_dependency_sha256 =
                     clang_backend::
@@ -9704,7 +10203,7 @@ prepare_compilation_environment(
                             compiled_dependencies,
                             pcm_root,
                             relocation,
-                            relocatable_dependency_hash_cache);
+                            compiled_relocatable_dependency_hash_cache);
             if (compiled_dependency_sha256
                     != record.dependency_sha256
                 || compiled_relocatable_dependency_sha256
@@ -9720,41 +10219,42 @@ prepare_compilation_environment(
                     + ")");
             }
             record.pcm_sha256 =
-                sha256_hex(read_file(record.pcm_path));
+                sha256_hex(read_file(pcm_artifacts.pcm));
             const std::string provenance =
                 clang_backend::render_pcm_provenance(
                     record,
                     clang_binary_sha256,
                     clang_scan_deps_sha256,
                     record.pcm_sha256);
-            write_if_different(
-                record.pcm_provenance_path, provenance);
+            // Transient compiler siblings are not part of the committed v4
+            // tuple. The provenance file is the atomic commit marker and is
+            // therefore published last.
+            clang_backend::remove_owned_leaf_if_present(
+                pcm_root,
+                pcm_artifacts.depfile,
+                "PCM dependency output");
+            clang_backend::remove_owned_leaf_if_present(
+                pcm_root,
+                pcm_artifacts.object,
+                "PCM object output");
+            clang_backend::atomic_write_owned_file(
+                pcm_root,
+                pcm_artifacts.provenance,
+                provenance,
+                "PCM provenance output",
+                true);
             record.pcm_provenance_sha256 =
                 sha256_hex(provenance);
+            publication.commit();
         } else {
-            if (!std::filesystem::is_regular_file(
-                    record.pcm_provenance_path)) {
-                throw std::runtime_error(
-                    "refusing to reuse unprovenanced content-key PCM for '"
-                    + module_name + "'");
-            }
-            record.pcm_sha256 =
-                sha256_hex(read_file(record.pcm_path));
-            const std::string expected_provenance =
-                clang_backend::render_pcm_provenance(
-                    record,
-                    clang_binary_sha256,
-                    clang_scan_deps_sha256,
-                    record.pcm_sha256);
-            const std::string persisted_provenance =
-                read_file(record.pcm_provenance_path);
-            if (persisted_provenance != expected_provenance) {
-                throw std::runtime_error(
-                    "refusing to reuse corrupt or stale content-key PCM "
-                    "for '" + module_name + "'");
-            }
-            record.pcm_provenance_sha256 =
-                sha256_hex(persisted_provenance);
+            clang_backend::remove_owned_leaf_if_present(
+                pcm_root,
+                pcm_artifacts.depfile,
+                "PCM dependency output");
+            clang_backend::remove_owned_leaf_if_present(
+                pcm_root,
+                pcm_artifacts.object,
+                "PCM object output");
         }
         observed_actions.push_back(preparation_action_record{
             .kind = preparation_action_kind::pcm_compilation,
@@ -10328,13 +10828,19 @@ prepare_compilation_environment(
     }
     synthetic_database_document << "\n]\n";
 
+    const std::filesystem::path canonical_pcm_root =
+        clang_backend::ensure_preparation_root(
+            configured_pcm_root);
     const std::filesystem::path synthetic_database_root =
-        configured_pcm_root / ".donor-retarget";
-    std::filesystem::create_directories(synthetic_database_root);
+        clang_backend::ensure_owned_directory(
+            canonical_pcm_root, ".donor-retarget");
     const std::filesystem::path synthetic_database =
         synthetic_database_root / "compile_commands.json";
-    write_if_different(
-        synthetic_database, synthetic_database_document.str());
+    clang_backend::atomic_write_owned_file(
+        canonical_pcm_root,
+        synthetic_database,
+        synthetic_database_document.str(),
+        "donor-retarget compile database");
 
     prepared_compilation_environment prepared =
         prepare_compilation_environment(
@@ -10861,13 +11367,18 @@ prepare_dependency_compilation_environment(
     }
     sealed_database_document << "\n]\n";
 
+    const std::filesystem::path canonical_pcm_root =
+        clang_backend::ensure_preparation_root(pcm_root);
     const std::filesystem::path sealed_database_root =
-        pcm_root / ".dependency-only";
-    std::filesystem::create_directories(sealed_database_root);
+        clang_backend::ensure_owned_directory(
+            canonical_pcm_root, ".dependency-only");
     const std::filesystem::path sealed_database =
         sealed_database_root / "compile_commands.json";
-    write_if_different(
-        sealed_database, sealed_database_document.str());
+    clang_backend::atomic_write_owned_file(
+        canonical_pcm_root,
+        sealed_database,
+        sealed_database_document.str(),
+        "dependency-only sealed compile database");
 
     prepared_compilation_environment prepared =
         prepare_compilation_environment(
@@ -10977,6 +11488,12 @@ validate_prepared_compilation_environment(
     const std::filesystem::path pcm_root =
         clang_backend::weakly_canonical_path(
             configured_pcm_root);
+    const std::filesystem::path scan_root =
+        clang_backend::validate_existing_owned_directory(
+            pcm_root, ".module-dependency-scan");
+    const std::filesystem::path dependency_root =
+        clang_backend::validate_existing_owned_directory(
+            pcm_root, ".dependencies");
     const std::filesystem::path relocation_root =
         clang_backend::derive_relocation_root(
             source_paths, compile_database, pcm_root);
@@ -11263,16 +11780,20 @@ validate_prepared_compilation_environment(
         std::vector<std::filesystem::path> command_inputs;
         std::vector<std::string> base_arguments;
         std::filesystem::path scan_database;
+        std::filesystem::path scan_database_spelling;
         std::string scan_database_sha256;
         std::string relocatable_scan_database_sha256;
         std::filesystem::path scan_result;
+        std::filesystem::path scan_result_spelling;
         std::string scan_result_sha256;
         std::string relocatable_scan_result_sha256;
         std::filesystem::path scan_diagnostics;
+        std::filesystem::path scan_diagnostics_spelling;
         std::string scan_diagnostics_sha256;
         std::string relocatable_scan_diagnostics_sha256;
         std::vector<std::string> imports;
         std::filesystem::path depfile;
+        std::filesystem::path depfile_spelling;
         std::string depfile_sha256;
         std::string relocatable_depfile_sha256;
         std::string dependency_sha256;
@@ -11280,8 +11801,10 @@ validate_prepared_compilation_environment(
         std::string content_key;
         std::string relocatable_content_key;
         std::filesystem::path pcm;
+        std::filesystem::path pcm_spelling;
         std::string pcm_sha256;
         std::filesystem::path pcm_provenance;
+        std::filesystem::path pcm_provenance_spelling;
         std::string pcm_provenance_sha256;
     };
     const llvm::json::Array* module_values =
@@ -11401,6 +11924,14 @@ validate_prepared_compilation_environment(
                 *object, "pcm_provenance_sha256"),
         };
         module.source_spelling = module.source;
+        module.scan_database_spelling = module.scan_database;
+        module.scan_result_spelling = module.scan_result;
+        module.scan_diagnostics_spelling =
+            module.scan_diagnostics;
+        module.depfile_spelling = module.depfile;
+        module.pcm_spelling = module.pcm;
+        module.pcm_provenance_spelling =
+            module.pcm_provenance;
         const llvm::json::Array* command_inputs =
             object->getArray("command_inputs");
         if (command_inputs == nullptr) {
@@ -11537,35 +12068,27 @@ validate_prepared_compilation_environment(
         module.scan_diagnostics =
             clang_backend::weakly_canonical_path(
                 module.scan_diagnostics);
-        std::string scan_key_material =
-            module.name + "\n"
-            + clang_backend::relocatable_path_spelling(
-                module.source, relocation)
-            + "\n" + clang_scan_deps_sha256 + "\n";
-        scan_key_material +=
-            clang_backend::relocatable_argument_material(
+        const clang_backend::active_import_artifact_paths
+            expected_scan_artifacts =
+            clang_backend::derive_active_import_artifact_paths(
+                scan_root,
+                module.name,
+                module.source,
                 module.base_arguments,
                 relocation,
-                clang_binary_sha256);
-        const std::string scan_basename =
-            clang_backend::safe_module_filename(module.name)
-            + "-"
-            + sha256_hex(scan_key_material).substr(0, 20);
-        const std::filesystem::path scan_root =
-            pcm_root / ".module-dependency-scan";
-        const std::filesystem::path expected_scan_database =
-            scan_root
-            / (scan_basename + ".compile_commands.json");
-        const std::filesystem::path expected_scan_result =
-            scan_root / (scan_basename + ".p1689.json");
-        const std::filesystem::path expected_scan_object =
-            scan_root / (scan_basename + ".o");
-        const std::filesystem::path expected_scan_diagnostics =
-            scan_root / (scan_basename + ".diagnostics.txt");
-        if (module.scan_database != expected_scan_database
-            || module.scan_result != expected_scan_result
+                clang_binary_sha256,
+                clang_scan_deps_sha256);
+        if (module.scan_database
+                != expected_scan_artifacts.database
+            || module.scan_result != expected_scan_artifacts.result
             || module.scan_diagnostics
-                != expected_scan_diagnostics
+                != expected_scan_artifacts.diagnostics
+            || module.scan_database_spelling.lexically_normal()
+                != expected_scan_artifacts.database
+            || module.scan_result_spelling.lexically_normal()
+                != expected_scan_artifacts.result
+            || module.scan_diagnostics_spelling.lexically_normal()
+                != expected_scan_artifacts.diagnostics
             || !std::filesystem::is_regular_file(
                 module.scan_database)
             || !std::filesystem::is_regular_file(
@@ -11622,7 +12145,7 @@ validate_prepared_compilation_environment(
             module.source_spelling.string());
         expected_scan_arguments.emplace_back("-o");
         expected_scan_arguments.push_back(
-            expected_scan_object.string());
+            expected_scan_artifacts.object.string());
         for (std::size_t argument_index = 0;
              argument_index < expected_scan_arguments.size();
              ++argument_index) {
@@ -11767,40 +12290,43 @@ validate_prepared_compilation_environment(
             for (const std::string& imported : module.imports) {
                 validate_module(imported);
             }
-            std::string physical_material =
-                std::string{
-                    clang_backend::MODULE_PREPARATION_POLICY_VERSION}
-                + "\n" + std::string{CLANG_VERSION_STRING}
-                + "\n" + clang_binary_sha256
-                + "\n" + clang_scan_deps_sha256
-                + "\n" + std::string{compiler_profile}
-                + "\n" + module.name
-                + "\n" + module.source_sha256
-                + "\n" + module.arguments_sha256
-                + "\n" + module.command_input_sha256
-                + "\n" + module.scan_database_sha256
-                + "\n" + module.scan_result_sha256
-                + "\n" + module.scan_diagnostics_sha256;
-            std::string relocatable_material =
-                std::string{
-                    clang_backend::MODULE_PREPARATION_POLICY_VERSION}
-                + "\n" + std::string{CLANG_VERSION_STRING}
-                + "\n" + clang_binary_sha256
-                + "\n" + clang_scan_deps_sha256
-                + "\n" + std::string{compiler_profile}
-                + "\n" + module.name
-                + "\n" + module.relocatable_source_sha256
-                + "\n" + module.relocatable_arguments_sha256
-                + "\n" + module.relocatable_command_input_sha256
-                + "\n" + module.relocatable_scan_database_sha256
-                + "\n" + module.relocatable_scan_result_sha256
-                + "\n" + module.relocatable_scan_diagnostics_sha256;
+            std::vector<std::pair<std::string, std::string>>
+                physical_import_keys;
+            std::vector<std::pair<std::string, std::string>>
+                relocatable_import_keys;
             for (const std::string& imported : module.imports) {
-                physical_material += "\n" + imported + "="
-                    + modules.at(imported).content_key;
-                relocatable_material += "\n" + imported + "="
-                    + modules.at(imported).relocatable_content_key;
+                physical_import_keys.emplace_back(
+                    imported, modules.at(imported).content_key);
+                relocatable_import_keys.emplace_back(
+                    imported,
+                    modules.at(imported).relocatable_content_key);
             }
+            const std::string physical_material =
+                clang_backend::predependency_material(
+                    compiler_profile,
+                    module.name,
+                    module.source_sha256,
+                    module.arguments_sha256,
+                    module.command_input_sha256,
+                    module.scan_database_sha256,
+                    module.scan_result_sha256,
+                    module.scan_diagnostics_sha256,
+                    clang_binary_sha256,
+                    clang_scan_deps_sha256,
+                    physical_import_keys);
+            const std::string relocatable_material =
+                clang_backend::predependency_material(
+                    compiler_profile,
+                    module.name,
+                    module.relocatable_source_sha256,
+                    module.relocatable_arguments_sha256,
+                    module.relocatable_command_input_sha256,
+                    module.relocatable_scan_database_sha256,
+                    module.relocatable_scan_result_sha256,
+                    module.relocatable_scan_diagnostics_sha256,
+                    clang_binary_sha256,
+                    clang_scan_deps_sha256,
+                    relocatable_import_keys);
             if (sha256_hex(
                     physical_material + "\ndependencies="
                     + module.dependency_sha256)
@@ -11812,6 +12338,31 @@ validate_prepared_compilation_environment(
                 throw std::runtime_error(
                     "PREPARE PCM content key is stale for module '"
                     + name + "'");
+            }
+            const std::filesystem::path expected_depfile =
+                clang_backend::derive_make_depfile_path(
+                    dependency_root,
+                    module.name,
+                    relocatable_material);
+            const clang_backend::pcm_artifact_paths
+                expected_pcm_artifacts =
+                clang_backend::derive_pcm_artifact_paths(
+                    pcm_root,
+                    module.name,
+                    module.relocatable_content_key);
+            if (module.depfile_spelling.lexically_normal()
+                    != expected_depfile
+                || module.depfile != expected_depfile
+                || module.pcm_spelling.lexically_normal()
+                    != expected_pcm_artifacts.pcm
+                || module.pcm != expected_pcm_artifacts.pcm
+                || module.pcm_provenance_spelling.lexically_normal()
+                    != expected_pcm_artifacts.provenance
+                || module.pcm_provenance
+                    != expected_pcm_artifacts.provenance) {
+                throw std::runtime_error(
+                    "PREPARE artifact spelling differs from its exact "
+                    "content-derived path for module '" + name + "'");
             }
             state[name] = 2;
             reached.insert(name);
@@ -11964,31 +12515,25 @@ validate_prepared_compilation_environment(
                     "mapping for import '" + imported + "'");
             }
         }
-        std::vector<std::string> expected_owned_arguments =
+        std::vector<std::string> expected_direct_arguments =
             module.base_arguments;
         for (const std::string& imported :
              expected_mapping_order) {
-            expected_owned_arguments.push_back(
+            expected_direct_arguments.push_back(
                 "-fmodule-file=" + imported + "="
                 + modules.at(imported).pcm.string());
         }
-        expected_owned_arguments.push_back(
-            "-fmodule-output=" + module.pcm.string());
-        expected_owned_arguments.emplace_back(
-            "-fmodules-reduced-bmi");
-        expected_owned_arguments.emplace_back("-c");
-        expected_owned_arguments.push_back(
-            module.source_spelling.string());
-        expected_owned_arguments.emplace_back("-o");
-        expected_owned_arguments.push_back(
-            module.pcm.string() + ".o");
-        expected_owned_arguments.emplace_back("-MD");
-        expected_owned_arguments.emplace_back("-MF");
-        expected_owned_arguments.push_back(
-            module.pcm.string() + ".d");
-        expected_owned_arguments.emplace_back("-MT");
-        expected_owned_arguments.push_back(
-            module.pcm.string() + ".d");
+        const clang_backend::pcm_artifact_paths
+            expected_pcm_artifacts =
+            clang_backend::derive_pcm_artifact_paths(
+                pcm_root,
+                module.name,
+                module.relocatable_content_key);
+        const std::vector<std::string> expected_owned_arguments =
+            clang_backend::derive_owned_arguments(
+                std::move(expected_direct_arguments),
+                module.source_spelling,
+                expected_pcm_artifacts);
         if (command.CommandLine != expected_owned_arguments
             || clang_backend::weakly_canonical_path(
                    command.Directory)

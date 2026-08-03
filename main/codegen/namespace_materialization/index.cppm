@@ -1,12 +1,15 @@
 module;
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <initializer_list>
 #include <map>
 #include <print>
 #include <set>
@@ -299,17 +302,27 @@ inline void validate_fixed_output_paths(const command_line& command) {
         throw std::runtime_error(
             "topology/artifact manifests must be the fixed files beneath --output-root");
     }
-    if (path_identity(command.pcm_root) != root / "pcm") {
+    std::error_code pcm_spelling_error;
+    const std::filesystem::path configured_pcm_root =
+        (command.pcm_root.is_absolute()
+             ? command.pcm_root
+             : std::filesystem::absolute(
+                   command.pcm_root, pcm_spelling_error))
+            .lexically_normal();
+    if (pcm_spelling_error
+        || configured_pcm_root != root / "pcm") {
         throw std::runtime_error(
             "--pcm-root must be the fixed pcm directory beneath --output-root");
     }
+    const std::filesystem::path canonical_pcm_root =
+        path_identity(command.pcm_root);
     if (path_identity(command.prepare_action_trace)
-        != root / "pcm/metadata/prepare_actions.json") {
+        != canonical_pcm_root / "metadata/prepare_actions.json") {
         throw std::runtime_error(
             "--prepare-action-trace must be the fixed PREPARE metadata file");
     }
     if (path_identity(command.prepare_stamp)
-        != root / "pcm/metadata/prepare.stamp") {
+        != canonical_pcm_root / "metadata/prepare.stamp") {
         throw std::runtime_error(
             "--prepare-stamp must be the fixed PREPARE metadata file");
     }
@@ -321,6 +334,187 @@ inline void validate_fixed_output_paths(const command_line& command) {
     }
 }
 
+[[nodiscard]] inline std::filesystem::path absolute_spelling(
+    const std::filesystem::path& value) {
+    std::error_code error;
+    const std::filesystem::path absolute = value.is_absolute()
+        ? value
+        : std::filesystem::absolute(value, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot make PREPARE path absolute: " + value.string());
+    }
+    return absolute.lexically_normal();
+}
+
+inline void validate_prepare_fixed_output_paths(
+    const prepare_command_line& command) {
+    const std::filesystem::path configured_root =
+        absolute_spelling(command.pcm_root);
+    std::error_code error;
+    const std::filesystem::file_status root_status =
+        std::filesystem::symlink_status(configured_root, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot inspect --pcm-root: "
+            + configured_root.string());
+    }
+    if (std::filesystem::exists(root_status)
+        && (!std::filesystem::is_directory(
+                configured_root, error)
+            || error)) {
+        throw std::runtime_error(
+            "--pcm-root must be a directory or a symlink to one");
+    }
+    const std::filesystem::path metadata =
+        configured_root / "metadata";
+    error.clear();
+    const std::filesystem::file_status metadata_status =
+        std::filesystem::symlink_status(metadata, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot inspect PREPARE metadata directory: "
+            + metadata.string());
+    }
+    if (std::filesystem::exists(metadata_status)
+        && (std::filesystem::is_symlink(metadata_status)
+            || !std::filesystem::is_directory(metadata_status))) {
+        throw std::runtime_error(
+            "PREPARE metadata directory must be a real directory");
+    }
+    const std::filesystem::path canonical_root =
+        path_identity(configured_root);
+    if (path_identity(metadata)
+        != canonical_root / "metadata") {
+        throw std::runtime_error(
+            "PREPARE metadata directory escapes --pcm-root");
+    }
+    const std::initializer_list<std::pair<
+        std::filesystem::path, std::string_view>> outputs{
+        {command.compile_database_output,
+         "prepare_compile_commands.json"},
+        {command.pcm_manifest, "pcm_manifest.json"},
+        {command.action_trace, "prepare_actions.json"},
+        {command.depfile, "prepare.d"},
+        {command.stamp, "prepare.stamp"},
+    };
+    for (const auto& [configured, filename] : outputs) {
+        const std::filesystem::path output =
+            absolute_spelling(configured);
+        const std::filesystem::path expected =
+            metadata / std::filesystem::path{std::string{filename}};
+        if (output != expected
+            || path_identity(output.parent_path())
+                != canonical_root / "metadata") {
+            throw std::runtime_error(
+                "PREPARE output must use its exact fixed metadata path: "
+                + expected.string());
+        }
+        error.clear();
+        const std::filesystem::file_status status =
+            std::filesystem::symlink_status(output, error);
+        if (error
+            || (std::filesystem::exists(status)
+                && (std::filesystem::is_symlink(status)
+                    || !std::filesystem::is_regular_file(status)))) {
+            throw std::runtime_error(
+                "PREPARE output is a symlink or non-regular file: "
+                + output.string());
+        }
+    }
+}
+
+inline void ensure_prepare_metadata_directory(
+    const prepare_command_line& command) {
+    const std::filesystem::path configured_root =
+        absolute_spelling(command.pcm_root);
+    std::error_code error;
+    std::filesystem::create_directories(configured_root, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot create PREPARE PCM root: " + error.message());
+    }
+    const std::filesystem::path metadata =
+        configured_root / "metadata";
+    const std::filesystem::file_status status =
+        std::filesystem::symlink_status(metadata, error);
+    if (error) {
+        throw std::runtime_error(
+            "cannot inspect PREPARE metadata directory: "
+            + error.message());
+    }
+    if (!std::filesystem::exists(status)) {
+        if (!std::filesystem::create_directory(metadata, error)
+            || error) {
+            throw std::runtime_error(
+                "cannot create PREPARE metadata directory: "
+                + error.message());
+        }
+    } else if (std::filesystem::is_symlink(status)
+               || !std::filesystem::is_directory(status)) {
+        throw std::runtime_error(
+            "PREPARE metadata directory changed before creation");
+    }
+}
+
+inline void write_prepare_output(
+    const prepare_command_line& command,
+    const std::filesystem::path& configured_path,
+    std::string_view content) {
+    validate_prepare_fixed_output_paths(command);
+    const std::filesystem::path path =
+        absolute_spelling(configured_path);
+    if (std::filesystem::is_regular_file(path)
+        && read_file(path) == content) {
+        return;
+    }
+    static std::atomic_uint64_t sequence{0};
+    std::filesystem::path temporary;
+    std::ofstream output;
+    for (std::size_t attempt = 0; attempt < 256; ++attempt) {
+        temporary = path.parent_path()
+            / (path.filename().string() + ".stage-"
+               + std::to_string(
+                   sequence.fetch_add(
+                       1, std::memory_order_relaxed)));
+        output.open(
+            temporary,
+            std::ios::binary | std::ios::noreplace);
+        if (output) break;
+        output.clear();
+        if (!std::filesystem::exists(temporary)) {
+            throw std::runtime_error(
+                "cannot create staged PREPARE output: "
+                + temporary.string());
+        }
+    }
+    if (!output) {
+        throw std::runtime_error(
+            "cannot allocate unique staged PREPARE output for "
+            + path.string());
+    }
+    output.write(
+        content.data(),
+        static_cast<std::streamsize>(content.size()));
+    output.close();
+    if (!output) {
+        std::filesystem::remove(temporary);
+        throw std::runtime_error(
+            "cannot finish staged PREPARE output: "
+            + temporary.string());
+    }
+    validate_prepare_fixed_output_paths(command);
+    std::error_code error;
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(temporary);
+        throw std::runtime_error(
+            "cannot atomically publish PREPARE output: "
+            + error.message());
+    }
+    validate_prepare_fixed_output_paths(command);
+}
+
 [[nodiscard]] inline int execute_prepare(prepare_command_line command) {
     require_regular_file(command.source, "template_flatten source");
     require_regular_file(command.signature_source, "signature source");
@@ -328,13 +522,8 @@ inline void validate_fixed_output_paths(const command_line& command) {
         throw std::runtime_error(
             "scan-only canonical source cannot be its own compilation-signature donor");
     }
-    if (path_identity(command.action_trace)
-        != path_identity(command.pcm_root)
-            / "metadata/prepare_actions.json") {
-        throw std::runtime_error(
-            "--action-trace must be the fixed PREPARE metadata file");
-    }
-    std::filesystem::create_directories(command.pcm_root);
+    validate_prepare_fixed_output_paths(command);
+    ensure_prepare_metadata_directory(command);
     clang_structural::prepared_compilation_environment prepared =
         clang_structural::prepare_dependency_compilation_environment(
             command.source,
@@ -355,14 +544,18 @@ inline void validate_fixed_output_paths(const command_line& command) {
         clang_structural::render_preparation_action_trace(prepared);
     prepared.dependencies.push_back(command.source);
     prepared.dependencies.push_back(command.signature_source);
-    write_if_different(
+    write_prepare_output(
+        command,
         command.compile_database_output, prepared.compile_database_json);
-    write_if_different(command.pcm_manifest, prepared.pcm_manifest_json);
-    write_if_different(command.action_trace, action_trace);
-    write_if_different(
+    write_prepare_output(
+        command, command.pcm_manifest, prepared.pcm_manifest_json);
+    write_prepare_output(command, command.action_trace, action_trace);
+    write_prepare_output(
+        command,
         command.depfile,
         render_depfile(command.stamp, std::move(prepared.dependencies)));
-    write_if_different(
+    write_prepare_output(
+        command,
         command.stamp,
         "bioseq_template_flatten_prepare_stamp/v1\n"
         "profile=production\n"

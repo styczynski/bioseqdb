@@ -433,26 +433,32 @@ inline void publish_prepared(
     return *pcm;
 }
 
-[[nodiscard]] inline std::filesystem::path first_dependency_scan_result(
-    const std::filesystem::path& pcm_root) {
+[[nodiscard]] inline std::filesystem::path first_dependency_scan_artifact(
+    const std::filesystem::path& pcm_root,
+    std::string_view suffix) {
     const std::filesystem::path scan_root =
         pcm_root / ".module-dependency-scan";
     std::vector<std::filesystem::path> results;
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator{scan_root}) {
         if (entry.is_regular_file()
-            && entry.path().filename().string().ends_with(
-                ".p1689.json")) {
+            && entry.path().filename().string().ends_with(suffix)) {
             results.push_back(entry.path());
         }
     }
     std::ranges::sort(results);
     if (results.empty()) {
         throw std::runtime_error(
-            "PREPARE contract fixture did not publish an active-import "
-            "scan result");
+            "PREPARE contract fixture did not publish the requested "
+            "active-import scan artifact");
     }
     return results.front();
+}
+
+[[nodiscard]] inline std::filesystem::path first_dependency_scan_result(
+    const std::filesystem::path& pcm_root) {
+    return first_dependency_scan_artifact(
+        pcm_root, ".p1689.json");
 }
 
 inline void assert_toolchain_exists(
@@ -1581,6 +1587,44 @@ inline int invoke() {
         "warm dependency-only action trace did not preserve the "
         "canonical Sema exclusion proof");
 
+    const std::filesystem::path interrupted_pcm =
+        first_pcm_dependency(warm_guard);
+    const std::filesystem::path interrupted_provenance{
+        interrupted_pcm.string() + ".provenance"};
+    require(
+        std::filesystem::remove(interrupted_provenance),
+        "dependency-only guard could not remove one PCM commit marker");
+    const std::filesystem::path interrupted_pcm_depfile{
+        interrupted_pcm.string() + ".d"};
+    write_file(
+        interrupted_pcm_depfile,
+        "this is an intentionally malformed stale compiler depfile\n");
+    const prepared_compilation_environment recovered_guard =
+        prepare_guard();
+    require(
+        count_actions(
+            recovered_guard,
+            preparation_action_kind::pcm_compilation,
+            preparation_action_disposition::executed) == 1u
+            && count_actions(
+                   recovered_guard,
+                   preparation_action_kind::pcm_compilation,
+                   preparation_action_disposition::validated_cache_hit)
+                == 1u,
+        "an interrupted PCM tuple was not rebuilt while the committed "
+        "sibling remained a validated hit");
+    require(
+        !std::filesystem::exists(interrupted_pcm_depfile),
+        "recovered PCM publication retained its stale transient depfile");
+    const prepared_compilation_environment recovered_warm_guard =
+        prepare_guard();
+    require(
+        count_actions(
+            recovered_warm_guard,
+            preparation_action_kind::pcm_compilation,
+            preparation_action_disposition::validated_cache_hit) == 2u,
+        "a recovered PCM tuple did not become a warm validated hit");
+
     write_file(
         guard_distinct_header,
         "#pragma once\n"
@@ -1600,6 +1644,10 @@ inline int invoke() {
         [&] { static_cast<void>(prepare_guard()); },
         "dependency scan and PCM compilation disagree",
         "distinct compiler depfile identity");
+    require_failure(
+        [&] { static_cast<void>(prepare_guard()); },
+        "dependency scan and PCM compilation disagree",
+        "distinct compiler depfile identity immediate retry");
 
     const std::filesystem::path source_root = root / "sources";
     const std::filesystem::path conditional_root =
@@ -2364,6 +2412,81 @@ inline int invoke() {
     write_file(owned_database, original_owned_database);
 
     const std::string original_manifest = read_file(manifest);
+    std::vector<std::filesystem::path> prepared_depfiles;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator{
+             production_pcm_root / ".dependencies"}) {
+        if (entry.is_regular_file()
+            && entry.path().extension() == ".d") {
+            prepared_depfiles.push_back(entry.path());
+        }
+    }
+    std::ranges::sort(prepared_depfiles);
+    require(
+        !prepared_depfiles.empty(),
+        "PREPARE contract fixture did not publish a make depfile");
+    const std::filesystem::path alternate_depfile =
+        production_pcm_root / "alternate-manifest-depfile.d";
+    write_file(
+        alternate_depfile, read_file(prepared_depfiles.front()));
+    write_file(
+        manifest,
+        replace_json_string_field(
+            original_manifest,
+            "depfile",
+            alternate_depfile.string()));
+    require_failure(
+        [&] {
+            static_cast<void>(validate(
+                toolchain,
+                {conditional_root},
+                owned_database,
+                production_pcm_root,
+                manifest));
+        },
+        "exact content-derived path",
+        "alternate in-root depfile spelling");
+    const std::filesystem::path alternate_pcm =
+        production_pcm_root / "alternate-manifest-pcm.pcm";
+    write_file(alternate_pcm, read_file(pcm));
+    write_file(
+        manifest,
+        replace_json_string_field(
+            original_manifest,
+            "pcm",
+            alternate_pcm.string()));
+    require_failure(
+        [&] {
+            static_cast<void>(validate(
+                toolchain,
+                {conditional_root},
+                owned_database,
+                production_pcm_root,
+                manifest));
+        },
+        "exact content-derived path",
+        "alternate in-root PCM spelling");
+    const std::filesystem::path alternate_provenance =
+        production_pcm_root / "alternate-manifest.provenance";
+    write_file(alternate_provenance, read_file(provenance));
+    write_file(
+        manifest,
+        replace_json_string_field(
+            original_manifest,
+            "pcm_provenance",
+            alternate_provenance.string()));
+    require_failure(
+        [&] {
+            static_cast<void>(validate(
+                toolchain,
+                {conditional_root},
+                owned_database,
+                production_pcm_root,
+                manifest));
+        },
+        "exact content-derived path",
+        "alternate in-root PCM provenance spelling");
+    write_file(manifest, original_manifest);
     std::string unknown_field_manifest = original_manifest;
     const std::size_t root_end =
         unknown_field_manifest.rfind("\n}\n");
@@ -2554,6 +2677,125 @@ inline int invoke() {
         symlink_owned,
         linked_pcm_root,
         symlink_manifest));
+
+    const std::filesystem::path outside_sentinel_directory =
+        root / "prepare-owned-sentinel";
+    const std::filesystem::path outside_sentinel =
+        outside_sentinel_directory / "sentinel.txt";
+    constexpr std::string_view sentinel_bytes{
+        "outside PREPARE sentinel must remain unchanged\n"};
+    write_file(outside_sentinel, sentinel_bytes);
+    const auto require_owned_directory_symlink_rejection =
+        [&](std::string_view component,
+            std::string_view case_name) {
+            const std::filesystem::path case_root =
+                root / ("linked-owned-directory-"
+                        + std::string{case_name});
+            std::filesystem::create_directories(case_root);
+            if (component == ".dependencies") {
+                std::filesystem::create_directory(
+                    case_root / ".module-dependency-scan");
+            }
+            std::error_code link_error;
+            std::filesystem::create_directory_symlink(
+                outside_sentinel_directory,
+                case_root / component,
+                link_error);
+            require(
+                !link_error,
+                "PREPARE contract fixture cannot create nested owned "
+                "directory symlink");
+            require_failure(
+                [&] {
+                    static_cast<void>(prepare(
+                        toolchain,
+                        {conditional_root},
+                        raw_database,
+                        case_root));
+                },
+                "owned directory is a symlink or non-directory",
+                case_name);
+            require(
+                read_file(outside_sentinel) == sentinel_bytes,
+                "nested owned-directory symlink mutated the outside "
+                "sentinel");
+        };
+    require_owned_directory_symlink_rejection(
+        ".module-dependency-scan", "P1689 directory confinement");
+    require_owned_directory_symlink_rejection(
+        ".dependencies", "Make dependency directory confinement");
+
+    const std::filesystem::path leaf_pcm_root =
+        root / "linked-owned-leaf-pcm";
+    const prepared_compilation_environment leaf_prepared =
+        prepare(
+            toolchain,
+            {conditional_root},
+            raw_database,
+            leaf_pcm_root);
+    const auto reject_leaf_symlink =
+        [&](const std::filesystem::path& leaf,
+            std::string_view expected_diagnostic,
+            std::string_view case_name) {
+            const std::string original =
+                std::filesystem::is_regular_file(leaf)
+                ? read_file(leaf)
+                : std::string{};
+            std::error_code leaf_error;
+            std::filesystem::remove(leaf, leaf_error);
+            leaf_error.clear();
+            std::filesystem::create_symlink(
+                outside_sentinel, leaf, leaf_error);
+            require(
+                !leaf_error,
+                "PREPARE contract fixture cannot create owned leaf "
+                "symlink");
+            require_failure(
+                [&] {
+                    static_cast<void>(prepare(
+                        toolchain,
+                        {conditional_root},
+                        raw_database,
+                        leaf_pcm_root));
+                },
+                expected_diagnostic,
+                case_name);
+            require(
+                read_file(outside_sentinel) == sentinel_bytes,
+                "owned leaf symlink mutated the outside sentinel");
+            leaf_error.clear();
+            std::filesystem::remove(leaf, leaf_error);
+            require(
+                !leaf_error,
+                "PREPARE contract fixture cannot remove owned leaf "
+                "symlink");
+            if (!original.empty()) {
+                write_file(leaf, original);
+            }
+        };
+    reject_leaf_symlink(
+        first_dependency_scan_result(leaf_pcm_root),
+        "P1689 scan result is a symlink or non-regular file",
+        "P1689 result leaf confinement");
+    reject_leaf_symlink(
+        first_dependency_scan_artifact(
+            leaf_pcm_root, ".diagnostics.txt"),
+        "P1689 diagnostics is a symlink or non-regular file",
+        "P1689 diagnostics leaf confinement");
+    const std::filesystem::path linked_leaf_pcm =
+        first_pcm_dependency(leaf_prepared);
+    reject_leaf_symlink(
+        linked_leaf_pcm,
+        "PCM output is a symlink or non-regular file",
+        "PCM leaf confinement");
+    reject_leaf_symlink(
+        std::filesystem::path{linked_leaf_pcm.string() + ".o"},
+        "PCM object output is a symlink or non-regular file",
+        "PCM object leaf confinement");
+    reject_leaf_symlink(
+        std::filesystem::path{linked_leaf_pcm.string() + ".d"},
+        "PCM dependency output is a symlink or non-regular file",
+        "PCM depfile leaf confinement");
 
     const std::filesystem::path invalid_root =
         root / "invalid";
