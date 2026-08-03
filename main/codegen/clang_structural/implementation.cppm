@@ -12241,6 +12241,24 @@ validate_prepared_compilation_environment(
                     + imported);
             }
         }
+        if (!clang_backend::path_within_root(
+                module.pcm_provenance, pcm_root)) {
+            throw std::runtime_error(
+                "PREPARE PCM provenance is missing or foreign for "
+                "module '" + name + "'");
+        }
+        if (!clang_backend::path_within_root(
+                module.depfile, pcm_root)) {
+            throw std::runtime_error(
+                "PREPARE depfile is missing, foreign, or stale for "
+                "module '" + name + "'");
+        }
+        if (!clang_backend::path_within_root(
+                module.pcm, pcm_root)) {
+            throw std::runtime_error(
+                "PREPARE PCM is missing, foreign, or corrupt for module '"
+                + name + "'");
+        }
     }
 
     std::map<std::string, int, std::less<>> validation_state;
