@@ -974,8 +974,9 @@ struct worker {
 };
 
 inline int invoke() {
-    auto local = []() { return 3; };
-    return local();
+    auto local = []() constexpr [[gnu::always_inline]] -> int { return 3; };
+    auto implicit = [] { return 4; };
+    return local() + implicit();
 }
 }
 namespace [[bioseq::similar]] decoy {}
@@ -1044,8 +1045,8 @@ namespace [[bioseq::similar]] decoy {}
         "Clang structural scan returned an empty namespace USR; "
             + clang_callable_inventory);
     require(
-        clang_namespace.callables.size() == 7,
-        "Clang structural scan expected exactly seven source callable "
+        clang_namespace.callables.size() == 8,
+        "Clang structural scan expected exactly eight source callable "
         "definitions; " + clang_callable_inventory);
     require(
         std::ranges::all_of(
@@ -1064,7 +1065,9 @@ namespace [[bioseq::similar]] decoy {}
                     callable.kind == callable_kind::lambda;
                 return (lambda
                             ? callable.hwy_attr_insertion.byte_offset
-                                == callable.body_range.begin.byte_offset
+                                    >= callable.declaration_range.begin.byte_offset
+                                && callable.hwy_attr_insertion.byte_offset
+                                    <= callable.body_range.begin.byte_offset
                             : callable.hwy_attr_insertion.byte_offset
                                     >= callable.declaration_range.begin
                                            .byte_offset
@@ -1076,8 +1079,32 @@ namespace [[bioseq::similar]] decoy {}
                            callable.body_range.begin.byte_offset]
                         == '{';
             }),
-        "Clang structural scan proves function-prefix and lambda-body "
+        "Clang structural scan proves function-prefix and lambda-declarator "
         "HWY_ATTR insertion points");
+    const auto lambda = std::ranges::find(
+        clang_namespace.callables,
+        callable_kind::lambda,
+        &callable_insertion_record::kind);
+    require(
+        lambda != clang_namespace.callables.end()
+            && simd_marker_source.substr(
+                lambda->hwy_attr_insertion.byte_offset,
+                std::string_view{" constexpr"}.size()) == " constexpr",
+        "Clang structural scan did not place the lambda HWY_ATTR insertion "
+        "immediately after its explicit parameter list; "
+            + clang_callable_inventory);
+    require(
+        std::ranges::any_of(
+            clang_namespace.callables,
+            [&](const callable_insertion_record& callable) {
+                return callable.kind == callable_kind::lambda
+                    && simd_marker_source.substr(
+                        callable.hwy_attr_insertion.byte_offset,
+                        std::string_view{" {"}.size()) == " {";
+            }),
+        "Clang structural scan did not place the parenthesis-free lambda "
+        "HWY_ATTR insertion immediately after its introducer; "
+            + clang_callable_inventory);
     for (const auto [kind, description] : {
              std::pair{callable_kind::function, "free function"},
              std::pair{callable_kind::constructor, "constructor"},

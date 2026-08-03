@@ -5093,6 +5093,21 @@ class structural_visitor final
             lambda->getCallOperator();
         const source_range body_range = source_range_of(
             body->getSourceRange(), sources_, language_);
+        clang::SourceLocation declarator_end =
+            sources_.getExpansionLoc(lambda->getIntroducerRange().getEnd());
+        if (lambda->hasExplicitParameters() && call_operator != nullptr) {
+            const clang::FunctionTypeLoc function_type =
+                call_operator->getFunctionTypeLoc();
+            if (!function_type.isNull()) {
+                declarator_end = sources_.getExpansionLoc(
+                    function_type.getRParenLoc());
+            } else {
+                declarator_end = {};
+            }
+        }
+        const source_position insertion = declarator_end.isValid()
+            ? token_range_of(declarator_end, sources_, language_).end
+            : source_position{};
         callable_candidates_.push_back(callable_candidate{
             .record = {
                 .kind = callable_kind::lambda,
@@ -5104,11 +5119,19 @@ class structural_visitor final
                 .declaration_range = source_range_of(
                     lambda->getSourceRange(), sources_, language_),
                 .body_range = body_range,
-                .hwy_attr_insertion = body_range.begin,
+                .hwy_attr_insertion = insertion,
             },
             .insertion_proven =
-                body_range.begin.byte_offset
-                    < body_range.end.byte_offset,
+                declarator_end.isValid()
+                    && sources_.isWrittenInMainFile(declarator_end)
+                    && insertion.byte_offset
+                        >= source_position_of(
+                               sources_.getExpansionLoc(lambda->getBeginLoc()),
+                               sources_)
+                               .byte_offset
+                    && insertion.byte_offset <= body_range.begin.byte_offset
+                    && body_range.begin.byte_offset
+                        < body_range.end.byte_offset,
         });
         return true;
     }
@@ -5429,7 +5452,8 @@ class structural_visitor final
                 .hwy_attr_insertion.byte_offset;
             const bool lambda_insertion =
                 candidate.record.kind == callable_kind::lambda
-                && insertion == body_begin;
+                && insertion >= declaration_begin
+                && insertion <= body_begin;
             const bool function_insertion =
                 candidate.record.kind != callable_kind::lambda
                 && insertion >= declaration_begin
@@ -5473,9 +5497,12 @@ class structural_visitor final
         if (const auto* method =
                 llvm::dyn_cast<clang::CXXMethodDecl>(function);
             method != nullptr && method->getParent()->isLambda()) {
-            // Lambda bodies need HWY_ATTR immediately before the body. The
-            // LambdaExpr visitor owns that insertion; treating the synthetic
-            // call operator as a normal member would record the body twice.
+            // Lambda call operators need HWY_ATTR immediately after their
+            // explicit parameter list (or introducer when parentheses are
+            // omitted), before specifiers, standard attributes, or a trailing
+            // return type. The LambdaExpr visitor owns that insertion;
+            // treating the synthetic call operator as a normal member would
+            // record the body twice.
             return;
         }
         if (!function->doesThisDeclarationHaveABody()) {

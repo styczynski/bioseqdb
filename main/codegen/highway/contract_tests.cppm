@@ -575,6 +575,32 @@ inline void verify_generated_closure() {
         "the artifact manifest records the complete generated topology");
 }
 
+inline void verify_lambda_attribute_order() {
+    extracted_source source{
+        .source = source_spec{
+            .key = "lambda_fixture",
+            .path = "lambda_fixture.cppm",
+        },
+        .enclosing_namespace = "bioseq::fixture",
+        .body =
+            "auto value = [](int x) constexpr [[gnu::always_inline]] "
+            "-> int { return x; };\n",
+    };
+    source.callables.push_back(callable_insertion{
+        .body_relative_offset = source.body.find(')') + 1u,
+        .qualified_name = "bioseq::fixture::target::<lambda>",
+        .kind = "lambda",
+    });
+    const std::string rendered = detail::body_with_highway_attributes(source);
+    require(
+        rendered.contains(
+            "[](int x) HWY_ATTR constexpr [[gnu::always_inline]] -> int")
+            && !rendered.contains("]] HWY_ATTR")
+            && !rendered.contains("-> int HWY_ATTR"),
+        "lambda HWY_ATTR precedes specifiers, standard attributes, and "
+        "trailing return types");
+}
+
 inline void verify_type_only_target_source() {
     generation_plan plan = two_target_plan();
     const source_spec foundation{
@@ -789,6 +815,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_complete_table_target_policy();
     contract_detail::verify_external_domain_topology_contract();
     contract_detail::verify_generated_closure();
+    contract_detail::verify_lambda_attribute_order();
     contract_detail::verify_type_only_target_source();
     contract_detail::verify_shared_publication_envelope();
     contract_detail::verify_typed_alignment_binder();

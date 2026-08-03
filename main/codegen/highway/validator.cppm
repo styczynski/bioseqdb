@@ -1013,9 +1013,9 @@ inline void validate_inventories(
             const bool lambda = callable.kind
                 == clang_structural::callable_kind::lambda;
             const bool valid_lambda = !lambda
-                || (insertion == callable.body_range.begin.byte_offset
-                    && insertion < content.size()
-                    && content[insertion] == '{');
+                || (insertion
+                        >= callable.declaration_range.begin.byte_offset
+                    && insertion <= callable.body_range.begin.byte_offset);
             const bool valid_named_callable = lambda
                 || (insertion >= callable.declaration_range.begin.byte_offset
                     && insertion < callable.body_range.begin.byte_offset);

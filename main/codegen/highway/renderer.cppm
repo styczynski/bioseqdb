@@ -2,6 +2,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -109,15 +110,20 @@ namespace detail {
          callable != source.callables.rend();
          ++callable) {
         const bool lambda = callable->kind == "lambda";
-        if (callable->body_relative_offset >= result.size()
-            || (lambda && result[callable->body_relative_offset] != '{')) {
+        if (callable->body_relative_offset >= result.size()) {
             throw std::runtime_error(
                 source.source.path.string()
                 + ": stale HWY_ATTR insertion geometry while rendering");
         }
-        result.insert(
-            callable->body_relative_offset,
-            lambda ? " HWY_ATTR" : "HWY_ATTR ");
+        if (lambda) {
+            std::string attribute{" HWY_ATTR"};
+            const unsigned char next = static_cast<unsigned char>(
+                result[callable->body_relative_offset]);
+            if (!std::isspace(next)) attribute += ' ';
+            result.insert(callable->body_relative_offset, attribute);
+        } else {
+            result.insert(callable->body_relative_offset, "HWY_ATTR ");
+        }
     }
     return result;
 }
