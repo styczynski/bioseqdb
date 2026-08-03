@@ -10,6 +10,7 @@ import bioseq.common.circular_append_buffer;
 import bioseq.sequences;
 import bioseq.instr;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.highway_contract;
 import bioseq.highway.sources.sequence_ops;
 import bioseq.highway.sources.hasher_base;
