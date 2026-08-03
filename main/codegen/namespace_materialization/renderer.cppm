@@ -24,11 +24,6 @@ import bioseq.codegen.support;
 
 export namespace bioseq::codegen::namespace_materialization {
 
-[[nodiscard]] inline std::string apply_exact_edits(
-    std::string source,
-    std::vector<source_edit> edits,
-    std::size_t source_origin = 0u);
-
 namespace detail {
 
 [[nodiscard]] inline bool nonempty_range(
@@ -490,7 +485,7 @@ inline void render_selector_switch(
 
 }  // namespace detail
 
-[[nodiscard]] inline std::string apply_exact_edits(
+[[nodiscard]] std::string apply_exact_edits(
     std::string source,
     std::vector<source_edit> edits,
     const std::size_t source_origin) {

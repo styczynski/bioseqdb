@@ -418,6 +418,34 @@ inline void verify_external_domain_topology_contract() {
         "artifact provenance preserves ordered named topology digests");
 }
 
+inline void verify_shared_target_coordinates() {
+    const generation_plan plan = two_target_plan();
+    const auto coordinates = detail::build_target_coordinates(
+        plan.target_inventory);
+    require(
+        coordinates.size() == 2u
+            && coordinates[0].ordinal == 0u
+            && coordinates[0].assignments.size() == 1u
+            && coordinates[0].assignments[0].role
+                == namespace_materialization::axis_role::external
+            && coordinates[0].assignments[0].group == "highway_target"
+            && coordinates[0].assignments[0].case_label == "HWY_EMU128"
+            && coordinates[0].identity_namespace == "N_EMU128"
+            && coordinates[0].module_name
+                == "bioseq.highway.generated.x86.emu128"
+            && coordinates[0].relative_path
+                == std::filesystem::path{"x86/emu128/index.cppm"}
+            && coordinates[1].ordinal == 1u
+            && coordinates[1].assignments.size() == 1u
+            && coordinates[1].assignments[0].case_label == "HWY_SSE2"
+            && coordinates[1].identity_namespace == "N_SSE2"
+            && coordinates[1].module_name
+                == "bioseq.highway.generated.x86.sse2"
+            && coordinates[1].relative_path
+                == std::filesystem::path{"x86/sse2/index.cppm"},
+        "Highway targets reuse the shared ordered external-coordinate IR");
+}
+
 inline void verify_generated_closure() {
     const generation_result generated = render_generation(two_target_plan());
     require(
@@ -1130,6 +1158,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_slot_callable_ownership();
     contract_detail::verify_complete_table_target_policy();
     contract_detail::verify_external_domain_topology_contract();
+    contract_detail::verify_shared_target_coordinates();
     contract_detail::verify_generated_closure();
     contract_detail::verify_lambda_attribute_order();
     contract_detail::verify_type_only_target_source();

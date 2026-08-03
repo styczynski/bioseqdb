@@ -131,6 +131,7 @@ inline void validate_preparation_action_trace_stamp_binding(
     switch (role) {
         case axis_role::identity: return "identity";
         case axis_role::shard: return "shard";
+        case axis_role::external: return "external";
     }
     return "unknown";
 }

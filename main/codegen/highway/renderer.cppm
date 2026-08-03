@@ -26,14 +26,36 @@ export namespace bioseq::codegen::highway {
 
 namespace detail {
 
-[[nodiscard]] inline std::string generated_module_name(
-    const target_spec& target) {
-    return "bioseq.highway.generated." + target.platform + "." + target.slug;
-}
-
-[[nodiscard]] inline std::filesystem::path generated_target_root(
-    const target_spec& target) {
-    return std::filesystem::path{target.platform} / target.slug;
+[[nodiscard]] inline std::vector<
+    namespace_materialization::materialization_coordinate>
+build_target_coordinates(const target_manifest& inventory) {
+    std::vector<namespace_materialization::materialization_coordinate>
+        coordinates;
+    coordinates.reserve(inventory.targets.size());
+    for (const target_spec& target : inventory.targets) {
+        const auto ordinal = static_cast<std::uint32_t>(coordinates.size());
+        namespace_materialization::materialization_coordinate coordinate{
+            .ordinal = ordinal,
+            .assignments = {
+                namespace_materialization::axis_case_assignment{
+                    .group = "highway_target",
+                    .role = namespace_materialization::axis_role::external,
+                    .case_label = target.token,
+                    .case_ordinal = ordinal,
+                },
+            },
+            .identity_namespace = target.name_space,
+            .module_name = "bioseq.highway.generated." + target.platform
+                + "." + target.slug,
+            .relative_path = std::filesystem::path{target.platform}
+                / target.slug / "index.cppm",
+            .topology_digest = inventory.policy_digest,
+        };
+        namespace_materialization::validate_coordinate_axis_domain(
+            coordinate);
+        coordinates.push_back(std::move(coordinate));
+    }
+    return coordinates;
 }
 
 [[nodiscard]] inline const target_spec& static_target(
@@ -106,48 +128,54 @@ namespace detail {
 
 [[nodiscard]] inline std::string body_with_highway_attributes(
     const extracted_source& source) {
-    std::string result = source.body;
-    for (auto callable = source.callables.rbegin();
-         callable != source.callables.rend();
-         ++callable) {
-        const bool lambda = callable->kind == "lambda";
-        if (callable->body_relative_offset >= result.size()) {
+    std::vector<namespace_materialization::source_edit> edits;
+    edits.reserve(source.callables.size());
+    for (const callable_insertion& callable : source.callables) {
+        const bool lambda = callable.kind == "lambda";
+        if (callable.body_relative_offset >= source.body.size()) {
             throw std::runtime_error(
                 source.source.path.string()
                 + ": stale HWY_ATTR insertion geometry while rendering");
         }
+        std::string attribute{"HWY_ATTR "};
         if (lambda) {
             const bool valid_preceding =
-                !callable->lambda_preceding_token.empty()
-                && callable->body_relative_offset
-                    >= callable->lambda_preceding_token.size()
-                && result.compare(
-                    callable->body_relative_offset
-                        - callable->lambda_preceding_token.size(),
-                    callable->lambda_preceding_token.size(),
-                    callable->lambda_preceding_token) == 0;
+                !callable.lambda_preceding_token.empty()
+                && callable.body_relative_offset
+                    >= callable.lambda_preceding_token.size()
+                && source.body.compare(
+                    callable.body_relative_offset
+                        - callable.lambda_preceding_token.size(),
+                    callable.lambda_preceding_token.size(),
+                    callable.lambda_preceding_token) == 0;
             const bool valid_following =
-                !callable->lambda_following_token.empty()
-                && callable->lambda_following_relative_offset < result.size()
-                && result.compare(
-                    callable->lambda_following_relative_offset,
-                    callable->lambda_following_token.size(),
-                    callable->lambda_following_token) == 0;
+                !callable.lambda_following_token.empty()
+                && callable.lambda_following_relative_offset
+                    < source.body.size()
+                && source.body.compare(
+                    callable.lambda_following_relative_offset,
+                    callable.lambda_following_token.size(),
+                    callable.lambda_following_token) == 0;
             if (!valid_preceding || !valid_following) {
                 throw std::runtime_error(
                     source.source.path.string()
                     + ": stale lambda declarator tokens while rendering");
             }
-            std::string attribute{" HWY_ATTR"};
+            attribute = " HWY_ATTR";
             const unsigned char next = static_cast<unsigned char>(
-                result[callable->body_relative_offset]);
+                source.body[callable.body_relative_offset]);
             if (!std::isspace(next)) attribute += ' ';
-            result.insert(callable->body_relative_offset, attribute);
-        } else {
-            result.insert(callable->body_relative_offset, "HWY_ATTR ");
         }
+        edits.push_back(namespace_materialization::source_edit{
+            .begin_byte = callable.body_relative_offset,
+            .end_byte = callable.body_relative_offset,
+            .replacement = std::move(attribute),
+            .provenance_id = callable.qualified_name,
+            .purpose = "insert HWY_ATTR on " + callable.qualified_name,
+        });
     }
-    return result;
+    return namespace_materialization::apply_exact_edits(
+        source.body, std::move(edits));
 }
 
 [[nodiscard]] inline std::string replace_target_namespace(
@@ -734,7 +762,7 @@ collect_alphabet_identities(
 inline void render_minimizer_wrappers(
     std::ostringstream& output,
     const std::vector<minimizer_case_binding>& cases,
-    const target_spec& target) {
+    const namespace_materialization::materialization_coordinate& coordinate) {
     if (cases.empty()) return;
 
     for (const minimizer_required_member& member
@@ -767,7 +795,7 @@ inline void render_minimizer_wrappers(
                        << "u:\n"
                        << "                    return "
                        << minimizer_callable_expression(
-                              *slot, target.name_space)
+                              *slot, coordinate.identity_namespace)
                        << "(invocation);\n";
                 ++end;
             }
@@ -821,31 +849,31 @@ inline void render_minimizer_wrappers(
 
 [[nodiscard]] inline std::string render_primary(
     const source_manifest& inventory,
-    const target_spec& target) {
-    const std::string module = generated_module_name(target);
+    const namespace_materialization::materialization_coordinate& coordinate) {
     std::ostringstream output;
     output << "// Generated by bioseq_codegen highway; do not edit.\n"
-           << "export module " << module << ";\n\n"
+           << "export module " << coordinate.module_name << ";\n\n"
            << "import " << inventory.contract_module << ";\n\n"
            << "export namespace bioseq::simd_dispatch::"
-           << target.name_space << " {\n"
+           << coordinate.identity_namespace << " {\n"
            << "[[nodiscard]] const HighwayTargetBinding* "
               "BindHighwayTarget() noexcept;\n"
            << "}  // namespace bioseq::simd_dispatch::"
-           << target.name_space << "\n";
+           << coordinate.identity_namespace << "\n";
     return output.str();
 }
 
 [[nodiscard]] inline std::string render_partition(
     const generation_plan& plan,
     const target_spec& target,
+    const namespace_materialization::materialization_coordinate& coordinate,
     const extracted_source& source,
     const std::map<std::string, const source_spec*, std::less<>>& by_key) {
-    const std::string module = generated_module_name(target);
     std::ostringstream output;
     output << fixed_target_fragment(plan.target_inventory, target)
            << "// Generated from " << source.source.key << "; do not edit.\n"
-           << "module " << module << ":" << source.source.partition << ";\n\n";
+           << "module " << coordinate.module_name << ":"
+           << source.source.partition << ";\n\n";
     for (const std::string& neutral : source.neutral_imports) {
         output << "import " << neutral << ";\n";
     }
@@ -861,20 +889,20 @@ inline void render_minimizer_wrappers(
         output << '\n';
     }
     output << "namespace " << source.enclosing_namespace << "::"
-           << target.name_space << " {\n"
+           << coordinate.identity_namespace << " {\n"
            << "#line " << source.body_first_line << " \""
            << cpp_escape(diagnostic_source_path(source.source.path)) << "\"\n"
            << body_with_highway_attributes(source);
     if (source.body.empty() || source.body.back() != '\n') output << '\n';
     output << "}  // namespace " << source.enclosing_namespace << "::"
-           << target.name_space << "\n";
+           << coordinate.identity_namespace << "\n";
     return output.str();
 }
 
 [[nodiscard]] inline std::string render_binder(
     const generation_plan& plan,
-    const target_spec& target) {
-    const std::string module = generated_module_name(target);
+    const target_spec& target,
+    const namespace_materialization::materialization_coordinate& coordinate) {
     std::map<std::string, std::vector<const slot_spec*>, std::less<>> families;
     for (const slot_spec& slot : plan.source_inventory.slots) {
         families[slot.family_field].push_back(&slot);
@@ -889,7 +917,7 @@ inline void render_minimizer_wrappers(
     std::ostringstream output;
     output << fixed_target_fragment(plan.target_inventory, target)
            << "// Generated target binding; do not edit.\n"
-           << "module " << module << ";\n\n"
+           << "module " << coordinate.module_name << ";\n\n"
            << "import " << plan.source_inventory.contract_module << ";\n";
     for (const slot_spec& slot : plan.source_inventory.slots) {
         if (is_alignment_family(slot.family_field)
@@ -901,9 +929,10 @@ inline void render_minimizer_wrappers(
     for (const extracted_source& source : plan.extracted_sources) {
         output << "import :" << source.source.partition << ";\n";
     }
-    output << "\nnamespace bioseq::simd_dispatch::" << target.name_space
+    output << "\nnamespace bioseq::simd_dispatch::"
+           << coordinate.identity_namespace
            << " {\n\n";
-    render_minimizer_wrappers(output, minimizer_cases, target);
+    render_minimizer_wrappers(output, minimizer_cases, coordinate);
     output << "HWY_ATTR HighwayKernelTable MakeHighwayKernelTable() noexcept {\n"
            << "    HighwayKernelTable table{};\n";
 
@@ -949,7 +978,7 @@ inline void render_minimizer_wrappers(
             const slot_spec* slot = family.members.find(member)->second;
             output << "        ." << member << " = "
                    << replace_target_namespace(
-                          slot->expression, target.name_space)
+                          slot->expression, coordinate.identity_namespace)
                    << ",\n";
         }
         output << "    };\n";
@@ -981,14 +1010,16 @@ inline void render_minimizer_wrappers(
         if (slots.size() == 1 && slots.front()->slot_field == "@") {
             output << "    table." << family << " = "
                    << replace_target_namespace(
-                          slots.front()->expression, target.name_space)
+                          slots.front()->expression,
+                          coordinate.identity_namespace)
                    << ";\n";
             continue;
         }
         for (const slot_spec* slot : slots) {
             output << "    table." << family << "." << slot->slot_field
                    << " = "
-                   << replace_target_namespace(slot->expression, target.name_space)
+                   << replace_target_namespace(
+                          slot->expression, coordinate.identity_namespace)
                    << ";\n";
         }
     }
@@ -1007,13 +1038,16 @@ inline void render_minimizer_wrappers(
            << "    };\n"
            << "    return &binding;\n"
            << "}\n\n"
-           << "}  // namespace bioseq::simd_dispatch::" << target.name_space
+           << "}  // namespace bioseq::simd_dispatch::"
+           << coordinate.identity_namespace
            << "\n";
     return output.str();
 }
 
 [[nodiscard]] inline std::string render_dispatch_registry_partition(
-    const generation_plan& plan) {
+    const generation_plan& plan,
+    const std::vector<namespace_materialization::materialization_coordinate>&
+        coordinates) {
     std::ostringstream output;
     output << dispatch_fragment(plan.target_inventory)
            << "// Generated single Highway dispatch registry; do not edit.\n"
@@ -1021,8 +1055,8 @@ inline void render_minimizer_wrappers(
            << ":highway_registry;\n\n"
            << "import " << plan.source_inventory.dispatch_module << ";\n"
            << "import " << plan.source_inventory.contract_module << ";\n";
-    for (const target_spec& target : plan.target_inventory.targets) {
-        output << "import " << generated_module_name(target) << ";\n";
+    for (const auto& coordinate : coordinates) {
+        output << "import " << coordinate.module_name << ";\n";
     }
     output << "\nnamespace bioseq::simd_dispatch {\n\n"
            << "HWY_EXPORT(BindHighwayTarget);\n\n"
@@ -1074,20 +1108,33 @@ inline void render_minimizer_wrappers(
 }
 
 [[nodiscard]] inline std::string render_test_support(
-    const generation_plan& plan) {
+    const generation_plan& plan,
+    const std::vector<namespace_materialization::materialization_coordinate>&
+        coordinates) {
     const target_spec& target = static_target(plan.target_inventory);
+    const auto target_position = std::ranges::find(
+        plan.target_inventory.targets,
+        target.token,
+        &target_spec::token);
+    const std::size_t target_index = static_cast<std::size_t>(
+        target_position - plan.target_inventory.targets.begin());
+    if (coordinates.size() != plan.target_inventory.targets.size()) {
+        throw std::runtime_error(
+            "fixed-target test support received an incomplete coordinate set");
+    }
+    const auto& coordinate = coordinates.at(target_index);
     std::ostringstream output;
     output << "module;\n\n"
            << "#include <stdexcept>\n\n"
            << "// Generated fixed-target test binding; do not edit.\n"
            << "export module bioseq.highway.test_support;\n\n"
            << "import " << plan.source_inventory.contract_module << ";\n"
-           << "import " << generated_module_name(target) << ";\n\n"
+           << "import " << coordinate.module_name << ";\n\n"
            << "export namespace bioseq::simd_dispatch {\n\n"
            << "[[nodiscard]] const HighwayTargetBinding& "
               "highway_test_target_binding() {\n"
            << "    const HighwayTargetBinding* binding = "
-           << target.name_space << "::BindHighwayTarget();\n"
+           << coordinate.identity_namespace << "::BindHighwayTarget();\n"
            << "    if (binding == nullptr || binding->kernels == nullptr) {\n"
            << "        throw std::logic_error{"
               "\"generated fixed-target test binding is incomplete\"};\n"
@@ -1198,37 +1245,47 @@ inline void validate_rendered_artifact(
 [[nodiscard]] inline generation_result render_generation(
     const generation_plan& plan) {
     generation_result result;
+    const std::vector<namespace_materialization::materialization_coordinate>
+        coordinates = detail::build_target_coordinates(
+            plan.target_inventory);
     std::map<std::string, const source_spec*, std::less<>> sources_by_key;
     for (const extracted_source& source : plan.extracted_sources) {
         sources_by_key.emplace(source.source.key, &source.source);
     }
 
-    for (const target_spec& target : plan.target_inventory.targets) {
-        const std::filesystem::path root = detail::generated_target_root(target);
-        const std::string module = detail::generated_module_name(target);
+    for (std::size_t target_index = 0u;
+         target_index < plan.target_inventory.targets.size();
+         ++target_index) {
+        const target_spec& target =
+            plan.target_inventory.targets[target_index];
+        const auto& coordinate = coordinates[target_index];
+        const std::filesystem::path root =
+            coordinate.relative_path.parent_path();
         result.artifacts.push_back(generated_artifact{
-            .relative_path = root / "index.cppm",
-            .module_name = module,
+            .relative_path = coordinate.relative_path,
+            .module_name = coordinate.module_name,
             .target_token = target.token,
             .kind = artifact_kind::primary,
-            .content = detail::render_primary(plan.source_inventory, target),
+            .content = detail::render_primary(
+                plan.source_inventory, coordinate),
         });
         result.artifacts.push_back(generated_artifact{
             .relative_path = root / "binder.cppm",
-            .module_name = module,
+            .module_name = coordinate.module_name,
             .target_token = target.token,
             .kind = artifact_kind::binder,
-            .content = detail::render_binder(plan, target),
+            .content = detail::render_binder(plan, target, coordinate),
         });
         for (const extracted_source& source : plan.extracted_sources) {
             result.artifacts.push_back(generated_artifact{
                 .relative_path = root / (source.source.partition + ".cppm"),
-                .module_name = module + ":" + source.source.partition,
+                .module_name = coordinate.module_name + ":"
+                    + source.source.partition,
                 .target_token = target.token,
                 .source_key = source.source.key,
                 .kind = artifact_kind::partition,
                 .content = detail::render_partition(
-                    plan, target, source, sources_by_key),
+                    plan, target, coordinate, source, sources_by_key),
             });
         }
     }
@@ -1237,7 +1294,8 @@ inline void validate_rendered_artifact(
         .module_name =
             plan.source_inventory.dispatch_module + ":highway_registry",
         .kind = artifact_kind::dispatch_registry_partition,
-        .content = detail::render_dispatch_registry_partition(plan),
+        .content = detail::render_dispatch_registry_partition(
+            plan, coordinates),
     });
     result.artifacts.push_back(generated_artifact{
         .relative_path = "dispatch_inventory.cppm",
@@ -1250,7 +1308,7 @@ inline void validate_rendered_artifact(
         .module_name = "bioseq.highway.test_support",
         .target_token = plan.target_inventory.static_target_token,
         .kind = artifact_kind::test_support,
-        .content = detail::render_test_support(plan),
+        .content = detail::render_test_support(plan, coordinates),
     });
     std::ranges::sort(
         result.artifacts,

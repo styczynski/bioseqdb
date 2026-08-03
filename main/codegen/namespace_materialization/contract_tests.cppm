@@ -1087,6 +1087,46 @@ inline void verify_exact_edits() {
         "out-of-bounds exact edits fail closed");
 }
 
+inline void verify_coordinate_axis_domains() {
+    const materialization_coordinate explicit_coordinate{
+        .assignments = {
+            axis_case_assignment{
+                .group = "alphabet",
+                .role = axis_role::identity,
+                .case_label = "dna4",
+            },
+            axis_case_assignment{
+                .group = "shape",
+                .role = axis_role::shard,
+                .case_label = "root",
+            },
+        },
+    };
+    validate_coordinate_axis_domain(explicit_coordinate);
+
+    const materialization_coordinate external_coordinate{
+        .ordinal = 1u,
+        .assignments = {
+            axis_case_assignment{
+                .group = "highway_target",
+                .role = axis_role::external,
+                .case_label = "HWY_SSE2",
+                .case_ordinal = 1u,
+            },
+        },
+    };
+    validate_coordinate_axis_domain(external_coordinate);
+
+    materialization_coordinate mixed = explicit_coordinate;
+    mixed.assignments.push_back(external_coordinate.assignments.front());
+    require_rejected(
+        [&] { validate_coordinate_axis_domain(mixed); },
+        "a coordinate cannot mix explicit axes with an external provider");
+    require_rejected(
+        [] { validate_coordinate_axis_domain(materialization_coordinate{}); },
+        "a coordinate must name one axis domain");
+}
+
 inline void verify_record_probe_provenance_placement() {
     constexpr std::string_view source =
         "namespace probe { struct scalar_type; }";
@@ -2144,6 +2184,7 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_production_scheduler_golden();
     detail::verify_production_declaration_heads_and_probes();
     detail::verify_exact_edits();
+    detail::verify_coordinate_axis_domains();
     detail::verify_record_probe_provenance_placement();
     detail::verify_alias_probe_provenance_placement();
     detail::verify_generated_topology();

@@ -25,6 +25,7 @@ inline constexpr std::string_view generator_version =
 enum class axis_role : std::uint8_t {
     identity,
     shard,
+    external,
 };
 
 struct replacement_case {
@@ -91,6 +92,19 @@ struct source_edit {
     std::string provenance_id;
     std::string purpose;
 };
+
+/// A coordinate belongs either to the explicit identity/shard product or to
+/// one policy-supplied external axis. The explicit grammar intentionally does
+/// not expose the external role; Highway is its sole DOC0398 adapter.
+void validate_coordinate_axis_domain(
+    const materialization_coordinate& coordinate);
+
+/// Applies policy-supplied edits against one authenticated source slice.
+/// Both explicit-axis materialization and Highway rendering use this owner.
+[[nodiscard]] std::string apply_exact_edits(
+    std::string source,
+    std::vector<source_edit> edits,
+    std::size_t source_origin = 0u);
 
 enum class validation_class : std::uint8_t {
     body_free,

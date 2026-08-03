@@ -617,6 +617,37 @@ attributes_named(
     return arguments.front();
 }
 
+void validate_coordinate_axis_domain(
+    const materialization_coordinate& coordinate) {
+    const std::size_t external_axes = std::ranges::count_if(
+        coordinate.assignments,
+        [](const axis_case_assignment& assignment) {
+            return assignment.role == axis_role::external;
+        });
+    const std::size_t explicit_axes =
+        coordinate.assignments.size() - external_axes;
+    if ((external_axes == 0u && explicit_axes == 0u)
+        || (external_axes != 0u && explicit_axes != 0u)
+        || external_axes > 1u) {
+        throw std::runtime_error(
+            "a materialization coordinate must carry either explicit "
+            "identity/shard axes or exactly one external axis");
+    }
+    if (external_axes == 1u) {
+        const axis_case_assignment& external =
+            *std::ranges::find(
+                coordinate.assignments,
+                axis_role::external,
+                &axis_case_assignment::role);
+        if (external.group.empty() || external.case_label.empty()
+            || external.case_ordinal != coordinate.ordinal) {
+            throw std::runtime_error(
+                "an external materialization axis must name its provider, "
+                "case, and ordered coordinate");
+        }
+    }
+}
+
 [[nodiscard]] inline bool coordinate_matches(
     const materialization_coordinate& coordinate,
     const std::vector<selection_clause>& clauses) {
@@ -748,6 +779,7 @@ attributes_named(
         }
         coordinate.identity_namespace = detail::identity_namespace(
             plan.region.boundary.qualified_name, coordinate.assignments);
+        validate_coordinate_axis_domain(coordinate);
         plan.coordinates.push_back(std::move(coordinate));
     }
     plan.canonical_digest_input = detail::canonical_topology_input(
