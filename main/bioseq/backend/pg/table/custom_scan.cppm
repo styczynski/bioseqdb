@@ -30402,7 +30402,10 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			const auto top_level_query_highway_kernels =
 				query_sketch_stage_owners == 1u
 				? bioseq::simd_dispatch::HighwayKernelSet{}
-				: PlannedQueryMinimizerHighwayKernels(&params);
+				: PlannedQueryMinimizerHighwayKernels(
+					&params,
+					QuerySketchPlanRouteFor(
+						explain_index_read_requirement));
 			const auto pipeline_scheduler =
 				bioseq::parallelism::pg::snapshot();
 			const auto pipeline_mode =
