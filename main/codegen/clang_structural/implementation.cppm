@@ -10145,8 +10145,12 @@ prepare_compilation_environment(
             ? std::filesystem::file_size(
                   pcm_artifacts.pcm, size_error)
             : 0;
-        if (pcm_exists && provenance_exists
-            && !size_error && existing_size != 0) {
+        if (pcm_exists && provenance_exists) {
+            if (size_error || existing_size == 0) {
+                throw std::runtime_error(
+                    "PREPARE PCM is missing, foreign, or corrupt for module '"
+                    + module_name + "'");
+            }
             record.pcm_sha256 =
                 sha256_hex(read_file(pcm_artifacts.pcm));
             const std::string expected_provenance =
@@ -10157,16 +10161,21 @@ prepare_compilation_environment(
                     record.pcm_sha256);
             const std::string persisted_provenance =
                 read_file(pcm_artifacts.provenance);
-            if (persisted_provenance == expected_provenance) {
-                record.pcm_provenance_sha256 =
-                    sha256_hex(persisted_provenance);
-                pcm_cache_hit = true;
+            if (persisted_provenance != expected_provenance) {
+                throw std::runtime_error(
+                    "PREPARE PCM is missing, foreign, or corrupt for module '"
+                    + module_name + "'");
             }
+            record.pcm_provenance_sha256 =
+                sha256_hex(persisted_provenance);
+            pcm_cache_hit = true;
         }
         if (!pcm_cache_hit) {
-            // An unprovenanced, empty, or stale tuple is an interrupted
-            // publication, not a cache hit. Remove only the exact derived
-            // siblings and rebuild from an absent state.
+            // A tuple with an absent payload or commit marker is recoverable
+            // interrupted publication state. A complete tuple whose marker
+            // does not authenticate its non-empty PCM was rejected above as
+            // corruption. Remove only the exact derived siblings and rebuild
+            // the incomplete tuple from an absent state.
             clang_backend::remove_pcm_artifact_tuple(
                 pcm_root, pcm_artifacts);
             clang_backend::scoped_pcm_publication publication{

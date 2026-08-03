@@ -217,17 +217,6 @@ def _run_ninja(
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         )
-    return result.stdout + result.stderr
-
-
-def _mtime_snapshot(paths: list[Path]) -> str:
-    rows = ["mtime snapshot (nanoseconds):"]
-    for path in paths:
-        if path.exists():
-            rows.append(f"  {path}: {path.stat().st_mtime_ns}")
-        else:
-            rows.append(f"  {path}: missing")
-    return "\n".join(rows)
     if (
         not expect_success
         and expected_diagnostic is not None
@@ -239,6 +228,17 @@ def _mtime_snapshot(paths: list[Path]) -> str:
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         )
+    return result.stdout + result.stderr
+
+
+def _mtime_snapshot(paths: list[Path]) -> str:
+    rows = ["mtime snapshot (nanoseconds):"]
+    for path in paths:
+        if path.exists():
+            rows.append(f"  {path}: {path.stat().st_mtime_ns}")
+        else:
+            rows.append(f"  {path}: missing")
+    return "\n".join(rows)
 
 
 def _touch_newer(path: Path, reference: Path) -> None:
