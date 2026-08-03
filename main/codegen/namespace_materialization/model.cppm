@@ -114,11 +114,14 @@ struct materialization_artifact {
     std::string content_sha256;
 };
 
-/// Actions directly observed by the namespace-materialization process. This
-/// ledger must never include later CMake module scans or compiler invocations.
+/// Actions directly observed by the namespace-materialization generate
+/// command. This ledger must never include later CMake module scans or
+/// compiler invocations, nor infer actions performed by the earlier prepare
+/// command merely because its authenticated outputs were validated.
 struct frontend_action_ledger {
     std::uint32_t dependency_preparation_validations{};
     std::uint32_t canonical_token_slice_scans{};
+    std::uint32_t signature_donor_token_slice_scans{};
     std::uint32_t body_free_declaration_probe_scans{};
     std::uint32_t artifact_render_passes{};
     std::uint32_t body_bearing_compiler_invocations{};

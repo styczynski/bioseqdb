@@ -281,6 +281,54 @@ long root(std::uint8_t abi_code, int value) {
     };
 }
 
+inline void attach_fixture_frontend_evidence(generation_plan& plan) {
+    const generation_result provisional = render_generation(plan, false);
+    plan.declaration_probes.clear();
+    for (const materialization_artifact& artifact : provisional.artifacts) {
+        if (artifact.artifact_kind
+            != materialization_artifact::kind::declaration_probe) {
+            continue;
+        }
+        require(
+            !artifact.logical_coordinate_ordinals.empty(),
+            "fixture declaration probe must cover an identity coordinate");
+        clang_structural::translation_unit probe;
+        probe.source_path = plan.output_root / artifact.relative_path;
+        probe.source_sha256 = sha256_hex(artifact.content);
+        probe.clang_version = plan.clang_version;
+        probe.mode = clang_structural::collection_mode::declaration_probe;
+        probe.source_module.provided_module = artifact.module_name;
+        clang_structural::declaration_record identity;
+        identity.stable_usr = "c:@F@fixture_probe_"
+            + std::to_string(artifact.logical_coordinate_ordinals.front());
+        identity.qualified_name = "fixture::probe_identity";
+        identity.provenance_id = "fixture-provenance-"
+            + std::to_string(artifact.logical_coordinate_ordinals.front());
+        identity.provenance_coordinate =
+            std::to_string(artifact.logical_coordinate_ordinals.front());
+        identity.linkage = clang_structural::entity_linkage::module;
+        identity.attachment =
+            clang_structural::module_attachment::named_module;
+        probe.declarations.push_back(std::move(identity));
+        plan.declaration_probes.push_back(std::move(probe));
+    }
+    plan.frontend_actions = frontend_action_ledger{
+        .dependency_preparation_validations = 1u,
+        .canonical_token_slice_scans = 2u,
+        .signature_donor_token_slice_scans = 1u,
+        .body_free_declaration_probe_scans =
+            static_cast<std::uint32_t>(plan.declaration_probes.size()),
+        .artifact_render_passes = 2u,
+        .body_bearing_compiler_invocations = 0u,
+    };
+    plan.compilation_obligations = cmake_compilation_obligations{
+        .api_partition_units = 1u,
+        .selector_partition_units = 1u,
+        .body_bearing_implementation_units =
+            static_cast<std::uint32_t>(plan.enabled_ordinals.size()),
+    };
+}
+
 enum class topology_mutation : std::uint8_t {
     reordered,
     grown,
@@ -1007,6 +1055,46 @@ inline void verify_generated_topology() {
     require(probes == 2u && instances == 4u, "probe/heavy action counts are exact");
 }
 
+inline void verify_template_flatten_manifest_evidence() {
+    scoped_temp_directory temporary;
+    generation_plan plan = fixture_plan();
+    plan.repository_root = temporary.path();
+    plan.source_path = temporary.path() / "flatten_fixture.cppm";
+    plan.topology.region.source_module.source_path = plan.source_path;
+    plan.output_root = temporary.path() / "generated";
+    attach_fixture_frontend_evidence(plan);
+
+    const generation_result generated = render_generation(plan);
+    require(
+        generated.manifest_identity.size() == 64u
+            && generated.artifact_manifest_json.contains(
+                "\"schema_version\": 2")
+            && generated.artifact_manifest_json.contains(
+                "\"canonical_token_slice_scans\":2")
+            && generated.artifact_manifest_json.contains(
+                "\"signature_donor_token_slice_scans\":1")
+            && generated.artifact_manifest_json.contains(
+                "\"body_free_declaration_probe_scans\":2")
+            && generated.artifact_manifest_json.contains(
+                "\"body_bearing_compiler_invocations\":0")
+            && generated.artifact_manifest_json.contains(
+                "\"body_bearing_implementation_units\":4"),
+        "template-flatten manifest must round-trip the observed action ledger "
+        "separately from CMake compilation obligations");
+
+    generation_plan false_action = plan;
+    false_action.frontend_actions.canonical_token_slice_scans = 1u;
+    require_rejected(
+        [&] { static_cast<void>(render_generation(false_action)); },
+        "template-flatten manifest rejects a fabricated frontend action count");
+    generation_plan false_obligation = plan;
+    false_obligation.compilation_obligations
+        .body_bearing_implementation_units = 3u;
+    require_rejected(
+        [&] { static_cast<void>(render_generation(false_obligation)); },
+        "template-flatten manifest rejects a truncated CMake compilation obligation");
+}
+
 inline void verify_policy_neutral_publication_envelope() {
     const std::string content = "export module fixture.generated;\n";
     const std::filesystem::path output_root = std::filesystem::absolute(
@@ -1195,6 +1283,7 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_exact_edits();
     detail::verify_record_probe_provenance_placement();
     detail::verify_generated_topology();
+    detail::verify_template_flatten_manifest_evidence();
     detail::verify_policy_neutral_publication_envelope();
     detail::verify_authenticated_incremental_publication();
 }

@@ -422,7 +422,8 @@ inline void validate_plan_identity(const generation_plan& plan) {
     }
 
     if (plan.frontend_actions.dependency_preparation_validations != 1u
-        || plan.frontend_actions.canonical_token_slice_scans != 1u
+        || plan.frontend_actions.canonical_token_slice_scans != 2u
+        || plan.frontend_actions.signature_donor_token_slice_scans != 1u
         || plan.frontend_actions.body_free_declaration_probe_scans
             != plan.declaration_probes.size()
         || plan.frontend_actions.artifact_render_passes != 2u
@@ -431,7 +432,8 @@ inline void validate_plan_identity(const generation_plan& plan) {
             != plan.topology.identity_representative_ordinals.size()) {
         throw std::runtime_error(
             "observed frontend action ledger disagrees with dependency "
-            "validation, token slicing, body-free probes, rendering, or the "
+            "validation, canonical/donor token slicing, body-free probes, "
+            "rendering, or the "
             "zero body-bearing compiler-action invariant");
     }
     if (plan.compilation_obligations.api_partition_units != 1u
@@ -1246,6 +1248,7 @@ inline void validate_template_flatten_publication_manifest(
         std::array{
             std::string_view{"dependency_preparation_validations"},
             std::string_view{"canonical_token_slice_scans"},
+            std::string_view{"signature_donor_token_slice_scans"},
             std::string_view{"body_free_declaration_probe_scans"},
             std::string_view{"artifact_render_passes"},
             std::string_view{"body_bearing_compiler_invocations"},
@@ -1262,6 +1265,13 @@ inline void validate_template_flatten_publication_manifest(
                require_member(
                    frontend_actions, "canonical_token_slice_scans", owner),
                "frontend_action_ledger.canonical_token_slice_scans")
+            != 2u
+        || require_unsigned(
+               require_member(
+                   frontend_actions,
+                   "signature_donor_token_slice_scans",
+                   owner),
+               "frontend_action_ledger.signature_donor_token_slice_scans")
             != 1u
         || require_unsigned(
                require_member(
@@ -1278,7 +1288,8 @@ inline void validate_template_flatten_publication_manifest(
         throw std::runtime_error(
             std::string{owner}
             + ": frontend ledger must record one preparation validation, "
-              "one token slice, two render passes, and zero observed "
+              "two canonical and one signature-donor token slices, two "
+              "render passes, and zero observed "
               "body-bearing compiler invocations");
     }
     const std::uint64_t body_free_probe_count = require_unsigned(
@@ -2731,6 +2742,8 @@ render_publication_manifest(const publication_manifest_request& request) {
            << plan.frontend_actions.dependency_preparation_validations
            << ",\"canonical_token_slice_scans\":"
            << plan.frontend_actions.canonical_token_slice_scans
+           << ",\"signature_donor_token_slice_scans\":"
+           << plan.frontend_actions.signature_donor_token_slice_scans
            << ",\"body_free_declaration_probe_scans\":"
            << plan.frontend_actions.body_free_declaration_probe_scans
            << ",\"artifact_render_passes\":"
