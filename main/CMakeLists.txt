@@ -736,6 +736,36 @@ endif()
 include(BioseqCodegen)
 include(BioseqHighwayCodegen)
 include(BioseqTemplateFlattenCodegen)
+if(BIOSEQ_BUILD_CORE)
+  set(_bioseq_highway_builder_contract_root
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/highway-builder-contracts")
+  add_custom_target(bioseq_highway_builder_contracts
+    COMMAND "${CMAKE_COMMAND}" -E rm -rf
+      "${_bioseq_highway_builder_contract_root}"
+    COMMAND "${CMAKE_COMMAND}" -E echo
+      "[bioseq-highway-contract] BEGIN header-closure"
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_ROOT=${_bioseq_highway_builder_contract_root}/header-closure"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_header_closure.cmake"
+    COMMAND "${CMAKE_COMMAND}" -E echo
+      "[bioseq-highway-contract] PASS header-closure"
+    COMMAND "${CMAKE_COMMAND}" -E echo
+      "[bioseq-highway-contract] BEGIN target-order"
+    COMMAND "${CMAKE_COMMAND}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_target_order.cmake"
+    COMMAND "${CMAKE_COMMAND}" -E echo
+      "[bioseq-highway-contract] PASS target-order"
+    COMMAND "${CMAKE_COMMAND}" -E echo
+      "[bioseq-highway-contract] BEGIN probe-identity"
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_ROOT=${_bioseq_highway_builder_contract_root}/probe-identity"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_probe_identity.cmake"
+    COMMAND "${CMAKE_COMMAND}" -E echo
+      "[bioseq-highway-contract] PASS probe-identity"
+    COMMENT "Running always-on Highway CMake builder contracts"
+    VERBATIM
+    USES_TERMINAL)
+endif()
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
   add_test(
     NAME bioseq_highway_header_closure_contract
@@ -849,6 +879,17 @@ endif()
 
 if(BIOSEQ_BUILD_CORE)
   add_subdirectory(bioseq)
+  foreach(_bioseq_highway_validation_consumer IN ITEMS
+      bioseq_aligner_tests_exec
+      bioseq_external_integration_tests_exec)
+    if(TARGET ${_bioseq_highway_validation_consumer})
+      add_dependencies(
+        ${_bioseq_highway_validation_consumer}
+        bioseq_highway_builder_contracts
+        bioseq_namespace_materialization_module_canary)
+    endif()
+  endforeach()
+  unset(_bioseq_highway_validation_consumer)
   if(TARGET bioseq_cache_bioseq_bench)
     # The cache benchmark target is declared before Bioseq so cache-only builds
     # remain valid. Complete the direct-target dependency once the sibling DSO
