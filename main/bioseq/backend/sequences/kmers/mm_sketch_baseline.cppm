@@ -1,9 +1,5 @@
 module;
 
-#include <hwy/highway.h>
-
-#include "common.h"
-
 #include <cstdint>
 #include <vector>
 #include <utility>
@@ -13,7 +9,6 @@ module;
 
 export module bioseq.sequences.kmers.mm_sketch_baseline;
 
-import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 
@@ -234,18 +229,12 @@ struct mm_sketch_entry {
 }  // namespace bioseq::mm_sketch_baseline_ns
 
 // -----------------------------------------------------------------------------
-// HWY-namespaced template that takes a compact_sequence_range and returns
+// Target-neutral template that takes a compact_sequence_range and returns
 // (last_pos, kmer) pairs in the same shape `sketch_collector::extract_pairs()`
-// produces. Lives inside HWY_NAMESPACE so it can resolve the SIMD-versioned
-// `compact_sequence_range` declaration without explicit qualification —
-// matches the call-site shape every kmers test already uses.
+// produces.
 // -----------------------------------------------------------------------------
 
-export {
-
-HWY_BEFORE_NAMESPACE();
-
-namespace bioseq::simd::HWY_NAMESPACE {
+export namespace bioseq::simd {
 
 /**
  * @param seq    Bioseq compact_sequence_range view of the input bytes.
@@ -311,8 +300,4 @@ mm_sketch_baseline_pairs(
     return pairs;
 }
 
-}  // namespace bioseq::simd::HWY_NAMESPACE
-
-HWY_AFTER_NAMESPACE();
-
-}  // export
+}  // namespace bioseq::simd

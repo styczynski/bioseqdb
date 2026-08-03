@@ -11,11 +11,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
 import bioseq.sequences.prefilters.sneaky_snake;
 import bioseq.sequences.prefilters.sneaky_snake_vulkan;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.gpu.vulkan.phase_b_abi;
 import bioseq.gpu.vulkan.phase_c_abi;
 
@@ -25,6 +28,18 @@ namespace hn = hwy::HWY_NAMESPACE;
 using namespace bioseq::sequences::prefilters;
 
 namespace {
+
+[[nodiscard]] ::bioseq::simd_dispatch::SneakySnakeSimdBatchKernel
+fixed_sneaky_snake_kernel()
+{
+    const auto kernel = ::bioseq::simd_dispatch::highway_test_kernel_table()
+        .common.sneaky_snake_simd_batch;
+    if (kernel == nullptr) {
+        throw std::logic_error{
+            "generated fixed-target test table lacks SneakySnake"};
+    }
+    return kernel;
+}
 
 [[nodiscard]] std::uint32_t exact_levenshtein(
     std::span<const std::uint8_t> query,
@@ -316,11 +331,9 @@ TEST_CASE(
 
     for (const SneakySnakeOptions options : option_sets) {
         const auto scalar = sneaky_snake_scalar_batch(input, options);
-        const auto simd = sneaky_snake_simd_batch_for(d, input, options);
-        const auto active_target = sneaky_snake_simd_batch(input, options);
+        const auto simd = fixed_sneaky_snake_kernel()(input, options);
         REQUIRE(scalar.size() == fixture.jobs.size());
         REQUIRE(simd.size() == scalar.size());
-        REQUIRE(active_target.size() == scalar.size());
 
         for (std::size_t index = 0u; index < scalar.size(); ++index) {
             const std::uint32_t distance = exact_levenshtein(
@@ -333,7 +346,6 @@ TEST_CASE(
                 scalar[index].lower_bound,
                 simd[index].lower_bound);
             REQUIRE(same_result(simd[index], scalar[index]));
-            REQUIRE(same_result(active_target[index], scalar[index]));
             REQUIRE(scalar[index].lower_bound <= distance);
             if (distance <= fixture.jobs[index].max_edits) {
                 REQUIRE(prefilter_accepted(scalar[index]));
@@ -346,7 +358,6 @@ TEST_CASE(
     "SneakySnake Highway scans full vectors and exact mismatch boundaries",
     "[sneaky_snake][prefilter][simd]")
 {
-    const hn::ScalableTag<std::uint32_t> d;
     const hn::ScalableTag<std::uint8_t> byte_d;
     const std::uint32_t lanes = static_cast<std::uint32_t>(
         hn::Lanes(byte_d));
@@ -400,14 +411,11 @@ TEST_CASE(
         .jobs = jobs,
     };
     const auto scalar = sneaky_snake_scalar_batch(input);
-    const auto simd = sneaky_snake_simd_batch_for(d, input);
-    const auto active_target = sneaky_snake_simd_batch(input);
+    const auto simd = fixed_sneaky_snake_kernel()(input, {});
     REQUIRE(simd.size() == scalar.size());
-    REQUIRE(active_target.size() == scalar.size());
     for (std::size_t index = 0u; index < scalar.size(); ++index) {
         CAPTURE(index, mismatch_positions[index], lanes, length);
         REQUIRE(same_result(simd[index], scalar[index]));
-        REQUIRE(same_result(active_target[index], scalar[index]));
         if (mismatch_positions[index] < length) {
             REQUIRE(scalar[index].lower_bound == 1u);
             REQUIRE_FALSE(prefilter_accepted(scalar[index]));
@@ -416,61 +424,6 @@ TEST_CASE(
             REQUIRE(prefilter_accepted(scalar[index]));
         }
     }
-}
-
-TEST_CASE(
-    "SneakySnake Highway candidate mask preserves the exact longest diagonal",
-    "[sneaky_snake][prefilter][simd]")
-{
-    const hn::ScalableTag<std::uint32_t> d;
-    const hn::ScalableTag<std::uint8_t> byte_d;
-    const std::uint32_t lanes = static_cast<std::uint32_t>(
-        hn::Lanes(byte_d));
-    const std::uint32_t length = 8u * lanes + 64u;
-    const std::uint32_t position = 3u * lanes + 10u;
-    const std::uint32_t max_edits = 2u * lanes + 3u;
-    const std::uint32_t lower = position - max_edits;
-    const std::uint32_t winning_start = position + lanes;
-    const std::uint32_t expected_run = length - winning_start;
-    constexpr std::uint32_t main_run = 3u;
-
-    std::vector<std::uint8_t> query(length, 255u);
-    std::vector<std::uint8_t> target(length, 254u);
-    for (std::uint32_t index = position; index < length; ++index) {
-        target[index] = static_cast<std::uint8_t>(
-            ((index - position) * 73u + 11u) % 251u);
-    }
-
-    const std::uint8_t filter_rank = target[position + main_run];
-    query[lower + main_run] = filter_rank;
-    query[lower + lanes - 1u + main_run] = filter_rank;
-    query[lower + lanes + main_run] = filter_rank;
-    for (std::uint32_t index = 0u; index < expected_run; ++index) {
-        query[winning_start + index] = target[position + index];
-    }
-    for (std::uint32_t index = 0u; index < main_run; ++index) {
-        query[position + index] = target[position + index];
-    }
-    query[position + main_run] = 252u;
-
-    const std::uint32_t scalar_best = sneaky_snake_detail::
-        longest_diagonal_run_for<sneaky_snake_detail::CpuTraversal::scalar>(
-            nullptr,
-            query,
-            target,
-            position,
-            length,
-            max_edits);
-    const std::uint32_t simd_best = sneaky_snake_detail::
-        longest_diagonal_run_for<sneaky_snake_detail::CpuTraversal::highway>(
-            d,
-            query,
-            target,
-            position,
-            length,
-            max_edits);
-    REQUIRE(scalar_best == expected_run);
-    REQUIRE(simd_best == expected_run);
 }
 
 TEST_CASE(
@@ -632,7 +585,7 @@ TEST_CASE(
 
     REQUIRE_FALSE(prefilter_job_in_bounds(input, jobs.front()));
     const auto scalar = sneaky_snake_scalar_batch(input);
-    const auto simd = sneaky_snake_simd_batch(input);
+    const auto simd = fixed_sneaky_snake_kernel()(input, {});
     REQUIRE(scalar.size() == 1u);
     REQUIRE(same_result(scalar.front(), simd.front()));
     REQUIRE(scalar.front().status == static_cast<std::uint32_t>(

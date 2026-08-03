@@ -36,6 +36,8 @@ import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.kmers.vulkan;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences.pipe;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
@@ -54,6 +56,11 @@ namespace {
 namespace hn = hwy::HWY_NAMESPACE;
 namespace pipe = bioseq::simd::HWY_NAMESPACE::pipe;
 namespace vk = ::bioseq::gpu::vulkan;
+
+[[nodiscard]] const ::bioseq::simd_dispatch::HighwayKernelTable*
+fixed_highway_kernels() noexcept {
+    return &::bioseq::simd_dispatch::highway_test_kernel_table();
+}
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t  = compact_sequence_range<dna4_u64>;
@@ -269,7 +276,8 @@ struct minimizer_run {
     sketch_collector collector;
     auto proof = pipe::minimizer_dispatch_range<MinimapSketchData>(
         collector, view, from, to, 10u, 15u, backend,
-        pipe::ExactSimdRangeRoute::require_continuation);
+        pipe::ExactSimdRangeRoute::require_continuation,
+        fixed_highway_kernels());
     return {
         .records = canonical_records(collector),
         .proof = proof,

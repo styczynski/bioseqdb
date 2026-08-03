@@ -6,10 +6,13 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 import bioseq.common.context;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences.chaining.scalar;
 import bioseq.sequences.chaining.simd;
 import bioseq.sequences.chaining.utils;
@@ -21,6 +24,17 @@ namespace hn = hwy::HWY_NAMESPACE;
 namespace {
 
 namespace ch = ::bioseq::chaining;
+
+[[nodiscard]] ch::ChainAnchorsSimdKernel fixed_chaining_kernel()
+{
+    const auto kernel = ::bioseq::simd_dispatch::highway_test_kernel_table()
+        .chaining.chain_anchors_simd;
+    if (kernel == nullptr) {
+        throw std::logic_error{
+            "generated fixed-target test table lacks SIMD chaining"};
+    }
+    return kernel;
+}
 
 TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap fallbacks",
           "[chaining][arena][memory]")
@@ -252,7 +266,8 @@ struct ChainOutputs {
     chains.reserve(anchors.size() + 1);
     reordered.reserve(anchors.size() + 1);
     ChainOutputs result;
-    chain_anchors_simd(
+    ch::chain_anchors_simd(
+        fixed_chaining_kernel(),
         anchors,
         params,
         chains,
@@ -650,7 +665,8 @@ TEST_CASE(
         reordered.reserve(anchors.size() + 1u);
         SimdChainingExecutionProof proof{};
         try {
-            chain_anchors_simd(
+            ch::chain_anchors_simd(
+                fixed_chaining_kernel(),
                 anchors,
                 params,
                 chains,
@@ -1134,7 +1150,8 @@ TEST_CASE(
     reordered.reserve(anchors.size() + 1);
     SimdChainingExecutionProof proof;
     try {
-        chain_anchors_simd(
+        ch::chain_anchors_simd(
+            fixed_chaining_kernel(),
             anchors, params, chains, reordered, &proof);
         FAIL("invalid Exact SIMD parameters must throw");
     } catch (const SimdChainingRuntimeError& error) {
