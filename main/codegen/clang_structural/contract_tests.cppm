@@ -1272,8 +1272,17 @@ inline int invoke() {
     // successful dependency-only cold/warm PREPARE therefore proves that the
     // canonical body never entered a compiler frontend. The authenticated
     // action trace then makes that proof independent of fixture filenames.
+    std::error_code guard_root_error;
+    const std::filesystem::path canonical_temporary_root =
+        std::filesystem::weakly_canonical(root, guard_root_error);
+    require(
+        !guard_root_error
+            && std::filesystem::is_directory(
+                canonical_temporary_root),
+        "dependency-only positive guard cannot canonicalize its existing "
+        "temporary root");
     const std::filesystem::path guard_root =
-        root / "dependency-only-positive";
+        canonical_temporary_root / "dependency-only-positive";
     const std::filesystem::path guard_canonical =
         guard_root / "canonical.cppm";
     const std::filesystem::path guard_donor =
@@ -1308,6 +1317,12 @@ inline int invoke() {
         guard_provider,
         "export module fixture.dependency_guard.provider;\n"
         "export int dependency_guard_provider();\n");
+    require(
+        std::filesystem::weakly_canonical(
+            guard_root, guard_root_error) == guard_root
+            && !guard_root_error,
+        "dependency-only positive guard paths do not retain one canonical "
+        "identity after publication");
     write_file(
         guard_raw_database,
         render_compile_database({
