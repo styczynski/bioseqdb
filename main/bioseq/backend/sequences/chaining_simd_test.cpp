@@ -24,6 +24,9 @@ namespace hn = hwy::HWY_NAMESPACE;
 namespace {
 
 namespace ch = ::bioseq::chaining;
+using ch::SimdChainingExecutionProof;
+using ch::SimdChainingRuntimeError;
+using ch::SimdChainingStatus;
 
 [[nodiscard]] ch::ChainAnchorsSimdKernel fixed_chaining_kernel()
 {

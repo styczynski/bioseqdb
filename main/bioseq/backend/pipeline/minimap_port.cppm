@@ -3821,7 +3821,8 @@ struct MatchResultCollection {
     TwoStackExecutionProof exact_simd_target_execution_proof{};
     PackedPaperNthashExecutionProof paper_nthash_query_execution_proof{};
     PackedPaperNthashExecutionProof paper_nthash_target_execution_proof{};
-    SimdChainingExecutionProof simd_chaining_execution_proof{};
+    bioseq::chaining::SimdChainingExecutionProof
+        simd_chaining_execution_proof{};
     BlockAlignerExecutionProof block_aligner_execution_proof{};
     ScalarPipelineExecutionProof scalar_pipeline_execution_proof{};
     Ksw2BatchedExecutionProof ksw2_batched_execution_proof{};
@@ -3888,7 +3889,8 @@ struct MatchResultCollection {
     }
 
     void record_simd_chaining_execution_proof(
-            const SimdChainingExecutionProof& proof) noexcept {
+            const bioseq::chaining::SimdChainingExecutionProof& proof)
+            noexcept {
         simd_chaining_execution_proof.combine(proof);
         simd_chaining_execution_proof_present = true;
     }
@@ -4254,7 +4256,7 @@ struct MatchResultCollection {
         const bool simd_chain_absent =
             !simd_chaining_execution_proof_present
             && simd_chaining_execution_proof
-                == SimdChainingExecutionProof{};
+                == bioseq::chaining::SimdChainingExecutionProof{};
         const bool block_absent =
             !block_aligner_execution_proof_present
             && block_aligner_execution_proof

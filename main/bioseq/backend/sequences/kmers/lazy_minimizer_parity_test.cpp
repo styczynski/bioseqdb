@@ -54,7 +54,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace {
 
 namespace hn = hwy::HWY_NAMESPACE;
-namespace pipe = bioseq::simd::HWY_NAMESPACE::pipe;
+namespace pipe = ::bioseq::simd::pipe;
 namespace vk = ::bioseq::gpu::vulkan;
 
 [[nodiscard]] const ::bioseq::simd_dispatch::HighwayKernelTable*
