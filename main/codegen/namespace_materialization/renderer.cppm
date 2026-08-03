@@ -190,20 +190,21 @@ inline void render_imports(
     const clang_structural::source_range& containing_range,
     const materialization_coordinate& coordinate) {
     if (declaration.kind != clang_structural::declaration_kind::record
-        && declaration.kind != clang_structural::declaration_kind::enum_) {
+        && declaration.kind != clang_structural::declaration_kind::enum_
+        && declaration.kind != clang_structural::declaration_kind::alias) {
         return false;
     }
     if (!nonempty_range(declaration.name_range)
         || !contains(containing_range, declaration.name_range)) {
         throw std::runtime_error(
-            "record/enum probe name range is outside its declaration head");
+            "record/enum/alias probe name range is outside its declaration head");
     }
     edits.push_back(source_edit{
         .begin_byte = declaration.name_range.begin.byte_offset,
         .end_byte = declaration.name_range.begin.byte_offset,
         .replacement = provenance_attribute(declaration, coordinate) + " ",
         .provenance_id = declaration.provenance_id,
-        .purpose = "place record/enum probe provenance",
+        .purpose = "place record/enum/alias probe provenance",
     });
     return true;
 }
