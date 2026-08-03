@@ -115,6 +115,19 @@ using aligner_options_catalog_row =
 using aligner_options_codec =
 	bioseq::table::sql_row_codecs::bioseq_aligner_options_codec;
 
+static_assert(
+	static_cast<std::uint8_t>(
+		pgseq_supported_alphabets::index_of<::seq::dna4>())
+		== bioseq::simd::pipe::minimizer_alphabet_code<::seq::dna4>(),
+	"PostgreSQL and minimizer DNA4 alphabet codes must agree");
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
+static_assert(
+	static_cast<std::uint8_t>(
+		pgseq_supported_alphabets::index_of<::seq::dna5>())
+		== bioseq::simd::pipe::minimizer_alphabet_code<::seq::dna5>(),
+	"PostgreSQL and minimizer DNA5 alphabet codes must agree");
+#endif
+
 /*
  * DOC0322 §7.5 — the former `extern "C++"` cross-partition reaches are replaced
  * by real module imports:
@@ -23974,6 +23987,25 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	}
 	bioseq::simd::Minimap2Params aligner_params =
 		frozen_semantics.params;
+	if (features.has_mmsearch) {
+		if (runtime.match_target_typmod < 0) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqScan mmsearch target typmod is missing")));
+		}
+		const auto match_target_type =
+			compact_sequence_stdc_type_params::decode(
+				runtime.match_target_typmod);
+		if (!is_supported_alphabet_code(match_target_type.alphabet_code)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqScan mmsearch target alphabet is unsupported"),
+				 errdetail("alphabet_code=%u",
+					static_cast<unsigned>(
+						match_target_type.alphabet_code))));
+		}
+		aligner_params.alphabet_code = match_target_type.alphabet_code;
+	}
 	/* Profiling is diagnostic/performance-only and deliberately remains live. */
 	aligner_params.enable_profiling =
 		bioseq::aligner::settings::enable_profiling;
@@ -24120,27 +24152,14 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	/*
 	 * Capture the structured pipeline description for EXPLAIN.  Walks the
 	 * same dispatch ladder `dispatch_pipeline` would but invokes each stage's
-	 * `describe()` instead of `on_batch(...)`.  The proto query / target
-	 * sequence ranges are empty placeholders — every stage's `describe()`
-	 * consults only by-value config fields (DOC0249 §6.1 invariant) so the
-	 * empty input is safe.
+	 * `describe()` instead of `on_batch(...)`.  The cold planner selects the
+	 * already-validated target alphabet once, then constructs its own empty
+	 * query/target prototypes; this is not another dispatch-chain dimension.
 	 */
 	if (features.has_mmsearch) {
-		using QR_default = sequence_custom_alphabet<seq::dna4, uint64_t>;
-		using TR_default = sequence_custom_alphabet<seq::dna4, uint64_t>;
-		compact_sequence_range<QR_default> empty_query_proto{};
-		compact_sequence_range<TR_default> empty_target_proto{};
-		auto empty_query_owner =
-			bioseq::storage::make_lazy_in_memory(empty_query_proto);
-		auto empty_target_owner =
-			bioseq::storage::make_lazy_in_memory(empty_target_proto);
-		const auto empty_query_view =
-			bioseq::storage::as_lazy_sequence_view(empty_query_owner);
-		const auto empty_target_view =
-			bioseq::storage::as_lazy_sequence_view(empty_target_owner);
 		runtime.aligner_state.pipeline_desc =
 			bioseq::simd::pipe::describe_pipeline_for(
-				aligner_params, empty_query_view, empty_target_view);
+				aligner_params, aligner_params.alphabet_code);
 	}
 
 	/*
@@ -26287,6 +26306,7 @@ static void BioseqBatchJoin_BeginCustomScan(
 		(void)apply_aligner_options_override(
 			mmsearch, params, requirement, get_cached_stub_oids());
 		finalize_simd_chaining_policy(params);
+		params.alphabet_code = runtime->alphabet_code;
 		if (requirement != runtime->index_read_requirement) {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -27081,6 +27101,7 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	(void)apply_aligner_options_override(
 		mmsearch, params, decoded_requirement, get_cached_stub_oids());
 	finalize_simd_chaining_policy(params);
+	params.alphabet_code = runtime->alphabet_code;
 	if (decoded_requirement
 			== bioseq::indexing::IndexReadRequirement::require_compatible_persisted) {
 		ereport(ERROR,
@@ -29567,13 +29588,14 @@ PlannedQueryMinimizerHighwayKernels(
 	}
 	const auto resolved =
 		bioseq::simd::pipe::planned_query_minimizer_highway_kernels(
-			params->minimizer_algorithm);
+			params->minimizer_algorithm, params->alphabet_code);
 	if (!resolved.has_value()) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("Highway EXPLAIN cannot resolve the query minimizer route"),
-			 errdetail("minimizer_algorithm=%u",
-				static_cast<unsigned>(params->minimizer_algorithm))));
+			 errdetail("minimizer_algorithm=%u alphabet_code=%u",
+				static_cast<unsigned>(params->minimizer_algorithm),
+				static_cast<unsigned>(params->alphabet_code))));
 	}
 	return *resolved;
 }
