@@ -962,6 +962,11 @@ namespace [[ bioseq :: simd ]] target {
 template<class Value>
 Value map_value(Value value) { return value; }
 
+#define FIXTURE_INLINE inline
+template<class Value>
+FIXTURE_INLINE Value macro_map_value(Value value) { return value; }
+#undef FIXTURE_INLINE
+
 struct worker {
     worker() {}
     int operator()() const { return 1; }
@@ -1039,8 +1044,8 @@ namespace [[bioseq::similar]] decoy {}
         "Clang structural scan returned an empty namespace USR; "
             + clang_callable_inventory);
     require(
-        clang_namespace.callables.size() == 6,
-        "Clang structural scan expected exactly six source callable "
+        clang_namespace.callables.size() == 7,
+        "Clang structural scan expected exactly seven source callable "
         "definitions; " + clang_callable_inventory);
     require(
         std::ranges::all_of(
@@ -1122,6 +1127,22 @@ namespace [[bioseq::similar]] decoy {}
                     && callable.qualified_name.contains("map_value");
             }),
         "Clang structural scan omitted the templated map_value definition; "
+            + clang_callable_inventory);
+    const auto macro_map_value = std::ranges::find_if(
+        clang_namespace.callables,
+        [](const callable_insertion_record& callable) {
+            return callable.kind == callable_kind::function
+                && callable.templated
+                && callable.qualified_name.contains("macro_map_value");
+        });
+    require(
+        macro_map_value != clang_namespace.callables.end()
+            && simd_marker_source.substr(
+                macro_map_value->hwy_attr_insertion.byte_offset,
+                std::string_view{"FIXTURE_INLINE"}.size())
+                == "FIXTURE_INLINE",
+        "Clang structural scan did not map a macro-prefixed callable "
+        "insertion to the writable expansion site; "
             + clang_callable_inventory);
 
     const configured_toolchain toolchain;

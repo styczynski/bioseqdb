@@ -5491,8 +5491,16 @@ class structural_visitor final
             sources_.getSpellingLoc(body->getBeginLoc());
         const clang::SourceLocation body_end =
             sources_.getSpellingLoc(body->getEndLoc());
+        // A declaration prefix may begin with a macro such as HWY_INLINE.
+        // Its spelling location belongs to the macro definition (typically a
+        // dependency header), while the only writable and semantically valid
+        // attribute position is the expansion site in the source owner.
+        const clang::SourceLocation declaration_begin =
+            sources_.getExpansionLoc(function->getBeginLoc());
+        const clang::SourceLocation declaration_end =
+            sources_.getExpansionLoc(function->getEndLoc());
         const clang::SourceLocation insertion_location =
-            sources_.getSpellingLoc(function->getInnerLocStart());
+            sources_.getExpansionLoc(function->getInnerLocStart());
         const bool main_file_body = body_begin.isValid()
             && body_end.isValid()
             && insertion_location.isValid()
@@ -5511,7 +5519,11 @@ class structural_visitor final
                 .templated = function->getTemplatedKind()
                     != clang::FunctionDecl::TK_NonTemplate,
                 .declaration_range = source_range_of(
-                    function->getSourceRange(), sources_, language_),
+                    clang::SourceRange{
+                        declaration_begin,
+                        declaration_end},
+                    sources_,
+                    language_),
                 .body_range = body_range,
                 .hwy_attr_insertion = insertion,
             },
