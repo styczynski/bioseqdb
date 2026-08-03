@@ -2742,6 +2742,16 @@ struct PipelineExecutionStats {
             || (persisted_generation_id == rhs.persisted_generation_id
                 && persisted_source_identity == rhs.persisted_source_identity
                 && mixed_persisted_identity == rhs.mixed_persisted_identity);
+        // The exact empty operand is a two-sided identity, but two completed
+        // proofs that name different nonzero Highway bindings are not
+        // compatible proof shards. ExecutionEnvironmentProof::merge()
+        // truthfully records that case as mixed; revoke full attestation in
+        // this same two-operand merge instead of waiting for a later operand.
+        const bool highway_binding_identity_compatible = lhs_empty || rhs_empty
+            || (environment.highway_executed_target
+                    == rhs.environment.highway_executed_target
+                && environment.highway_executed_target_mixed
+                    == rhs.environment.highway_executed_target_mixed);
         const bool retain_full_attestation =
             can_retain_full_attestation(*this)
             && can_retain_full_attestation(rhs)
@@ -2752,7 +2762,8 @@ struct PipelineExecutionStats {
             && simd_policy_identity_compatible
             && simd_alignment_identity_compatible
             && source_identity_compatible
-            && persisted_identity_compatible;
+            && persisted_identity_compatible
+            && highway_binding_identity_compatible;
 
         const std::uint64_t lhs_attempted = attempted_alignment_jobs;
         const std::uint64_t rhs_attempted = rhs.attempted_alignment_jobs;
@@ -10856,6 +10867,19 @@ template <is_constexpr_aligner_params Cep,
         description_alignment_kernels, ignored_out, params,
         query_len, target_len);
     auto description = describe_with_params<Cep>(pipeline);
+    if (complete_all_gpu_tuple_selected(params)) {
+        /* The scheduler admits this exact tuple only to the dedicated
+         * resident GPU route and returns before constructing the generic
+         * CPU/SIMD pipeline. In particular, bounded CIGAR is produced by the
+         * Vulkan extension, not by the selected BLOCK_ALIGNER trait. Keep the
+         * generic stage skeleton for EXPLAIN, but do not advertise any of its
+         * bypassed Highway entry points as planned work. */
+        for (auto& stage : description.stages) {
+            if (stage.algorithm.has_value()) {
+                stage.algorithm->highway_kernels.reset();
+            }
+        }
+    }
     auto query_sketch = describe_query_sketch_stage(
         params, query_sketch_route);
     if (!query_sketch.has_value()) {

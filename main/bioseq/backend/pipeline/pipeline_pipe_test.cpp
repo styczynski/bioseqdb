@@ -1189,6 +1189,57 @@ TEST_CASE("unbound pipeline description owns exact Highway kernels by stage",
     REQUIRE(stage_kernels("AlignStage") == alignment_kernels);
 }
 
+TEST_CASE("all-GPU bounded CIGAR description advertises no Highway kernel",
+          "[pipe][describe][highway][vulkan][contract]") {
+    using bioseq::simd::BaseAlignmentAlgorithmType;
+    using bioseq::simd::ChainingAlgorithmType;
+    using bioseq::simd::Minimap2Params;
+    using bioseq::simd::MinimizerAlgorithmType;
+    using bioseq::simd::pipe::QuerySketchPlanRoute;
+
+    Minimap2Params params{};
+    params.alphabet_code =
+        bioseq::simd::pipe::minimizer_alphabet_code<::seq::dna4>();
+    params.kmer_size = 15;
+    params.window_size = 10;
+    params.minimizer_algorithm =
+        MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+    params.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
+    params.base_alignment_algorithm =
+        BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+    params.vulkan_enabled = true;
+    params.vulkan_seed_hits_enabled = true;
+    params.vulkan_fused_frontend_enabled = true;
+    params.vulkan_gpu_index_build_enabled = true;
+    params.vulkan_extend_enabled = true;
+    params.do_cigar = true;
+    params.compute_divergence = false;
+    params.compute_mapq = false;
+    params.compute_edit_distance = false;
+    params.exact_edit_filter_enabled = false;
+    params.prefilter_enabled = false;
+    params.max_occ = 500;
+
+    REQUIRE(bioseq::simd::pipe::complete_all_gpu_tuple_selected(params));
+    REQUIRE(params.highway_kernels == nullptr);
+
+    const auto description = bioseq::simd::pipe::describe_pipeline_for(
+        params, params.alphabet_code,
+        QuerySketchPlanRoute::recompute_capable);
+    const auto align_stage = std::ranges::find(
+        description.stages, "AlignStage",
+        &bioseq::simd::pipe::StageDescription::stage_name);
+    REQUIRE(align_stage != description.stages.end());
+    REQUIRE(align_stage->algorithm.has_value());
+    REQUIRE(align_stage->algorithm->highway_kernels.none());
+    REQUIRE(std::ranges::all_of(
+        description.stages,
+        [](const bioseq::simd::pipe::StageDescription& stage) {
+            return !stage.algorithm.has_value()
+                || stage.algorithm->highway_kernels.none();
+        }));
+}
+
 TEST_CASE("persisted Shape-V5 publication rejects burned fully-consumed proof",
           "[vulkan][pipe][shape-v5][publication][transaction][burn]") {
     using namespace bioseq::pipeline_stats;
@@ -2049,6 +2100,11 @@ TEST_CASE("DOC0398 Highway execution proof merges preserve exact target evidence
         REQUIRE(mixed.environment.highway_executed_target == 0);
         REQUIRE(mixed.environment.highway_executed_target_mixed);
         REQUIRE_FALSE(mixed.environment.mixed_invalid);
+        REQUIRE(mixed.attempted_alignment_jobs == 2);
+        REQUIRE(mixed.fully_attested_alignment_jobs == 0);
+        REQUIRE(mixed.unattested_alignment_jobs == 2);
+        REQUIRE(mixed.first_unattested_target_row == 4);
+        REQUIRE(mixed.first_unattested_query_ordinal == 0);
         REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
             mixed));
 
