@@ -5,6 +5,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <type_traits>
 
@@ -127,4 +128,82 @@ TEST_CASE("Highway dispatch inventory preserves supported and runnable masks",
     REQUIRE(empty.runnable_targets == 0);
     REQUIRE(empty.planned_target == 0);
     REQUIRE(simd_dispatch::highway_target_names(0).empty());
+}
+
+TEST_CASE("Highway dispatch inventory obeys the synthetic mask matrix",
+          "[highway][dispatch][inventory][mask-matrix]") {
+    constexpr std::uint64_t positive_mask = static_cast<std::uint64_t>(
+        (std::numeric_limits<std::int64_t>::max)());
+    const std::int64_t supported_targets = hwy::SupportedTargets();
+    const std::uint64_t supported_bits =
+        static_cast<std::uint64_t>(supported_targets) & positive_mask;
+    REQUIRE(supported_bits != 0u);
+
+    const std::uint64_t supported_bit =
+        supported_bits & (~supported_bits + std::uint64_t{1});
+    const std::uint64_t unsupported_bits =
+        (~supported_bits) & positive_mask;
+    REQUIRE(unsupported_bits != 0u);
+    const std::uint64_t unsupported_bit =
+        unsupported_bits & (~unsupported_bits + std::uint64_t{1});
+
+    struct MaskCase {
+        std::string_view name;
+        std::uint64_t compiled;
+        std::uint64_t runnable;
+        std::uint64_t planned;
+    };
+    const std::array cases{
+        MaskCase{"empty compiled inventory", 0u, 0u, 0u},
+        MaskCase{
+            "one compiled and supported target",
+            supported_bit,
+            supported_bit,
+            supported_bit},
+        MaskCase{
+            "compiled target unsupported by this CPU",
+            unsupported_bit,
+            0u,
+            0u},
+        MaskCase{
+            "unsupported compiled bits are excluded",
+            supported_bit | unsupported_bit,
+            supported_bit,
+            supported_bit},
+        MaskCase{
+            "all positive compiled bits intersect exactly",
+            positive_mask,
+            supported_bits,
+            supported_bit},
+    };
+
+    for (const auto& test_case : cases) {
+        CAPTURE(test_case.name, test_case.compiled, test_case.runnable,
+                test_case.planned);
+        const auto info = simd_dispatch::highway_dispatch_info(
+            static_cast<std::int64_t>(test_case.compiled));
+        REQUIRE(info.compiled_targets
+                == static_cast<std::int64_t>(test_case.compiled));
+        REQUIRE(info.cpu_supported_targets == supported_targets);
+        REQUIRE(info.runnable_targets
+                == static_cast<std::int64_t>(test_case.runnable));
+        REQUIRE(info.runnable_targets
+                == (info.compiled_targets & info.cpu_supported_targets));
+        REQUIRE(info.planned_target
+                == static_cast<std::int64_t>(test_case.planned));
+    }
+
+    const std::uint64_t remaining_supported =
+        supported_bits & (supported_bits - std::uint64_t{1});
+    if (remaining_supported != 0u) {
+        const std::uint64_t second_supported = remaining_supported
+            & (~remaining_supported + std::uint64_t{1});
+        const auto two_runnable = simd_dispatch::highway_dispatch_info(
+            static_cast<std::int64_t>(supported_bit | second_supported));
+        REQUIRE(two_runnable.runnable_targets
+                == static_cast<std::int64_t>(
+                    supported_bit | second_supported));
+        REQUIRE(two_runnable.planned_target
+                == static_cast<std::int64_t>(supported_bit));
+    }
 }

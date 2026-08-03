@@ -17,6 +17,8 @@ import bioseq.integration_tests.common;
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <mutex>
 
 using namespace bioseq_int_tests;
 
@@ -30,6 +32,90 @@ std::string explain_target_sql() {
         "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32));",
         kTable);
 }
+
+void configure_highway_simd_pipeline(
+        const connection_test_context& ctx) {
+    exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
+    exec_sql(ctx,
+        "SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash';");
+    exec_sql(ctx,
+        "SET bioseq.aligner.chaining_algorithm = 'simd_mm2';");
+    exec_sql(ctx,
+        "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner';");
+}
+
+struct ExpectedHighwayStageFunction {
+    std::string_view function;
+    std::string_view stage;
+};
+
+void require_complete_generic_highway_pipeline(
+        std::span<const std::string> plan) {
+    constexpr std::array expected{
+        ExpectedHighwayStageFunction{
+            "minimizer::two_stack_nthash", "QuerySketchStage"},
+        ExpectedHighwayStageFunction{
+            "chaining::chain_anchors_simd", "ChainStage"},
+        ExpectedHighwayStageFunction{
+            "alignment::block_aligner", "AlignStage"},
+    };
+    std::array<bool, expected.size()> seen{};
+    std::size_t planned_function_count = 0;
+    for (const std::string& line : plan) {
+        if (line.find("Highway Function:") == std::string::npos
+            || line.find("* Highway Function:") != std::string::npos
+            || line.find("[stage:") == std::string::npos) {
+            continue;
+        }
+        ++planned_function_count;
+        bool matched = false;
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            const auto& item = expected[index];
+            if (line.find(fmt::format(
+                    "Highway Function: {}", item.function))
+                    == std::string::npos
+                || line.find(fmt::format("[stage: {}]", item.stage))
+                    == std::string::npos) {
+                continue;
+            }
+            REQUIRE_FALSE(seen[index]);
+            seen[index] = true;
+            matched = true;
+            break;
+        }
+        REQUIRE(matched);
+        REQUIRE(line.find("[planned architecture:") != std::string::npos);
+    }
+    REQUIRE(planned_function_count == expected.size());
+    for (const bool was_seen : seen) REQUIRE(was_seen);
+}
+
+#ifdef BIOSEQ_TEST_INDEXES
+std::mutex highway_target_force_mutex;
+
+class HighwayTargetForceReset final {
+public:
+    explicit HighwayTargetForceReset(PGconn* connection) noexcept
+        : connection_{connection} {}
+
+    HighwayTargetForceReset(const HighwayTargetForceReset&) = delete;
+    HighwayTargetForceReset& operator=(const HighwayTargetForceReset&) = delete;
+
+    ~HighwayTargetForceReset() noexcept {
+        if (connection_ == nullptr) return;
+        PGresult* result = PQexec(
+            connection_,
+            "SELECT bioseq_internal.set_highway_target_for_test(0);");
+        if (result != nullptr) PQclear(result);
+    }
+
+private:
+    PGconn* connection_ = nullptr;
+};
+#endif
 
 std::vector<std::string> explain_with_options(
     const connection_test_context& ctx,
@@ -465,6 +551,7 @@ TEST_CASE("DOC0398 plain EXPLAIN reports the complete Highway dispatch plan",
           "[highway][explain][dispatch]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
+    configure_highway_simd_pipeline(ctx);
 
     const auto plan = explain_text<false>(ctx, explain_target_sql());
     const auto planned = find_explain_property(
@@ -490,18 +577,34 @@ TEST_CASE("DOC0398 plain EXPLAIN reports the complete Highway dispatch plan",
     const std::string planned_annotation = fmt::format(
         "[planned architecture: {}]", *planned);
     std::size_t highway_functions = 0;
+    bool query_sketch_found = false;
+    bool chaining_found = false;
+    bool alignment_found = false;
     for (const std::string& line : plan) {
         if (line.find("Highway Function:") == std::string::npos) continue;
         ++highway_functions;
         REQUIRE(line.find(planned_annotation) != std::string::npos);
+        query_sketch_found = query_sketch_found
+            || line.find("minimizer::two_stack_nthash")
+                != std::string::npos;
+        chaining_found = chaining_found
+            || line.find("chaining::chain_anchors_simd")
+                != std::string::npos;
+        alignment_found = alignment_found
+            || line.find("alignment::block_aligner")
+                != std::string::npos;
     }
-    REQUIRE(highway_functions > 0u);
+    REQUIRE(highway_functions >= 3u);
+    REQUIRE(query_sketch_found);
+    REQUIRE(chaining_found);
+    REQUIRE(alignment_found);
 }
 
 TEST_CASE("DOC0398 EXPLAIN ANALYZE reports the executed Highway binding",
           "[highway][explain][analyze][dispatch]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
+    configure_highway_simd_pipeline(ctx);
 
     const auto plan = explain_text<true>(ctx, explain_target_sql());
     const auto planned = find_explain_property(
@@ -516,10 +619,111 @@ TEST_CASE("DOC0398 EXPLAIN ANALYZE reports the executed Highway binding",
     REQUIRE(*executed == *planned);
 }
 
+TEST_CASE("DOC0398 BatchJoin and PerRow EXPLAIN own every selected Highway stage",
+          "[highway][explain][dispatch][batch-join][per-row]") {
+    constexpr std::string_view target =
+        "test_explain_highway_join_target";
+    auto ctx = fresh_context({target});
+    seed_small_bioseq_column(ctx, target);
+    configure_highway_simd_pipeline(ctx);
+    exec_sql(ctx,
+        "CREATE TEMP TABLE test_explain_highway_join_query "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
+    exec_sql(ctx,
+        "INSERT INTO test_explain_highway_join_query VALUES "
+        "(1, 'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4',32));");
+
+    const std::string batch_join_sql = fmt::format(
+        "SELECT q.id, t.pk FROM {} AS t "
+        "JOIN test_explain_highway_join_query AS q "
+        "ON mmsearch(t.seq0, q.seq);",
+        target);
+    const auto batch_join = explain_with_options(
+        ctx, "VERBOSE, COSTS OFF", batch_join_sql);
+    REQUIRE(plan_contains(batch_join, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(batch_join, "Bioseq Batch ABI Version: 3"));
+    REQUIRE_FALSE(plan_contains(
+        batch_join, "Bioseq Mmsearch Ownership: per-row recipe"));
+    require_complete_generic_highway_pipeline(batch_join);
+
+    const std::string per_row_sql = fmt::format(
+        "SELECT q.id, t.pk FROM {} AS t "
+        "JOIN test_explain_highway_join_query AS q "
+        "ON mmsearch(t.seq0[0:], q.seq[0:]);",
+        target);
+    const auto per_row = explain_with_options(
+        ctx, "VERBOSE, COSTS OFF", per_row_sql);
+    REQUIRE(plan_contains(per_row, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(
+        per_row, "Bioseq Mmsearch Ownership: per-row recipe"));
+    require_complete_generic_highway_pipeline(per_row);
+}
+
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("DOC0398 every runnable Highway target preserves public query results",
+          "[highway][explain][dispatch][forced-target][serial]") {
+    const std::scoped_lock serialized{highway_target_force_mutex};
+    auto ctx = fresh_context({kTable});
+    HighwayTargetForceReset restore{ctx.raw()};
+    (void)query_scalar(
+        ctx, "SELECT bioseq_internal.set_highway_target_for_test(0);");
+    seed_small_bioseq_column(ctx, kTable);
+    configure_highway_simd_pipeline(ctx);
+
+    const auto baseline_mask = static_cast<std::int64_t>(query_scalar_int(
+        ctx,
+        "SELECT bioseq_internal."
+        "highway_baseline_runnable_targets_for_test();"));
+    REQUIRE(baseline_mask > 0);
+    REQUIRE(sql_fails(
+        ctx, "SELECT bioseq_internal.set_highway_target_for_test(-1);"));
+
+    const std::uint64_t baseline_bits =
+        static_cast<std::uint64_t>(baseline_mask);
+    if ((baseline_bits & (baseline_bits - std::uint64_t{1})) != 0u) {
+        REQUIRE(sql_fails(ctx, fmt::format(
+            "SELECT bioseq_internal.set_highway_target_for_test({});",
+            baseline_mask)));
+    }
+
+    const std::string public_sql = fmt::format(
+        "SELECT pk, seq0 FROM {} WHERE mmsearch(seq0, "
+        "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32)) ORDER BY pk;",
+        kTable);
+    const rowset_t baseline_rows = query_rows(ctx, public_sql);
+    REQUIRE_FALSE(baseline_rows.empty());
+
+    std::uint64_t remaining = baseline_bits;
+    while (remaining != 0u) {
+        const std::uint64_t target_bit =
+            remaining & (~remaining + std::uint64_t{1});
+        const auto target = static_cast<std::int64_t>(target_bit);
+        const std::string target_name = query_scalar(ctx, fmt::format(
+            "SELECT bioseq_internal.set_highway_target_for_test({});",
+            target));
+        CAPTURE(target, target_name);
+
+        REQUIRE(query_rows(ctx, public_sql) == baseline_rows);
+        const auto plan = explain_text<true>(ctx, explain_target_sql());
+        const auto planned = find_explain_property(
+            plan, "Highway Planned Architecture");
+        const auto executed = find_explain_property(
+            plan, "* Highway Executed Architecture");
+        REQUIRE(planned.has_value());
+        REQUIRE(executed.has_value());
+        REQUIRE(*planned == target_name);
+        REQUIRE(*executed == target_name);
+
+        remaining &= remaining - std::uint64_t{1};
+    }
+}
+#endif
+
 TEST_CASE("EXPLAIN FORMAT JSON owns one complete Highway dispatch object",
           "[explain][json][highway]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
+    configure_highway_simd_pipeline(ctx);
 
     const std::string json = explain_json(ctx, explain_target_sql());
 
@@ -543,6 +747,12 @@ TEST_CASE("EXPLAIN FORMAT JSON owns one complete Highway dispatch object",
         REQUIRE(count_occurrences(*highway_dispatch, property) == 1u);
     }
     REQUIRE(json.find("\"Highway Functions\"") != std::string::npos);
+    REQUIRE(json.find("minimizer::two_stack_nthash")
+            != std::string::npos);
+    REQUIRE(json.find("chaining::chain_anchors_simd")
+            != std::string::npos);
+    REQUIRE(json.find("alignment::block_aligner")
+            != std::string::npos);
 }
 
 TEST_CASE("DOC0398 structured plan omits an execution target before ANALYZE",
