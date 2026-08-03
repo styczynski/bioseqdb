@@ -7072,6 +7072,7 @@ struct module_build_record {
     std::filesystem::path pcm_path;
     std::filesystem::path pcm_provenance_path;
     std::filesystem::path depfile_path;
+    std::filesystem::path pcm_depfile_path;
     std::string source_sha256;
     std::string relocatable_source_sha256;
     std::string argument_sha256;
@@ -9679,6 +9680,8 @@ prepare_compilation_environment(
             / (clang_backend::safe_module_filename(module_name)
                + "-" + record.relocatable_content_key.substr(0, 20)
                + ".pcm");
+        record.pcm_depfile_path =
+            record.pcm_path.string() + ".d";
         record.pcm_provenance_path =
             record.pcm_path.string() + ".provenance";
         for (const std::filesystem::path& dependency :
@@ -9703,10 +9706,10 @@ prepare_compilation_environment(
         record.owned_arguments.emplace_back("-MD");
         record.owned_arguments.emplace_back("-MF");
         record.owned_arguments.push_back(
-            record.depfile_path.string());
+            record.pcm_depfile_path.string());
         record.owned_arguments.emplace_back("-MT");
         record.owned_arguments.push_back(
-            record.depfile_path.string());
+            record.pcm_depfile_path.string());
 
         std::error_code size_error;
         const std::uintmax_t existing_size =
@@ -9730,20 +9733,21 @@ prepare_compilation_environment(
                     "Clang reported success without publishing PCM for '"
                     + module_name + "'");
             }
-            record.discovered_dependencies =
+            const std::vector<std::filesystem::path>
+                compiled_dependencies =
                 clang_backend::parse_make_depfile(
-                    record.depfile_path,
+                    record.pcm_depfile_path,
                     record.command.Directory);
             const std::string compiled_dependency_sha256 =
                 clang_backend::dependency_content_hash(
-                    record.discovered_dependencies,
+                    compiled_dependencies,
                     pcm_root,
                     dependency_hash_cache);
             const std::string
                 compiled_relocatable_dependency_sha256 =
                     clang_backend::
                         relocatable_dependency_content_hash(
-                            record.discovered_dependencies,
+                            compiled_dependencies,
                             pcm_root,
                             relocation,
                             relocatable_dependency_hash_cache);
@@ -9753,14 +9757,14 @@ prepare_compilation_environment(
                     != record.relocatable_dependency_sha256) {
                 throw std::runtime_error(
                     "Clang dependency scan and PCM compilation disagree "
-                    "for module '" + module_name + "'");
+                    "for module '" + module_name
+                    + "' (scan="
+                    + std::to_string(
+                        record.discovered_dependencies.size())
+                    + ", compile="
+                    + std::to_string(compiled_dependencies.size())
+                    + ")");
             }
-            record.depfile_sha256 =
-                sha256_hex(read_file(record.depfile_path));
-            record.relocatable_depfile_sha256 =
-                clang_backend::relocatable_document_hash(
-                    read_file(record.depfile_path),
-                    relocation);
             record.pcm_sha256 =
                 sha256_hex(read_file(record.pcm_path));
             const std::string provenance =
