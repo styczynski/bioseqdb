@@ -4650,7 +4650,7 @@ struct algorithm_traits<::bioseq::simd::ChainingAlgorithmType::SIMD_MM2> {
             const ChainingParams&   params,
             ArenaSlab<Chain>&       chains_out,
             ArenaSlab<Anchor>&      reordered_anchors_out,
-            SimdChainingExecutionProof* proof)
+            ::bioseq::chaining::SimdChainingExecutionProof* proof)
         {
             if (highway == nullptr
                 || !highway->contains(highway_kernel_id)) {
@@ -8235,7 +8235,7 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
                 bioseq_log<ERR>("SIMD chaining stage has no execution-proof sink");
                 std::abort();
             }
-            SimdChainingExecutionProof proof{};
+            ::bioseq::chaining::SimdChainingExecutionProof proof{};
             Kernel::call(
                 highway_kernels, anchors_span, active_cp,
                 chains_slab, reordered_slab, &proof);
@@ -8795,7 +8795,8 @@ struct PrefilterStage
                 "max_edits", std::to_string(params.prefilter_max_edits)});
             algorithm.parameters.push_back({
                 "submaze_width",
-                std::to_string(sneaky_snake_default_submaze_width)});
+                std::to_string(
+                    prefilters::sneaky_snake_default_submaze_width)});
             algorithm.computed_properties.push_back({
                 "domain", "mandatory seed-to-seed global fills"});
             algorithm.computed_properties.push_back({
