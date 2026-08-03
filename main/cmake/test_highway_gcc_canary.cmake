@@ -32,19 +32,46 @@ foreach(_driver_closure_contract IN ITEMS
     "_bioseq_highway_gcc_canary_driver_closure"
     "-print-prog-name=cc1plus"
     "-print-prog-name=collect2"
+    "-print-file-name=include"
+    "-print-file-name=include-fixed"
     "-dumpspecs"
     "libstdc++.dylib"
     "libstdc++.a"
     "libgcc_s.1.1.dylib"
     "libgcc.a"
     "libgcc_eh.a"
-    "include/c++/*")
+    "include/c++"
+    "gcc-internal"
+    "gcc-include-fixed"
+    "_bioseq_highway_gcc_canary_collect_macho_closure")
   string(FIND "${_canary_module_source}" "${_driver_closure_contract}"
     _driver_closure_offset)
   if(_driver_closure_offset EQUAL -1)
     message(FATAL_ERROR
       "Highway GCC canary lost driver closure evidence "
       "${_driver_closure_contract}")
+  endif()
+endforeach()
+foreach(_macho_closure_contract IN ITEMS
+    "/usr/bin/otool"
+    "LC_LOAD_DYLIB"
+    "LC_LOAD_WEAK_DYLIB"
+    "LC_REEXPORT_DYLIB"
+    "LC_LOAD_UPWARD_DYLIB"
+    "LC_LAZY_LOAD_DYLIB"
+    "LC_LOAD_DYLINKER"
+    "LC_DYLD_ENVIRONMENT"
+    "exact-account"
+    "unparsed"
+    [=[libc\\+\\+]=]
+    "libhwy"
+    "file(SHA256")
+  string(FIND "${_canary_module_source}" "${_macho_closure_contract}"
+    _macho_closure_offset)
+  if(_macho_closure_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary lost recursive Mach-O closure evidence "
+      "${_macho_closure_contract}")
   endif()
 endforeach()
 foreach(_outer_generic_contract IN ITEMS
@@ -372,10 +399,8 @@ foreach(_sealed_argument IN ITEMS
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
     "--verbose"
     "bioseq_gcc_canary_closure"
-    "/usr/bin/otool -L"
-    "libc"
-    "libhwy"
-    "unexpected non-system dependency"
+    "_bioseq_highway_gcc_canary_collect_macho_closure"
+    "non-system transitive dependency"
     "_bioseq_highway_gcc_audit_macho")
   string(FIND "${_runner_source}" "${_sealed_argument}" _sealed_offset)
   if(_sealed_offset EQUAL -1)
