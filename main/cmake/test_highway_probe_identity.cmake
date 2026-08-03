@@ -143,6 +143,26 @@ elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "undef-builtins")
     COMPILER_ARGUMENTS -undef
     DEFINITIONS HWY_TEST_POLICY=1)
   message(FATAL_ERROR "compiler builtin undefinition unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "long-define-macro")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS "--define-macro=HWY_TARGET=HWY_SCALAR"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "long macro definition unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "long-undefine-macro-shell")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS "SHELL:--undefine-macro HWY_TARGET"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "long macro undefinition unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "long-forced-include")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS "--include=${TEST_ROOT}/forced.h"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "long forced include unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "long-forced-imacros-shell")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS "SHELL:--imacros ${TEST_ROOT}/forced-macros.h"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "long forced imacros unexpectedly succeeded")
 elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-search-paired")
   _bioseq_highway_prepare_direct_probe_policy(_arguments
     CONFIGURED_FLAGS -I "${TEST_ROOT}/shadow-include"
@@ -164,6 +184,12 @@ elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-vfs-driver-alias")
     COMPILER_ARGUMENTS -vfsoverlay "${TEST_ROOT}/shadow-overlay.yaml"
     DEFINITIONS HWY_TEST_POLICY=1)
   message(FATAL_ERROR "driver VFS overlay alias unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-vfs-long-shell")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS
+      "SHELL:--vfsoverlay ${TEST_ROOT}/shadow-overlay.yaml"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "long VFS overlay alias unexpectedly succeeded")
 elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-cxx-isystem")
   _bioseq_highway_prepare_direct_probe_policy(_arguments
     CONFIGURED_FLAGS -cxx-isystem "${TEST_ROOT}/shadow-cxx-system"
@@ -210,6 +236,33 @@ elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-ibuiltininc")
     COMPILE_OPTIONS -ibuiltininc
     DEFINITIONS HWY_TEST_POLICY=1)
   message(FATAL_ERROR "builtin include state override unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-long-directory")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS
+      "--include-directory=${TEST_ROOT}/shadow-long-include"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "long include directory unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-long-prefix-shell")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS
+      "SHELL:--include-with-prefix-before ${TEST_ROOT}/shadow-prefix"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "long include prefix unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-long-state")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS --no-standard-includes
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "long standard include suppression unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-multilib")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS -imultilib "${TEST_ROOT}/shadow-multilib"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "multilib include selector unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-multiarch-shell")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS "SHELL:-imultiarch shadow-multiarch"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "multiarch include selector unexpectedly succeeded")
 elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "framework-search")
   _bioseq_highway_prepare_direct_probe_policy(_arguments
     CONFIGURED_FLAGS "-F${TEST_ROOT}/shadow-frameworks"
@@ -415,7 +468,8 @@ function(_contract_expect_child_failure case_name diagnostic_pattern)
     message(FATAL_ERROR
       "contract child '${case_name}' unexpectedly succeeded")
   endif()
-  if(NOT _error MATCHES "${diagnostic_pattern}")
+  string(REGEX REPLACE "[ \t\r\n]+" " " _normalized_error "${_error}")
+  if(NOT _normalized_error MATCHES "${diagnostic_pattern}")
     message(FATAL_ERROR
       "contract child '${case_name}' did not fail closed as expected:\n"
       "${_error}")
@@ -468,6 +522,15 @@ _contract_expect_child_failure(
 _contract_expect_child_failure(
   undef-builtins "suppresses authenticated compiler predefined macros")
 _contract_expect_child_failure(
+  long-define-macro "unauthenticated compiler macro mutation option")
+_contract_expect_child_failure(
+  long-undefine-macro-shell
+  "unauthenticated compiler macro mutation option")
+_contract_expect_child_failure(
+  long-forced-include "unauthenticated forced preprocessor input")
+_contract_expect_child_failure(
+  long-forced-imacros-shell "unauthenticated forced preprocessor input")
+_contract_expect_child_failure(
   header-search-paired "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
   header-search-joined "unauthenticated header-search/VFS option")
@@ -475,6 +538,8 @@ _contract_expect_child_failure(
   header-vfs-shell "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
   header-vfs-driver-alias "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-vfs-long-shell "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
   header-cxx-isystem "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
@@ -493,6 +558,16 @@ _contract_expect_child_failure(
   header-nobuiltininc "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
   header-ibuiltininc "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-long-directory "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-long-prefix-shell "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-long-state "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-multilib "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-multiarch-shell "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
   framework-search "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(

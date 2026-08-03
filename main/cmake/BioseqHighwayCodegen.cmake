@@ -360,21 +360,31 @@ function(_bioseq_highway_reject_opaque_preprocessor_inputs label)
       _bioseq_highway_fail(
         "${label} contains opaque compiler configuration option "
         "'${_option}'")
+    elseif(_option MATCHES
+        "(^|[ :])--(define-macro|undefine-macro)(=|[ ]|$)")
+      _bioseq_highway_fail(
+        "${label} contains unauthenticated compiler macro mutation option "
+        "'${_option}'")
     elseif(_option MATCHES "(^|[ :])-undef(=|[ ]|$)")
       _bioseq_highway_fail(
         "${label} suppresses authenticated compiler predefined macros with "
         "'${_option}'")
     elseif(_option MATCHES
-        "(^|[ :])(-I|-F|-isystem|-cxx-isystem|-stdlib[+][+]-isystem|-iquote|-idirafter|-iprefix|-iwithprefixbefore|-iwithprefix|-iwithsysroot)"
+        "(^|[ :])(-I|-F|-isystem|-cxx-isystem|-stdlib[+][+]-isystem|-iquote|-idirafter|-iprefix|-iwithprefixbefore|-iwithprefix|-iwithsysroot|-imultilib|-imultiarch)"
         OR _option MATCHES
-        "(^|[ :])(-iframework|-ivfsoverlay|-vfsoverlay|-resource-dir)"
+        "(^|[ :])(-iframework|-ivfsoverlay|-vfsoverlay|--vfsoverlay|-resource-dir)"
         OR _option MATCHES
-        "(^|[ :])(-nostdinc([+][+])?|-nostdlibinc|-nobuiltininc|-ibuiltininc)(=|[ ]|$)")
+        "(^|[ :])(-nostdinc([+][+])?|-nostdlibinc|-nobuiltininc|-ibuiltininc)(=|[ ]|$)"
+        OR _option MATCHES
+        "(^|[ :])--(include-barrier|no-standard-includes)(=|[ ]|$)"
+        OR _option MATCHES
+        "(^|[ :])--include-(directory(-after)?|prefix|with-prefix(-after|-before)?)(=|[ ]|$)")
       _bioseq_highway_fail(
         "${label} contains unauthenticated header-search/VFS option "
         "'${_option}'")
     elseif(_option MATCHES
-        "(^|[ :,=])(-include-pch|-include-pth|-include|-imacros)")
+        "(^|[ :,=])(-include-pch|-include-pth|-include|-imacros)"
+        OR _option MATCHES "(^|[ :])--(include|imacros)(=|[ ]|$)")
       _bioseq_highway_fail(
         "${label} contains unauthenticated forced preprocessor input "
         "'${_option}'")
