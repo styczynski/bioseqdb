@@ -240,14 +240,12 @@ if(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
     "${_codegen_src}/namespace_materialization/renderer.cppm"
     "${_codegen_src}/namespace_materialization/contract_tests.cppm"
     "${_codegen_src}/namespace_materialization/index.cppm")
-  if(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)
-    string(APPEND _codegen_component_imports
-      "import bioseq.codegen.namespace_materialization;\n")
-    string(APPEND _codegen_component_entries
-      "        {\"namespace_materialization\", "
-      "&bioseq::codegen::namespace_materialization::self_test, "
-      "&bioseq::codegen::namespace_materialization::run},\n")
-  endif()
+  string(APPEND _codegen_component_imports
+    "import bioseq.codegen.namespace_materialization;\n")
+  string(APPEND _codegen_component_entries
+    "        {\"namespace_materialization\", "
+    "&bioseq::codegen::namespace_materialization::self_test, "
+    "&bioseq::codegen::namespace_materialization::run},\n")
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
@@ -561,6 +559,20 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL
     "BIOSEQ_LINKED_LLVM_LIBRARY_SHA256=\"${_bioseq_llvm_library_sha256}\"")
 endif()
 
+if(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
+    OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
+  target_compile_definitions(bioseq_codegen PRIVATE
+    "BIOSEQ_NAMESPACE_MATERIALIZATION_TEST_REPOSITORY_ROOT=\"${BIOSEQ_REPOSITORY_ROOT}\"")
+endif()
+
+if((BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
+      OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY)
+    AND BIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS)
+  add_custom_command(TARGET bioseq_codegen POST_BUILD
+    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test namespace_materialization
+    COMMENT "Running namespace-materialization code-generator contracts"
+    VERBATIM)
+endif()
 if(BIOSEQ_CODEGEN_ENABLE_HIGHWAY
     AND BIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS)
   add_custom_command(TARGET bioseq_codegen POST_BUILD
