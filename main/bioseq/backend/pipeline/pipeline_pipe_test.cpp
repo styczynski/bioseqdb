@@ -4045,7 +4045,7 @@ TEST_CASE("DOC0372 SIMD chaining policy is exact by default and explicit in proo
     using ::bioseq::simd::ChainingAlgorithmType;
     using ::bioseq::simd::MatchResultCollection;
     using ::bioseq::simd::Minimap2Params;
-    using ::bioseq::simd::SimdChainingExecutionProof;
+    using ::bioseq::chaining::SimdChainingExecutionProof;
     using Kernel = algorithm_traits<ChainingAlgorithmType::SIMD_MM2>::kernel_type;
 
     Minimap2Params params{};
