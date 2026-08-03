@@ -484,10 +484,13 @@ inline void verify_generated_closure() {
                     artifact.target_token, artifact.source_key);
                 require(
                     artifact.content.contains("#define HWY_TARGET ")
+                        && artifact.content.contains(
+                            "#include <hwy/aligned_allocator.h>")
                         && artifact.content.contains("HWY_ATTR int kernel()")
                         && artifact.content.contains(
                             "import bioseq.fixture.neutral;"),
-                    "each target/source partition fixes its target and rewrites the callable");
+                    "each target/source partition fixes its target, provides "
+                    "the Highway allocation surface, and rewrites the callable");
                 break;
             case artifact_kind::dispatch_registry_partition:
                 ++registry_count;

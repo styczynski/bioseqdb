@@ -67,6 +67,7 @@ namespace detail {
            << "#include <hwy/detect_targets.h>\n"
            << "#undef HWY_TARGET\n"
            << "#define HWY_TARGET " << target.token << "\n"
+           << "#include <hwy/aligned_allocator.h>\n"
            << "#include <hwy/highway.h>\n\n";
     return output.str();
 }
