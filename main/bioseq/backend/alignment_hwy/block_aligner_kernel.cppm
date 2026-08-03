@@ -702,7 +702,7 @@ HWY_INLINE auto ba_place_block(
         // Per-column-invariant scoring LUT: load the 16-byte row for `c`
         // once, reuse for every `i` in this column. Without this hoist
         // the LoadDup128 fires on every cell (height/L times per column).
-        const auto score_lut = load_score_lut(matrix, d, c);
+        const auto score_lut = load_score_lut<Alphabet>(matrix, d, c);
 
         // Origin can only land on j == 0 when can_have_origin is true.
         const bool col_can_have_origin = can_have_origin && (j == 0);
@@ -716,7 +716,7 @@ HWY_INLINE auto ba_place_block(
             D_corner = D10;
 
             // Score lookup (LUT pre-loaded above; no per-cell row load)
-            auto scores = get_scores_with_lut(
+            auto scores = get_scores_with_lut<Alphabet>(
                 matrix, d, score_lut, query.ptr_at(start_i + i));
 
             // Match/mismatch

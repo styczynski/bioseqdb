@@ -100,8 +100,8 @@ HWY_INLINE hn::Vec<D> get_scores(
     std::uint8_t rank,
     const std::uint8_t* query_ptr)
 {
-    return get_scores_with_lut(
-        matrix, d, load_score_lut(matrix, d, rank), query_ptr);
+    return get_scores_with_lut<Alphabet>(
+        matrix, d, load_score_lut<Alphabet>(matrix, d, rank), query_ptr);
 }
 
 }  // namespace target
