@@ -922,6 +922,41 @@ public:
         TupleTableSlot* query_slot = nullptr;
     };
 
+	/* PG_TRY is sigsetjmp-based, so mutable automatic C++ objects become
+	 * indeterminate after an ERROR longjmp.  Deferred Highway preparation keeps
+	 * every vector and exception receipt in this stable buffer-owned object;
+	 * only trivial scalar locals cross the inner PG_TRY boundary. */
+	struct JoinCpuPreparationScratch final {
+		std::vector<const bioseq::pg_types::seq*> query_headers{};
+		std::vector<Datum> query_recipe_datums{};
+		std::vector<pg_sequence_descriptor> query_recipe_descriptors{};
+		std::vector<std::uint64_t> query_ordinals{};
+		std::vector<bioseq::pg_types::seq*> detoast_copies{};
+		std::vector<std::vector<char>> rewidthed_query_varlenas{};
+		std::exception_ptr cpp_error{};
+
+		[[nodiscard]] bool empty() const noexcept {
+			return query_headers.empty()
+				&& query_recipe_datums.empty()
+				&& query_recipe_descriptors.empty()
+				&& query_ordinals.empty()
+				&& detoast_copies.empty()
+				&& rewidthed_query_varlenas.empty()
+				&& cpp_error == nullptr;
+		}
+
+		void clear_storage_noexcept() noexcept {
+			std::vector<const bioseq::pg_types::seq*>{}.swap(query_headers);
+			std::vector<Datum>{}.swap(query_recipe_datums);
+			std::vector<pg_sequence_descriptor>{}.swap(
+				query_recipe_descriptors);
+			std::vector<std::uint64_t>{}.swap(query_ordinals);
+			std::vector<bioseq::pg_types::seq*>{}.swap(detoast_copies);
+			std::vector<std::vector<char>>{}.swap(rewidthed_query_varlenas);
+			cpp_error = nullptr;
+		}
+	};
+
     struct JoinOutputCursor {
         std::size_t query_index = 0;
         std::size_t match_index = 0;
@@ -981,6 +1016,7 @@ private:
 	 * sketch/reader action runs below process_sequences' one selector. */
 	std::vector<JoinQueryRef> join_pending_cpu_preparation_queries{};
 	bool join_cpu_preparation_pending = false;
+	JoinCpuPreparationScratch join_cpu_preparation_scratch{};
     std::map<std::uint64_t,
         std::vector<::bioseq::simd::MatchResult>>
         join_match_map{};
@@ -1795,6 +1831,7 @@ public:
         join_target_prepared = false;
 		join_pending_cpu_preparation_queries.clear();
 		join_cpu_preparation_pending = false;
+		join_cpu_preparation_scratch.clear_storage_noexcept();
         join_target_outcomes_recorded = false;
 		join_prepared_union_outcomes_recorded = false;
 		join_prepared_build_checksum_recorded = false;
@@ -1840,25 +1877,26 @@ private:
 			throw std::logic_error{
 				"BioseqBatchJoin deferred CPU preparation has no wave session"};
 		}
+		if (!join_cpu_preparation_scratch.empty()) {
+			throw std::logic_error{
+				"BioseqBatchJoin retained stale CPU preparation scratch"};
+		}
 
-		std::vector<const bioseq::pg_types::seq*> query_headers;
-		std::vector<Datum> query_recipe_datums;
-		std::vector<pg_sequence_descriptor> query_recipe_descriptors;
-		std::vector<std::uint64_t> query_ordinals;
-		std::vector<bioseq::pg_types::seq*> detoast_copies;
-		std::vector<std::vector<char>> rewidthed_query_varlenas(
+		join_cpu_preparation_scratch.rewidthed_query_varlenas.resize(
 			join_pending_cpu_preparation_queries.size());
-		query_headers.reserve(join_pending_cpu_preparation_queries.size());
-		query_recipe_datums.reserve(
+		join_cpu_preparation_scratch.query_headers.reserve(
 			join_pending_cpu_preparation_queries.size());
-		query_recipe_descriptors.reserve(
+		join_cpu_preparation_scratch.query_recipe_datums.reserve(
 			join_pending_cpu_preparation_queries.size());
-		query_ordinals.reserve(join_pending_cpu_preparation_queries.size());
-		detoast_copies.reserve(join_pending_cpu_preparation_queries.size());
+		join_cpu_preparation_scratch.query_recipe_descriptors.reserve(
+			join_pending_cpu_preparation_queries.size());
+		join_cpu_preparation_scratch.query_ordinals.reserve(
+			join_pending_cpu_preparation_queries.size());
+		join_cpu_preparation_scratch.detoast_copies.reserve(
+			join_pending_cpu_preparation_queries.size());
 
 		MemoryContext saved_context = CurrentMemoryContext;
 		ErrorData* volatile pg_error = nullptr;
-		std::exception_ptr cpp_error;
 		PG_TRY();
 		{
 			try {
@@ -1893,10 +1931,14 @@ private:
 							mmsearch_context.query_alphabet_code,
 							mmsearch_context.query_storage_unit_byte_width,
 							"query");
-						query_headers.push_back(nullptr);
-						query_recipe_datums.push_back(query_datum);
-						query_recipe_descriptors.push_back(descriptor);
-						query_ordinals.push_back(query.ordinal);
+						join_cpu_preparation_scratch.query_headers.push_back(
+							nullptr);
+						join_cpu_preparation_scratch.query_recipe_datums.push_back(
+							query_datum);
+						join_cpu_preparation_scratch.query_recipe_descriptors.
+							push_back(descriptor);
+						join_cpu_preparation_scratch.query_ordinals.push_back(
+							query.ordinal);
 						previous_ordinal = query.ordinal;
 						first = false;
 						continue;
@@ -1950,8 +1992,9 @@ private:
 						}
 						const std::size_t rewidthed_bytes =
 							static_cast<std::size_t>(VARSIZE(rewidthed));
-						auto& owned =
-							rewidthed_query_varlenas[query_headers.size()];
+						auto& owned = join_cpu_preparation_scratch.
+							rewidthed_query_varlenas[
+								join_cpu_preparation_scratch.query_headers.size()];
 						owned.assign(
 							reinterpret_cast<const char*>(rewidthed),
 							reinterpret_cast<const char*>(rewidthed)
@@ -1961,14 +2004,18 @@ private:
 							reinterpret_cast<const bioseq::pg_types::seq*>(
 								owned.data());
 					}
-					query_headers.push_back(preparation_query_header);
-					query_recipe_datums.push_back(Datum{0});
-					query_recipe_descriptors.push_back(
+					join_cpu_preparation_scratch.query_headers.push_back(
+						preparation_query_header);
+					join_cpu_preparation_scratch.query_recipe_datums.push_back(
+						Datum{0});
+					join_cpu_preparation_scratch.query_recipe_descriptors.push_back(
 						pg_sequence_descriptor{});
-					query_ordinals.push_back(query.ordinal);
+					join_cpu_preparation_scratch.query_ordinals.push_back(
+						query.ordinal);
 					if (reinterpret_cast<void*>(query_header)
 						!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
-						detoast_copies.push_back(query_header);
+						join_cpu_preparation_scratch.detoast_copies.push_back(
+							query_header);
 					}
 					previous_ordinal = query.ordinal;
 					first = false;
@@ -1995,12 +2042,12 @@ private:
 						join_cpu_prepared_target.target_bp_size,
 						mmsearch_context.alphabet_code,
 						mmsearch_context.storage_unit_byte_width,
-						query_headers,
-						query_recipe_datums,
-						query_recipe_descriptors,
+						join_cpu_preparation_scratch.query_headers,
+						join_cpu_preparation_scratch.query_recipe_datums,
+						join_cpu_preparation_scratch.query_recipe_descriptors,
 						scanner_pg_ctx.read_session,
 						std::addressof(mmsearch_query_payload_observer),
-						query_ordinals,
+						join_cpu_preparation_scratch.query_ordinals,
 						dispatched_params,
 						*executor_read_context,
 						join_cpu_prepared_target);
@@ -2009,12 +2056,12 @@ private:
 						mmsearch_context.alphabet_code,
 						mmsearch_context.storage_unit_byte_width,
 						join_cpu_prepared_target.target_bp_size,
-						query_headers,
-						query_recipe_datums,
-						query_recipe_descriptors,
+						join_cpu_preparation_scratch.query_headers,
+						join_cpu_preparation_scratch.query_recipe_datums,
+						join_cpu_preparation_scratch.query_recipe_descriptors,
 						scanner_pg_ctx.read_session,
 						std::addressof(mmsearch_query_payload_observer),
-						query_ordinals,
+						join_cpu_preparation_scratch.query_ordinals,
 						dispatched_params,
 						/*include_persisted_parameter_group=*/true,
 						::bioseq::simd::BatchProcessor::
@@ -2022,7 +2069,8 @@ private:
 						join_cpu_prepared_target);
 				}
 			} catch (...) {
-				cpp_error = std::current_exception();
+				join_cpu_preparation_scratch.cpp_error =
+					std::current_exception();
 			}
 		}
 		PG_CATCH();
@@ -2034,21 +2082,27 @@ private:
 		PG_END_TRY();
 
 		if (pg_error != nullptr) {
-			query_headers.clear();
-			detoast_copies.clear();
+			join_cpu_preparation_scratch.clear_storage_noexcept();
 			ErrorData* exact_error = pg_error;
 			throw bioseq::pg_utils::PostgresErrorAsCpp{exact_error};
 		}
-		if (cpp_error != nullptr) {
-			for (bioseq::pg_types::seq* copy : detoast_copies) {
+		if (join_cpu_preparation_scratch.cpp_error != nullptr) {
+			for (bioseq::pg_types::seq* copy
+					: join_cpu_preparation_scratch.detoast_copies) {
 				bioseq::pg_utils::invoke_pg_as_cpp(
 					[copy] { pfree(copy); });
 			}
-			std::rethrow_exception(cpp_error);
+			std::exception_ptr exact_error = std::exchange(
+				join_cpu_preparation_scratch.cpp_error,
+				std::exception_ptr{});
+			join_cpu_preparation_scratch.clear_storage_noexcept();
+			std::rethrow_exception(exact_error);
 		}
-		for (bioseq::pg_types::seq* copy : detoast_copies) {
+		for (bioseq::pg_types::seq* copy
+				: join_cpu_preparation_scratch.detoast_copies) {
 			bioseq::pg_utils::invoke_pg_as_cpp([copy] { pfree(copy); });
 		}
+		join_cpu_preparation_scratch.clear_storage_noexcept();
 		if (!join_cpu_prepared_target.unions_ready
 			|| !join_cpu_prepared_target.highway_binding_matches(
 				dispatched_params)) {
@@ -3724,6 +3778,7 @@ public:
         join_target_prepared = false;
 		join_pending_cpu_preparation_queries.clear();
 		join_cpu_preparation_pending = false;
+		join_cpu_preparation_scratch.clear_storage_noexcept();
         join_target_outcomes_recorded = false;
 		join_prepared_union_outcomes_recorded = false;
 		join_prepared_build_checksum_recorded = false;
@@ -3772,6 +3827,7 @@ public:
         join_target_prepared = false;
 		join_pending_cpu_preparation_queries.clear();
 		join_cpu_preparation_pending = false;
+		join_cpu_preparation_scratch.clear_storage_noexcept();
         join_target_outcomes_recorded = false;
         join_prepared_union_outcomes_recorded = false;
         join_prepared_build_checksum_recorded = false;
@@ -3814,6 +3870,7 @@ public:
         join_target_prepared = false;
 		join_pending_cpu_preparation_queries.clear();
 		join_cpu_preparation_pending = false;
+		join_cpu_preparation_scratch.clear_storage_noexcept();
         join_target_outcomes_recorded = false;
 		join_prepared_union_outcomes_recorded = false;
 		join_prepared_build_checksum_recorded = false;
