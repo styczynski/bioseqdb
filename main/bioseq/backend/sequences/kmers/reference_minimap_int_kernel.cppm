@@ -12,6 +12,7 @@ import bioseq.instr;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.highway_contract;
 import bioseq.highway.sources.sequence_ops;
+import bioseq.highway.sources.hasher_base;
 import bioseq.highway.sources.hasher_minimap_int;
 import bioseq.highway.sources.simd_utils;
 import bioseq.highway.sources.vector_stream;
