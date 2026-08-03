@@ -7,6 +7,7 @@ export module bioseq.highway.sources.hasher_minimap_int;
 import std;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.highway.sources.hasher_base;
 import bioseq.highway.sources.hasher_lexic;

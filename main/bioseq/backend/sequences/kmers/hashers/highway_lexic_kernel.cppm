@@ -7,6 +7,7 @@ export module bioseq.highway.sources.hasher_lexic;
 import std;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
+import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.hashers.lexic;
 import bioseq.highway.sources.hasher_base;
 import bioseq.highway.sources.simd_utils;
