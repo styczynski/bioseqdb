@@ -1137,6 +1137,8 @@ inline void validate_configure_handshake(
             "production",
             clang_structural::dependency_compilation_manifest_authority(
                 "core", dependency_authority));
+    validate_scheduler_highway_prepared_closure(
+        command.output_module, prepared);
     const clang_structural::preparation_action_trace_validation
         preparation_actions =
             clang_structural::validate_preparation_action_trace(

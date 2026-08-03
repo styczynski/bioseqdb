@@ -145,6 +145,17 @@ inline constexpr std::string_view entry_attribute =
     throw std::runtime_error(location(path, range) + ": " + std::move(message));
 }
 
+inline constexpr std::string_view scheduler_output_module =
+    "bioseq.scheduler.dispatch_processor";
+
+[[nodiscard]] inline bool forbidden_scheduler_highway_provider(
+    std::string_view module,
+    std::string_view output_module) {
+    return module.starts_with("bioseq.highway.generated.")
+        || module
+            == std::string{output_module} + ":highway_registry";
+}
+
 [[nodiscard]] inline unsigned hex_value(const char character) noexcept {
     if (character >= '0' && character <= '9') {
         return static_cast<unsigned>(character - '0');
@@ -1486,6 +1497,68 @@ inline void validate_materialization_region(
     }
 }
 
+/// The explicit-axis scheduler may consume the ordinary target-neutral
+/// dispatch contract, but it must never become a Highway target source or
+/// import the generated target graph. Exact token records keep this check
+/// independent of comments and substrings in unrelated identifiers.
+inline void validate_scheduler_highway_source_separation(
+    const clang_structural::translation_unit& unit,
+    std::string_view output_module) {
+    if (output_module != detail::scheduler_output_module) return;
+
+    for (const std::string& imported : unit.source_module.imported_modules) {
+        if (!detail::forbidden_scheduler_highway_provider(
+                imported, output_module)) {
+            continue;
+        }
+        throw std::runtime_error(
+            unit.source_path.string()
+            + ": scheduler materialization source imports forbidden Highway provider '"
+            + imported + "'");
+    }
+
+    static constexpr std::array<std::string_view, 3u> forbidden_tokens{
+        "HWY_TARGET",
+        "HWY_EXPORT",
+        "HWY_DYNAMIC_DISPATCH",
+    };
+    for (const clang_structural::lexical_token& token : unit.tokens) {
+        if (!std::ranges::contains(forbidden_tokens, token.spelling)) continue;
+        detail::reject(
+            unit.source_path,
+            token.range,
+            "scheduler materialization source contains forbidden Highway token '"
+                + token.spelling + "'");
+    }
+    if (!unit.marked_namespaces.empty()) {
+        detail::reject(
+            unit.source_path,
+            unit.marked_namespaces.front().marker.complete_range,
+            "scheduler materialization source contains forbidden bioseq::simd namespace marker");
+    }
+}
+
+/// Recheck the same boundary against the authenticated module identities from
+/// PREPARE so an indirect generated provider cannot be laundered through an
+/// otherwise neutral direct import.
+inline void validate_scheduler_highway_prepared_closure(
+    std::string_view output_module,
+    const clang_structural::prepared_compilation_validation& prepared) {
+    if (output_module != detail::scheduler_output_module) return;
+
+    for (const clang_structural::preparation_module_identity& module
+         : prepared.modules) {
+        if (!detail::forbidden_scheduler_highway_provider(
+                module.module_name, output_module)) {
+            continue;
+        }
+        throw std::runtime_error(
+            module.source_path.string()
+            + ": authenticated scheduler PREPARE closure contains forbidden Highway provider '"
+            + module.module_name + "'");
+    }
+}
+
 [[nodiscard]] inline materialization_region extract_materialization_region(
     const clang_structural::translation_unit& unit,
     std::string configured_output_module_name,
@@ -1495,6 +1568,8 @@ inline void validate_materialization_region(
             unit.source_path.string()
             + ": namespace materialization requires the non-Sema token_slice collector");
     }
+    validate_scheduler_highway_source_separation(
+        unit, configured_output_module_name);
     materialization_region region{
         .source_module = unit.source_module,
         .configured_output_module_name =

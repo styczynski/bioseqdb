@@ -617,6 +617,123 @@ inline void verify_configure_structural_digest_mutations() {
     }
 }
 
+inline void verify_scheduler_highway_separation() {
+    constexpr std::string_view output_module =
+        "bioseq.scheduler.dispatch_processor";
+    const auto scan = [](std::string source) {
+        return clang_structural::scan_token_slice(
+            "scheduler_highway_separation.cppm", source);
+    };
+    const auto source_with = [](std::string_view addition) {
+        return std::string{
+                   "export module fixture.scheduler_highway_separation;\n"
+                   "import bioseq.scheduler.dispatch_processor;\n"}
+            + std::string{addition}
+            + "\nnamespace fixture::scheduler_highway_separation {\n"
+              "inline constexpr int HWY_TARGETED = 1;\n"
+              "inline constexpr int HWY_EXPORTABLE = 2;\n"
+              "inline constexpr int HWY_DYNAMIC_DISPATCHED = 3;\n"
+              "namespace [[bioseq::similar]] decoy {}\n"
+              "}\n";
+    };
+
+    const clang_structural::translation_unit neutral = scan(source_with(
+        "import bioseq.highway.dispatch_contract;\n"
+        "import bioseq.highway.dispatch_contract:pipeline;"));
+    validate_scheduler_highway_source_separation(neutral, output_module);
+
+    for (const std::string_view imported : {
+             std::string_view{"bioseq.highway.generated.linux.avx2"},
+             std::string_view{
+                 "bioseq.scheduler.dispatch_processor:highway_registry"},
+         }) {
+        const clang_structural::translation_unit forbidden_import = scan(
+            source_with("import " + std::string{imported} + ";"));
+        require_rejected(
+            [&forbidden_import] {
+                validate_scheduler_highway_source_separation(
+                    forbidden_import,
+                    "bioseq.scheduler.dispatch_processor");
+            },
+            "scheduler source accepted a direct Highway generated/registry import");
+    }
+
+    for (const std::string_view token : {
+             std::string_view{"HWY_TARGET"},
+             std::string_view{"HWY_EXPORT"},
+             std::string_view{"HWY_DYNAMIC_DISPATCH"},
+         }) {
+        const clang_structural::translation_unit forbidden_token = scan(
+            source_with(
+                "namespace fixture_highway_token { inline constexpr int "
+                + std::string{token} + " = 1; }"));
+        require_rejected(
+            [&forbidden_token] {
+                validate_scheduler_highway_source_separation(
+                    forbidden_token,
+                    "bioseq.scheduler.dispatch_processor");
+            },
+            "scheduler source accepted a forbidden Highway lexical token");
+    }
+
+    const clang_structural::translation_unit simd_marked = scan(source_with(
+        "namespace [[bioseq::simd]] target { inline int value() { return 1; } }"));
+    require_rejected(
+        [&simd_marked] {
+            validate_scheduler_highway_source_separation(
+                simd_marked,
+                "bioseq.scheduler.dispatch_processor");
+        },
+        "scheduler source accepted a bioseq::simd structural marker");
+
+    clang_structural::prepared_compilation_validation prepared;
+    prepared.modules = {
+        clang_structural::preparation_module_identity{
+            .module_name = "bioseq.scheduler.dispatch_processor",
+            .source_path = "dispatch_processor.cppm",
+        },
+        clang_structural::preparation_module_identity{
+            .module_name = "bioseq.highway.dispatch_contract",
+            .source_path = "highway_dispatch_contract.cppm",
+        },
+        clang_structural::preparation_module_identity{
+            .module_name = "bioseq.highway.dispatch_contract:pipeline",
+            .source_path = "highway_dispatch_pipeline_contract.cppm",
+        },
+    };
+    validate_scheduler_highway_prepared_closure(output_module, prepared);
+
+    for (const std::string_view provider : {
+             std::string_view{"bioseq.highway.generated.linux.avx2"},
+             std::string_view{
+                 "bioseq.scheduler.dispatch_processor:highway_registry"},
+         }) {
+        clang_structural::prepared_compilation_validation forbidden = prepared;
+        forbidden.modules.push_back(
+            clang_structural::preparation_module_identity{
+                .module_name = std::string{provider},
+                .source_path = "forbidden_highway_provider.cppm",
+            });
+        require_rejected(
+            [&forbidden] {
+                validate_scheduler_highway_prepared_closure(
+                    "bioseq.scheduler.dispatch_processor", forbidden);
+            },
+            "authenticated scheduler closure accepted a forbidden Highway provider");
+    }
+
+    validate_scheduler_highway_source_separation(
+        simd_marked, "fixture.unrelated_output");
+    clang_structural::prepared_compilation_validation unrelated = prepared;
+    unrelated.modules.push_back(
+        clang_structural::preparation_module_identity{
+            .module_name = "bioseq.highway.generated.linux.avx2",
+            .source_path = "unrelated_policy_provider.cppm",
+        });
+    validate_scheduler_highway_prepared_closure(
+        "fixture.unrelated_output", unrelated);
+}
+
 inline void verify_scheduler_profile_policy() {
     materialization_coordinate known{
         .assignments = {
@@ -2180,6 +2297,7 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_malformed_materialization_sources();
     detail::verify_zip_product_and_digest();
     detail::verify_configure_structural_digest_mutations();
+    detail::verify_scheduler_highway_separation();
     detail::verify_scheduler_profile_policy();
     detail::verify_production_scheduler_golden();
     detail::verify_production_declaration_heads_and_probes();
