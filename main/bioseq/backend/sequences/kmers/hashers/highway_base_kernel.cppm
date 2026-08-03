@@ -45,7 +45,7 @@ template<
     typename D = hn::ScalableTag<Input>,
     typename SimdHasher =
         Hasher<Alphabet>::template simd_hash<Input, D>>
-concept supports_simd_hash = ::bioseq::sequence_alphabet<Alphabet>
+concept supports_simd_hash = ::sequence_alphabet<Alphabet>
     && requires (SimdHasher& hasher, D& d, hn::Vec<D>&& incoming) {
         { hasher.next(
             d, std::move(incoming), std::move(incoming)) }
