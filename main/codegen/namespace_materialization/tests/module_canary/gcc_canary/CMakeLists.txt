@@ -103,6 +103,8 @@ foreach(_source IN LISTS _generated_sources
   endif()
 endforeach()
 
+get_filename_component(
+  _primary_base_dir "${BIOSEQ_GCC_CANARY_PRIMARY}" DIRECTORY)
 add_executable(bioseq_highway_gcc_module_canary)
 target_sources(bioseq_highway_gcc_module_canary
   PRIVATE
@@ -112,6 +114,7 @@ target_sources(bioseq_highway_gcc_module_canary
   PRIVATE
     FILE_SET CXX_MODULES
     TYPE CXX_MODULES
+    BASE_DIRS "${_primary_base_dir}"
     FILES "${BIOSEQ_GCC_CANARY_PRIMARY}")
 # The generated API/selector are implementation partitions and instance_0..3
 # plus driver are implementation units. They therefore remain ordinary private

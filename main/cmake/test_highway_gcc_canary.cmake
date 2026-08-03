@@ -172,6 +172,7 @@ foreach(_required_text IN ITEMS
     "BIOSEQ_GCC_CANARY_PRIMARY"
     "BIOSEQ_GCC_CANARY_DRIVER"
     "BIOSEQ_GCC_CANARY_MAIN"
+    "BASE_DIRS"
     "CXX_SCAN_FOR_MODULES ON")
   string(FIND "${_nested}" "${_required_text}" _required_offset)
   if(_required_offset EQUAL -1)
