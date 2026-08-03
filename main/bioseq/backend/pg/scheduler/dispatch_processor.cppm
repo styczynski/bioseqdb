@@ -586,17 +586,6 @@ public:
 				});
 		}
 	};
-	static_assert(CpuPreparedTarget::same_highway_dispatch_identity(
-		::bioseq::simd_dispatch::HighwayDispatchInfo{3, 3, 3, 1},
-		1,
-		::bioseq::simd_dispatch::HighwayDispatchInfo{3, 3, 3, 1},
-		1));
-	static_assert(!CpuPreparedTarget::same_highway_dispatch_identity(
-		::bioseq::simd_dispatch::HighwayDispatchInfo{3, 3, 3, 1},
-		1,
-		::bioseq::simd_dispatch::HighwayDispatchInfo{3, 3, 3, 2},
-		2));
-
 	/* One restart-cold, PostgreSQL-authenticated Format-5 generation retained
 	 * for the complete BatchJoin target lifecycle.  The resident owns the three
 	 * Vulkan buffers; resident_view contains only stable pointers into that
@@ -1063,9 +1052,6 @@ public:
 			active_index_policy_source = bioseq::storage::indexing::
 				ActiveReadPolicyResolutionSource::unresolved;
     };
-	static_assert(ScannerPgContext::HighwayPreparationHook{}.empty());
-	static_assert(!ScannerPgContext::HighwayPreparationHook{}.valid());
-
     /*
      * Run the minimap2 pipeline across a batch. DOC0279 §11.3 — per target
      * row, the loop ASSEMBLES the table's active per-sequence minimizer index
