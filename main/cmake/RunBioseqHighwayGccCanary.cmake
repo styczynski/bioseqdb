@@ -48,10 +48,9 @@ cmake_path(
   NORMAL_PATH BIOSEQ_GCC_CANARY_BUILD OUTPUT_VARIABLE _nested_build_normal)
 cmake_path(
   NORMAL_PATH BIOSEQ_GCC_CANARY_OUTER_BINARY OUTPUT_VARIABLE _outer_normal)
-string(FIND "${_nested_build_normal}/" "${_outer_normal}/" _under_outer)
-if(NOT _under_outer EQUAL 0
-    OR NOT _nested_build_normal MATCHES
-      "/highway-gcc-canary/nested$")
+set(_expected_nested_build
+  "${_outer_normal}/codegen/namespace_materialization/tests/module_canary/highway-gcc-canary/nested")
+if(NOT _nested_build_normal STREQUAL _expected_nested_build)
   message(FATAL_ERROR
     "refusing to recreate an unscoped Highway GCC canary build tree: "
     "${_nested_build_normal}")
