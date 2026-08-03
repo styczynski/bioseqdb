@@ -27,6 +27,8 @@
 
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
@@ -63,6 +65,11 @@ using bioseq::indexing::test::FakeFragmentStorage;
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t  = compact_sequence_range<dna4_u64>;
+
+[[nodiscard]] const ::bioseq::minimizers::MinimizerKernels*
+fixed_minimizer_kernels() {
+    return &::bioseq::simd_dispatch::highway_test_kernel_table().minimizers;
+}
 
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
     std::vector<seq::dna4> v(n);
@@ -408,7 +415,8 @@ TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restr
             FakeFragmentStorage<>>::build(
                 exact_storage,
                 exact_sequence_view,
-                MinimizerSketchBackend::ExactSimd);
+                MinimizerSketchBackend::ExactSimd,
+                fixed_minimizer_kernels());
     }
     REQUIRE(storage.runs_.empty());   // build() calls release_runs() at the end
     REQUIRE(exact_storage.runs_.empty());
@@ -538,6 +546,7 @@ TEST_CASE("scalar MPS build proof aggregates deterministically across workers",
                 storage,
                 sequence_view,
                 MinimizerSketchBackend::Scalar,
+                nullptr,
                 &proof);
         return proof;
     };
@@ -583,7 +592,10 @@ TEST_CASE("ExactSimd MPS collection accepts fragmented DNA5 with N resets",
     FakeFragmentStorage<> storage;
 
     REQUIRE_NOTHROW(MpsIndex::build(
-        storage, sequence_view, MinimizerSketchBackend::ExactSimd));
+        storage,
+        sequence_view,
+        MinimizerSketchBackend::ExactSimd,
+        fixed_minimizer_kernels()));
     REQUIRE(storage.runs_.empty());
 }
 
@@ -671,14 +683,14 @@ TEST_CASE("persisted minimizer indexes built with Vulkan cover scalar lookups",
     TestFragmentStorage gpu_mps;
 
     bioseq::indexing::MinimizersPerFragmentIndex<TestFragmentStorage>::build(
-        scalar_mpf, scalar_sequence_view, backend_t::Scalar);
+        scalar_mpf, scalar_sequence_view, backend_t::Scalar, nullptr);
     bioseq::indexing::MinimizersPerFragmentIndex<TestFragmentStorage>::build(
-        gpu_mpf, gpu_sequence_view, backend_t::VulkanSegment);
+        gpu_mpf, gpu_sequence_view, backend_t::VulkanSegment, nullptr);
 
     bioseq::indexing::MinimizerSequenceMergedIndex<TestFragmentStorage>::build(
-        scalar_mps, scalar_sequence_view, backend_t::Scalar);
+        scalar_mps, scalar_sequence_view, backend_t::Scalar, nullptr);
     bioseq::indexing::MinimizerSequenceMergedIndex<TestFragmentStorage>::build(
-        gpu_mps, gpu_sequence_view, backend_t::VulkanSegment);
+        gpu_mps, gpu_sequence_view, backend_t::VulkanSegment, nullptr);
 
     bioseq::indexing::MinimizerAssemblyScratch scratch_scalar;
     bioseq::indexing::MinimizerAssemblyScratch scratch_gpu;

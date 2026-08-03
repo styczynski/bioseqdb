@@ -38,6 +38,8 @@
 import bioseq.common.mlogging;
 import bioseq.common.context;
 import bioseq.common.sequan_compat;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.sequences.chaining.utils;
 import bioseq.sequences.kmers;
@@ -80,6 +82,19 @@ using dna4_u16 = sequence_custom_alphabet<seq::dna4, std::uint16_t>;
 using dna4_u16_range_t = compact_sequence_range<dna4_u16>;
 using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
 using dna5_range_t = compact_sequence_range<dna5_u64>;
+
+[[nodiscard]] const ::bioseq::minimizers::MinimizerKernels*
+fixed_minimizer_kernels() {
+    return &::bioseq::simd_dispatch::highway_test_kernel_table().minimizers;
+}
+
+[[nodiscard]] const ::bioseq::minimizers::MinimizerKernels*
+minimizer_kernels_for_backend(const MinimizerSketchBackend backend) {
+    return backend == MinimizerSketchBackend::ExactSimd
+            || backend == MinimizerSketchBackend::PaperNtHashSimd
+        ? fixed_minimizer_kernels()
+        : nullptr;
+}
 
 inline constexpr auto kTestV3LegacyProfileResult =
     bioseq::indexing::minimizer_generation_payload_profile(
@@ -1663,6 +1678,7 @@ TEST_CASE("ExactSimd indexing bridge is linked, exact, and instrumented",
             10,
             15,
             0,
+            fixed_minimizer_kernels(),
             "bridge contract"),
         bioseq::indexing::ExactSimdIndexRuntimeError);
 #else
@@ -1675,6 +1691,7 @@ TEST_CASE("ExactSimd indexing bridge is linked, exact, and instrumented",
             10,
             15,
             0,
+            fixed_minimizer_kernels(),
             "bridge contract");
     const auto scalar = whole_sequence_minimizers(range, 10, 15);
     const auto& exact = exact_collector.extract_sketches_data();
@@ -1718,6 +1735,7 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
             w,
             k,
             0,
+            fixed_minimizer_kernels(),
             "DNA5 bridge contract"),
         bioseq::indexing::ExactSimdIndexRuntimeError);
 #else
@@ -1730,6 +1748,7 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
             w,
             k,
             0,
+            fixed_minimizer_kernels(),
             "DNA5 bridge contract");
     const auto no_n_scalar = whole_sequence_minimizers(no_n_range, w, k);
     const auto& no_n_exact = no_n_exact_collector.extract_sketches_data();
@@ -1762,6 +1781,7 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
             w,
             k,
             0,
+            fixed_minimizer_kernels(),
             "DNA5 bridge N-reset contract");
     REQUIRE(with_n_proof.ambiguous_symbols == n_positions.size());
     REQUIRE(with_n_proof.ambiguous_reset_batches > 0);
@@ -3714,7 +3734,7 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
         chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     auto mpf_producer = Index::make_generation_replay_producer(
-        lazy_view, MinimizerSketchBackend::Scalar);
+        lazy_view, MinimizerSketchBackend::Scalar, nullptr);
     CollectingMinimizerRowSink mpf_sink;
     auto mpf_options = test_generation_options(range.bp_size());
     auto mpf = encode_minimizer_generation(
@@ -3738,6 +3758,7 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
         spill_storage,
         lazy_view,
         MinimizerSketchBackend::Scalar,
+        nullptr,
         fragment_bp);
     REQUIRE(spilled.has_value());
     REQUIRE(spilled->run_count() >= 3);
@@ -3777,7 +3798,9 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
     const auto lazy_exact_view =
         bioseq::storage::as_lazy_sequence_view(lazy_exact);
     auto exact_mpf_producer = Index::make_generation_replay_producer(
-        lazy_exact_view, MinimizerSketchBackend::ExactSimd);
+        lazy_exact_view,
+        MinimizerSketchBackend::ExactSimd,
+        fixed_minimizer_kernels());
     CollectingMinimizerRowSink exact_mpf_sink;
     auto exact_mpf_options = mpf_options;
     exact_mpf_options.generation_id += 2;
@@ -3801,6 +3824,7 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
         exact_spill_storage,
         lazy_exact_view,
         MinimizerSketchBackend::ExactSimd,
+        fixed_minimizer_kernels(),
         fragment_bp);
     REQUIRE(exact_spilled.has_value());
     REQUIRE(exact_spilled->run_count() == scalar_spill_run_count);
@@ -3849,6 +3873,7 @@ TEST_CASE("inactive format-4 MPS evidence binds Scalar and Exact spill replay",
             storage,
             lazy_view,
             backend,
+            minimizer_kernels_for_backend(backend),
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
             &spill_evidence);
@@ -3969,6 +3994,7 @@ TEST_CASE("Format-5 MPS exact SIMD binds the canonical shape profile",
             storage,
             lazy_view,
             MinimizerSketchBackend::ExactSimd,
+            fixed_minimizer_kernels(),
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp);
     };
@@ -4202,6 +4228,7 @@ TEST_CASE("inactive format-4 MPS spill authority is non-forgeable and detects mu
         storage,
         lazy_view,
         MinimizerSketchBackend::Scalar,
+        nullptr,
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
         &spill_evidence);
@@ -4271,6 +4298,7 @@ TEST_CASE("format-4 MPF execution evidence is sealed to one publication identity
     const auto encoded = Index::encode_persisted_generation(
         lazy_view,
         MinimizerSketchBackend::Scalar,
+        nullptr,
         sink,
         test_grouped32_generation_options(range.bp_size()),
         {},
@@ -4353,6 +4381,7 @@ TEST_CASE("inactive format-4 MPS accepts real empty and shorter-than-window spil
             storage,
             lazy_view,
             MinimizerSketchBackend::Scalar,
+            nullptr,
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
             &spill_evidence);
@@ -4417,7 +4446,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
             bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> storage;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            storage, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
+            storage,
+            lazy_view,
+            MinimizerSketchBackend::Scalar,
+            nullptr,
+            fragment_bp);
         REQUIRE(spill.has_value());
         const MpsSegmentSpillStorageBinding before =
             storage.segment_spill_storage_binding();
@@ -4453,7 +4486,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
         FakeFragmentStorage<> original;
         FakeFragmentStorage<> replacement;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            original, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
+            original,
+            lazy_view,
+            MinimizerSketchBackend::Scalar,
+            nullptr,
+            fragment_bp);
         REQUIRE(spill.has_value());
         CollectingMinimizerRowSink wrong_sink;
         require_wire_error(
@@ -4504,6 +4541,7 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
             storage,
             empty_lazy_view,
             MinimizerSketchBackend::Scalar,
+            nullptr,
             fragment_bp);
         REQUIRE(spill.has_value());
         const MpsSegmentSpillStorageBinding issued =
@@ -4536,7 +4574,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
             bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> original;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            original, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
+            original,
+            lazy_view,
+            MinimizerSketchBackend::Scalar,
+            nullptr,
+            fragment_bp);
         REQUIRE(spill.has_value());
         const MpsSegmentSpillStorageBinding issued =
             original.segment_spill_storage_binding();
@@ -4565,6 +4607,7 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
             original,
             empty_lazy_view,
             MinimizerSketchBackend::Scalar,
+            nullptr,
             fragment_bp);
         REQUIRE(spill.has_value());
         REQUIRE(original.segment_spill_storage_binding().valid());
@@ -4590,7 +4633,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
             bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> storage;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            storage, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
+            storage,
+            lazy_view,
+            MinimizerSketchBackend::Scalar,
+            nullptr,
+            fragment_bp);
         REQUIRE(spill.has_value());
         const MpsSegmentSpillStorageBinding before =
             storage.segment_spill_storage_binding();
@@ -4631,7 +4678,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
             bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> storage;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            storage, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
+            storage,
+            lazy_view,
+            MinimizerSketchBackend::Scalar,
+            nullptr,
+            fragment_bp);
         REQUIRE(spill.has_value());
         auto producer = MpsIndex::make_generation_replay_producer(
             storage, range.bp_size(), std::move(*spill));
@@ -4744,6 +4795,7 @@ TEST_CASE("inactive format-4 MPS reuses checked bounded packed Paper",
         storage,
         lazy_view,
         MinimizerSketchBackend::PaperNtHashSimd,
+        fixed_minimizer_kernels(),
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
         &spill_evidence);
@@ -4851,6 +4903,7 @@ TEST_CASE("inactive format-4 MPS canonicalizes periodic Paper ties within admiss
         storage,
         lazy_view,
         MinimizerSketchBackend::PaperNtHashSimd,
+        fixed_minimizer_kernels(),
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
         &spill_evidence);
@@ -4906,6 +4959,7 @@ TEST_CASE("inactive format-4 MPS Paper rejects DNA5 without fallback",
             storage,
             lazy_view,
             MinimizerSketchBackend::PaperNtHashSimd,
+            fixed_minimizer_kernels(),
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
             &evidence);
@@ -4955,7 +5009,11 @@ TEST_CASE("legacy MPF Vulkan build records accepted operation-originated batched
     storage.run_buffer_bytes_ = 64u << 20u;
     MpfGenerationExecutionEvidence evidence;
     Index::build(
-        storage, view, MinimizerSketchBackend::VulkanSegment, &evidence);
+        storage,
+        view,
+        MinimizerSketchBackend::VulkanSegment,
+        nullptr,
+        &evidence);
 
     REQUIRE_FALSE(evidence.accepted());
     REQUIRE(evidence.direct_build_accepted());
@@ -5003,6 +5061,7 @@ TEST_CASE("inactive format-4 MPS carries operation-originated Vulkan proof",
         storage,
         lazy_view,
         MinimizerSketchBackend::VulkanSegment,
+        nullptr,
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
         &spill_evidence);
@@ -5081,7 +5140,9 @@ TEST_CASE("bounded Paper MPF replay matches one checked resident execution",
         chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     auto producer = Index::make_generation_replay_producer(
-        lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
+        lazy_view,
+        MinimizerSketchBackend::PaperNtHashSimd,
+        fixed_minimizer_kernels());
     auto options = test_generation_options(range.bp_size());
     options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
     options.minimizer_scheme_version =
@@ -5192,7 +5253,9 @@ TEST_CASE("Paper MPF canonicalizes tied periodic events identically across repla
         chunked::from_range(range)};
     const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     auto replay = Index::make_generation_replay_producer(
-        lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
+        lazy_view,
+        MinimizerSketchBackend::PaperNtHashSimd,
+        fixed_minimizer_kernels());
     const auto collect_replay = [](void* context,
             const CanonicalMinimizerEvent& event)
             -> std::expected<void, MinimizerGenerationWireError> {
@@ -5221,7 +5284,9 @@ TEST_CASE("Paper MPF canonicalizes tied periodic events identically across repla
     REQUIRE(replay.execution_evidence().paper_nthash_core_runs > 0u);
 
     auto encoder_replay = Index::make_generation_replay_producer(
-        lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
+        lazy_view,
+        MinimizerSketchBackend::PaperNtHashSimd,
+        fixed_minimizer_kernels());
     auto options = test_generation_options(range.bp_size());
     options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
     options.minimizer_scheme_version =
@@ -5253,7 +5318,9 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
         const auto lazy_view =
             bioseq::storage::as_lazy_sequence_view(lazy);
         auto producer = Index::make_generation_replay_producer(
-            lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
+            lazy_view,
+            MinimizerSketchBackend::PaperNtHashSimd,
+            fixed_minimizer_kernels());
         auto options = test_generation_options(range.bp_size());
         options.alphabet_code = 5;
         options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
@@ -5294,7 +5361,9 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
         const auto lazy_view =
             bioseq::storage::as_lazy_sequence_view(lazy);
         auto producer = Index::make_generation_replay_producer(
-            lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
+            lazy_view,
+            MinimizerSketchBackend::PaperNtHashSimd,
+            fixed_minimizer_kernels());
         auto options = test_generation_options(range.bp_size());
         options.storage_unit_byte_width = sizeof(std::uint16_t);
         options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
@@ -5376,7 +5445,7 @@ TEST_CASE("DOC0371 actual producers cross the persisted 8MiB core edge bounded",
     const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
 
     auto mpf_producer = Index::make_generation_replay_producer(
-        lazy_view, MinimizerSketchBackend::Scalar);
+        lazy_view, MinimizerSketchBackend::Scalar, nullptr);
     const auto options = test_generation_options(range.bp_size());
     const auto mpf_plan = plan_minimizer_generation(mpf_producer, options);
     REQUIRE(mpf_plan.has_value());
@@ -5389,6 +5458,7 @@ TEST_CASE("DOC0371 actual producers cross the persisted 8MiB core edge bounded",
         spill_storage,
         lazy_view,
         MinimizerSketchBackend::Scalar,
+        nullptr,
         fragment_bp);
     REQUIRE(spilled.has_value());
     REQUIRE(spilled->run_count() > 256);
@@ -5505,7 +5575,9 @@ TEST_CASE("DOC0371 actual producers preserve DNA5 N reset and packed tail",
     auto options = test_generation_options(range.bp_size());
     options.alphabet_code = 5;
     auto mpf_producer = Index::make_generation_replay_producer(
-        lazy_view, MinimizerSketchBackend::ExactSimd);
+        lazy_view,
+        MinimizerSketchBackend::ExactSimd,
+        fixed_minimizer_kernels());
     CollectingMinimizerRowSink mpf_sink;
     auto mpf = encode_minimizer_generation(
         mpf_producer, mpf_sink, options);
@@ -5516,6 +5588,7 @@ TEST_CASE("DOC0371 actual producers preserve DNA5 N reset and packed tail",
         spill_storage,
         lazy_view,
         MinimizerSketchBackend::ExactSimd,
+        fixed_minimizer_kernels(),
         fragment_bp);
     REQUIRE(spilled.has_value());
     REQUIRE(spilled->exact_simd_proof_present());
@@ -7524,7 +7597,9 @@ TEST_CASE("grouped32 reader W2 validation preserves non-scatter semantics",
             MinimizerSketchBackend::ExactSimd,
             metadata.directory_bytes,
             query,
-            64u);
+            64u,
+            ::bioseq::simd_dispatch::highway_test_kernel_table()
+                .indexing.validate_non_scatter_local32_w2);
         REQUIRE(made.has_value());
         auto reader = std::move(*made);
         const std::vector<std::uint32_t> controls{
@@ -14719,7 +14794,9 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
         const auto lazy_view =
             bioseq::storage::as_lazy_sequence_view(lazy);
         auto mpf_producer = Index::make_generation_replay_producer(
-            lazy_view, MinimizerSketchBackend::ExactSimd);
+            lazy_view,
+            MinimizerSketchBackend::ExactSimd,
+            fixed_minimizer_kernels());
         CollectingMinimizerRowSink mpf_sink;
         auto mpf_options = test_shape_v5_generation_options(
             range.bp_size(), 65'534u);
@@ -14755,6 +14832,7 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
             spill_storage,
             lazy_view,
             MinimizerSketchBackend::ExactSimd,
+            fixed_minimizer_kernels(),
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
             &spill_execution);
@@ -15198,9 +15276,11 @@ TEST_CASE("ExactSimd MPF fragmented build preserves scalar segment lookups",
     bioseq::indexing::MpfGenerationExecutionEvidence exact_evidence;
     Index::build(
         scalar_storage, scalar_view, MinimizerSketchBackend::Scalar,
+        nullptr,
         &scalar_evidence);
     Index::build(
         exact_storage, exact_view, MinimizerSketchBackend::ExactSimd,
+        fixed_minimizer_kernels(),
         &exact_evidence);
     REQUIRE(scalar_evidence.scalar_core_runs > 0u);
     REQUIRE(scalar_evidence.exact_simd_core_runs == 0u);
