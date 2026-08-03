@@ -33,9 +33,6 @@ using ::bioseq::minimizers::PackedSequenceAlphabet;
 using ::bioseq::minimizers::PackedSequenceKernelView;
 
 using ::bioseq::minimizers::minimizer_sink_collector;
-namespace minimizer_kernel_detail =
-    ::bioseq::minimizers::kernel_detail;
-
 #ifdef BIOSEQ_TEST_INDEXES
 /// Algorithm-local receipt for the legacy reference-SIMD minimizer kernel.
 /// Dispatcher tests reset/snapshot this thread-local seam around one call; a
@@ -528,7 +525,8 @@ template<sequence_alphabet Alphabet, class StorageUnit>
     MinimizerKernelInvocation& invocation,
     MinimizerKernelResult& result)
 {
-    return with_borrowed_compact_range<Alphabet, StorageUnit>(
+    return ::bioseq::minimizers::kernel_detail::
+        with_borrowed_compact_range<Alphabet, StorageUnit>(
         invocation.sequence,
         [&invocation, &result]<class Range>(Range& range) {
             minimizer_sink_collector<MinimapSketchData> collector{
