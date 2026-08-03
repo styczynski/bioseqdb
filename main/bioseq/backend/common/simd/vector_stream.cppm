@@ -21,7 +21,10 @@ HWY_BEFORE_NAMESPACE();
 
 #define BIOSEQ_VECTOR_STREAM_STATIC_FACADE 1
 #define target HWY_NAMESPACE
+// Suppress only the canonical source's required leading global fragment.
+#define module
 #include "highway_vector_stream.cppm"
+#undef module
 #undef target
 #undef BIOSEQ_VECTOR_STREAM_STATIC_FACADE
 

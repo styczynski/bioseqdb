@@ -1,6 +1,6 @@
 /** Canonical generator input for exact minimizer sequence iteration. */
-#ifndef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
 module;
+#ifndef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.sequence_ops;

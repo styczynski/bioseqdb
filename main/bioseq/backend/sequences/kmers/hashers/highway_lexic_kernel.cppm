@@ -1,6 +1,6 @@
 /** Canonical generator input for the exact lexic minimizer hasher. */
-#ifndef BIOSEQ_HASHER_LEXIC_STATIC_FACADE
 module;
+#ifndef BIOSEQ_HASHER_LEXIC_STATIC_FACADE
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.hasher_lexic;

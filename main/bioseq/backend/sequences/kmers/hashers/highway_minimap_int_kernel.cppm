@@ -1,6 +1,6 @@
 /** Canonical generator input for the exact minimap integer hasher. */
-#ifndef BIOSEQ_HASHER_MINIMAP_INT_STATIC_FACADE
 module;
+#ifndef BIOSEQ_HASHER_MINIMAP_INT_STATIC_FACADE
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.hasher_minimap_int;

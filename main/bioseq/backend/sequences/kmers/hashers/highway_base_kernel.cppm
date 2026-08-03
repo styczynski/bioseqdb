@@ -1,6 +1,6 @@
 /** Canonical generator input for exact minimizer SIMD foundations. */
-#ifndef BIOSEQ_HASHER_BASE_STATIC_FACADE
 module;
+#ifndef BIOSEQ_HASHER_BASE_STATIC_FACADE
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.hasher_base;

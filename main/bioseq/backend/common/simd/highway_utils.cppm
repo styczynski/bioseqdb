@@ -1,6 +1,6 @@
 /** Canonical generator input for minimizer-owned Highway utilities. */
-#ifndef BIOSEQ_SIMD_UTILS_STATIC_FACADE
 module;
+#ifndef BIOSEQ_SIMD_UTILS_STATIC_FACADE
 #include <hwy/highway.h>
 #include <hwy/aligned_allocator.h>
 

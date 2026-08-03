@@ -1,6 +1,6 @@
 /** Canonical generator input for exact minimizer vector streams. */
-#ifndef BIOSEQ_VECTOR_STREAM_STATIC_FACADE
 module;
+#ifndef BIOSEQ_VECTOR_STREAM_STATIC_FACADE
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.vector_stream;

@@ -23,7 +23,11 @@ HWY_BEFORE_NAMESPACE();
 
 #define BIOSEQ_SIMD_UTILS_STATIC_FACADE 1
 #define target HWY_NAMESPACE
+// The canonical source must start with `module;`; textual replay needs an
+// empty declaration at this already-declared module position instead.
+#define module
 #include "highway_utils.cppm"
+#undef module
 #undef target
 #undef BIOSEQ_SIMD_UTILS_STATIC_FACADE
 
