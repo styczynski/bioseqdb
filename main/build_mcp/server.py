@@ -10639,7 +10639,8 @@ def tool_start_build(mode: str, build_only: bool = False,
 def _run_build_inline(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
                       test_flags=None, bench_e2e_config=None,
-                      postgres_error_safety_review_waiver_json=None) -> int:
+                      postgres_error_safety_review_waiver_json=None,
+                      sql_guardrail_request_json=None) -> int:
     """Reserve the per-mode state slot and run the build worker INLINE
     (synchronously, in this very process) instead of detaching it.
 
@@ -10680,6 +10681,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
         or bench_flags
         or test_flags
         or bench_e2e_config
+        or sql_guardrail_request_json
         or postgres_error_safety_review_waiver_json
     ):
         _log(
@@ -10688,7 +10690,8 @@ def _run_build_inline(mode: str, build_only: bool = False,
         return 2
     if mode == PACKAGE_LINUX_MODE and (
         build_only or debug or bench_flags or test_flags
-        or bench_e2e_config or postgres_error_safety_review_waiver_json
+        or bench_e2e_config or sql_guardrail_request_json
+        or postgres_error_safety_review_waiver_json
     ):
         _log("--run-build-sync: package-linux rejects variable inputs")
         return 2
@@ -14927,6 +14930,8 @@ def main() -> int:
                                  test_flags=test_flags,
                                  bench_e2e_config=(
                                      args.bench_e2e_config or None),
+                                 sql_guardrail_request_json=(
+                                     args.sql_guardrail_request or None),
                                  postgres_error_safety_review_waiver_json=(
                                      args
                                      .postgres_error_safety_review_waiver_snapshot

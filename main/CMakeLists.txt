@@ -874,6 +874,14 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_highway_profile_modes.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_highway_gcc_canary_mode.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
       "${CMAKE_SOURCE_DIR}/cmake/test_production_dso_qualification.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1

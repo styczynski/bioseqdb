@@ -83,7 +83,8 @@
         "description": "Isolated bench-opt-equivalent tree with BIOSEQ_TEST_INDEXES enabled. Keeping test hooks/descriptors in build/test-opt prevents benchmark binaries in build/bench-opt from silently carrying failure-injection branches or test-only indexes.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
-          "BIOSEQ_TEST_INDEXES": "ON"
+          "BIOSEQ_TEST_INDEXES": "ON",
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0"
         }
       },
       {

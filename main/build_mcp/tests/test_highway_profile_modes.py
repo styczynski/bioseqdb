@@ -212,6 +212,7 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
             {"build_only": True, "bench_flags": ["--debug"]},
             {"build_only": True, "test_flags": ["[index]"]},
             {"build_only": True, "bench_e2e_config": "config.json"},
+            {"build_only": True, "sql_guardrail_request_json": "{}"},
             {
                 "build_only": True,
                 "postgres_error_safety_review_waiver_json": "{}",
@@ -225,7 +226,7 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
             server,
             "_ensure_build_worker_timesharing_policy",
         ), mock.patch.object(server, "_load_state") as load_state:
-            for mode in PROFILE_MODES:
+            for mode in sorted(server.FIXED_BUILD_ONLY_MODES):
                 for request in invalid_requests:
                     with self.subTest(mode=mode, request=request):
                         self.assertEqual(
