@@ -33,6 +33,14 @@ std::string explain_target_sql() {
         kTable);
 }
 
+std::string explain_highway_target_sql() {
+    return fmt::format(
+        "SELECT pk, seq0, bioseq.edit(pk) AS edit_distance FROM {} "
+        "WHERE mmsearch(seq0, "
+        "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32));",
+        kTable);
+}
+
 void configure_highway_simd_pipeline(
         const connection_test_context& ctx) {
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
@@ -560,7 +568,8 @@ TEST_CASE("DOC0398 plain EXPLAIN reports the complete Highway dispatch plan",
     seed_small_bioseq_column(ctx, kTable);
     configure_highway_simd_pipeline(ctx);
 
-    const auto plan = explain_text<false>(ctx, explain_target_sql());
+    const auto plan = explain_text<false>(
+        ctx, explain_highway_target_sql());
     const auto planned = find_explain_property(
         plan, "Highway Planned Architecture");
     const auto supported = find_explain_property(
@@ -613,7 +622,8 @@ TEST_CASE("DOC0398 EXPLAIN ANALYZE reports the executed Highway binding",
     seed_small_bioseq_column(ctx, kTable);
     configure_highway_simd_pipeline(ctx);
 
-    const auto plan = explain_text<true>(ctx, explain_target_sql());
+    const auto plan = explain_text<true>(
+        ctx, explain_highway_target_sql());
     const auto planned = find_explain_property(
         plan, "Highway Planned Architecture");
     const auto executed = find_explain_property(
@@ -644,7 +654,8 @@ TEST_CASE("DOC0398 BatchJoin and PerRow EXPLAIN own every selected Highway stage
         "(1, 'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4',32));");
 
     const std::string batch_join_sql = fmt::format(
-        "SELECT q.id, t.pk FROM {} AS t "
+        "SELECT q.id, t.pk, bioseq.edit(t.pk) AS edit_distance "
+        "FROM {} AS t "
         "JOIN test_explain_highway_join_query AS q "
         "ON mmsearch(t.seq0, q.seq);",
         target);
@@ -652,18 +663,23 @@ TEST_CASE("DOC0398 BatchJoin and PerRow EXPLAIN own every selected Highway stage
         ctx, "VERBOSE, COSTS OFF", batch_join_sql);
     REQUIRE(plan_contains(batch_join, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(batch_join, "Bioseq Batch ABI Version: 3"));
+    REQUIRE(plan_contains(
+        batch_join, "Bioseq Match Placeholder Sites: 1"));
     REQUIRE_FALSE(plan_contains(
         batch_join, "Bioseq Mmsearch Ownership: per-row recipe"));
     require_complete_generic_highway_pipeline(batch_join);
 
     const std::string per_row_sql = fmt::format(
-        "SELECT q.id, t.pk FROM {} AS t "
+        "SELECT q.id, t.pk, bioseq.edit(t.pk) AS edit_distance "
+        "FROM {} AS t "
         "JOIN test_explain_highway_join_query AS q "
         "ON mmsearch(t.seq0[0:], q.seq[0:]);",
         target);
     const auto per_row = explain_with_options(
         ctx, "VERBOSE, COSTS OFF", per_row_sql);
     REQUIRE(plan_contains(per_row, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(
+        per_row, "Bioseq Match Placeholder Sites: 1"));
     REQUIRE(plan_contains(
         per_row, "Bioseq Mmsearch Ownership: per-row recipe"));
     require_complete_generic_highway_pipeline(per_row);
@@ -800,7 +816,8 @@ TEST_CASE("DOC0398 every runnable Highway target preserves public query results"
         CAPTURE(target, target_name);
 
         REQUIRE(query_rows(ctx, public_sql) == baseline_rows);
-        const auto plan = explain_text<true>(ctx, explain_target_sql());
+        const auto plan = explain_text<true>(
+            ctx, explain_highway_target_sql());
         const auto planned = find_explain_property(
             plan, "Highway Planned Architecture");
         const auto executed = find_explain_property(
@@ -821,7 +838,8 @@ TEST_CASE("EXPLAIN FORMAT JSON owns one complete Highway dispatch object",
     seed_small_bioseq_column(ctx, kTable);
     configure_highway_simd_pipeline(ctx);
 
-    const std::string json = explain_json(ctx, explain_target_sql());
+    const std::string json = explain_json(
+        ctx, explain_highway_target_sql());
 
     REQUIRE_FALSE(json.empty());
     // BioseqScan and the Custom-Scan node-type string must both appear.
@@ -857,7 +875,8 @@ TEST_CASE("DOC0398 structured plan omits an execution target before ANALYZE",
     seed_small_bioseq_column(ctx, kTable);
 
     const auto rows = explain_with_options(
-        ctx, "FORMAT JSON, VERBOSE, COSTS OFF", explain_target_sql());
+        ctx, "FORMAT JSON, VERBOSE, COSTS OFF",
+        explain_highway_target_sql());
     const std::string json = plan_document(rows);
 
     REQUIRE(count_occurrences(
