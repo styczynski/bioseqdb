@@ -192,85 +192,75 @@ inline void verify_template_flatten_separation() {
             },
         },
     };
-    const auto scan = [](
-                          const std::string_view name,
-                          const std::string_view source) {
-        return clang_structural::scan_token_slice(
-            std::filesystem::path{std::string{name}}, source);
-    };
-
-    std::vector<clang_structural::translation_unit> neutral{
-        scan(
+    const source_spec& source = inventory.sources.front();
+    validate_highway_source_policy(
+        clang_structural::scan_token_slice(
             "fixture_highway_source.cppm",
             "export module bioseq.highway.sources.fixture;\n"
-            "import bioseq.highway.dispatch_contract;\n"),
-        scan(
-            "highway_dispatch_contract.cppm",
-            "export module bioseq.highway.dispatch_contract;\n"),
-    };
-    validate_template_flatten_separation(inventory, neutral);
-
-    std::vector<clang_structural::translation_unit> direct_selector{
-        scan(
-            "fixture_highway_source.cppm",
-            "export module bioseq.highway.sources.fixture;\n"
-            "import bioseq.scheduler.dispatch_processor:typed_flat_selector;\n"),
-        scan(
-            "typed_flat_selector.cppm",
-            "module bioseq.scheduler.dispatch_processor:typed_flat_selector;\n"),
-    };
-    require_rejected(
-        [&] {
-            validate_template_flatten_separation(
-                inventory, direct_selector);
-        },
-        "a direct typed scheduler selector provider is rejected");
-
-    std::vector<clang_structural::translation_unit> transitive_api{
-        scan(
-            "fixture_highway_source.cppm",
-            "export module bioseq.highway.sources.fixture;\n"
-            "import fixture.neutral_bridge;\n"),
-        scan(
-            "neutral_bridge.cppm",
-            "export module fixture.neutral_bridge;\n"
-            "import bioseq.scheduler.dispatch_processor:typed_flat_api;\n"),
-        scan(
-            "typed_flat_api.cppm",
-            "module bioseq.scheduler.dispatch_processor:typed_flat_api;\n"),
-    };
-    require_rejected(
-        [&] {
-            validate_template_flatten_separation(inventory, transitive_api);
-        },
-        "a transitive typed scheduler API provider is rejected");
+            "import bioseq.highway.dispatch_contract;\n"));
+    validate_highway_direct_import(
+        inventory, source, inventory.contract_module);
 
     constexpr std::array policy_attributes{
         std::string_view{"bioseq::template_flatten"},
         std::string_view{"bioseq::template_flatten_when"},
         std::string_view{"bioseq::template_flatten_entry"},
-        std::string_view{"bioseq::template_flatten_provenance"},
     };
     for (const std::string_view attribute : policy_attributes) {
-        const std::string marked_provider =
-            "export module fixture.marked_bridge;\n[["
+        const std::string marked_source =
+            "export module bioseq.highway.sources.fixture;\n[["
             + std::string{attribute}
             + "(\"shape\", \"root\")]]\nint marked_value;\n";
         require_rejected(
             [&] {
-                std::vector<clang_structural::translation_unit>
-                    transitive_policy{
-                        scan(
-                            "fixture_highway_source.cppm",
-                            "export module bioseq.highway.sources.fixture;\n"
-                            "import fixture.marked_bridge;\n"),
-                        scan("marked_bridge.cppm", marked_provider),
-                    };
-                validate_template_flatten_separation(
-                    inventory, transitive_policy);
+                validate_highway_source_policy(
+                    clang_structural::scan_token_slice(
+                        "fixture_highway_source.cppm", marked_source));
             },
-            "a transitive template-flatten structural policy attribute is rejected");
+            "a registered Highway source rejects template-flatten policy "
+            "attributes");
     }
+
+    const std::array forbidden_providers{
+        std::string{"bioseq.codegen.inputs.dispatch_processor_typed"},
+        inventory.dispatch_module + ":typed_flat_api",
+        inventory.dispatch_module + ":typed_flat_selector",
+    };
+    for (const std::string& provider : forbidden_providers) {
+        require_rejected(
+            [&] {
+                validate_highway_direct_import(
+                    inventory, source, provider);
+            },
+            "a direct typed scheduler provider import is rejected");
+
+        clang_structural::prepared_compilation_validation prepared{
+            .modules = {
+                clang_structural::preparation_module_identity{
+                    .module_name = inventory.contract_module,
+                },
+                clang_structural::preparation_module_identity{
+                    .module_name = provider,
+                },
+            },
+        };
+        require_rejected(
+            [&] {
+                validate_highway_prepared_closure(inventory, prepared);
+            },
+            "an exact forbidden provider is rejected from the transitive "
+            "PREPARE closure");
+    }
+
+    validate_highway_prepared_closure(
+        inventory,
+        clang_structural::prepared_compilation_validation{
+            .modules = {
+                clang_structural::preparation_module_identity{
+                    .module_name = inventory.contract_module,
+                },
+            },
+        });
 }
 
 /// Cover owner-scoped slot lookup, overload/template names, and misspellings.
