@@ -199,10 +199,17 @@ inline void render_imports(
         throw std::runtime_error(
             "record/enum/alias probe name range is outside its declaration head");
     }
+    const std::size_t insertion_offset =
+        declaration.kind == clang_structural::declaration_kind::alias
+        ? declaration.name_range.end.byte_offset
+        : declaration.name_range.begin.byte_offset;
     edits.push_back(source_edit{
-        .begin_byte = declaration.name_range.begin.byte_offset,
-        .end_byte = declaration.name_range.begin.byte_offset,
-        .replacement = provenance_attribute(declaration, coordinate) + " ",
+        .begin_byte = insertion_offset,
+        .end_byte = insertion_offset,
+        .replacement = declaration.kind
+                == clang_structural::declaration_kind::alias
+            ? " " + provenance_attribute(declaration, coordinate)
+            : provenance_attribute(declaration, coordinate) + " ",
         .provenance_id = declaration.provenance_id,
         .purpose = "place record/enum/alias probe provenance",
     });
