@@ -3097,6 +3097,18 @@ add_dependencies(
   bioseq_sql_final_production
   bioseq_sql_final_test_indexes)
 
+# The raw compile database names generated SQL module providers before their
+# source files exist on a fresh tree.  Template-flatten PREPARE recursively
+# scans the scheduler primary, so order its dependency-only scan after the
+# active SQL profile has materialized the complete provider set.  Append the
+# concrete stamp as a file dependency: a target-only edge would allow Ninja to
+# run the two custom commands concurrently.
+add_custom_command(
+  OUTPUT
+    "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}/pcm/metadata/prepare_compile_commands.json"
+  APPEND
+  DEPENDS "${BIOSEQ_SQL_GENERATED_STAMP}")
+
 # The production determinism gate regenerates the complete SUPPORT/CORE/FINAL
 # artifact closure from canonical, reversed, and deterministically shuffled
 # owner inventories.  Each process has a distinct working/output root and a
