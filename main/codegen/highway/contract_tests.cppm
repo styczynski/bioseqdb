@@ -572,6 +572,45 @@ inline void verify_generated_closure() {
         "the artifact manifest records the complete generated topology");
 }
 
+inline void verify_type_only_target_source() {
+    generation_plan plan = two_target_plan();
+    const source_spec foundation{
+        .key = "foundation",
+        .path = "fixture_highway_foundation.cppm",
+        .module_name = "bioseq.highway.sources.foundation",
+        .partition = "foundation",
+        .family = "common",
+    };
+    plan.source_inventory.sources.push_back(foundation);
+    plan.extracted_sources.push_back(extracted_source{
+        .source = foundation,
+        .enclosing_namespace = "bioseq::fixture",
+        .body =
+            "template<class Value> struct foundation { using type = Value; };\n",
+        .body_first_line = 5u,
+        .source_sha256 =
+            "33333333333333333333333333333333"
+            "33333333333333333333333333333333",
+    });
+
+    const generation_result generated = render_generation(plan);
+    std::size_t type_only_partitions = 0u;
+    for (const generated_artifact& artifact : generated.artifacts) {
+        if (artifact.kind != artifact_kind::partition
+            || artifact.source_key != foundation.key) {
+            continue;
+        }
+        ++type_only_partitions;
+        require(
+            artifact.content.contains("struct foundation")
+                && !artifact.content.contains("HWY_ATTR"),
+            "a type-only target source is emitted without invented callables");
+    }
+    require(
+        type_only_partitions == plan.target_inventory.targets.size(),
+        "each fixed target receives the type-only dependency partition");
+}
+
 inline void verify_shared_publication_envelope() {
     const generation_plan plan = two_target_plan();
     const generation_result generated = render_generation(plan);
@@ -747,6 +786,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_complete_table_target_policy();
     contract_detail::verify_external_domain_topology_contract();
     contract_detail::verify_generated_closure();
+    contract_detail::verify_type_only_target_source();
     contract_detail::verify_shared_publication_envelope();
     contract_detail::verify_typed_alignment_binder();
 }

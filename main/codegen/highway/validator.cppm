@@ -1032,11 +1032,6 @@ inline void validate_inventories(
                 .kind = detail::callable_kind_name(callable.kind),
             });
         }
-        if (extracted.callables.empty()) {
-            throw std::runtime_error(
-                source.path.string()
-                + ": marked target namespace contains no proven callable definition");
-        }
         std::ranges::sort(
             extracted.callables,
             {},
