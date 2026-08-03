@@ -1454,6 +1454,8 @@ class ModeDefinition:
     uses_private_cluster: bool = False
     """Optional mode-wide wall-clock ceiling, including build and cleanup."""
     hard_timeout_min: Optional[float] = None
+    """True for fixed local compile gates that must never execute runtime work."""
+    requires_build_only: bool = False
 
     def __post_init__(self) -> None:
         if self.preset_family not in {
@@ -1466,6 +1468,12 @@ class ModeDefinition:
                 "PostgreSQL extension")
         if self.hard_timeout_min is not None and self.hard_timeout_min <= 0:
             raise ValueError("mode hard_timeout_min must be positive")
+        if self.requires_build_only and (
+                self.commands or self.post_build_targets
+                or self.install_extension):
+            raise ValueError(
+                "fixed build-only modes cannot own runtime commands, "
+                "post-build targets, or extension installation")
 
     @property
     def verb_is(self) -> str:
@@ -1624,6 +1632,48 @@ MODES: Dict[str, ModeDefinition] = {
             "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
             "BIOSEQ_BUILD_WEBSITE": "OFF",
         },
+    ),
+    "highway-profile1": ModeDefinition(
+        lock_group="tests",
+        expected_duration_min=120.0,
+        build_only_expected_duration_min=120.0,
+        label="Highway typed-scheduler profile-1 compile gate",
+        docs=(
+            "Build the production extension in the isolated optimization-level-1 "
+            "test tree, proving the 14-unit typed-scheduler materialization profile"
+        ),
+        is_verb_plular=False,
+        targets=["postgresql_bioseq"],
+        commands=[],
+        preset_override="test-opt-level1",
+        preset_family="test",
+        required_cache_variables={
+            "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "1",
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+            "BIOSEQ_BUILD_WEBSITE": "OFF",
+        },
+        requires_build_only=True,
+    ),
+    "highway-profile2": ModeDefinition(
+        lock_group="tests",
+        expected_duration_min=180.0,
+        build_only_expected_duration_min=180.0,
+        label="Highway typed-scheduler profile-2 compile gate",
+        docs=(
+            "Build the production extension in the isolated optimization-level-2 "
+            "test tree, proving the 56-unit typed-scheduler materialization profile"
+        ),
+        is_verb_plular=False,
+        targets=["postgresql_bioseq"],
+        commands=[],
+        preset_override="test-opt-level2",
+        preset_family="test",
+        required_cache_variables={
+            "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "2",
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+            "BIOSEQ_BUILD_WEBSITE": "OFF",
+        },
+        requires_build_only=True,
     ),
     "bench": ModeDefinition(
         lock_group="bench",
@@ -1911,6 +1961,9 @@ MODES: Dict[str, ModeDefinition] = {
     ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
+FIXED_BUILD_ONLY_MODES: frozenset[str] = frozenset(
+    mode for mode, details in MODES.items()
+    if details.requires_build_only)
 # These modes intentionally depend on local-only build trees or host resources.
 # Keep them out of the remote schema and reject direct remote-run calls before
 # any provisioning, synchronization, or worker dispatch occurs.
@@ -1918,6 +1971,7 @@ REMOTE_RUN_REJECTED_MODES: Set[str] = {
     "website",
     POSTGRES_ERROR_SAFETY_MODE,
     PACKAGE_LINUX_MODE,
+    *FIXED_BUILD_ONLY_MODES,
 }
 REMOTE_RUN_BUILD_MODES: tuple[str, ...] = tuple(sorted(
     VALID_MODES - REMOTE_RUN_REJECTED_MODES))
@@ -2019,11 +2073,19 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
 
 
 def get_modes_short_documentation() -> str:
-    modes_list_str = ", ".join(
-        f"'{mode}' (~{int(MODES[mode].expected_duration_min)} min and "
-        f"~{int(MODES[mode].build_only_expected_duration_min)} min for build-only)"
-        for mode in sorted(VALID_MODES)
-    )
+    entries: list[str] = []
+    for mode in sorted(VALID_MODES):
+        details = MODES[mode]
+        if details.requires_build_only:
+            entries.append(
+                f"'{mode}' (~{int(details.build_only_expected_duration_min)} "
+                "min, local build-only only)")
+            continue
+        entries.append(
+            f"'{mode}' (~{int(details.expected_duration_min)} min and "
+            f"~{int(details.build_only_expected_duration_min)} min for "
+            "build-only)")
+    modes_list_str = ", ".join(entries)
     return f"Modes: {modes_list_str}"
 
 
@@ -8523,6 +8585,20 @@ def _run_build_worker(mode: str, build_only: bool = False,
     if not entry:
         _log(f"worker for {mode}: no state entry, exiting")
         return 1
+    mode_details = MODES[mode]
+    if mode_details.requires_build_only and (
+        not build_only
+        or debug
+        or bench_flags
+        or test_flags
+        or bench_e2e_config
+        or sql_guardrail_request_json
+        or postgres_error_safety_review_waiver_json
+    ):
+        _log(
+            f"{mode} worker requires build_only=true and rejects every "
+            "runtime-selection input")
+        return 1
     if mode == PACKAGE_LINUX_MODE:
         if (
             build_only or debug or bench_flags or test_flags
@@ -8548,7 +8624,6 @@ def _run_build_worker(mode: str, build_only: bool = False,
             "postgres-error-safety mode")
         return 1
 
-    mode_details = MODES[mode]
     started_at = float(entry["started_at"])
     log_path = Path(entry["log_file"])
     mode_timeout_sec = (
@@ -10228,6 +10303,18 @@ def tool_start_build(mode: str, build_only: bool = False,
                 f"{', '.join(VALID_MODES)}.")
 
     mode_details = MODES[mode]
+    if mode_details.requires_build_only and (
+        not build_only
+        or debug_supplied or debug
+        or filter_supplied or bench_filter is not None
+        or debug_report_supplied or debug_report
+        or bench_e2e_config is not None
+        or postgres_error_safety_review_waiver is not None
+    ):
+        return (
+            f"{mode} is a fixed local compile gate: it requires "
+            "build_only=true and accepts no debug, filter, debug_report, "
+            "bench_e2e_config, or review-waiver inputs.")
     if mode == PACKAGE_LINUX_MODE and (
         build_only
         or debug_supplied or debug
@@ -10556,6 +10643,19 @@ def _run_build_inline(mode: str, build_only: bool = False,
         return 2
     if mode not in VALID_MODES:
         _log(f"--run-build-sync: invalid mode '{mode}'")
+        return 2
+    mode_details = MODES[mode]
+    if mode_details.requires_build_only and (
+        not build_only
+        or debug
+        or bench_flags
+        or test_flags
+        or bench_e2e_config
+        or postgres_error_safety_review_waiver_json
+    ):
+        _log(
+            f"--run-build-sync: {mode} requires build_only=true and "
+            "rejects every runtime-selection input")
         return 2
     if mode == PACKAGE_LINUX_MODE and (
         build_only or debug or bench_flags or test_flags
@@ -13275,7 +13375,12 @@ TOOL_DEFINITIONS = [
                 },
                 "build_only": {
                    "type": "boolean",
-                   "description": "Do you want only to build the target, but do not actually run any commands (like benchmarks, tests etc.). Useful for faster iteration to check if the code just compiles correctly.",
+                   "description": (
+                       "Build the targets without running tests, benchmarks, "
+                       "or other runtime commands. Useful for a fast compile "
+                       "check. Required for fixed local compile-gate modes: "
+                       f"{', '.join(sorted(FIXED_BUILD_ONLY_MODES))}."
+                   ),
                    "default": False,
                 },
                 "debug": {

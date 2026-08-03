@@ -172,6 +172,16 @@
         }
       },
       {
+        "name": "test-opt-level1",
+        "inherits": "test-opt",
+        "displayName": "Optimised level-1 qualification config",
+        "description": "Isolated unit/integration qualification tree for the 14-unit typed-scheduler profile. The checked-in everyday optimization level remains zero.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "1"
+        }
+      },
+      {
         "name": "test-opt-level2",
         "inherits": "test-opt",
         "displayName": "Optimised level-2 qualification config",

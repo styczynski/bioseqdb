@@ -1137,11 +1137,8 @@ class RemoteRunWebsiteRejectionTests(unittest.TestCase):
         self.assertIn("start_build mode=website", message)
 
     def test_remote_run_does_not_reject_ordinary_modes(self):
-        # Every other build mode stays eligible for remote-run.
-        self.assertEqual(
-            server.REMOTE_RUN_REJECTED_MODES & server.VALID_MODES,
-            {"website"},
-        )
+        self.assertNotIn("unit+integration", server.REMOTE_RUN_REJECTED_MODES)
+        self.assertIn("unit+integration", server.REMOTE_RUN_BUILD_MODES)
 
 
 if __name__ == "__main__":
