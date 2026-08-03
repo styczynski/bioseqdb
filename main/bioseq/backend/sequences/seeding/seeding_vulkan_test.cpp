@@ -496,7 +496,7 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
 
     auto cpu_slab = ch::make_arena_slab<Anchor>();
     cpu_slab.reserve(64);
-    ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits<MinimapSketchData>(
+    ::bioseq::simd::collect_seed_hits<MinimapSketchData>(
         std::span<const MinimapSketchData>{query.data(), query.size()},
         idx, query_len, max_occ, kmer_size, cpu_slab);
 
@@ -575,7 +575,7 @@ TEST_CASE("vulkan seeding: non-fused shader consumes sorted-dense resident with 
     context::installed_context_scope install{ctx};
     auto cpu_slab = ch::make_arena_slab<Anchor>();
     cpu_slab.reserve(64u);
-    ::bioseq::simd::HWY_NAMESPACE::collect_seed_hits<MinimapSketchData>(
+    ::bioseq::simd::collect_seed_hits<MinimapSketchData>(
         std::span<const MinimapSketchData>{query.data(), query.size()},
         idx, query_len, max_occ, kmer_size, cpu_slab);
 

@@ -590,7 +590,7 @@ struct VectorReplayMinimizerProducer {
         bioseq::indexing::kLegacyMinimapV1SchemeIdentity;
     bioseq::indexing::MinimizerProducerBackendIdentity producer_backend =
         bioseq::indexing::minimizer_producer_backend_identity_for_backend(
-            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
+            bioseq::simd::MinimizerSketchBackend::Scalar);
 
     explicit VectorReplayMinimizerProducer(
             std::span<const std::pair<std::uint64_t, std::uint64_t>> pairs,
@@ -608,9 +608,9 @@ struct VectorReplayMinimizerProducer {
                       minimizer_producer_backend_identity_for_backend(
                           scheme_identity == bioseq::indexing::
                                   kPaperNtHashU32R7SumV1SchemeIdentity
-                              ? bioseq::simd::HWY_NAMESPACE::
+                              ? bioseq::simd::
                                   MinimizerSketchBackend::PaperNtHashSimd
-                              : bioseq::simd::HWY_NAMESPACE::
+                              : bioseq::simd::
                                   MinimizerSketchBackend::Scalar)) {
         events.reserve(pairs.size());
         for (const auto& pair : pairs) {
@@ -839,7 +839,7 @@ struct DriftingReplayMinimizerProducer {
     producer_backend_identity() const noexcept {
         return bioseq::indexing::
             minimizer_producer_backend_identity_for_backend(
-                bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
+                bioseq::simd::MinimizerSketchBackend::Scalar);
     }
 
     [[nodiscard]] std::expected<void, bioseq::indexing::MinimizerGenerationWireError>
@@ -892,8 +892,8 @@ struct BoundaryIdentityDriftingProducer {
     producer_backend_identity() const noexcept {
         const auto backend = axis == IdentityDriftAxis::backend
                 && scan_count >= drift_after_scan
-            ? bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::ExactSimd
-            : bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+            ? bioseq::simd::MinimizerSketchBackend::ExactSimd
+            : bioseq::simd::MinimizerSketchBackend::Scalar;
         return bioseq::indexing::
             minimizer_producer_backend_identity_for_backend(backend);
     }
@@ -1430,9 +1430,9 @@ struct Grouped32ReaderFixture {
             minimizer_producer_backend_identity_for_backend(
                 scheme == bioseq::indexing::
                     kPaperNtHashU32R7SumV1SchemeIdentity
-                    ? bioseq::simd::HWY_NAMESPACE::
+                    ? bioseq::simd::
                         MinimizerSketchBackend::PaperNtHashSimd
-                    : bioseq::simd::HWY_NAMESPACE::
+                    : bioseq::simd::
                         MinimizerSketchBackend::ExactSimd);
     }
     VectorReplayMinimizerProducer producer{
