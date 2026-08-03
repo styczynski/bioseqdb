@@ -1681,13 +1681,14 @@ MODES: Dict[str, ModeDefinition] = {
         build_only_expected_duration_min=30.0,
         label="Local Homebrew GCC 16 generated-module canary",
         docs=(
-            "Use the ordinary Darwin Clang generator to emit the fixed 2x2 "
-            "namespace-materialization closure, then compile and link its API, "
-            "selector, four implementation units, primary, driver, and main in "
-            "an isolated no-vcpkg Ninja sub-build with an authenticated paired "
-            "Homebrew gcc/g++ >= 16.1 and libstdc++.modules.json. This proves "
-            "only the GCC module/attribute/generated-IU boundary, not the full "
-            "external-api build or production DSO."
+            "Compile and run a generated-style two-target Highway closure with "
+            "neutral imported target primaries, private fixed-target vector "
+            "partitions/binders, and the sole HWY_EXPORT/HWY_DYNAMIC_DISPATCH "
+            "registry in an isolated no-vcpkg-toolchain Ninja sub-build with an "
+            "authenticated paired Homebrew gcc/g++ >= 16.1, "
+            "libstdc++.modules.json, and sealed Highway headers. This proves "
+            "only the GCC Highway module/attribute/dispatch boundary, not the "
+            "full external-api build or production DSO."
         ),
         is_verb_plular=False,
         targets=["bioseq_highway_gcc_canary"],

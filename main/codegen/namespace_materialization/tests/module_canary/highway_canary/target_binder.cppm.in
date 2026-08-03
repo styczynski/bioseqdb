@@ -1,0 +1,34 @@
+module;
+
+// This policy is byte-identical in every Highway-consuming canary unit.
+#define HWY_COMPILE_ALL_ATTAINABLE 1
+#define HWY_DISABLED_TARGETS (~(@SIMD_TARGET_TOKEN@ | HWY_EMU128))
+#define HWY_HEADER_ONLY 1
+#define HWY_STATIC_DEFINE 1
+#define TOOLCHAIN_MISS_SYS_AUXV_H 1
+#define TOOLCHAIN_MISS_ASM_HWCAP_H 1
+#include <hwy/detect_targets.h>
+#undef HWY_TARGET
+#define HWY_TARGET @TARGET_TOKEN@
+#include <hwy/highway.h>
+
+module @TARGET_MODULE@;
+
+import bioseq.highway.gcc_canary.contract;
+import :kernel;
+
+namespace bioseq::highway_gcc_canary::HWY_NAMESPACE {
+
+HWY_ATTR const TargetBinding* BindHighwayTarget() noexcept {
+  static const KernelTable kernels{
+      .add_one = &AddOne,
+  };
+  static const TargetBinding binding{
+      .target = HWY_TARGET,
+      .target_name = hwy::TargetName(HWY_TARGET),
+      .kernels = &kernels,
+  };
+  return binding.complete() ? &binding : nullptr;
+}
+
+}  // namespace bioseq::highway_gcc_canary::HWY_NAMESPACE

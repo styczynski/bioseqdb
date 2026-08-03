@@ -1,0 +1,42 @@
+module;
+
+// This policy is byte-identical in every Highway-consuming canary unit.
+#define HWY_COMPILE_ALL_ATTAINABLE 1
+#define HWY_DISABLED_TARGETS (~(@SIMD_TARGET_TOKEN@ | HWY_EMU128))
+#define HWY_HEADER_ONLY 1
+#define HWY_STATIC_DEFINE 1
+#define TOOLCHAIN_MISS_SYS_AUXV_H 1
+#define TOOLCHAIN_MISS_ASM_HWCAP_H 1
+#include <hwy/detect_targets.h>
+#undef HWY_TARGET
+#define HWY_TARGET @TARGET_TOKEN@
+#include <hwy/highway.h>
+
+#include <cstdint>
+
+module @TARGET_MODULE@:kernel;
+
+import bioseq.highway.gcc_canary.contract;
+
+namespace bioseq::highway_gcc_canary::HWY_NAMESPACE {
+namespace hn = hwy::HWY_NAMESPACE;
+
+/** A real vector load/add/store kernel whose ABI remains target-neutral. */
+HWY_ATTR void AddOne(
+    const std::uint32_t* input,
+    std::uint32_t* output,
+    const std::uint32_t count) noexcept {
+  const hn::ScalableTag<std::uint32_t> d;
+  const auto lanes = static_cast<std::uint32_t>(hn::Lanes(d));
+  const auto one = hn::Set(d, std::uint32_t{1});
+  std::uint32_t index = 0;
+  for (; lanes <= count - index; index += lanes) {
+    const auto values = hn::LoadU(d, input + index);
+    hn::StoreU(hn::Add(values, one), d, output + index);
+  }
+  for (; index < count; ++index) {
+    output[index] = input[index] + std::uint32_t{1};
+  }
+}
+
+}  // namespace bioseq::highway_gcc_canary::HWY_NAMESPACE

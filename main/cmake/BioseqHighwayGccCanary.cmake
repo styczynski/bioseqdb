@@ -63,13 +63,40 @@ function(_bioseq_highway_gcc_canary_require_homebrew_root root)
     "authenticated Homebrew Cellar; selected ${_root_real}")
 endfunction()
 
+function(_bioseq_highway_gcc_canary_header_digest output include_root)
+  if(NOT IS_ABSOLUTE "${include_root}"
+      OR NOT EXISTS "${include_root}/hwy/highway.h"
+      OR NOT EXISTS "${include_root}/hwy/targets.h")
+    message(FATAL_ERROR
+      "Highway GCC canary requires an absolute complete Highway include root: "
+      "${include_root}")
+  endif()
+  file(REAL_PATH "${include_root}" _include_root)
+  file(GLOB_RECURSE _headers LIST_DIRECTORIES FALSE
+    "${_include_root}/hwy/*.h")
+  list(SORT _headers)
+  if(NOT _headers)
+    message(FATAL_ERROR
+      "Highway GCC canary found no headers beneath ${_include_root}/hwy")
+  endif()
+  set(_material "bioseq-highway-gcc-canary-headers-v1\n")
+  foreach(_header IN LISTS _headers)
+    cmake_path(RELATIVE_PATH _header
+      BASE_DIRECTORY "${_include_root}" OUTPUT_VARIABLE _relative)
+    file(SHA256 "${_header}" _header_sha256)
+    string(APPEND _material "${_relative}\t${_header_sha256}\n")
+  endforeach()
+  string(SHA256 _digest "${_material}")
+  set(${output} "${_digest}" PARENT_SCOPE)
+endfunction()
+
 function(bioseq_add_highway_gcc_canary)
   cmake_parse_arguments(PARSE_ARGV 0 ARG
     ""
-    "TARGET;GENERATION_TARGET;GENERATED_ROOT;PRIMARY;DRIVER;MAIN"
+    "TARGET;SOURCE_ROOT;HIGHWAY_INCLUDE_ROOT"
     "")
   foreach(_required IN ITEMS
-      TARGET GENERATION_TARGET GENERATED_ROOT PRIMARY DRIVER MAIN)
+      TARGET SOURCE_ROOT HIGHWAY_INCLUDE_ROOT)
     if(NOT DEFINED ARG_${_required} OR "${ARG_${_required}}" STREQUAL "")
       message(FATAL_ERROR
         "bioseq_add_highway_gcc_canary requires ${_required}")
@@ -84,19 +111,17 @@ function(bioseq_add_highway_gcc_canary)
     message(FATAL_ERROR
       "Highway GCC canary target already exists: ${ARG_TARGET}")
   endif()
-  if(NOT TARGET "${ARG_GENERATION_TARGET}")
+  if(NOT IS_ABSOLUTE "${ARG_SOURCE_ROOT}"
+      OR NOT EXISTS "${ARG_SOURCE_ROOT}/contract.cppm"
+      OR NOT EXISTS "${ARG_SOURCE_ROOT}/target_primary.cppm.in")
     message(FATAL_ERROR
-      "Highway GCC canary generation target does not exist: "
-      "${ARG_GENERATION_TARGET}")
+      "Highway GCC canary SOURCE_ROOT must own the complete source/template "
+      "closure: ${ARG_SOURCE_ROOT}")
   endif()
-  foreach(_checked_source IN ITEMS PRIMARY DRIVER MAIN)
-    if(NOT IS_ABSOLUTE "${ARG_${_checked_source}}"
-        OR NOT EXISTS "${ARG_${_checked_source}}")
-      message(FATAL_ERROR
-        "Highway GCC canary ${_checked_source} must be an existing absolute "
-        "path: ${ARG_${_checked_source}}")
-    endif()
-  endforeach()
+  file(REAL_PATH "${ARG_SOURCE_ROOT}" _canary_source_root)
+  file(REAL_PATH "${ARG_HIGHWAY_INCLUDE_ROOT}" _highway_include_root)
+  _bioseq_highway_gcc_canary_header_digest(
+    _highway_header_digest "${_highway_include_root}")
 
   _bioseq_highway_gcc_canary_validate_host(
     HOST_SYSTEM "${CMAKE_HOST_SYSTEM_NAME}"
@@ -153,10 +178,10 @@ function(bioseq_add_highway_gcc_canary)
       "-DBIOSEQ_GCC_CANARY_SOURCE=${_nested_source}"
       "-DBIOSEQ_GCC_CANARY_BUILD=${_nested_build}"
       "-DBIOSEQ_GCC_CANARY_OUTER_BINARY=${CMAKE_BINARY_DIR}"
-      "-DBIOSEQ_GCC_CANARY_GENERATED_ROOT=${ARG_GENERATED_ROOT}"
-      "-DBIOSEQ_GCC_CANARY_PRIMARY=${ARG_PRIMARY}"
-      "-DBIOSEQ_GCC_CANARY_DRIVER=${ARG_DRIVER}"
-      "-DBIOSEQ_GCC_CANARY_MAIN=${ARG_MAIN}"
+      "-DBIOSEQ_GCC_CANARY_CANARY_HELPER=${CMAKE_CURRENT_FUNCTION_LIST_FILE}"
+      "-DBIOSEQ_GCC_CANARY_CANARY_SOURCE_ROOT=${_canary_source_root}"
+      "-DBIOSEQ_GCC_CANARY_HIGHWAY_INCLUDE_ROOT=${_highway_include_root}"
+      "-DBIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST=${_highway_header_digest}"
       "-DBIOSEQ_GCC_CANARY_TOOLCHAIN_HELPER=${_toolchain_helper}"
       "-DBIOSEQ_GCC_CANARY_ROOT=${_gcc_root}"
       "-DBIOSEQ_GCC_CANARY_C=${_gcc_c}"
@@ -169,8 +194,7 @@ function(bioseq_add_highway_gcc_canary)
       "-DBIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256=${_gcc_module_sources_sha256}"
       -P "${_runner}"
     COMMENT
-      "Compiling generated namespace-materialization IUs with isolated Homebrew GCC 16"
+      "Compiling and running the imported-binder Highway canary with isolated Homebrew GCC 16"
     VERBATIM
     USES_TERMINAL)
-  add_dependencies("${ARG_TARGET}" "${ARG_GENERATION_TARGET}")
 endfunction()

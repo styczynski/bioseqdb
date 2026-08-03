@@ -1,0 +1,10 @@
+// Configure-generated target primary; intentionally Highway-free and neutral.
+export module @TARGET_MODULE@;
+
+import bioseq.highway.gcc_canary.contract;
+
+export namespace bioseq::highway_gcc_canary::@TARGET_NAMESPACE@ {
+
+[[nodiscard]] const TargetBinding* BindHighwayTarget() noexcept;
+
+}  // namespace bioseq::highway_gcc_canary::@TARGET_NAMESPACE@

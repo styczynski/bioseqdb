@@ -6,10 +6,10 @@ set(_required_inputs
   BIOSEQ_GCC_CANARY_SOURCE
   BIOSEQ_GCC_CANARY_BUILD
   BIOSEQ_GCC_CANARY_OUTER_BINARY
-  BIOSEQ_GCC_CANARY_GENERATED_ROOT
-  BIOSEQ_GCC_CANARY_PRIMARY
-  BIOSEQ_GCC_CANARY_DRIVER
-  BIOSEQ_GCC_CANARY_MAIN
+  BIOSEQ_GCC_CANARY_CANARY_HELPER
+  BIOSEQ_GCC_CANARY_CANARY_SOURCE_ROOT
+  BIOSEQ_GCC_CANARY_HIGHWAY_INCLUDE_ROOT
+  BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST
   BIOSEQ_GCC_CANARY_TOOLCHAIN_HELPER
   BIOSEQ_GCC_CANARY_ROOT
   BIOSEQ_GCC_CANARY_C
@@ -63,7 +63,8 @@ set(_identity_material
   "${BIOSEQ_GCC_CANARY_C_SHA256}\n"
   "${BIOSEQ_GCC_CANARY_CXX_SHA256}\n"
   "${BIOSEQ_GCC_CANARY_MODULES_SHA256}\n"
-  "${BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256}\n")
+  "${BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256}\n"
+  "${BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST}\n")
 string(SHA256 _identity "${_identity_material}")
 set(_identity_file "${BIOSEQ_GCC_CANARY_BUILD}/.bioseq-toolchain-identity")
 # The closure is deliberately tiny. Recreate it on every invocation so no
@@ -122,10 +123,10 @@ execute_process(
     "-DCMAKE_PROJECT_bioseq_highway_gcc_module_canary_INCLUDE_BEFORE:FILEPATH="
     "-DCMAKE_PREFIX_PATH:STRING="
     "-DCMAKE_CXX_MODULE_STD:BOOL=OFF"
-    "-DBIOSEQ_GCC_CANARY_GENERATED_ROOT:PATH=${BIOSEQ_GCC_CANARY_GENERATED_ROOT}"
-    "-DBIOSEQ_GCC_CANARY_PRIMARY:FILEPATH=${BIOSEQ_GCC_CANARY_PRIMARY}"
-    "-DBIOSEQ_GCC_CANARY_DRIVER:FILEPATH=${BIOSEQ_GCC_CANARY_DRIVER}"
-    "-DBIOSEQ_GCC_CANARY_MAIN:FILEPATH=${BIOSEQ_GCC_CANARY_MAIN}"
+    "-DBIOSEQ_GCC_CANARY_CANARY_HELPER:FILEPATH=${BIOSEQ_GCC_CANARY_CANARY_HELPER}"
+    "-DBIOSEQ_GCC_CANARY_CANARY_SOURCE_ROOT:PATH=${BIOSEQ_GCC_CANARY_CANARY_SOURCE_ROOT}"
+    "-DBIOSEQ_GCC_CANARY_HIGHWAY_INCLUDE_ROOT:PATH=${BIOSEQ_GCC_CANARY_HIGHWAY_INCLUDE_ROOT}"
+    "-DBIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST:STRING=${BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST}"
     "-DBIOSEQ_GCC_CANARY_TOOLCHAIN_HELPER:FILEPATH=${BIOSEQ_GCC_CANARY_TOOLCHAIN_HELPER}"
     "-DBIOSEQ_GCC_CANARY_ROOT:PATH=${BIOSEQ_GCC_CANARY_ROOT}"
     "-DBIOSEQ_GCC_CANARY_C:FILEPATH=${BIOSEQ_GCC_CANARY_C}"
@@ -148,6 +149,29 @@ execute_process(
     --verbose
   COMMAND_ERROR_IS_FATAL ANY)
 
+set(_canary_executable
+  "${BIOSEQ_GCC_CANARY_BUILD}/bin/bioseq_highway_gcc_module_canary")
+if(NOT EXISTS "${_canary_executable}")
+  message(FATAL_ERROR
+    "Highway GCC canary linked no executable at ${_canary_executable}")
+endif()
+execute_process(
+  COMMAND "${BIOSEQ_GCC_CANARY_CMAKE}" -E env
+    ${_sanitized_environment}
+    --
+    "${_canary_executable}"
+  OUTPUT_VARIABLE _canary_output
+  ERROR_VARIABLE _canary_error
+  COMMAND_ERROR_IS_FATAL ANY)
+string(STRIP "${_canary_output}" _canary_output)
+if(NOT _canary_output MATCHES
+    "^bioseq-highway-gcc-canary: first=[A-Z0-9_]+ second=EMU128 checksum=976$")
+  message(FATAL_ERROR
+    "Highway GCC canary returned malformed selection evidence: "
+    "stdout='${_canary_output}' stderr='${_canary_error}'")
+endif()
+
 message(STATUS
   "bioseq-highway-gcc-canary: linked isolated GCC ${BIOSEQ_GCC_CANARY_VERSION} "
-  "module canary; toolchain identity=${_identity}")
+  "module canary; ${_canary_output}; toolchain identity=${_identity}; "
+  "Highway headers=${BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST}")

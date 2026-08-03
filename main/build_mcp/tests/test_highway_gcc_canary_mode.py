@@ -75,7 +75,12 @@ class HighwayGccCanaryModeContractTest(unittest.TestCase):
         docs = server.MODES[MODE].docs
         self.assertIn("paired Homebrew gcc/g++ >= 16.1", docs)
         self.assertIn("libstdc++.modules.json", docs)
-        self.assertIn("only the GCC module/attribute/generated-IU boundary", docs)
+        self.assertIn("sole HWY_EXPORT/HWY_DYNAMIC_DISPATCH", docs)
+        self.assertIn("sealed Highway headers", docs)
+        self.assertIn(
+            "only the GCC Highway module/attribute/dispatch boundary",
+            docs,
+        )
         self.assertIn("not the full external-api build or production DSO", docs)
 
     def test_public_entry_rejects_runtime_and_debug_forms(self) -> None:

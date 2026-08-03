@@ -91,7 +91,7 @@
         "name": "highway-gcc-canary",
         "inherits": "bench-opt",
         "displayName": "Local Homebrew GCC 16 generated-module canary",
-        "description": "Opt-in Darwin build-only boundary proof: the normal Clang host generator emits the fixed 2x2 namespace-materialization closure, then an isolated no-vcpkg Ninja sub-build compiles and links it with authenticated Homebrew g++-16. This is not the full external-api or production DSO build.",
+        "description": "Opt-in Darwin build-only boundary proof: an isolated no-vcpkg-toolchain Ninja sub-build compiles, links, and runs a sealed two-target Highway imported-binder closure with authenticated Homebrew g++-16. This is not the full external-api or production DSO build.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "environment": {
           "CMAKE_NAMED_ENV_TYPE": "H"

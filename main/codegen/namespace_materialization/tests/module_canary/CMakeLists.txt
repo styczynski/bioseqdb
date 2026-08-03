@@ -91,17 +91,36 @@ set_target_properties(bioseq_namespace_materialization_module_canary PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 if(BIOSEQ_HIGHWAY_GCC_CANARY)
+  if(NOT TARGET hwy::hwy)
+    find_package(HWY 1.3.0 EXACT REQUIRED NO_MODULE)
+  endif()
+  _bioseq_highway_collect_target_usage(
+    _bioseq_gcc_canary_highway_include_dirs
+    _bioseq_gcc_canary_highway_definitions
+    _bioseq_gcc_canary_highway_compile_options)
+  set(_bioseq_gcc_canary_highway_include_root "")
+  foreach(_bioseq_gcc_canary_include_dir
+      IN LISTS _bioseq_gcc_canary_highway_include_dirs)
+    if(EXISTS "${_bioseq_gcc_canary_include_dir}/hwy/highway.h")
+      if(NOT _bioseq_gcc_canary_highway_include_root STREQUAL "")
+        message(FATAL_ERROR
+          "Highway GCC canary requires one unambiguous Highway header root")
+      endif()
+      set(_bioseq_gcc_canary_highway_include_root
+        "${_bioseq_gcc_canary_include_dir}")
+    endif()
+  endforeach()
+  if(_bioseq_gcc_canary_highway_include_root STREQUAL "")
+    message(FATAL_ERROR
+      "Highway GCC canary could not resolve hwy/highway.h from hwy::hwy")
+  endif()
   include(BioseqHighwayGccCanary)
   bioseq_add_highway_gcc_canary(
     TARGET bioseq_highway_gcc_canary
-    GENERATION_TARGET
-      "${_bioseq_namespace_materialization_canary_codegen}"
-    GENERATED_ROOT
-      "${_bioseq_namespace_materialization_canary_generated_root}"
-    PRIMARY "${_bioseq_namespace_materialization_canary_primary}"
-    DRIVER
-      "${_bioseq_namespace_materialization_canary_dir}/driver.cppm"
-    MAIN "${_bioseq_namespace_materialization_canary_dir}/main.cpp")
+    SOURCE_ROOT
+      "${_bioseq_namespace_materialization_canary_dir}/highway_canary"
+    HIGHWAY_INCLUDE_ROOT
+      "${_bioseq_gcc_canary_highway_include_root}")
 endif()
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)

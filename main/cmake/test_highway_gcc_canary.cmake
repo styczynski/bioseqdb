@@ -22,11 +22,11 @@ foreach(_checked IN ITEMS
 endforeach()
 file(READ "${_canary_module}" _canary_module_source)
 string(FIND "${_canary_module_source}"
-  "add_dependencies("
-  _generation_dependency_offset)
-if(_generation_dependency_offset EQUAL -1)
+  "_bioseq_highway_gcc_canary_header_digest"
+  _header_authentication_offset)
+if(_header_authentication_offset EQUAL -1)
   message(FATAL_ERROR
-    "Highway GCC canary must explicitly depend on Clang-host generation")
+    "Highway GCC canary must authenticate its complete Highway header closure")
 endif()
 
 function(_expect_script_failure name source expected)
@@ -171,15 +171,13 @@ file(READ "${_nested_project}" _nested)
 foreach(_required_text IN ITEMS
     "CMAKE_CXX_MODULE_STD OFF"
     "CXX_MODULE_STD OFF"
-    "typed_flat_api.cppm"
-    "typed_flat_selector.cppm"
-    "instance_0.cppm"
-    "instance_1.cppm"
-    "instance_2.cppm"
-    "instance_3.cppm"
-    "BIOSEQ_GCC_CANARY_PRIMARY"
-    "BIOSEQ_GCC_CANARY_DRIVER"
-    "BIOSEQ_GCC_CANARY_MAIN"
+    "BIOSEQ_GCC_CANARY_HIGHWAY_INCLUDE_ROOT"
+    "BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST"
+    "HWY_NEON_WITHOUT_AES"
+    "HWY_SSE2"
+    "HWY_EMU128"
+    "highway_registry.cppm"
+    "runtime.cpp"
     "BASE_DIRS"
     "CXX_SCAN_FOR_MODULES ON")
   string(FIND "${_nested}" "${_required_text}" _required_offset)
@@ -195,6 +193,60 @@ if(NOT _find_package_offset EQUAL -1
   message(FATAL_ERROR
     "nested GCC canary must have no package discovery or explicit libraries")
 endif()
+
+set(_canary_source_root
+  "${SOURCE_ROOT}/codegen/namespace_materialization/tests/module_canary/highway_canary")
+file(READ "${_canary_source_root}/registry.cppm.in" _registry_source)
+foreach(_primary_import IN ITEMS
+    "import @SIMD_TARGET_MODULE@;"
+    "import @FALLBACK_TARGET_MODULE@;")
+  string(FIND "${_registry_source}" "${_primary_import}" _import_offset)
+  if(_import_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC registry lost generated target primary ${_primary_import}")
+  endif()
+endforeach()
+string(REGEX MATCHALL "HWY_EXPORT\\(BindHighwayTarget\\)"
+  _export_matches "${_registry_source}")
+string(REGEX MATCHALL "HWY_DYNAMIC_DISPATCH\\(BindHighwayTarget\\)"
+  _dispatch_matches "${_registry_source}")
+list(LENGTH _export_matches _export_count)
+list(LENGTH _dispatch_matches _dispatch_count)
+if(NOT _export_count EQUAL 1 OR NOT _dispatch_count EQUAL 1)
+  message(FATAL_ERROR
+    "Highway GCC canary must own exactly one literal binder dispatch registry")
+endif()
+file(READ "${_canary_source_root}/target_kernel.cppm.in" _kernel_source)
+foreach(_operation IN ITEMS "hn::LoadU" "hn::Add" "hn::StoreU" "HWY_ATTR")
+  string(FIND "${_kernel_source}" "${_operation}" _operation_offset)
+  if(_operation_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary kernel lost real Highway operation ${_operation}")
+  endif()
+endforeach()
+file(GLOB _canary_sources LIST_DIRECTORIES FALSE
+  "${_canary_source_root}/*")
+foreach(_canary_source IN LISTS _canary_sources)
+  file(READ "${_canary_source}" _canary_contents)
+  string(FIND "${_canary_contents}" "hwy/foreach_target.h"
+    _foreach_target_offset)
+  if(NOT _foreach_target_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary must prove fixed target units without foreach_target")
+  endif()
+endforeach()
+file(READ "${_canary_source_root}/runtime.cpp.in" _runtime_source)
+foreach(_runtime_contract IN ITEMS
+    "HWY_HEADER_ONLY"
+    "SupportedTargets()"
+    "GetChosenTarget()"
+    "does not link the outer Clang/libc++ libhwy.a")
+  string(FIND "${_runtime_source}" "${_runtime_contract}" _runtime_offset)
+  if(_runtime_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary runtime lost ABI contract ${_runtime_contract}")
+  endif()
+endforeach()
 
 file(READ "${_runner}" _runner_source)
 foreach(_sealed_argument IN ITEMS
@@ -214,7 +266,9 @@ foreach(_sealed_argument IN ITEMS
     "--unset=VCPKG_ROOT"
     "--unset=DYLD_INSERT_LIBRARIES"
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
-    "--verbose")
+    "--verbose"
+    "_canary_executable"
+    "bioseq-highway-gcc-canary: first=")
   string(FIND "${_runner_source}" "${_sealed_argument}" _sealed_offset)
   if(_sealed_offset EQUAL -1)
     message(FATAL_ERROR
