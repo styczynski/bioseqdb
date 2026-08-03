@@ -6838,8 +6838,9 @@ void validate_owned_compile_database(
             .filename().string();
     const bool recognized_compiler =
         compiler == "c++" || compiler == "g++"
-        || compiler == "clang++"
+        || compiler == "clang" || compiler == "clang++"
         || compiler.starts_with("g++-")
+        || compiler.starts_with("clang-")
         || compiler.starts_with("clang++-");
     if (!recognized_compiler) {
         throw std::runtime_error(
