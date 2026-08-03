@@ -202,8 +202,18 @@ foreach(_sealed_argument IN ITEMS
     "-DCMAKE_TOOLCHAIN_FILE:FILEPATH="
     "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING="
     "-DCMAKE_CXX_FLAGS:STRING="
+    "-DCMAKE_PROJECT_INCLUDE_BEFORE:FILEPATH="
     "-DCMAKE_CXX_MODULE_STD:BOOL=OFF"
     "bioseq_verify_gcc16_toolchain_identity"
+    "file(REMOVE_RECURSE"
+    "--unset=CPATH"
+    "--unset=CPLUS_INCLUDE_PATH"
+    "--unset=LIBRARY_PATH"
+    "--unset=COMPILER_PATH"
+    "--unset=GCC_EXEC_PREFIX"
+    "--unset=VCPKG_ROOT"
+    "--unset=DYLD_INSERT_LIBRARIES"
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
     "--verbose")
   string(FIND "${_runner_source}" "${_sealed_argument}" _sealed_offset)
   if(_sealed_offset EQUAL -1)

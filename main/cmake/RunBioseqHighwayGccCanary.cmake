@@ -5,6 +5,7 @@ set(_required_inputs
   BIOSEQ_GCC_CANARY_NINJA
   BIOSEQ_GCC_CANARY_SOURCE
   BIOSEQ_GCC_CANARY_BUILD
+  BIOSEQ_GCC_CANARY_OUTER_BINARY
   BIOSEQ_GCC_CANARY_GENERATED_ROOT
   BIOSEQ_GCC_CANARY_PRIMARY
   BIOSEQ_GCC_CANARY_DRIVER
@@ -38,6 +39,24 @@ bioseq_verify_gcc16_toolchain_identity(
   MODULE_SOURCE_CLOSURE_SHA256
     "${BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256}")
 
+if(NOT IS_ABSOLUTE "${BIOSEQ_GCC_CANARY_BUILD}"
+    OR NOT IS_ABSOLUTE "${BIOSEQ_GCC_CANARY_OUTER_BINARY}")
+  message(FATAL_ERROR
+    "Highway GCC canary build and outer binary roots must be absolute")
+endif()
+cmake_path(
+  NORMAL_PATH BIOSEQ_GCC_CANARY_BUILD OUTPUT_VARIABLE _nested_build_normal)
+cmake_path(
+  NORMAL_PATH BIOSEQ_GCC_CANARY_OUTER_BINARY OUTPUT_VARIABLE _outer_normal)
+string(FIND "${_nested_build_normal}/" "${_outer_normal}/" _under_outer)
+if(NOT _under_outer EQUAL 0
+    OR NOT _nested_build_normal MATCHES
+      "/highway-gcc-canary/nested$")
+  message(FATAL_ERROR
+    "refusing to recreate an unscoped Highway GCC canary build tree: "
+    "${_nested_build_normal}")
+endif()
+
 set(_identity_material
   "bioseq-highway-gcc-canary/v1\n"
   "${BIOSEQ_GCC_CANARY_ROOT}\n"
@@ -48,18 +67,45 @@ set(_identity_material
   "${BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256}\n")
 string(SHA256 _identity "${_identity_material}")
 set(_identity_file "${BIOSEQ_GCC_CANARY_BUILD}/.bioseq-toolchain-identity")
-if(EXISTS "${_identity_file}")
-  file(READ "${_identity_file}" _previous_identity)
-  string(STRIP "${_previous_identity}" _previous_identity)
-  if(NOT _previous_identity STREQUAL _identity)
-    file(REMOVE_RECURSE "${BIOSEQ_GCC_CANARY_BUILD}")
-  endif()
-endif()
+# The closure is deliberately tiny. Recreate it on every invocation so no
+# same-compiler CMake cache, project hook, or flag injection can survive.
+file(REMOVE_RECURSE "${_nested_build_normal}")
 file(MAKE_DIRECTORY "${BIOSEQ_GCC_CANARY_BUILD}")
 file(WRITE "${_identity_file}" "${_identity}\n")
 
+set(_sanitized_environment
+  --unset=CC
+  --unset=CXX
+  --unset=CFLAGS
+  --unset=CXXFLAGS
+  --unset=CPPFLAGS
+  --unset=LDFLAGS
+  --unset=CPATH
+  --unset=C_INCLUDE_PATH
+  --unset=CPLUS_INCLUDE_PATH
+  --unset=OBJC_INCLUDE_PATH
+  --unset=LIBRARY_PATH
+  --unset=COMPILER_PATH
+  --unset=GCC_EXEC_PREFIX
+  --unset=SDKROOT
+  --unset=MACOSX_DEPLOYMENT_TARGET
+  --unset=CMAKE_PREFIX_PATH
+  --unset=CMAKE_TOOLCHAIN_FILE
+  --unset=VCPKG_ROOT
+  --unset=VCPKG_DEFAULT_TRIPLET
+  --unset=PKG_CONFIG_PATH
+  --unset=DYLD_LIBRARY_PATH
+  --unset=DYLD_FALLBACK_LIBRARY_PATH
+  --unset=DYLD_FRAMEWORK_PATH
+  --unset=DYLD_FALLBACK_FRAMEWORK_PATH
+  --unset=DYLD_INSERT_LIBRARIES
+  "PATH=/usr/bin:/bin:/usr/sbin:/sbin")
+
 execute_process(
-  COMMAND "${BIOSEQ_GCC_CANARY_CMAKE}"
+  COMMAND "${BIOSEQ_GCC_CANARY_CMAKE}" -E env
+    ${_sanitized_environment}
+    --
+    "${BIOSEQ_GCC_CANARY_CMAKE}"
     -S "${BIOSEQ_GCC_CANARY_SOURCE}"
     -B "${BIOSEQ_GCC_CANARY_BUILD}"
     -G Ninja
@@ -68,9 +114,13 @@ execute_process(
     "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING="
     "-DCMAKE_CXX_FLAGS:STRING="
     "-DCMAKE_EXE_LINKER_FLAGS:STRING="
+    "-DCMAKE_BUILD_TYPE:STRING=Release"
     "-DCMAKE_TOOLCHAIN_FILE:FILEPATH="
     "-DCMAKE_PROJECT_INCLUDE:FILEPATH="
+    "-DCMAKE_PROJECT_INCLUDE_BEFORE:FILEPATH="
     "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES:STRING="
+    "-DCMAKE_PROJECT_bioseq_highway_gcc_module_canary_INCLUDE:FILEPATH="
+    "-DCMAKE_PROJECT_bioseq_highway_gcc_module_canary_INCLUDE_BEFORE:FILEPATH="
     "-DCMAKE_PREFIX_PATH:STRING="
     "-DCMAKE_CXX_MODULE_STD:BOOL=OFF"
     "-DBIOSEQ_GCC_CANARY_GENERATED_ROOT:PATH=${BIOSEQ_GCC_CANARY_GENERATED_ROOT}"
@@ -90,7 +140,10 @@ execute_process(
   COMMAND_ERROR_IS_FATAL ANY)
 
 execute_process(
-  COMMAND "${BIOSEQ_GCC_CANARY_CMAKE}"
+  COMMAND "${BIOSEQ_GCC_CANARY_CMAKE}" -E env
+    ${_sanitized_environment}
+    --
+    "${BIOSEQ_GCC_CANARY_CMAKE}"
     --build "${BIOSEQ_GCC_CANARY_BUILD}"
     --target bioseq_highway_gcc_module_canary
     --verbose
