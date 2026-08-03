@@ -1675,6 +1675,35 @@ MODES: Dict[str, ModeDefinition] = {
         },
         requires_build_only=True,
     ),
+    "highway-gcc-canary": ModeDefinition(
+        lock_group="tests",
+        expected_duration_min=30.0,
+        build_only_expected_duration_min=30.0,
+        label="Local Homebrew GCC 16 generated-module canary",
+        docs=(
+            "Use the ordinary Darwin Clang generator to emit the fixed 2x2 "
+            "namespace-materialization closure, then compile and link its API, "
+            "selector, four implementation units, primary, driver, and main in "
+            "an isolated no-vcpkg Ninja sub-build with an authenticated paired "
+            "Homebrew gcc/g++ >= 16.1 and libstdc++.modules.json. This proves "
+            "only the GCC module/attribute/generated-IU boundary, not the full "
+            "external-api build or production DSO."
+        ),
+        is_verb_plular=False,
+        targets=["bioseq_highway_gcc_canary"],
+        commands=[],
+        preset_override="highway-gcc-canary",
+        required_cache_variables={
+            "BIOSEQ_HIGHWAY_GCC_CANARY": "ON",
+            "BIOSEQ_BUILD_CORE": "ON",
+            "BIOSEQ_BUILD_CACHE": "OFF",
+            "BIOSEQ_BUILD_PAPERS": "OFF",
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+            "BIOSEQ_BUILD_WEBSITE": "OFF",
+            "BUILD_TESTING": "OFF",
+        },
+        requires_build_only=True,
+    ),
     "bench": ModeDefinition(
         lock_group="bench",
         expected_duration_min=25.0,
