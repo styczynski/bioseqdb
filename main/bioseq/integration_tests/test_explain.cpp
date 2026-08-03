@@ -669,6 +669,85 @@ TEST_CASE("DOC0398 BatchJoin and PerRow EXPLAIN own every selected Highway stage
     require_complete_generic_highway_pipeline(per_row);
 }
 
+TEST_CASE("DOC0398 BatchJoin attaches executed grouped32 to SeedHitStage",
+          "[highway][explain][analyze][batch-join][grouped32]") {
+    constexpr std::string_view target =
+        "test_explain_highway_grouped32_target";
+    constexpr std::string_view query_table =
+        "test_explain_highway_grouped32_query";
+    constexpr std::string_view query_sequence =
+        "GATCGTACCTAGGCTAACGTTCGATGACCTAGGCTTACGA";
+    constexpr std::string_view target_sequence =
+        "ACGTTGCAGATCCGATGCTAGCATCGATGCTA"
+        "GATCGTACCTAGGCTAACGTTCGATGACCTAGGCTTACGA"
+        "TGCATCGGATACGTTAGCCTAGATCGTACGTA";
+
+    auto ctx = fresh_context({target});
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{target},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{
+            .pk = 1,
+            .sequences = {std::string{target_sequence}},
+        }});
+    configure_highway_simd_pipeline(ctx);
+    exec_sql(ctx,
+        "SET bioseq.index_async_persist = off; "
+        "SET bioseq.recompute_async_persist = off; "
+        "SET bioseq.read_sequence_index = on; "
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+    exec_sql(ctx, fmt::format(
+        "SELECT bioseq.set_active_read_index('{}'::regclass, "
+        "'minimizers_per_fragment');",
+        target));
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.update_index('{}'::regclass, "
+        "'minimizers_per_fragment');",
+        target)) == 1);
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE {} "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32)); "
+        "INSERT INTO {} VALUES "
+        "(1, '{}'::bioseq.seq('dna4',32));",
+        query_table, query_table, query_sequence));
+
+    const std::string sql = fmt::format(
+        "SELECT q.id, t.pk FROM {} AS t JOIN {} AS q "
+        "ON mmsearch(t.seq0, q.seq);",
+        target, query_table);
+    const auto plain = explain_with_options(
+        ctx, "VERBOSE, COSTS OFF", sql);
+    REQUIRE(plan_contains(plain, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE_FALSE(plan_contains(
+        plain, "indexing::grouped32_validate"));
+
+    const auto analyzed = explain_with_options(
+        ctx, "ANALYZE, VERBOSE, COSTS OFF", sql);
+    REQUIRE(plan_contains(
+        analyzed,
+        "Bioseq Index Read Requirement: require_compatible_persisted"));
+    std::size_t grouped32_stage_functions = 0u;
+    for (const std::string& line : analyzed) {
+        if (line.find(
+                "Highway Function: indexing::grouped32_validate")
+                == std::string::npos) {
+            continue;
+        }
+        ++grouped32_stage_functions;
+        REQUIRE(line.find("[stage: SeedHitStage]") != std::string::npos);
+        REQUIRE(line.find("[planned architecture:") != std::string::npos);
+        REQUIRE(line.find("[executed calls:") == std::string::npos);
+        REQUIRE(line.find("* Highway Function:") == std::string::npos);
+    }
+    REQUIRE(grouped32_stage_functions == 1u);
+}
+
 #ifdef BIOSEQ_TEST_INDEXES
 TEST_CASE("DOC0398 every runnable Highway target preserves public query results",
           "[highway][explain][dispatch][forced-target][serial]") {

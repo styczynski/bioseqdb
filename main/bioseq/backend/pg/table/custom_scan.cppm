@@ -29637,12 +29637,34 @@ PlannedQueryMinimizerHighwayKernels(
 	return *resolved;
 }
 
+[[nodiscard]] static bioseq::simd_dispatch::HighwayKernelSet
+HighwayKernelsForExplainStage(
+		const bioseq::simd::pipe::StageDescription& stage,
+		const std::uint64_t indexing_grouped32_validate_calls)
+{
+	auto kernels = stage.algorithm.has_value()
+		? stage.algorithm->highway_kernels
+		: bioseq::simd_dispatch::HighwayKernelSet{};
+	/* A plan cannot know which persisted wire format a row will resolve to.
+	 * Merge grouped32 only from completed runtime evidence, and only into the
+	 * seed lookup that consumes that reader. Plain EXPLAIN and
+	 * recomputed/non-grouped routes keep the plan-owned set unchanged. */
+	if (indexing_grouped32_validate_calls != 0
+		&& stage.stage_name == "SeedHitStage") {
+		kernels |= bioseq::simd_dispatch::highway_kernel_set(
+			bioseq::simd_dispatch::HighwayKernelId::
+				indexing_grouped32_validate);
+	}
+	return kernels;
+}
+
 template <class Visitor>
 static void
 VisitPlannedHighwayFunctions(
 		const bioseq::simd_dispatch::HighwayKernelSet&
 			top_level_query_kernels,
 		const bioseq::simd::pipe::PipelineDescription* pipeline_desc,
+		const std::uint64_t indexing_grouped32_validate_calls,
 		Visitor&& visitor)
 {
 	const auto visit_kernel_set = [&visitor](
@@ -29664,7 +29686,9 @@ VisitPlannedHighwayFunctions(
 	for (const auto& stage : pipeline_desc->stages) {
 		if (!stage.algorithm.has_value()) continue;
 		visit_kernel_set(
-			stage.algorithm->highway_kernels, stage.stage_name.c_str());
+			HighwayKernelsForExplainStage(
+				stage, indexing_grouped32_validate_calls),
+			stage.stage_name.c_str());
 	}
 }
 
@@ -29726,8 +29750,9 @@ ExplainPipelineExecutionStats(
 		if (pipeline_desc != nullptr) {
 			for (const auto& stage : pipeline_desc->stages) {
 				if (stage.algorithm.has_value()) {
-					all_planned_kernels |=
-						stage.algorithm->highway_kernels;
+					all_planned_kernels |= HighwayKernelsForExplainStage(
+						stage,
+						operational.indexing_grouped32_validate_calls);
 				}
 			}
 		}
@@ -29743,12 +29768,6 @@ ExplainPipelineExecutionStats(
 			HighwayTargetNames(highway_plan.compiled_targets);
 		const std::string runnable =
 			HighwayTargetNames(highway_plan.runnable_targets);
-		const auto grouped32_kernel =
-			bioseq::simd_dispatch::HighwayKernelId::
-				indexing_grouped32_validate;
-		const std::string_view grouped32_function =
-			bioseq::simd_dispatch::highway_kernel_name(grouped32_kernel);
-
 		if (es->format == EXPLAIN_FORMAT_TEXT) {
 			const auto print_plan_property = [es](
 					const char* name, const std::string& value) {
@@ -29762,6 +29781,7 @@ ExplainPipelineExecutionStats(
 			print_plan_property("Highway Runnable Architectures", runnable);
 			VisitPlannedHighwayFunctions(
 				top_level_query_kernels, pipeline_desc,
+				operational.indexing_grouped32_validate_calls,
 				[es, &planned](
 						const bioseq::simd_dispatch::HighwayKernelId kernel,
 						const char* stage_name) {
@@ -29786,15 +29806,6 @@ ExplainPipelineExecutionStats(
 					"* Highway Executed Architecture: %s\n",
 					executed.c_str());
 			}
-			if (operational.indexing_grouped32_validate_calls != 0) {
-				appendStringInfoSpaces(es->str, es->indent * 2);
-				appendStringInfo(es->str,
-					"* Highway Function: %.*s [executed calls: %llu]\n",
-					static_cast<int>(grouped32_function.size()),
-					grouped32_function.data(),
-					static_cast<unsigned long long>(
-						operational.indexing_grouped32_validate_calls));
-			}
 		} else {
 			ExplainOpenGroup(
 				"Highway SIMD Dispatch", "Highway SIMD Dispatch", true, es);
@@ -29811,6 +29822,7 @@ ExplainPipelineExecutionStats(
 					"Planned Highway Functions", false, es);
 				VisitPlannedHighwayFunctions(
 					top_level_query_kernels, pipeline_desc,
+					operational.indexing_grouped32_validate_calls,
 					[es, &planned](
 							const bioseq::simd_dispatch::HighwayKernelId kernel,
 							const char* stage_name) {
@@ -29839,22 +29851,6 @@ ExplainPipelineExecutionStats(
 					stats.environment.highway_executed_target);
 				ExplainPropertyText(
 					"Executed Architecture", executed.c_str(), es);
-			}
-			if (operational.indexing_grouped32_validate_calls != 0) {
-				ExplainOpenGroup(
-					"Executed Highway Functions",
-					"Executed Highway Functions", false, es);
-				ExplainOpenGroup("Highway Function", nullptr, true, es);
-				const std::string function_text{grouped32_function};
-				ExplainPropertyText(
-					"Function", function_text.c_str(), es);
-				ExplainPropertyUInteger(
-					"Executed Calls", nullptr,
-					operational.indexing_grouped32_validate_calls, es);
-				ExplainCloseGroup("Highway Function", nullptr, true, es);
-				ExplainCloseGroup(
-					"Executed Highway Functions",
-					"Executed Highway Functions", false, es);
 			}
 			ExplainCloseGroup(
 				"Highway SIMD Dispatch", "Highway SIMD Dispatch", true, es);
@@ -30495,25 +30491,13 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			const auto highway_kernels_for_stage =
 				[explain_runtime](
 					const bioseq::simd::pipe::StageDescription& stage) {
-					auto kernels = stage.algorithm.has_value()
-						? stage.algorithm->highway_kernels
-						: bioseq::simd_dispatch::HighwayKernelSet{};
-					/*
-					 * A plan cannot know which persisted wire format a row will
-					 * resolve to.  Merge grouped32 only from completed runtime
-					 * evidence, and only into the seed lookup that consumes that
-					 * reader.  Plain EXPLAIN and recomputed/non-grouped routes keep
-					 * the plan-owned set unchanged.
-					 */
-					if (explain_runtime != nullptr
-						&& explain_runtime->buffer.execution_stats().operational
-							.indexing_grouped32_validate_calls != 0
-						&& stage.stage_name == "SeedHitStage") {
-						kernels |= bioseq::simd_dispatch::highway_kernel_set(
-							bioseq::simd_dispatch::HighwayKernelId::
-								indexing_grouped32_validate);
-					}
-					return kernels;
+					return HighwayKernelsForExplainStage(
+						stage,
+						explain_runtime == nullptr
+							? 0u
+							: explain_runtime->buffer.execution_stats()
+								.operational
+								.indexing_grouped32_validate_calls);
 				};
 
 			if (es->format == EXPLAIN_FORMAT_TEXT) {
