@@ -109,7 +109,14 @@ public:
         PGresult* result = PQexec(
             connection_,
             "SELECT bioseq_internal.set_highway_target_for_test(0);");
+        const bool restored = result != nullptr
+            && PQresultStatus(result) == PGRES_TUPLES_OK;
         if (result != nullptr) PQclear(result);
+        if (!restored) {
+            // Terminating/replacing the backend also discards Highway's
+            // process-local test mask if SQL cleanup cannot run.
+            PQreset(connection_);
+        }
     }
 
 private:
@@ -626,6 +633,9 @@ TEST_CASE("DOC0398 BatchJoin and PerRow EXPLAIN own every selected Highway stage
     auto ctx = fresh_context({target});
     seed_small_bioseq_column(ctx, target);
     configure_highway_simd_pipeline(ctx);
+    exec_sql(ctx, "SET join_collapse_limit = 1;");
+    exec_sql(ctx, "SET from_collapse_limit = 1;");
+    exec_sql(ctx, "SET geqo = off;");
     exec_sql(ctx,
         "CREATE TEMP TABLE test_explain_highway_join_query "
         "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
