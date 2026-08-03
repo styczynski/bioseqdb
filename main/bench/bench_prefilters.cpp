@@ -10,7 +10,6 @@
  * unavailable on hosts without a hardware Vulkan device and never falls back
  * to CPU.
  */
-#include "common_simd.h"
 #include "common.h"
 #include "prefilter_small_seed_keys.hpp"
 #include "SneakySnake.h"
@@ -35,6 +34,8 @@
 
 import bench_framework;
 import bioseq.instr;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences.edit_distance_threshold;
 import bioseq.sequences.prefilters.prefilter_types;
 import bioseq.sequences.prefilters.gatekeeper;
@@ -42,8 +43,6 @@ import bioseq.sequences.prefilters.gatekeeper_vulkan;
 import bioseq.sequences.prefilters.sneaky_snake;
 import bioseq.sequences.prefilters.sneaky_snake_vulkan;
 import bioseq.gpu.vulkan.phase_c_abi;
-
-HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::bench_prefilters {
 namespace {
@@ -348,7 +347,7 @@ void append_rank_bytes(
         const auto oracle_start = std::chrono::steady_clock::now();
         for (auto& [threshold, prepared] : input.prepared) {
             prepared.scalar_oracle_results =
-                bioseq::simd::HWY_NAMESPACE::sneaky_snake_scalar_batch(
+                bioseq::sequences::prefilters::sneaky_snake_scalar_batch(
                     PrefilterBatchInput{
                         .query_ranks = input.query_ranks,
                         .target_ranks = input.target_ranks,
@@ -572,6 +571,18 @@ void validate_available_backend(
         return output;
     }
 
+    ::bioseq::simd_dispatch::SneakySnakeSimdBatchKernel
+        fixed_sneaky_snake_simd_batch = nullptr;
+    if (algorithm == "sneakysnake_simd") {
+        fixed_sneaky_snake_simd_batch =
+            ::bioseq::simd_dispatch::highway_test_kernel_table()
+                .common.sneaky_snake_simd_batch;
+        if (fixed_sneaky_snake_simd_batch == nullptr) {
+            throw std::runtime_error(
+                "generated fixed-target table lacks SneakySnake");
+        }
+    }
+
     static const auto* backend_batch_region =
         bioseq::instr::register_region_static("prefilter_backend_batch");
     const auto backend_batch_start = std::chrono::steady_clock::now();
@@ -592,19 +603,21 @@ void validate_available_backend(
                     length) != 0 ? 1u : 0u;
             }
         } else if (algorithm == "sneakysnake_scalar") {
-            cpu_results = bioseq::simd::HWY_NAMESPACE::sneaky_snake_scalar_batch(
-                PrefilterBatchInput{
-                    .query_ranks = input.query_ranks,
-                    .target_ranks = input.target_ranks,
-                    .jobs = prepared.jobs,
-                });
+            cpu_results =
+                bioseq::sequences::prefilters::sneaky_snake_scalar_batch(
+                    PrefilterBatchInput{
+                        .query_ranks = input.query_ranks,
+                        .target_ranks = input.target_ranks,
+                        .jobs = prepared.jobs,
+                    });
         } else if (algorithm == "sneakysnake_simd") {
-            cpu_results = bioseq::simd::HWY_NAMESPACE::sneaky_snake_simd_batch(
+            cpu_results = fixed_sneaky_snake_simd_batch(
                 PrefilterBatchInput{
                     .query_ranks = input.query_ranks,
                     .target_ranks = input.target_ranks,
                     .jobs = prepared.jobs,
-                });
+                },
+                {});
         } else if (is_sneaky_vulkan_algorithm(algorithm)) {
             vulkan_results = vulkan_prefilter::run_sneaky_snake_vulkan_batch(
                 input.query_ranks,
@@ -949,5 +962,3 @@ make_prefilter_small_seed_benchmark(std::string config_path)
 }
 
 }  // namespace bioseq::bench_prefilters
-
-HWY_AFTER_NAMESPACE();

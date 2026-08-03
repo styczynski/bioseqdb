@@ -93,6 +93,28 @@ target_compile_definitions(bioseq_bench
     "BIOSEQ_BENCH_DATA_DIR=\"${BENCH_V10_DIR}\""
     "BIOSEQ_BENCH_CONFIG_PATH=\"${BENCH_V10_DIR}/bench_v10_configuration.json\"")
 
+# Kernel microbenchmarks are independent test roots, not production scheduler
+# invocations. Give them the same generator-proven fixed table as unit tests so
+# they never call an active-target facade or introduce a second selector.
+set_source_files_properties(
+  "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
+  "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
+  ${BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS}
+  PROPERTIES GENERATED TRUE)
+set_source_files_properties(
+  ${BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS}
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
+target_sources(bioseq_bench
+  PRIVATE ${BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS}
+  PRIVATE FILE_SET bioseq_highway_fixed_target_bench_modules
+    TYPE CXX_MODULES
+    BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
+    FILES
+      "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
+      "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}")
+target_link_libraries(bioseq_bench PRIVATE bioseq_highway_target_policy)
+add_dependencies(bioseq_bench bioseq_highway_target_modules)
+
 if(APPLE)
     target_link_options(bioseq_bench PRIVATE
       -L/opt/homebrew/opt/llvm/lib/c++)
