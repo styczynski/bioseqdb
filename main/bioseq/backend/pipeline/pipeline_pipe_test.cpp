@@ -73,15 +73,24 @@ fixed_highway_dispatch_info() {
     };
 }
 
-void bind_fixed_highway(
-        ::bioseq::simd::Minimap2Params& params,
-        std::uint8_t alphabet_code = 0u) {
+template <sequence_alphabet Alphabet = ::seq::dna4>
+void bind_fixed_highway(::bioseq::simd::Minimap2Params& params) {
     const auto& binding =
         ::bioseq::simd_dispatch::highway_test_target_binding();
+    const auto* identity = binding.kernels == nullptr
+            || !binding.kernels->complete()
+        ? nullptr
+        : binding.kernels->template resolve_alphabet_identity<Alphabet>();
+    if (identity == nullptr
+        || binding.kernels->resolve_alphabet_identity(
+               identity->alphabet_code) != identity) {
+        throw std::logic_error{
+            "generated fixed-target test binding lacks alphabet identity"};
+    }
     params.highway_kernels = binding.kernels;
     params.highway_executed_target = binding.target;
     params.highway_dispatch = fixed_highway_dispatch_info();
-    params.alphabet_code = alphabet_code;
+    params.alphabet_code = identity->alphabet_code;
 }
 
 struct RawSketchAppendFixture {
@@ -1149,8 +1158,12 @@ TEST_CASE("unbound pipeline description owns exact Highway kernels by stage",
     using bioseq::simd_dispatch::highway_kernel_set;
 
     Minimap2Params params{};
-    params.alphabet_code =
-        bioseq::simd::pipe::minimizer_alphabet_code<::seq::dna4>();
+    const auto& table =
+        ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* alphabet_identity = table.complete()
+        ? table.resolve_alphabet_identity<::seq::dna4>() : nullptr;
+    REQUIRE(alphabet_identity != nullptr);
+    params.alphabet_code = alphabet_identity->alphabet_code;
     params.minimizer_algorithm =
         MinimizerAlgorithmType::PAPER_NTHASH_SIMD;
     params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
@@ -1162,7 +1175,8 @@ TEST_CASE("unbound pipeline description owns exact Highway kernels by stage",
     params.do_cigar = true;
     REQUIRE(params.highway_kernels == nullptr);
 
-    const auto description = bioseq::simd::pipe::describe_pipeline_for(
+    const auto description = bioseq::simd::pipe::describe_pipeline_for<
+        ::seq::dna4>(
         params, params.alphabet_code,
         QuerySketchPlanRoute::recompute_capable);
     REQUIRE(bioseq::simd::pipe::query_sketch_stage_owner_count(
@@ -1198,8 +1212,12 @@ TEST_CASE("all-GPU bounded CIGAR description advertises no Highway kernel",
     using bioseq::simd::pipe::QuerySketchPlanRoute;
 
     Minimap2Params params{};
-    params.alphabet_code =
-        bioseq::simd::pipe::minimizer_alphabet_code<::seq::dna4>();
+    const auto& table =
+        ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* alphabet_identity = table.complete()
+        ? table.resolve_alphabet_identity<::seq::dna4>() : nullptr;
+    REQUIRE(alphabet_identity != nullptr);
+    params.alphabet_code = alphabet_identity->alphabet_code;
     params.kmer_size = 15;
     params.window_size = 10;
     params.minimizer_algorithm =
@@ -1223,7 +1241,8 @@ TEST_CASE("all-GPU bounded CIGAR description advertises no Highway kernel",
     REQUIRE(bioseq::simd::pipe::complete_all_gpu_tuple_selected(params));
     REQUIRE(params.highway_kernels == nullptr);
 
-    const auto description = bioseq::simd::pipe::describe_pipeline_for(
+    const auto description = bioseq::simd::pipe::describe_pipeline_for<
+        ::seq::dna4>(
         params, params.alphabet_code,
         QuerySketchPlanRoute::recompute_capable);
     const auto align_stage = std::ranges::find(

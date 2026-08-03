@@ -5,6 +5,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <ranges>
 #include <set>
 #include <stdexcept>
@@ -786,6 +787,16 @@ inline void verify_typed_alignment_binder() {
                 && artifact.content.contains(
                     ".alphabet_code = 1u, .typed_table = &alignment_1")
                 && artifact.content.contains(
+                    "HighwayAlphabetIdentityEntry alphabet_identities[]")
+                && occurrences(
+                       artifact.content,
+                       "highway_alphabet_type_identity<::seq::dna4>()") == 1u
+                && occurrences(
+                       artifact.content,
+                       "highway_alphabet_type_identity<::seq::dna5>()") == 1u
+                && artifact.content.contains(
+                    "table.alphabet_identities = alphabet_identities")
+                && artifact.content.contains(
                     "highway_kernel_set(HighwayKernelId::alignment_ksw2)")
                 && artifact.content.contains(
                     "highway_kernel_set(HighwayKernelId::alignment_ksw2_batched)")
@@ -809,6 +820,17 @@ inline void verify_typed_alignment_binder() {
     require_rejected(
         [&] { (void)render_generation(mixed); },
         "a typed alignment family mixing alphabet arguments is rejected");
+
+    generation_plan duplicate_type = plan;
+    for (slot_spec& slot : duplicate_type.source_inventory.slots) {
+        if (slot.family_field == "alignment_1") {
+            const std::size_t dna5 = slot.expression.find("::seq::dna5");
+            slot.expression.replace(dna5, 11u, "::seq::dna4");
+        }
+    }
+    require_rejected(
+        [&] { (void)render_generation(duplicate_type); },
+        "two alignment codes may not erase the same concrete alphabet type");
 }
 
 inline void verify_typed_minimizer_binder() {
@@ -921,6 +943,16 @@ inline void verify_typed_minimizer_binder() {
                 && occurrences(
                        artifact.content,
                        "MinimizerKernelStatus::invalid_configuration") == 3u
+                && artifact.content.contains(
+                    "HighwayAlphabetIdentityEntry alphabet_identities[]")
+                && occurrences(
+                       artifact.content,
+                       "highway_alphabet_type_identity<::seq::dna4>()") == 1u
+                && occurrences(
+                       artifact.content,
+                       "highway_alphabet_type_identity<::seq::dna5>()") == 1u
+                && artifact.content.contains(
+                    "table.alphabet_identities = alphabet_identities")
                 && !artifact.content.contains("table.minimizer_case_"),
             "each binder folds the exact typed minimizer matrix into three "
             "neutral runtime wrappers");
@@ -1001,6 +1033,93 @@ inline void verify_typed_minimizer_binder() {
     require_rejected(
         [&] { (void)render_generation(wrong_leaf); },
         "a typed minimizer member naming the wrong case leaf is rejected");
+
+    const auto append_alignment = [](
+        generation_plan& target,
+        const std::uint8_t code,
+        const std::string_view alphabet) {
+        const std::string family = "alignment_" + std::to_string(code);
+        const auto append = [&target, &family, alphabet](
+            const std::string_view owner,
+            const std::string_view member) {
+            target.source_inventory.slots.push_back(slot_spec{
+                .owner_key = std::string{owner},
+                .family_field = family,
+                .slot_field = std::string{member},
+                .expression =
+                    "&::bioseq::simd::{target_namespace}::"
+                    + std::string{member} + "<" + std::string{alphabet} + ">",
+            });
+        };
+        append("ksw2", "ksw2_z2");
+        append("ksw2", "ksw2_d2");
+        append("ksw2_batched", "ksw2_batched");
+        append("block_aligner", "block_prepare");
+        append("block_aligner", "block_try_certified_gap");
+        append("block_aligner", "block_align");
+    };
+
+    std::map<std::string, std::vector<const slot_spec*>, std::less<>>
+        topology_families;
+    for (const slot_spec& slot : plan.source_inventory.slots) {
+        topology_families[slot.family_field].push_back(&slot);
+    }
+    const auto topology_identities = collect_alphabet_identities(
+        {}, collect_minimizer_cases(topology_families));
+    require(
+        topology_identities.size() > 1u,
+        "combined-consumer fixture exposes multiple topology alphabets");
+
+    generation_plan combined = plan;
+    for (const alphabet_identity_binding& identity : topology_identities) {
+        append_alignment(
+            combined, identity.alphabet_code, identity.alphabet_type);
+    }
+    const generation_result combined_generated = render_generation(combined);
+    std::size_t combined_binders = 0u;
+    for (const generated_artifact& artifact : combined_generated.artifacts) {
+        if (artifact.kind != artifact_kind::binder) continue;
+        ++combined_binders;
+        require(
+            occurrences(
+                artifact.content,
+                "highway_alphabet_type_identity<::seq::dna4>()") == 1u
+                && occurrences(
+                       artifact.content,
+                       "highway_alphabet_type_identity<::seq::dna5>()") == 1u,
+            "alignment and minimizer families share one alphabet identity "
+            "axis in each binder");
+        for (const alphabet_identity_binding& identity
+             : topology_identities) {
+            require(
+                artifact.content.contains(
+                    "highway_alphabet_type_identity<"
+                    + identity.alphabet_type
+                    + ">(), .alphabet_code = "
+                    + std::to_string(identity.alphabet_code) + "u"),
+                "the reconciled identity axis preserves each generated "
+                "topology code/type pair");
+        }
+    }
+    require(
+        combined_binders == checked_binders,
+        "each fixed target receives the reconciled identity axis");
+
+    generation_plan mismatched_consumers = plan;
+    for (std::size_t index = 0u; index < topology_identities.size(); ++index) {
+        const alphabet_identity_binding& code_owner =
+            topology_identities[index];
+        const alphabet_identity_binding& wrong_type =
+            topology_identities[(index + 1u) % topology_identities.size()];
+        append_alignment(
+            mismatched_consumers,
+            code_owner.alphabet_code,
+            wrong_type.alphabet_type);
+    }
+    require_rejected(
+        [&] { (void)render_generation(mismatched_consumers); },
+        "alignment and minimizer consumers must agree on topology code/type "
+        "identity");
 }
 
 }  // namespace contract_detail

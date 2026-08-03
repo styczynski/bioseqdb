@@ -7,6 +7,7 @@
  */
 module;
 #include <concepts>
+#include <cstdint>
 #include <string_view>
 export module bioseq.indexing.traits;
 import bioseq.indexing.type;
@@ -59,9 +60,12 @@ concept index_provides_backend_build_fragmented =
         typename T::storage_type& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         bioseq::minimizers::MinimizerSketchBackend backend,
-        const bioseq::minimizers::MinimizerKernels* kernels) {
-        { T::build(storage, seq, backend, kernels) } -> std::same_as<void>;
-        { T::rebuild(storage, seq, backend, kernels) } -> std::same_as<void>;
+        const bioseq::minimizers::MinimizerKernels* kernels,
+        std::uint8_t alphabet_code) {
+        { T::build(storage, seq, backend, kernels, alphabet_code) }
+            -> std::same_as<void>;
+        { T::rebuild(storage, seq, backend, kernels, alphabet_code) }
+            -> std::same_as<void>;
     };
 template <class T, class Alphabet>
 concept index_provides_build_inline =

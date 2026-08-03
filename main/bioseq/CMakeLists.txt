@@ -1366,7 +1366,9 @@ unset(_bioseq_highway_alignment_alphabet_ordinal)
 # Minimizer target wrappers use the same scheduler-owned alphabet/width axes.
 # Each synthetic family is one Cartesian case; the Highway renderer validates
 # exact 2 x 4 closure and folds these leaves back into the neutral three-member
-# MinimizerKernels table.
+# MinimizerKernels table. The renderer also reconciles these records with the
+# typed alignment families to emit the root table's neutral alphabet-identity
+# evidence; no additional CMake alphabet registry participates.
 set(BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS)
 set(BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS)
 foreach(_bioseq_highway_minimizer_alphabet_label

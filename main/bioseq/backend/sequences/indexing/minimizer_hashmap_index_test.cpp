@@ -27,6 +27,7 @@
 #include <queue>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -86,6 +87,41 @@ using dna5_range_t = compact_sequence_range<dna5_u64>;
 [[nodiscard]] const ::bioseq::minimizers::MinimizerKernels*
 fixed_minimizer_kernels() {
     return &::bioseq::simd_dispatch::highway_test_kernel_table().minimizers;
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::uint8_t fixed_alphabet_code() {
+    const auto& table =
+        ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* identity = table.complete()
+        ? table.template resolve_alphabet_identity<Alphabet>() : nullptr;
+    if (identity == nullptr
+        || table.resolve_alphabet_identity(identity->alphabet_code)
+            != identity) {
+        throw std::logic_error{
+            "generated test table has no requested alphabet identity"};
+    }
+    return identity->alphabet_code;
+}
+
+template <class Range>
+[[nodiscard]] ::bioseq::minimizers::PackedSequenceKernelView
+fixed_packed_sequence_view(const Range& range) {
+    using traits = typename Range::traits;
+    return {
+        .storage = reinterpret_cast<const std::byte*>(
+            range.read_cptr(range.cbegin())),
+        .storage_units = range.size(),
+        .begin_symbol = 0u,
+        .end_symbol = range.bp_size(),
+        .alphabet_code = fixed_alphabet_code<
+            typename traits::alphabet_type>(),
+        .bits_per_symbol = static_cast<std::uint8_t>(
+            traits::bits_per_char),
+        .storage_unit_bytes = static_cast<std::uint8_t>(
+            sizeof(typename traits::storage_unit)),
+        .final_segment = true,
+    };
 }
 
 [[nodiscard]] const ::bioseq::minimizers::MinimizerKernels*
@@ -1673,6 +1709,7 @@ TEST_CASE("ExactSimd indexing bridge is linked, exact, and instrumented",
         (void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
             exact_collector,
             range_view,
+            fixed_alphabet_code<::seq::dna4>(),
             0,
             range_view.bp_size(),
             10,
@@ -1686,6 +1723,7 @@ TEST_CASE("ExactSimd indexing bridge is linked, exact, and instrumented",
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             exact_collector,
             range_view,
+            fixed_alphabet_code<::seq::dna4>(),
             0,
             range_view.bp_size(),
             10,
@@ -1725,11 +1763,26 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
     auto no_n_owner = bioseq::storage::make_lazy_in_memory(no_n_range);
     const auto no_n_view = bioseq::storage::as_lazy_sequence_view(no_n_owner);
     sketch_collector no_n_exact_collector;
+    sketch_collector mismatched_alphabet_collector;
+    REQUIRE_THROWS_AS(
+        (void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
+            mismatched_alphabet_collector,
+            no_n_view,
+            fixed_alphabet_code<::seq::dna4>(),
+            0,
+            no_n_view.bp_size(),
+            w,
+            k,
+            0,
+            fixed_minimizer_kernels(),
+            "DNA5 bridge mismatched alphabet evidence"),
+        bioseq::indexing::ExactSimdIndexRuntimeError);
 #if HWY_TARGET == HWY_SCALAR
     REQUIRE_THROWS_AS(
         (void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
             no_n_exact_collector,
             no_n_view,
+            fixed_alphabet_code<::seq::dna5>(),
             0,
             no_n_view.bp_size(),
             w,
@@ -1743,6 +1796,7 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             no_n_exact_collector,
             no_n_view,
+            fixed_alphabet_code<::seq::dna5>(),
             0,
             no_n_view.bp_size(),
             w,
@@ -1776,6 +1830,7 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             with_n_collector,
             with_n_view,
+            fixed_alphabet_code<::seq::dna5>(),
             0,
             with_n_view.bp_size(),
             w,
@@ -3800,7 +3855,8 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
     auto exact_mpf_producer = Index::make_generation_replay_producer(
         lazy_exact_view,
         MinimizerSketchBackend::ExactSimd,
-        fixed_minimizer_kernels());
+        fixed_minimizer_kernels(),
+        fixed_alphabet_code<::seq::dna4>());
     CollectingMinimizerRowSink exact_mpf_sink;
     auto exact_mpf_options = mpf_options;
     exact_mpf_options.generation_id += 2;
@@ -3825,7 +3881,10 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
         lazy_exact_view,
         MinimizerSketchBackend::ExactSimd,
         fixed_minimizer_kernels(),
-        fragment_bp);
+        fragment_bp,
+        kMinimizerPreferredSegmentSpanBp,
+        nullptr,
+        fixed_alphabet_code<::seq::dna4>());
     REQUIRE(exact_spilled.has_value());
     REQUIRE(exact_spilled->run_count() == scalar_spill_run_count);
     auto exact_mps_producer = MpsIndex::make_generation_replay_producer(
@@ -3876,7 +3935,8 @@ TEST_CASE("inactive format-4 MPS evidence binds Scalar and Exact spill replay",
             minimizer_kernels_for_backend(backend),
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
-            &spill_evidence);
+            &spill_evidence,
+            fixed_alphabet_code<::seq::dna4>());
         REQUIRE(spill.has_value());
         REQUIRE(spill_evidence.spill_accepted());
         REQUIRE(spill_evidence.spill_operation_epoch != 0);
@@ -3996,7 +4056,9 @@ TEST_CASE("Format-5 MPS exact SIMD binds the canonical shape profile",
             MinimizerSketchBackend::ExactSimd,
             fixed_minimizer_kernels(),
             fragment_bp,
-            kMinimizerPreferredSegmentSpanBp);
+            kMinimizerPreferredSegmentSpanBp,
+            nullptr,
+            fixed_alphabet_code<::seq::dna4>());
     };
 
     SECTION("canonical Format-5 profile is published with native SIMD proof") {
@@ -4757,9 +4819,10 @@ TEST_CASE("inactive format-4 MPS reuses checked bounded packed Paper",
     sketch_collector resident_collector;
     const auto resident_result = collect_packed_paper_nthash_index_erased(
         PackedPaperNthashIndexBridgeRequest{
+            .kernels = fixed_minimizer_kernels(),
+            .sequence = fixed_packed_sequence_view(range),
             .sequence_context = &range,
             .collector_context = &resident_collector,
-            .alphabet = PackedPaperNthashIndexAlphabet::dna4,
             .storage_unit_bytes = sizeof(std::uint64_t),
             .letters_per_unit = range_t::traits::letters_per_unit,
             .storage_units = range.size(),
@@ -4798,7 +4861,8 @@ TEST_CASE("inactive format-4 MPS reuses checked bounded packed Paper",
         fixed_minimizer_kernels(),
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
-        &spill_evidence);
+        &spill_evidence,
+        fixed_alphabet_code<::seq::dna4>());
     if (!spill && spill_evidence.packed_paper_status
             == PackedPaperNthashIndexStatus::unsupported_vector_shape) {
         SKIP("the compiled Highway target cannot execute packed Paper ntHash");
@@ -4860,9 +4924,10 @@ TEST_CASE("inactive format-4 MPS canonicalizes periodic Paper ties within admiss
     sketch_collector resident_collector;
     const auto resident_result = collect_packed_paper_nthash_index_erased(
         PackedPaperNthashIndexBridgeRequest{
+            .kernels = fixed_minimizer_kernels(),
+            .sequence = fixed_packed_sequence_view(range),
             .sequence_context = &range,
             .collector_context = &resident_collector,
-            .alphabet = PackedPaperNthashIndexAlphabet::dna4,
             .storage_unit_bytes = sizeof(std::uint64_t),
             .letters_per_unit = range_t::traits::letters_per_unit,
             .storage_units = range.size(),
@@ -4906,7 +4971,8 @@ TEST_CASE("inactive format-4 MPS canonicalizes periodic Paper ties within admiss
         fixed_minimizer_kernels(),
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
-        &spill_evidence);
+        &spill_evidence,
+        fixed_alphabet_code<::seq::dna4>());
     REQUIRE(spill.has_value());
     REQUIRE(spill_evidence.spill_accepted());
     REQUIRE(spill_evidence.spilled_event_count == canonical.size());
@@ -4960,7 +5026,8 @@ TEST_CASE("format-4 MPS Paper admits DNA5 and preserves the explicit N-reset fal
         fixed_minimizer_kernels(),
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
-        &evidence);
+        &evidence,
+        fixed_alphabet_code<::seq::dna5>());
     REQUIRE(spill.has_value());
     REQUIRE(evidence.spill_complete);
     REQUIRE(evidence.spill_accepted());
@@ -5098,9 +5165,10 @@ TEST_CASE("bounded Paper MPF replay matches one checked resident execution",
     sketch_collector resident_collector;
     const auto resident_result = collect_packed_paper_nthash_index_erased(
         PackedPaperNthashIndexBridgeRequest{
+            .kernels = fixed_minimizer_kernels(),
+            .sequence = fixed_packed_sequence_view(range),
             .sequence_context = &range,
             .collector_context = &resident_collector,
-            .alphabet = PackedPaperNthashIndexAlphabet::dna4,
             .storage_unit_bytes = sizeof(std::uint64_t),
             .letters_per_unit = range_t::traits::letters_per_unit,
             .storage_units = range.size(),
@@ -5134,7 +5202,8 @@ TEST_CASE("bounded Paper MPF replay matches one checked resident execution",
     auto producer = Index::make_generation_replay_producer(
         lazy_view,
         MinimizerSketchBackend::PaperNtHashSimd,
-        fixed_minimizer_kernels());
+        fixed_minimizer_kernels(),
+        fixed_alphabet_code<::seq::dna4>());
     auto options = test_generation_options(range.bp_size());
     options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
     options.minimizer_scheme_version =
@@ -5196,9 +5265,10 @@ TEST_CASE("Paper MPF canonicalizes tied periodic events identically across repla
     sketch_collector raw_collector;
     const auto raw_result = collect_packed_paper_nthash_index_erased(
         PackedPaperNthashIndexBridgeRequest{
+            .kernels = fixed_minimizer_kernels(),
+            .sequence = fixed_packed_sequence_view(range),
             .sequence_context = &range,
             .collector_context = &raw_collector,
-            .alphabet = PackedPaperNthashIndexAlphabet::dna4,
             .storage_unit_bytes = sizeof(std::uint64_t),
             .letters_per_unit = range_t::traits::letters_per_unit,
             .storage_units = range.size(),
@@ -5247,7 +5317,8 @@ TEST_CASE("Paper MPF canonicalizes tied periodic events identically across repla
     auto replay = Index::make_generation_replay_producer(
         lazy_view,
         MinimizerSketchBackend::PaperNtHashSimd,
-        fixed_minimizer_kernels());
+        fixed_minimizer_kernels(),
+        fixed_alphabet_code<::seq::dna4>());
     const auto collect_replay = [](void* context,
             const CanonicalMinimizerEvent& event)
             -> std::expected<void, MinimizerGenerationWireError> {
@@ -5278,7 +5349,8 @@ TEST_CASE("Paper MPF canonicalizes tied periodic events identically across repla
     auto encoder_replay = Index::make_generation_replay_producer(
         lazy_view,
         MinimizerSketchBackend::PaperNtHashSimd,
-        fixed_minimizer_kernels());
+        fixed_minimizer_kernels(),
+        fixed_alphabet_code<::seq::dna4>());
     auto options = test_generation_options(range.bp_size());
     options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
     options.minimizer_scheme_version =
@@ -5312,7 +5384,8 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
         auto producer = Index::make_generation_replay_producer(
             lazy_view,
             MinimizerSketchBackend::PaperNtHashSimd,
-            fixed_minimizer_kernels());
+            fixed_minimizer_kernels(),
+            fixed_alphabet_code<::seq::dna5>());
         auto options = test_generation_options(range.bp_size());
         options.alphabet_code = 5;
         options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
@@ -5350,7 +5423,8 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
         auto producer = Index::make_generation_replay_producer(
             lazy_view,
             MinimizerSketchBackend::PaperNtHashSimd,
-            fixed_minimizer_kernels());
+            fixed_minimizer_kernels(),
+            fixed_alphabet_code<::seq::dna4>());
         auto options = test_generation_options(range.bp_size());
         options.storage_unit_byte_width = sizeof(std::uint16_t);
         options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
@@ -5382,9 +5456,20 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
             / range_t::traits::letters_per_unit;
         const auto rejected = collect_packed_paper_nthash_index_erased(
             PackedPaperNthashIndexBridgeRequest{
+                .kernels = fixed_minimizer_kernels(),
+                .sequence = {
+                    .storage = &sentinel,
+                    .storage_units = storage_units,
+                    .begin_symbol = 0u,
+                    .end_symbol = local_bp_size,
+                    .alphabet_code = fixed_alphabet_code<::seq::dna4>(),
+                    .bits_per_symbol = static_cast<std::uint8_t>(
+                        range_t::traits::bits_per_char),
+                    .storage_unit_bytes = sizeof(std::uint64_t),
+                    .final_segment = true,
+                },
                 .sequence_context = &sentinel,
                 .collector_context = &collector,
-                .alphabet = PackedPaperNthashIndexAlphabet::dna4,
                 .storage_unit_bytes = sizeof(std::uint64_t),
                 .letters_per_unit = range_t::traits::letters_per_unit,
                 .storage_units = storage_units,
@@ -5564,7 +5649,8 @@ TEST_CASE("DOC0371 actual producers preserve DNA5 N reset and packed tail",
     auto mpf_producer = Index::make_generation_replay_producer(
         lazy_view,
         MinimizerSketchBackend::ExactSimd,
-        fixed_minimizer_kernels());
+        fixed_minimizer_kernels(),
+        fixed_alphabet_code<::seq::dna5>());
     CollectingMinimizerRowSink mpf_sink;
     auto mpf = encode_minimizer_generation(
         mpf_producer, mpf_sink, options);
@@ -5576,7 +5662,10 @@ TEST_CASE("DOC0371 actual producers preserve DNA5 N reset and packed tail",
         lazy_view,
         MinimizerSketchBackend::ExactSimd,
         fixed_minimizer_kernels(),
-        fragment_bp);
+        fragment_bp,
+        kMinimizerPreferredSegmentSpanBp,
+        nullptr,
+        fixed_alphabet_code<::seq::dna5>());
     REQUIRE(spilled.has_value());
     REQUIRE(spilled->exact_simd_proof_present());
     const ExactSimdIndexExecutionProof mps_exact_proof =
@@ -14783,7 +14872,8 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
         auto mpf_producer = Index::make_generation_replay_producer(
             lazy_view,
             MinimizerSketchBackend::ExactSimd,
-            fixed_minimizer_kernels());
+            fixed_minimizer_kernels(),
+            fixed_alphabet_code<::seq::dna4>());
         CollectingMinimizerRowSink mpf_sink;
         auto mpf_options = test_shape_v5_generation_options(
             range.bp_size(), 65'534u);
@@ -14822,7 +14912,8 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
             fixed_minimizer_kernels(),
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
-            &spill_execution);
+            &spill_execution,
+            fixed_alphabet_code<::seq::dna4>());
         REQUIRE(spill.has_value());
         REQUIRE(spill->run_count() >= 2u);
         REQUIRE(spill_execution.spill_accepted());
@@ -15268,7 +15359,8 @@ TEST_CASE("ExactSimd MPF fragmented build preserves scalar segment lookups",
     Index::build(
         exact_storage, exact_view, MinimizerSketchBackend::ExactSimd,
         fixed_minimizer_kernels(),
-        &exact_evidence);
+        &exact_evidence,
+        fixed_alphabet_code<::seq::dna4>());
     REQUIRE(scalar_evidence.scalar_core_runs > 0u);
     REQUIRE(scalar_evidence.exact_simd_core_runs == 0u);
     REQUIRE(scalar_evidence.paper_nthash_core_runs == 0u);

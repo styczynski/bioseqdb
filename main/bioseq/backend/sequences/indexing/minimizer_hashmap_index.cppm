@@ -151,11 +151,6 @@ struct ExactSimdIndexPackedFragment {
     std::size_t storage_units = 0;
 };
 
-enum class ExactSimdIndexAlphabet : std::uint8_t {
-    dna4 = 0,
-    dna5 = 1,
-};
-
 using ExactSimdIndexReadFragmentFn =
     ExactSimdIndexPackedFragment (*)(void*, std::size_t);
 using ExactSimdIndexReleaseFragmentFn = void (*)(void*, std::size_t) noexcept;
@@ -169,7 +164,9 @@ struct ExactSimdIndexBridgeRequest {
     ExactSimdIndexReleaseFragmentFn release_fragment = nullptr;
     void* collector_context = nullptr;
     ExactSimdIndexAppendRawFn append_raw = nullptr;
-    ExactSimdIndexAlphabet alphabet = ExactSimdIndexAlphabet::dna4;
+    std::uint8_t alphabet_code =
+        bioseq::minimizers::unbound_packed_alphabet_code;
+    std::uint8_t bits_per_symbol = 0u;
     std::size_t storage_unit_bytes = 0;
     std::size_t letters_per_unit = 0;
     std::size_t total_units = 0;
@@ -269,6 +266,7 @@ template<class Collector, sequence_alphabet Alphabet>
 collect_exact_simd_index_range_or_throw(
         Collector& collector,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+        std::uint8_t alphabet_code,
         sequence_size_t lo_bp,
         sequence_size_t hi_bp,
         std::size_t runtime_w,
@@ -278,11 +276,6 @@ collect_exact_simd_index_range_or_throw(
         std::string_view operation) {
     static_assert(std::same_as<typename MinimapSketchData::storage_t, std::uint64_t>);
 
-    if constexpr (!std::same_as<Alphabet, seq::dna4>
-                  && !std::same_as<Alphabet, seq::dna5>) {
-        throw ExactSimdIndexRuntimeError{
-            ExactSimdIndexStatus::unsupported_alphabet, operation};
-    } else {
         if (kernels == nullptr || kernels->two_stack_nthash == nullptr) {
             throw ExactSimdIndexRuntimeError{
                 ExactSimdIndexStatus::invalid_state, operation};
@@ -379,9 +372,8 @@ collect_exact_simd_index_range_or_throw(
                 .release_fragment = release_fragment,
                 .collector_context = &collector,
                 .append_raw = append_raw,
-                .alphabet = std::same_as<Alphabet, seq::dna4>
-                    ? ExactSimdIndexAlphabet::dna4
-                    : ExactSimdIndexAlphabet::dna5,
+                .alphabet_code = alphabet_code,
+                .bits_per_symbol = descriptor.bits_per_symbol,
                 .storage_unit_bytes = descriptor.storage_unit_byte_width,
                 .letters_per_unit = descriptor.storage_unit_byte_width * 8u
                     / bioseq::storage::lazy_rank_stream_traits<Alphabet>::
@@ -401,7 +393,6 @@ collect_exact_simd_index_range_or_throw(
             throw ExactSimdIndexRuntimeError{result.status, operation};
         }
         return result.proof;
-    }
 }
 
 // Plain ABI mirror of the packed Paper-ntHash checked kernel plus one
@@ -507,12 +498,6 @@ consume_forced_packed_paper_index_status_for_test() noexcept {
 #endif
     return std::nullopt;
 }
-
-enum class PackedPaperNthashIndexAlphabet : std::uint8_t {
-    dna4 = 0,
-    dna5 = 1,
-    unsupported = 2,
-};
 
 inline constexpr std::uint32_t kPackedPaperNthashKernelSchemeId =
     0x504E5431u;
@@ -734,8 +719,6 @@ struct PackedPaperNthashIndexBridgeRequest {
     bioseq::minimizers::PackedSequenceKernelView sequence{};
     void* sequence_context = nullptr;
     void* collector_context = nullptr;
-    PackedPaperNthashIndexAlphabet alphabet =
-        PackedPaperNthashIndexAlphabet::unsupported;
     std::size_t storage_unit_bytes = 0;
     std::size_t letters_per_unit = 0;
     std::size_t storage_units = 0;
@@ -775,6 +758,7 @@ template <sequence_alphabet Alphabet>
 [[nodiscard]] PackedPaperNthashIndexBridgeResult
 collect_bounded_packed_paper_nthash_index_lazy(
         bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+        std::uint8_t alphabet_code,
         sequence_size_t lo_bp,
         sequence_size_t hi_bp,
         std::uint64_t local_bp_size,
@@ -786,11 +770,6 @@ collect_bounded_packed_paper_nthash_index_lazy(
     if (materialized_window_bp_out != nullptr) {
         *materialized_window_bp_out = 0u;
     }
-    if constexpr (!std::same_as<Alphabet, seq::dna4>
-                  && !std::same_as<Alphabet, seq::dna5>) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::unsupported_alphabet);
-    } else {
         if (kernels == nullptr || kernels->paper_nthash == nullptr) {
             return rejected_packed_paper_nthash_index_result(
                 PackedPaperNthashIndexStatus::invalid_state);
@@ -886,10 +865,7 @@ collect_bounded_packed_paper_nthash_index_lazy(
                     .storage_units = descriptor.unit_count,
                     .begin_symbol = 0u,
                     .end_symbol = static_cast<std::size_t>(local_bp_size),
-                    .alphabet_code = static_cast<std::uint8_t>(
-                        std::same_as<Alphabet, seq::dna4>
-                            ? bioseq::minimizers::PackedSequenceAlphabet::dna4
-                            : bioseq::minimizers::PackedSequenceAlphabet::dna5),
+                    .alphabet_code = alphabet_code,
                     .bits_per_symbol = descriptor.bits_per_symbol,
                     .storage_unit_bytes =
                         descriptor.storage_unit_byte_width,
@@ -897,9 +873,6 @@ collect_bounded_packed_paper_nthash_index_lazy(
                 },
                 .sequence_context = std::addressof(descriptor),
                 .collector_context = std::addressof(collector),
-                .alphabet = std::same_as<Alphabet, seq::dna4>
-                    ? PackedPaperNthashIndexAlphabet::dna4
-                    : PackedPaperNthashIndexAlphabet::dna5,
                 .storage_unit_bytes = descriptor.storage_unit_byte_width,
                 .letters_per_unit = descriptor.storage_unit_byte_width * 8u
                     / bioseq::storage::lazy_rank_stream_traits<Alphabet>::
@@ -910,7 +883,6 @@ collect_bounded_packed_paper_nthash_index_lazy(
                 .kmer_size = kmer_size,
                 .sequence_context_is_resident_descriptor = true,
             });
-    }
 }
 
 // Revision-3 persisted minimizer codecs stay in this wire owner. Their shared
@@ -21836,6 +21808,8 @@ private:
     sequence_type sequence_;
     MinimizerSketchBackend backend_ = MinimizerSketchBackend::Scalar;
     const bioseq::minimizers::MinimizerKernels* kernels_ = nullptr;
+    std::uint8_t alphabet_code_ =
+        bioseq::minimizers::unbound_packed_alphabet_code;
     std::uint16_t window_size_ = 10;
     std::uint16_t kmer_size_ = 15;
     std::uint64_t scan_count_ = 0;
@@ -21933,6 +21907,7 @@ private:
                 const auto paper_result =
                     collect_bounded_packed_paper_nthash_index_lazy(
                         sequence_,
+                        alphabet_code_,
                         static_cast<sequence_size_t>(collect_lo),
                         static_cast<sequence_size_t>(collect_hi),
                         collect_hi - emit_base,
@@ -21957,6 +21932,7 @@ private:
                     const auto proof = collect_exact_simd_index_range_or_throw(
                         collector,
                         sequence_,
+                        alphabet_code_,
                         static_cast<sequence_size_t>(collect_lo),
                         static_cast<sequence_size_t>(collect_hi),
                         window_size_,
@@ -22017,11 +21993,13 @@ public:
             sequence_type sequence,
             MinimizerSketchBackend backend,
             const bioseq::minimizers::MinimizerKernels* kernels,
+            std::uint8_t alphabet_code,
             std::uint16_t window_size = 10,
             std::uint16_t kmer_size = 15) noexcept
         : sequence_(sequence),
           backend_(backend),
           kernels_(kernels),
+          alphabet_code_(alphabet_code),
           window_size_(window_size),
           kmer_size_(kmer_size) {}
 
@@ -22249,9 +22227,11 @@ struct MinimizersPerFragmentIndex {
     [[nodiscard]] static auto make_generation_replay_producer(
             bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             MinimizerSketchBackend backend,
-            const bioseq::minimizers::MinimizerKernels* kernels) {
+            const bioseq::minimizers::MinimizerKernels* kernels,
+            std::uint8_t alphabet_code =
+                bioseq::minimizers::unbound_packed_alphabet_code) {
         return MpfFragmentGenerationReplayProducer<Alphabet>{
-            sequence, backend, kernels};
+            sequence, backend, kernels, alphabet_code};
     }
 
     /// Concrete MPF construction seam. Live v2 routing remains unchanged;
@@ -22267,7 +22247,9 @@ struct MinimizersPerFragmentIndex {
             Sink& sink,
             const MinimizerGenerationEncodeOptions& options,
             const MinimizerGenerationFixedWidthLimits& limits = {},
-            MpfGenerationExecutionEvidence* execution_evidence_out = nullptr) {
+            MpfGenerationExecutionEvidence* execution_evidence_out = nullptr,
+            std::uint8_t runtime_alphabet_code =
+                bioseq::minimizers::unbound_packed_alphabet_code) {
         if (execution_evidence_out != nullptr) {
             *execution_evidence_out = {};
         }
@@ -22285,7 +22267,7 @@ struct MinimizersPerFragmentIndex {
                 MinimizerGenerationWireError::compatibility_mismatch);
         }
         auto producer = make_generation_replay_producer(
-            sequence, backend, kernels);
+            sequence, backend, kernels, runtime_alphabet_code);
         auto encoded = encode_minimizer_generation(
             producer, sink, options, limits);
         MpfGenerationExecutionEvidence evidence =
@@ -22321,7 +22303,9 @@ struct MinimizersPerFragmentIndex {
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend,
         const bioseq::minimizers::MinimizerKernels* kernels,
-        MpfGenerationExecutionEvidence* execution_evidence_out = nullptr) {
+        MpfGenerationExecutionEvidence* execution_evidence_out = nullptr,
+        std::uint8_t alphabet_code =
+            bioseq::minimizers::unbound_packed_alphabet_code) {
         constexpr std::size_t w = 10, k = 15;                                  // pinned, == sidecar today
         constexpr std::size_t frag_bp    = 32'768u;
         constexpr std::size_t W          = w + k;                              // backward context
@@ -22467,7 +22451,8 @@ struct MinimizersPerFragmentIndex {
         }
 
         auto build_fragment_blob =
-            [seq, backend, kernels, total_bp, execution_evidence_out](std::size_t fragment_no,
+            [seq, backend, kernels, alphabet_code, total_bp,
+             execution_evidence_out](std::size_t fragment_no,
                                      sketch_collector& collector,
                                      std::vector<MinimapSketchData>& core,
                                      std::vector<char>& out_blob) {
@@ -22497,7 +22482,8 @@ struct MinimizersPerFragmentIndex {
                 } else {
                     if (backend == MinimizerSketchBackend::ExactSimd) {
                         const auto proof = collect_exact_simd_index_range_or_throw(
-                            collector, seq, coll_lo, coll_hi, w, k, 0u,
+                            collector, seq, alphabet_code,
+                            coll_lo, coll_hi, w, k, 0u,
                             kernels,
                             "minimizers_per_fragment build");
                         if (execution_evidence_out != nullptr) {
@@ -22515,7 +22501,8 @@ struct MinimizersPerFragmentIndex {
                             == MinimizerSketchBackend::PaperNtHashSimd) {
                         const auto result =
                             collect_bounded_packed_paper_nthash_index_lazy(
-                                seq, coll_lo, coll_hi, collect_bp,
+                                seq, alphabet_code,
+                                coll_lo, coll_hi, collect_bp,
                                 w, k, kernels, collector);
                         if (result.status
                                 != PackedPaperNthashIndexStatus::ok) {
@@ -22649,6 +22636,16 @@ struct MinimizersPerFragmentIndex {
           storage.template write_to_each<std::int64_t>(DIRECTORY_SUB_KEY, [manifest](std::size_t chunk_no, std::int64_t* manifest_buf, std::size_t){ manifest_buf[0]=manifest; return chunk_no; }); }
     }
 
+    template <sequence_alphabet Alphabet>
+    static void build(
+        S& storage,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+        MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
+        const std::uint8_t alphabet_code) {
+        build(storage, seq, backend, kernels, nullptr, alphabet_code);
+    }
+
     // DOC0345 Patch F — scalar-default overload delegates to the explicit backend.
     template <sequence_alphabet Alphabet>
     static void build(
@@ -22662,7 +22659,9 @@ struct MinimizersPerFragmentIndex {
         S& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend,
-        const bioseq::minimizers::MinimizerKernels* kernels)
+        const bioseq::minimizers::MinimizerKernels* kernels,
+        std::uint8_t alphabet_code =
+            bioseq::minimizers::unbound_packed_alphabet_code)
     {
         if (backend == MinimizerSketchBackend::ExactSimd
             && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
@@ -22677,7 +22676,7 @@ struct MinimizersPerFragmentIndex {
                 "minimizers_per_fragment rebuild"};
         }
         storage.clear_entity();
-        build(storage, seq, backend, kernels);
+        build(storage, seq, backend, kernels, nullptr, alphabet_code);
     }
 
     template <sequence_alphabet Alphabet>

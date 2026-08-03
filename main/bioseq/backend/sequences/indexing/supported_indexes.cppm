@@ -9,6 +9,7 @@
  */
 module;
 #include <array>
+#include <cstdint>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -154,12 +155,13 @@ struct supported_indexes {
     [[gnu::always_inline]] void run_fragmented_(OpenFragment&& open_for,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
             bioseq::minimizers::MinimizerSketchBackend backend,
-            const bioseq::minimizers::MinimizerKernels* kernels) {
+            const bioseq::minimizers::MinimizerKernels* kernels,
+            std::uint8_t alphabet_code) {
         std::size_t i = 0;
         // DOC0321 — explicit minimal capture (no `[&]` capture-all): `this` for
         // the enabled[]/policy[] members, the fold counter, the open callback,
         // the sequence, and the backend enum (by value).
-        ([this, &i, &open_for, seq, backend, kernels]{
+        ([this, &i, &open_for, seq, backend, kernels, alphabet_code]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT &&
                           (!OnlyOnInsert || index_descriptor<Indexes>::allows_update_on_insert)) {
@@ -174,9 +176,11 @@ struct supported_indexes {
                     StorageFragment& storage =
                         open_for(index_descriptor<Indexes>::index_name);
                     if constexpr (Rebuild) {
-                        B::rebuild(storage, seq, backend, kernels);
+                        B::rebuild(
+                            storage, seq, backend, kernels, alphabet_code);
                     } else {
-                        B::build(storage, seq, backend, kernels);
+                        B::build(
+                            storage, seq, backend, kernels, alphabet_code);
                     }
                 }
             }
@@ -223,9 +227,10 @@ struct supported_indexes {
         OpenFragment&& open_for,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         bioseq::minimizers::MinimizerSketchBackend backend,
-        const bioseq::minimizers::MinimizerKernels* kernels) {
+        const bioseq::minimizers::MinimizerKernels* kernels,
+        std::uint8_t alphabet_code) {
         run_fragmented_<false, OnlyOnInsert>(
-            open_for, seq, backend, kernels);
+            open_for, seq, backend, kernels, alphabet_code);
     }
     template <bool OnlyOnInsert = false, class OpenFragment,
               sequence_alphabet Alphabet>
@@ -236,7 +241,8 @@ struct supported_indexes {
             open_for,
             seq,
             bioseq::minimizers::MinimizerSketchBackend::Scalar,
-            nullptr);
+            nullptr,
+            bioseq::minimizers::unbound_packed_alphabet_code);
     }
     template <bool OnlyOnInsert=false, class OpenInline,
               sequence_alphabet Alphabet>
@@ -251,8 +257,10 @@ struct supported_indexes {
         OpenFragment&& open_for,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         bioseq::minimizers::MinimizerSketchBackend backend,
-        const bioseq::minimizers::MinimizerKernels* kernels) {
-        run_fragmented_<true, false>(open_for, seq, backend, kernels);
+        const bioseq::minimizers::MinimizerKernels* kernels,
+        std::uint8_t alphabet_code) {
+        run_fragmented_<true, false>(
+            open_for, seq, backend, kernels, alphabet_code);
     }
     template <class OpenFragment, sequence_alphabet Alphabet>
     void rebuild_fragmented(
@@ -262,7 +270,8 @@ struct supported_indexes {
             open_for,
             seq,
             bioseq::minimizers::MinimizerSketchBackend::Scalar,
-            nullptr);
+            nullptr,
+            bioseq::minimizers::unbound_packed_alphabet_code);
     }
     template <class OpenInline, sequence_alphabet Alphabet>
     void rebuild_sequence(
@@ -286,14 +295,16 @@ struct supported_indexes {
         StorageFragment& storage,
             bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
             bioseq::minimizers::MinimizerSketchBackend backend,
-            const bioseq::minimizers::MinimizerKernels* kernels) {
+            const bioseq::minimizers::MinimizerKernels* kernels,
+            std::uint8_t alphabet_code) {
         // DOC0321 — explicit minimal capture (no `[&]` capture-all).
-        ([&storage, seq, &name, backend, kernels]{
+        ([&storage, seq, &name, backend, kernels, alphabet_code]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT) {
                 if (index_descriptor<Indexes>::index_name == name) {
                     require_selected_minimizer_kernel_(backend, kernels);
-                    B::rebuild(storage, seq, backend, kernels);
+                    B::rebuild(
+                        storage, seq, backend, kernels, alphabet_code);
                 }
             }
         }(), ...);
@@ -308,7 +319,8 @@ struct supported_indexes {
             storage,
             seq,
             bioseq::minimizers::MinimizerSketchBackend::Scalar,
-            nullptr);
+            nullptr,
+            bioseq::minimizers::unbound_packed_alphabet_code);
     }
     template <sequence_alphabet Alphabet>
     void rebuild_one_inline(

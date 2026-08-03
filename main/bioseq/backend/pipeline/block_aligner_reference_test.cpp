@@ -47,17 +47,18 @@ using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
 
 template<sequence_alphabet Alphabet>
 [[nodiscard]] const AlignmentKernels<Alphabet>& fixed_alignment_kernels() {
-    constexpr std::uint8_t alphabet_code = [] {
-        if constexpr (std::is_same_v<Alphabet, seq::dna4>) return 0u;
-        if constexpr (std::is_same_v<Alphabet, seq::dna5>) return 1u;
-        return 0xffu;
-    }();
-    static_assert(alphabet_code != 0xffu,
-                  "test fixed-target table covers scheduler alphabets only");
     const auto& root =
         ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* identity = root.complete()
+        ? root.template resolve_alphabet_identity<Alphabet>() : nullptr;
+    if (identity == nullptr
+        || root.resolve_alphabet_identity(identity->alphabet_code)
+            != identity) {
+        throw std::logic_error{
+            "generated fixed-target test table lacks alphabet identity"};
+    }
     for (const auto& entry : root.alignment_by_alphabet) {
-        if (entry.alphabet_code == alphabet_code
+        if (entry.alphabet_code == identity->alphabet_code
             && entry.typed_table != nullptr) {
             return *static_cast<const AlignmentKernels<Alphabet>*>(
                 entry.typed_table);

@@ -2388,7 +2388,8 @@ template <sequence_alphabet Alphabet>
                 backend,
                 &mps_params.highway_kernels->minimizers,
                 scalar_query_selected
-                    ? &scalar_target_build_proof : nullptr);
+                    ? &scalar_target_build_proof : nullptr,
+                mps_params.alphabet_code);
 
         auto query_sketch =
             sketch_query_for_index_selection<MinimapSketchData>(
@@ -4242,7 +4243,8 @@ template <class S>
 	                                            OpportunisticFragmentIndexStorage>::build(
 	                                                ram_store, ft_pg_view,
                             target_backend_from_params_for_recompute(params),
-                            &params.highway_kernels->minimizers);
+                            &params.highway_kernels->minimizers,
+                            params.alphabet_code);
 	                                        const std::string_view opportunistic_index_name =
 	                                            want_seq
 	                                                ? kMinimizersPerSequenceIndex

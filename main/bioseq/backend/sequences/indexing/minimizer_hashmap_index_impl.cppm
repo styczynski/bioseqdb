@@ -472,23 +472,6 @@ ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
         return rejected_bridge_result(ExactSimdIndexStatus::invalid_state);
     }
 
-    std::uint8_t alphabet_code = 0u;
-    std::size_t bits_per_symbol = 0u;
-    switch (request.alphabet) {
-        case ExactSimdIndexAlphabet::dna4:
-            alphabet_code = static_cast<std::uint8_t>(
-                bioseq::minimizers::PackedSequenceAlphabet::dna4);
-            bits_per_symbol = 2u;
-            break;
-        case ExactSimdIndexAlphabet::dna5:
-            alphabet_code = static_cast<std::uint8_t>(
-                bioseq::minimizers::PackedSequenceAlphabet::dna5);
-            bits_per_symbol = 3u;
-            break;
-        default:
-            return rejected_bridge_result(
-                ExactSimdIndexStatus::unsupported_alphabet);
-    }
     if (request.storage_unit_bytes != 1u
         && request.storage_unit_bytes != 2u
         && request.storage_unit_bytes != 4u
@@ -497,7 +480,13 @@ ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
             ExactSimdIndexStatus::unsupported_storage);
     }
     const std::size_t storage_bits = request.storage_unit_bytes * 8u;
-    const std::size_t letters_per_unit = storage_bits / bits_per_symbol;
+    if (request.bits_per_symbol == 0u
+        || request.bits_per_symbol > 8u) {
+        return rejected_bridge_result(
+            ExactSimdIndexStatus::unsupported_alphabet);
+    }
+    const std::size_t letters_per_unit =
+        storage_bits / request.bits_per_symbol;
     if (letters_per_unit == 0u
         || request.letters_per_unit != letters_per_unit) {
         return rejected_bridge_result(
@@ -558,8 +547,8 @@ ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
             .storage_units = request.total_units,
             .begin_symbol = 0u,
             .end_symbol = request.total_bp,
-            .alphabet_code = alphabet_code,
-            .bits_per_symbol = static_cast<std::uint8_t>(bits_per_symbol),
+            .alphabet_code = request.alphabet_code,
+            .bits_per_symbol = request.bits_per_symbol,
             .storage_unit_bytes = static_cast<std::uint8_t>(
                 request.storage_unit_bytes),
             .final_segment = true,
@@ -603,11 +592,6 @@ collect_packed_paper_nthash_index_erased(
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::invalid_configuration);
     }
-    if (request.alphabet != PackedPaperNthashIndexAlphabet::dna4
-        && request.alphabet != PackedPaperNthashIndexAlphabet::dna5) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::unsupported_alphabet);
-    }
     if (request.storage_unit_bytes != sizeof(std::uint8_t)
         && request.storage_unit_bytes != sizeof(std::uint16_t)
         && request.storage_unit_bytes != sizeof(std::uint32_t)
@@ -628,16 +612,16 @@ collect_packed_paper_nthash_index_erased(
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_representation);
     }
-    const bool dna4 = request.alphabet
-        == PackedPaperNthashIndexAlphabet::dna4;
-    const std::uint8_t bits_per_symbol = dna4 ? 2u : 3u;
-    const std::uint8_t alphabet_code = static_cast<std::uint8_t>(
-        dna4
-            ? bioseq::minimizers::PackedSequenceAlphabet::dna4
-            : bioseq::minimizers::PackedSequenceAlphabet::dna5);
+    const std::uint8_t bits_per_symbol =
+        request.sequence.bits_per_symbol;
+    if (bits_per_symbol == 0u || bits_per_symbol > 8u) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::unsupported_alphabet);
+    }
     const std::size_t letters_per_unit =
         request.storage_unit_bytes * 8u / bits_per_symbol;
-    if (request.storage_units
+    if (letters_per_unit == 0u
+        || request.storage_units
             > (std::numeric_limits<std::size_t>::max)()
                 / letters_per_unit
         || request.local_bp_size
@@ -648,8 +632,6 @@ collect_packed_paper_nthash_index_erased(
     if (request.sequence.storage_units != request.storage_units
         || request.sequence.end_symbol != request.local_bp_size
         || request.sequence.begin_symbol != 0u
-        || request.sequence.alphabet_code != alphabet_code
-        || request.sequence.bits_per_symbol != bits_per_symbol
         || request.sequence.storage_unit_bytes != request.storage_unit_bytes
         || request.letters_per_unit != letters_per_unit
         || !request.sequence.final_segment) {

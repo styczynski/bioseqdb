@@ -472,7 +472,8 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
                                      attno, name, loc, rowno, nullptr, mctx)).first->second; };
         try {
             idx.build_fragmented<true>(
-                open_frag, lazy_view, backend, minimizer_kernels);
+                open_frag, lazy_view, backend, minimizer_kernels,
+                hdr->alphabet_code);
             idx.build_sequence<true>(open_inl, lazy_view);
             for (auto& [name, storage] : fcache) {
                 (void)name;
@@ -702,6 +703,7 @@ inline void rebuild_one_fragmented_maybe_resident(
         Storage& store,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
         std::uint8_t requested_width,
+        std::uint8_t alphabet_code,
         std::uint64_t rowno,
         bioseq::minimizers::MinimizerSketchBackend backend,
         const bioseq::minimizers::MinimizerKernels* kernels) {
@@ -712,11 +714,13 @@ inline void rebuild_one_fragmented_maybe_resident(
                     sequence, requested_width, rowno, name);
             resident.has_value()) {
             idx.rebuild_one_fragmented(
-                name, store, resident->owner.view(), backend, kernels);
+                name, store, resident->owner.view(), backend, kernels,
+                alphabet_code);
             return;
         }
     }
-    idx.rebuild_one_fragmented(name, store, sequence, backend, kernels);
+    idx.rebuild_one_fragmented(
+        name, store, sequence, backend, kernels, alphabet_code);
 }
 
 /**
@@ -1345,7 +1349,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     [rid, seq_attno, loc, rs, caches, inner,
                      promoted_datum, layout, rel_oid, name, rowno, work,
                      &idx, use_grouped32_generation, backend,
-                     minimizer_kernels, requested_provider, bw]<class S>() {
+                     minimizer_kernels, requested_provider, bw,
+                     alpha]<class S>() {
                     using SourceBinding =
                         bioseq::storage::postgres_lazy_sequence_binding<S>;
                     const SourceBinding source_binding{
@@ -1357,7 +1362,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         promoted_datum, inner, layout, rel_oid, rid,
                         seq_attno, &name, loc, rowno, caches, work, &idx,
                         use_grouped32_generation, source_binding, backend,
-                        minimizer_kernels, requested_provider, bw] {
+                        minimizer_kernels, requested_provider, bw, alpha] {
                       with_promoted_pg_sequence_view<
                           typename SourceBinding::alphabet_type>(
                           promoted_datum, inner,
@@ -1365,7 +1370,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                            caches, work, &idx, use_grouped32_generation,
                            source_binding, backend, minimizer_kernels,
                            requested_provider,
-                           bw](auto lazy_view){
+                           bw, alpha](auto lazy_view){
                             if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                                 auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
                                 run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view] {
@@ -1381,9 +1386,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                     requested_provider);
                             } else {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, rowno, backend, minimizer_kernels] {
+                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, alpha, rowno, backend, minimizer_kernels] {
                                     rebuild_one_fragmented_maybe_resident(
-                                        idx, name, store, lazy_view, bw,
+                                        idx, name, store, lazy_view, bw, alpha,
                                         rowno, backend, minimizer_kernels);
                                 });
                             }
@@ -1399,7 +1404,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     hdr->storage_unit_byte_width,
                     [hdr, layout, rel_oid, rid, seq_attno, name, rowno,
                      caches, work, &idx, bw, backend,
-                     minimizer_kernels]<class S>() {
+                     minimizer_kernels, alpha]<class S>() {
                     compact_sequence_range<S> rng{*hdr};
                     auto lazy = bioseq::storage::make_lazy_in_memory(rng);
                     const auto lazy_view =
@@ -1415,9 +1420,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         });
                     } else {
                         auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, rowno, backend, minimizer_kernels] {
+                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, alpha, rowno, backend, minimizer_kernels] {
                             rebuild_one_fragmented_maybe_resident(
-                                idx, name, store, lazy_view, bw,
+                                idx, name, store, lazy_view, bw, alpha,
                                 rowno, backend, minimizer_kernels);
                         });
                     }
@@ -2826,7 +2831,8 @@ build_and_publish_minimizer_format6_generation_pg(
             kernels,
             /*core_span_bp=*/0u,
             /*position_segment_span_bp=*/locator.total_bp_size,
-            &state->execution);
+            &state->execution,
+            state->source.alphabet_code);
         if (!spill) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
@@ -3471,7 +3477,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 auto encoded = MpfIndex::encode_persisted_generation(
                     sequence, backend, kernels, *state->writer, options,
                     bioseq::indexing::MinimizerGenerationFixedWidthLimits{},
-                    &state->mpf_execution);
+                    &state->mpf_execution,
+                    state->source.alphabet_code);
                 if (encoded) {
                     state->generation.emplace(std::move(*encoded));
                     state->execution = state->mpf_execution;
@@ -3484,7 +3491,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
                     storage, sequence, backend, kernels,
                     /*core_span_bp=*/0,
                     bioseq::indexing::kMinimizerPreferredSegmentSpanBp,
-                    &state->mps_execution);
+                    &state->mps_execution,
+                    state->source.alphabet_code);
                 if (!spill) {
                     state->encode_error = spill.error();
                 } else {

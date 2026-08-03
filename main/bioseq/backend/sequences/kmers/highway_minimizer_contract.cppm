@@ -1441,12 +1441,9 @@ struct PackedPaperNthashResult {
     }
 };
 
-
-/** Codes are translated explicitly from the central scheduler shape registry. */
-enum class PackedSequenceAlphabet : std::uint8_t {
-    dna4 = 0u,
-    dna5 = 1u,
-};
+/** Sentinel used only before source/topology alphabet evidence is attached. */
+inline constexpr std::uint8_t unbound_packed_alphabet_code =
+    (std::numeric_limits<std::uint8_t>::max)();
 
 /**
  * Borrowed, already-resident packed sequence segment.
@@ -1463,7 +1460,7 @@ struct PackedSequenceKernelView final {
     std::size_t storage_units = 0u;
     std::size_t begin_symbol = 0u;
     std::size_t end_symbol = 0u;
-    std::uint8_t alphabet_code = 0u;
+    std::uint8_t alphabet_code = unbound_packed_alphabet_code;
     std::uint8_t bits_per_symbol = 0u;
     std::uint8_t storage_unit_bytes = 0u;
     bool final_segment = false;

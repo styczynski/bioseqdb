@@ -630,6 +630,88 @@ collect_minimizer_cases(
     return result;
 }
 
+struct alphabet_identity_binding final {
+    std::uint8_t alphabet_code{};
+    std::string alphabet_type;
+};
+
+/**
+ * Reconcile every typed consumer against one generated alphabet identity axis.
+ *
+ * Alignment and minimizer records are separately useful renderer fixtures, so
+ * either family may stand alone. When both are present (the production
+ * registry), their code/type maps must be identical before any erased
+ * alignment pointer or minimizer wrapper is emitted.
+ */
+[[nodiscard]] inline std::vector<alphabet_identity_binding>
+collect_alphabet_identities(
+    const std::vector<alignment_family_binding>& alignment_families,
+    const std::vector<minimizer_case_binding>& minimizer_cases) {
+    using code_map = std::map<std::uint8_t, std::string>;
+    using type_map = std::map<std::string, std::uint8_t, std::less<>>;
+    code_map alignment_by_code;
+    type_map alignment_by_type;
+    code_map minimizer_by_code;
+    type_map minimizer_by_type;
+
+    const auto insert = [](
+        code_map& by_code,
+        type_map& by_type,
+        const std::uint8_t code,
+        const std::string& type,
+        const std::string_view owner) {
+        const auto [code_entry, inserted_code] = by_code.emplace(code, type);
+        if (!inserted_code && code_entry->second != type) {
+            throw std::runtime_error(
+                std::string{owner} + " alphabet code "
+                + std::to_string(code) + " maps to multiple C++ types");
+        }
+        const auto [type_entry, inserted_type] = by_type.emplace(type, code);
+        if (!inserted_type && type_entry->second != code) {
+            throw std::runtime_error(
+                std::string{owner} + " alphabet type '" + type
+                + "' maps to multiple scheduler codes");
+        }
+    };
+
+    for (const alignment_family_binding& family : alignment_families) {
+        insert(
+            alignment_by_code,
+            alignment_by_type,
+            family.alphabet_code,
+            family.alphabet_type,
+            "typed alignment");
+    }
+    for (const minimizer_case_binding& binding : minimizer_cases) {
+        insert(
+            minimizer_by_code,
+            minimizer_by_type,
+            binding.alphabet_code,
+            binding.alphabet_type,
+            "typed minimizer");
+    }
+
+    if (!alignment_by_code.empty() && !minimizer_by_code.empty()
+        && alignment_by_code != minimizer_by_code) {
+        throw std::runtime_error(
+            "typed alignment and minimizer registries disagree on the "
+            "source-owned alphabet identity axis");
+    }
+
+    const code_map& selected = !minimizer_by_code.empty()
+        ? minimizer_by_code
+        : alignment_by_code;
+    std::vector<alphabet_identity_binding> result;
+    result.reserve(selected.size());
+    for (const auto& [code, type] : selected) {
+        result.push_back(alphabet_identity_binding{
+            .alphabet_code = code,
+            .alphabet_type = type,
+        });
+    }
+    return result;
+}
+
 [[nodiscard]] inline std::string minimizer_wrapper_name(
     const std::string_view member) {
     return "MinimizerDispatch_" + std::string{member};
@@ -801,6 +883,8 @@ inline void render_minimizer_wrappers(
         collect_alignment_families(families);
     const std::vector<minimizer_case_binding> minimizer_cases =
         collect_minimizer_cases(families);
+    const std::vector<alphabet_identity_binding> alphabet_identities =
+        collect_alphabet_identities(alignment_families, minimizer_cases);
 
     std::ostringstream output;
     output << fixed_target_fragment(plan.target_inventory, target)
@@ -837,6 +921,24 @@ inline void render_minimizer_wrappers(
                    << "highway_kernel_set(HighwayKernelId::" << kernel << ")\n";
         }
         output << "        ;\n";
+    }
+
+    if (!alphabet_identities.empty()) {
+        output
+            << "    static const ::bioseq::simd_dispatch::"
+               "HighwayAlphabetIdentityEntry alphabet_identities[]{\n";
+        for (const alphabet_identity_binding& identity
+             : alphabet_identities) {
+            output
+                << "        {.type_identity = "
+                   "::bioseq::simd_dispatch::"
+                   "highway_alphabet_type_identity<"
+                << identity.alphabet_type << ">(), .alphabet_code = "
+                << static_cast<unsigned int>(identity.alphabet_code)
+                << "u},\n";
+        }
+        output << "    };\n"
+               << "    table.alphabet_identities = alphabet_identities;\n";
     }
 
     for (const alignment_family_binding& family : alignment_families) {

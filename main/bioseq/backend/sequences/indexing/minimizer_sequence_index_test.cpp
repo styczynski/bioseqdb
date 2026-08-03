@@ -71,6 +71,21 @@ fixed_minimizer_kernels() {
     return &::bioseq::simd_dispatch::highway_test_kernel_table().minimizers;
 }
 
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::uint8_t fixed_alphabet_code() {
+    const auto& table =
+        ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* identity = table.complete()
+        ? table.template resolve_alphabet_identity<Alphabet>() : nullptr;
+    if (identity == nullptr
+        || table.resolve_alphabet_identity(identity->alphabet_code)
+            != identity) {
+        throw std::logic_error{
+            "generated test table has no requested alphabet identity"};
+    }
+    return identity->alphabet_code;
+}
+
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
     std::vector<seq::dna4> v(n);
     std::uint64_t s = seed;
@@ -416,7 +431,9 @@ TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restr
                 exact_storage,
                 exact_sequence_view,
                 MinimizerSketchBackend::ExactSimd,
-                fixed_minimizer_kernels());
+                fixed_minimizer_kernels(),
+                nullptr,
+                fixed_alphabet_code<::seq::dna4>());
     }
     REQUIRE(storage.runs_.empty());   // build() calls release_runs() at the end
     REQUIRE(exact_storage.runs_.empty());
@@ -595,7 +612,9 @@ TEST_CASE("ExactSimd MPS collection accepts fragmented DNA5 with N resets",
         storage,
         sequence_view,
         MinimizerSketchBackend::ExactSimd,
-        fixed_minimizer_kernels()));
+        fixed_minimizer_kernels(),
+        nullptr,
+        fixed_alphabet_code<::seq::dna5>()));
     REQUIRE(storage.runs_.empty());
 }
 

@@ -123,7 +123,8 @@ struct Minimap2Params {
     ::bioseq::simd_dispatch::HighwayDispatchInfo highway_dispatch{};
     std::int64_t highway_executed_target = 0;
     /// Central scheduler-registry code fixed by the outer alphabet dispatch.
-    std::uint8_t alphabet_code = 0xffu;
+    std::uint8_t alphabet_code =
+        (std::numeric_limits<std::uint8_t>::max)();
 
     int32_t kmer_size      = 15;     ///< k-mer size
     int32_t window_size    = 10;     ///< minimizer window

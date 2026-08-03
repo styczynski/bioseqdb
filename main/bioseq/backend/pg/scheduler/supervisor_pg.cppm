@@ -3448,7 +3448,8 @@ void process_mps_build_claim_cpp(
                                     bioseq::indexing::MinimizerSequenceMergedIndex<
                                         bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
                                             store, resident_view, worker_backend,
-                                            nullptr);
+                                            nullptr,
+                                            meta->alphabet_code);
                                     return;
                                 }
                             }
@@ -3461,7 +3462,8 @@ void process_mps_build_claim_cpp(
                             bioseq::indexing::MinimizerSequenceMergedIndex<
                                 bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
                                     store, source_view, worker_backend,
-                                    nullptr);
+                                    nullptr,
+                                    meta->alphabet_code);
                         });
                     store.close_checked();
                 } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {

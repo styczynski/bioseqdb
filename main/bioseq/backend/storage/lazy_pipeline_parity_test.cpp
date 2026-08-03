@@ -18,6 +18,7 @@
 #include "common.h"
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -46,7 +47,16 @@ using range_t  = compact_sequence_range<dna4_u64>;
         ::bioseq::simd_dispatch::highway_test_target_binding();
     params.highway_kernels = binding.kernels;
     params.highway_executed_target = binding.target;
-    params.alphabet_code = 0u;
+    const auto* identity = binding.kernels == nullptr
+            || !binding.kernels->complete()
+        ? nullptr : binding.kernels->resolve_alphabet_identity<seq::dna4>();
+    if (identity == nullptr
+        || binding.kernels->resolve_alphabet_identity(
+               identity->alphabet_code) != identity) {
+        throw std::logic_error{
+            "generated fixed-target test binding lacks DNA4 identity"};
+    }
+    params.alphabet_code = identity->alphabet_code;
     return params;
 }
 

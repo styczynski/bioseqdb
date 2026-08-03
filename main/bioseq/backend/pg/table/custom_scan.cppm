@@ -41,6 +41,7 @@ module;
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -115,18 +116,26 @@ using aligner_options_catalog_row =
 using aligner_options_codec =
 	bioseq::table::sql_row_codecs::bioseq_aligner_options_codec;
 
-static_assert(
-	static_cast<std::uint8_t>(
-		pgseq_supported_alphabets::index_of<::seq::dna4>())
-		== bioseq::simd::pipe::minimizer_alphabet_code<::seq::dna4>(),
-	"PostgreSQL and minimizer DNA4 alphabet codes must agree");
-#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
-static_assert(
-	static_cast<std::uint8_t>(
-		pgseq_supported_alphabets::index_of<::seq::dna5>())
-		== bioseq::simd::pipe::minimizer_alphabet_code<::seq::dna5>(),
-	"PostgreSQL and minimizer DNA5 alphabet codes must agree");
-#endif
+[[nodiscard]] inline bioseq::simd::pipe::PipelineDescription
+DescribePipelineForPgAlphabet(
+		const bioseq::simd::Minimap2Params& params,
+		const std::uint8_t alphabet_code,
+		const bioseq::simd::pipe::QuerySketchPlanRoute route) {
+	std::optional<bioseq::simd::pipe::PipelineDescription> description;
+	pgseq_supported_alphabets::dispatch_alphabet_by_code(
+		static_cast<pgseq_supported_alphabets::alphabet_code_t>(alphabet_code),
+		[&description, &params, alphabet_code, route]
+		<sequence_alphabet Alphabet>() {
+			description.emplace(
+				bioseq::simd::pipe::describe_pipeline_for<Alphabet>(
+					params, alphabet_code, route));
+		});
+	if (!description.has_value()) {
+		throw std::invalid_argument{
+			"PostgreSQL alphabet dispatch produced no pipeline description"};
+	}
+	return std::move(*description);
+}
 
 /*
  * DOC0322 §7.5 — the former `extern "C++"` cross-partition reaches are replaced
@@ -24172,7 +24181,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	 */
 	if (features.has_mmsearch) {
 		runtime.aligner_state.pipeline_desc =
-			bioseq::simd::pipe::describe_pipeline_for(
+			DescribePipelineForPgAlphabet(
 				aligner_params, aligner_params.alphabet_code,
 				QuerySketchPlanRouteFor(index_read_requirement));
 	}
@@ -26395,7 +26404,7 @@ static void BioseqBatchJoin_BeginCustomScan(
 		 * releases the child's registration. */
 		runtime->aligner_params = params;
 		runtime->aligner_params_captured = true;
-		runtime->pipeline_desc = bioseq::simd::pipe::describe_pipeline_for(
+		runtime->pipeline_desc = DescribePipelineForPgAlphabet(
 			params, runtime->alphabet_code,
 			QuerySketchPlanRouteFor(requirement));
 		runtime->buffer.configure_params(
@@ -27197,7 +27206,7 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	}
 	runtime->aligner_params = params;
 	runtime->aligner_params_captured = true;
-	runtime->pipeline_desc = bioseq::simd::pipe::describe_pipeline_for(
+	runtime->pipeline_desc = DescribePipelineForPgAlphabet(
 		params, runtime->alphabet_code,
 		QuerySketchPlanRouteFor(
 			bioseq::indexing::IndexReadRequirement::require_absent));

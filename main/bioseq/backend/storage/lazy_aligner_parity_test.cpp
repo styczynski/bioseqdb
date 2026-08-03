@@ -40,8 +40,17 @@ using range_t  = compact_sequence_range<dna4_u64>;
 fixed_alignment_kernels() {
     const auto& root =
         ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* identity = root.complete()
+        ? root.resolve_alphabet_identity<seq::dna4>() : nullptr;
+    if (identity == nullptr
+        || root.resolve_alphabet_identity(identity->alphabet_code)
+            != identity) {
+        throw std::logic_error{
+            "generated fixed-target test table lacks DNA4 identity"};
+    }
     for (const auto& entry : root.alignment_by_alphabet) {
-        if (entry.alphabet_code == 0u && entry.typed_table != nullptr) {
+        if (entry.alphabet_code == identity->alphabet_code
+            && entry.typed_table != nullptr) {
             return *static_cast<const AlignmentKernels<seq::dna4>*>(
                 entry.typed_table);
         }

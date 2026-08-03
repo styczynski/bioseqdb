@@ -4736,6 +4736,19 @@ requires (
 [[nodiscard]] inline MinimizerKernelResult two_stack_nthash_case(
     MinimizerKernelInvocation& invocation)
 {
+    using config = sequence_custom_alphabet<Alphabet, StorageUnit>;
+    using traits = typename compact_sequence_range<config>::traits;
+    if (invocation.sequence.bits_per_symbol != traits::bits_per_char
+        || invocation.sequence.storage_unit_bytes != sizeof(StorageUnit)) {
+        MinimizerKernelResult rejected{};
+        rejected.proof.algorithm =
+            MinimizerKernelAlgorithm::two_stack_nthash;
+        rejected.proof.target = static_cast<std::int64_t>(HWY_TARGET);
+        rejected.status = MinimizerKernelStatus::invalid_configuration;
+        rejected.family_status = static_cast<std::uint32_t>(
+            TwoStackContinuationStatus::invalid_static_configuration);
+        return rejected;
+    }
 #if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
     return two_stack_nthash_scalable_storage_fallback_case<
         Alphabet, StorageUnit>(invocation);

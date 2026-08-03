@@ -77,6 +77,41 @@ static_assert(std::is_trivially_copyable_v<ChainingKernels>);
 static_assert(std::is_standard_layout_v<IndexingKernels>);
 static_assert(std::is_trivially_copyable_v<IndexingKernels>);
 
+/**
+ * ODR-stable neutral identity for one concrete alphabet type.
+ *
+ * Generated binders materialize this token from the scheduler topology's
+ * alphabet replacement. Neutral callers form the same token from their
+ * already-selected `Alphabet` template argument, so no second numeric enum or
+ * type-to-code switch is required. An inline variable specialization is one
+ * program entity and therefore has one address across module boundaries.
+ */
+using HighwayAlphabetTypeIdentity = const void*;
+
+namespace highway_alphabet_identity_detail {
+
+template<class Alphabet>
+inline std::byte anchor{};
+
+}  // namespace highway_alphabet_identity_detail
+
+template<class Alphabet>
+[[nodiscard]] constexpr HighwayAlphabetTypeIdentity
+highway_alphabet_type_identity() noexcept
+{
+    return &highway_alphabet_identity_detail::anchor<Alphabet>;
+}
+
+/** One source-topology-owned alphabet ordinal and its concrete C++ type. */
+struct HighwayAlphabetIdentityEntry final {
+    HighwayAlphabetTypeIdentity type_identity = nullptr;
+    std::uint8_t alphabet_code =
+        ::bioseq::minimizers::unbound_packed_alphabet_code;
+};
+
+static_assert(std::is_standard_layout_v<HighwayAlphabetIdentityEntry>);
+static_assert(std::is_trivially_copyable_v<HighwayAlphabetIdentityEntry>);
+
 /** Stable EXPLAIN spelling for one coarse target-bound function. */
 [[nodiscard]] constexpr std::string_view highway_kernel_name(
     const HighwayKernelId kernel) noexcept
@@ -128,6 +163,7 @@ static_assert(std::is_trivially_copyable_v<IndexingKernels>);
  */
 struct HighwayKernelTable final {
     HighwayKernelSet available_kernels{};
+    std::span<const HighwayAlphabetIdentityEntry> alphabet_identities{};
     ::bioseq::minimizers::MinimizerKernels minimizers{};
     CommonKernels common{};
     ChainingKernels chaining{};
@@ -146,6 +182,36 @@ struct HighwayKernelTable final {
         return (available_kernels & required) == required;
     }
 
+    /** Resolve one generated alphabet entry by its scheduler ordinal. */
+    [[nodiscard]] const HighwayAlphabetIdentityEntry*
+    resolve_alphabet_identity(const std::uint8_t alphabet_code) const noexcept
+    {
+        const HighwayAlphabetIdentityEntry* resolved = nullptr;
+        for (const HighwayAlphabetIdentityEntry& entry
+             : alphabet_identities) {
+            if (entry.alphabet_code != alphabet_code) continue;
+            if (resolved != nullptr) return nullptr;
+            resolved = &entry;
+        }
+        return resolved;
+    }
+
+    /** Resolve the scheduler-owned code for an already-selected C++ type. */
+    template<class Alphabet>
+    [[nodiscard]] const HighwayAlphabetIdentityEntry*
+    resolve_alphabet_identity() const noexcept
+    {
+        const auto expected = highway_alphabet_type_identity<Alphabet>();
+        const HighwayAlphabetIdentityEntry* resolved = nullptr;
+        for (const HighwayAlphabetIdentityEntry& entry
+             : alphabet_identities) {
+            if (entry.type_identity != expected) continue;
+            if (resolved != nullptr) return nullptr;
+            resolved = &entry;
+        }
+        return resolved;
+    }
+
     /** Fail closed unless every generated coarse family and typed table exists. */
     [[nodiscard]] bool complete() const noexcept {
         if (!available_kernels.all()
@@ -155,18 +221,27 @@ struct HighwayKernelTable final {
             || common.sneaky_snake_simd_batch == nullptr
             || chaining.chain_anchors_simd == nullptr
             || indexing.validate_non_scatter_local32_w2 == nullptr
-            || alignment_by_alphabet.empty()) {
+            || alphabet_identities.empty()
+            || alphabet_identities.size() != alignment_by_alphabet.size()) {
             return false;
         }
-        for (std::size_t index = 0;
-             index < alignment_by_alphabet.size();
+        for (std::size_t index = 0; index < alphabet_identities.size();
              ++index) {
-            const auto& entry = alignment_by_alphabet[index];
-            if (entry.typed_table == nullptr
+            const auto& identity = alphabet_identities[index];
+            const auto& alignment = alignment_by_alphabet[index];
+            if (identity.type_identity == nullptr
+                || alignment.typed_table == nullptr
+                || alignment.alphabet_code != identity.alphabet_code
                 || (index != 0u
-                    && alignment_by_alphabet[index - 1u].alphabet_code
-                        >= entry.alphabet_code)) {
+                    && alphabet_identities[index - 1u].alphabet_code
+                        >= identity.alphabet_code)) {
                 return false;
+            }
+            for (std::size_t previous = 0u; previous < index; ++previous) {
+                if (alphabet_identities[previous].type_identity
+                    == identity.type_identity) {
+                    return false;
+                }
             }
         }
         return true;

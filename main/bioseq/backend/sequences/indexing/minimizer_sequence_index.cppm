@@ -1978,6 +1978,7 @@ struct MinimizerSequenceMergedIndex {
         MinimizerGenerationWireError>
     collect_generation_core_run(
             bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+            std::uint8_t alphabet_code,
             MinimizerSketchBackend backend,
             const bioseq::minimizers::MinimizerKernels* kernels,
             SegmentUnitRange range,
@@ -2066,6 +2067,7 @@ struct MinimizerSequenceMergedIndex {
             exact_simd_proof = collect_exact_simd_index_range_or_throw(
                 collector,
                 sequence,
+                alphabet_code,
                 range.cs_u,
                 range.ce_u,
                 10u,
@@ -2090,6 +2092,7 @@ struct MinimizerSequenceMergedIndex {
             const auto paper_result =
                 collect_bounded_packed_paper_nthash_index_lazy(
                     sequence,
+                    alphabet_code,
                     range.cs_u,
                     range.ce_u,
                     local_bp_size,
@@ -2159,7 +2162,9 @@ struct MinimizerSequenceMergedIndex {
             std::uint64_t core_span_bp = 0,
             std::uint64_t position_segment_span_bp =
                 kMinimizerPreferredSegmentSpanBp,
-            MpsGenerationExecutionEvidence* execution_evidence_out = nullptr) {
+            MpsGenerationExecutionEvidence* execution_evidence_out = nullptr,
+            std::uint8_t alphabet_code =
+                bioseq::minimizers::unbound_packed_alphabet_code) {
         static_assert(MpsSegmentQualifiedSpillStorage<S>);
         constexpr std::uint64_t default_core_span = 32'768u;
         constexpr std::uint64_t lpu = 1u;
@@ -2367,6 +2372,7 @@ struct MinimizerSequenceMergedIndex {
                 }
                 auto collected = collect_generation_core_run(
                     sequence,
+                    alphabet_code,
                     backend,
                     kernels,
                     *range,
@@ -2673,7 +2679,9 @@ struct MinimizerSequenceMergedIndex {
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend,
         const bioseq::minimizers::MinimizerKernels* kernels,
-        ScalarMpsBuildExecutionProof* scalar_build_proof_out = nullptr) {
+        ScalarMpsBuildExecutionProof* scalar_build_proof_out = nullptr,
+        std::uint8_t alphabet_code =
+            bioseq::minimizers::unbound_packed_alphabet_code) {
         constexpr std::size_t w = 10, k = 15;
         constexpr std::size_t lpu = 1u;
         constexpr std::size_t frag_bp    = 32'768u;
@@ -2752,7 +2760,7 @@ struct MinimizerSequenceMergedIndex {
         // pairs are sorted on the HOST, so there is no CPU minimizer COLLECT on
         // this path. The scalar branch is unchanged.
         auto collect_core_range_pairs =
-            [&seq, backend, kernels](
+            [&seq, backend, kernels, alphabet_code](
                 sequence_size_t core_lo,
                 sequence_size_t core_hi,
                 sketch_collector& collector,
@@ -2765,6 +2773,7 @@ struct MinimizerSequenceMergedIndex {
                 seq, core_lo, core_hi, W);
             if (!range || !collect_generation_core_run(
                     seq,
+                    alphabet_code,
                     backend,
                     kernels,
                     *range,
@@ -3424,6 +3433,16 @@ struct MinimizerSequenceMergedIndex {
         }
     }
 
+    template <sequence_alphabet Alphabet>
+    static void build(
+        S& storage,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+        MinimizerSketchBackend backend,
+        const bioseq::minimizers::MinimizerKernels* kernels,
+        const std::uint8_t alphabet_code) {
+        build(storage, seq, backend, kernels, nullptr, alphabet_code);
+    }
+
     // DOC0345 Patch E — scalar-default overload delegates to the explicit backend.
     template <sequence_alphabet Alphabet>
     static void build(
@@ -3437,7 +3456,9 @@ struct MinimizerSequenceMergedIndex {
         S& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend,
-        const bioseq::minimizers::MinimizerKernels* kernels)
+        const bioseq::minimizers::MinimizerKernels* kernels,
+        std::uint8_t alphabet_code =
+            bioseq::minimizers::unbound_packed_alphabet_code)
     {
         if (backend == MinimizerSketchBackend::ExactSimd
             && (kernels == nullptr || kernels->two_stack_nthash == nullptr)) {
@@ -3452,7 +3473,7 @@ struct MinimizerSequenceMergedIndex {
                 "minimizers_per_sequence rebuild"};
         }
         storage.clear_entity();
-        build(storage, seq, backend, kernels);
+        build(storage, seq, backend, kernels, nullptr, alphabet_code);
     }
 
     template <sequence_alphabet Alphabet>
