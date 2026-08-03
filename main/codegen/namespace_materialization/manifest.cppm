@@ -1462,7 +1462,9 @@ inline void validate_template_flatten_publication_manifest(
     std::string previous_path;
     std::uint64_t api_partition_count = 0u;
     std::uint64_t selector_partition_count = 0u;
+    std::uint64_t declaration_probe_count = 0u;
     std::uint64_t implementation_unit_count = 0u;
+    std::uint64_t manifest_count = 0u;
     for (std::size_t index = 0; index < artifacts.children.size(); ++index) {
         const json_value& artifact = artifacts.children[index];
         require_exact_members(
@@ -1504,8 +1506,12 @@ inline void validate_template_flatten_publication_manifest(
             ++api_partition_count;
         } else if (kind == "selector_partition") {
             ++selector_partition_count;
+        } else if (kind == "declaration_probe") {
+            ++declaration_probe_count;
         } else if (kind == "implementation_unit") {
             ++implementation_unit_count;
+        } else if (kind == "manifest") {
+            ++manifest_count;
         }
         const std::string_view module = require_string(
             require_member(artifact, "module", owner), "artifact.module");
@@ -1532,13 +1538,20 @@ inline void validate_template_flatten_publication_manifest(
         const std::string_view validation = require_string(
             require_member(artifact, "validation_class", owner),
             "artifact.validation_class");
-        if (validation != "body_free" && validation != "body_bearing") {
+        const std::string_view expected_validation =
+            kind == "selector_partition" || kind == "implementation_unit"
+            ? std::string_view{"body_bearing"}
+            : std::string_view{"body_free"};
+        if (validation != expected_validation) {
             throw std::runtime_error(
-                std::string{owner} + ": unknown artifact validation class");
+                std::string{owner}
+                + ": artifact kind disagrees with its validation class");
         }
     }
     if (api_partition_count != 1u || selector_partition_count != 1u
-        || implementation_unit_count != body_bearing_obligation_count) {
+        || declaration_probe_count != body_free_probe_count
+        || implementation_unit_count != body_bearing_obligation_count
+        || manifest_count != 1u) {
         throw std::runtime_error(
             std::string{owner}
             + ": rendered artifacts disagree with distinct CMake "

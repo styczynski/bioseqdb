@@ -1087,12 +1087,43 @@ inline void verify_template_flatten_manifest_evidence() {
     require_rejected(
         [&] { static_cast<void>(render_generation(false_action)); },
         "template-flatten manifest rejects a fabricated frontend action count");
+    false_action = plan;
+    false_action.frontend_actions.body_free_declaration_probe_scans = 1u;
+    require_rejected(
+        [&] { static_cast<void>(render_generation(false_action)); },
+        "template-flatten manifest binds probe scans to probe evidence");
     generation_plan false_obligation = plan;
     false_obligation.compilation_obligations
         .body_bearing_implementation_units = 3u;
     require_rejected(
         [&] { static_cast<void>(render_generation(false_obligation)); },
         "template-flatten manifest rejects a truncated CMake compilation obligation");
+
+    generation_result wrong_validation = render_generation(plan, false);
+    const auto probe = std::ranges::find_if(
+        wrong_validation.artifacts,
+        [](const materialization_artifact& artifact) {
+            return artifact.artifact_kind
+                == materialization_artifact::kind::declaration_probe;
+        });
+    require(
+        probe != wrong_validation.artifacts.end(),
+        "manifest validation fixture requires a declaration probe artifact");
+    probe->validation = validation_class::body_bearing;
+    wrong_validation.artifacts.push_back(materialization_artifact{
+        .artifact_kind = materialization_artifact::kind::manifest,
+        .relative_path = "topology.json",
+        .validation = validation_class::body_free,
+        .content = render_topology_manifest(plan),
+    });
+    wrong_validation.artifacts.back().content_sha256 =
+        sha256_hex(wrong_validation.artifacts.back().content);
+    require_rejected(
+        [&] {
+            static_cast<void>(render_artifact_manifest(
+                plan, wrong_validation.artifacts, std::string_view{}));
+        },
+        "template-flatten manifest binds every artifact kind to its body class");
 }
 
 inline void verify_policy_neutral_publication_envelope() {
