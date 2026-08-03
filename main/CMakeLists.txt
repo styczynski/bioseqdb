@@ -390,8 +390,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 # publish it through CMake's authoritative sysroot input before project()
 # enables C/C++. Cross configurations must provide their own Apple SDK and
 # deployment identity instead of inheriting host defaults.
+set(_bioseq_apple_sdk_cache_help
+  "Apple SDK used by Bioseq compilation")
+set(_bioseq_apple_deployment_cache_help
+  "Minimum Apple deployment target used by Bioseq compilation")
 set(_bioseq_native_apple_intent FALSE)
 if(CMAKE_HOST_APPLE
+    AND NOT DEFINED CMAKE_TOOLCHAIN_FILE
+    AND NOT DEFINED ENV{CMAKE_TOOLCHAIN_FILE}
     AND (NOT DEFINED CMAKE_SYSTEM_NAME
       OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
   set(_bioseq_native_apple_intent TRUE)
@@ -401,14 +407,14 @@ if(_bioseq_native_apple_intent AND NOT CMAKE_OSX_SYSROOT)
     "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
   if(IS_DIRECTORY "${_bioseq_default_apple_sdk}")
     set(CMAKE_OSX_SYSROOT "${_bioseq_default_apple_sdk}" CACHE PATH
-      "Apple SDK used by Bioseq compilation" FORCE)
+      "${_bioseq_apple_sdk_cache_help}" FORCE)
   endif()
   unset(_bioseq_default_apple_sdk)
 endif()
 if(_bioseq_native_apple_intent
     AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING
-    "Minimum Apple deployment target used by Bioseq compilation")
+    "${_bioseq_apple_deployment_cache_help}")
 endif()
 unset(_bioseq_native_apple_intent)
 
@@ -434,21 +440,50 @@ project(
   LANGUAGES C CXX
 )
 
-# `APPLE` now reflects the configured target rather than only pre-project host
-# state. Migrate only the empty-help cache entry created by the former
-# unconditional FORCE assignment; explicit command-line/toolchain entries
-# retain their help marker and remain fail-closed in Highway probe validation.
-if(NOT APPLE
-    AND DEFINED CACHE{CMAKE_OSX_DEPLOYMENT_TARGET}
-    AND CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "14.0")
-  get_property(_bioseq_legacy_deployment_help CACHE
-    CMAKE_OSX_DEPLOYMENT_TARGET PROPERTY HELPSTRING)
-  if(_bioseq_legacy_deployment_help STREQUAL "")
-    unset(CMAKE_OSX_DEPLOYMENT_TARGET CACHE)
-    unset(CMAKE_OSX_DEPLOYMENT_TARGET)
+# `APPLE` now reflects the configured target rather than pre-project host
+# state. Remove only exact cache values proven to have been seeded by Bioseq's
+# former host defaults; explicit command-line/toolchain identities retain
+# their distinct help marker and remain fail-closed in probe validation.
+if(NOT APPLE)
+  if(DEFINED CACHE{CMAKE_OSX_SYSROOT})
+    get_property(_bioseq_legacy_sysroot_value CACHE
+      CMAKE_OSX_SYSROOT PROPERTY VALUE)
+    get_property(_bioseq_legacy_sysroot_help CACHE
+      CMAKE_OSX_SYSROOT PROPERTY HELPSTRING)
+    if(_bioseq_legacy_sysroot_value STREQUAL
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+        AND _bioseq_legacy_sysroot_help STREQUAL
+        "${_bioseq_apple_sdk_cache_help}")
+      unset(CMAKE_OSX_SYSROOT CACHE)
+      if(CMAKE_OSX_SYSROOT STREQUAL "${_bioseq_legacy_sysroot_value}")
+        unset(CMAKE_OSX_SYSROOT)
+      endif()
+    endif()
+    unset(_bioseq_legacy_sysroot_value)
+    unset(_bioseq_legacy_sysroot_help)
   endif()
-  unset(_bioseq_legacy_deployment_help)
+
+  if(DEFINED CACHE{CMAKE_OSX_DEPLOYMENT_TARGET})
+    get_property(_bioseq_legacy_deployment_value CACHE
+      CMAKE_OSX_DEPLOYMENT_TARGET PROPERTY VALUE)
+    get_property(_bioseq_legacy_deployment_help CACHE
+      CMAKE_OSX_DEPLOYMENT_TARGET PROPERTY HELPSTRING)
+    if(_bioseq_legacy_deployment_value STREQUAL "14.0"
+        AND (_bioseq_legacy_deployment_help STREQUAL ""
+        OR _bioseq_legacy_deployment_help STREQUAL
+          "${_bioseq_apple_deployment_cache_help}"))
+      unset(CMAKE_OSX_DEPLOYMENT_TARGET CACHE)
+      if(CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL
+          "${_bioseq_legacy_deployment_value}")
+        unset(CMAKE_OSX_DEPLOYMENT_TARGET)
+      endif()
+    endif()
+    unset(_bioseq_legacy_deployment_value)
+    unset(_bioseq_legacy_deployment_help)
+  endif()
 endif()
+unset(_bioseq_apple_sdk_cache_help)
+unset(_bioseq_apple_deployment_cache_help)
 
 # CMake's import-std support creates this static helper during project().  Its
 # objects are folded into static libraries that are subsequently linked into

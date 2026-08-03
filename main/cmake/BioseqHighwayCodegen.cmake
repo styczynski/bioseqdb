@@ -365,7 +365,11 @@ function(_bioseq_highway_reject_opaque_preprocessor_inputs label)
         "${label} suppresses authenticated compiler predefined macros with "
         "'${_option}'")
     elseif(_option MATCHES
-        "(^|[ :])(-I|-F|-isystem|-iquote|-idirafter|-iprefix|-iwithprefixbefore|-iwithprefix|-iframework|-ivfsoverlay)")
+        "(^|[ :])(-I|-F|-isystem|-cxx-isystem|-stdlib[+][+]-isystem|-iquote|-idirafter|-iprefix|-iwithprefixbefore|-iwithprefix|-iwithsysroot)"
+        OR _option MATCHES
+        "(^|[ :])(-iframework|-ivfsoverlay|-vfsoverlay|-resource-dir)"
+        OR _option MATCHES
+        "(^|[ :])(-nostdinc([+][+])?|-nostdlibinc|-nobuiltininc|-ibuiltininc)(=|[ ]|$)")
       _bioseq_highway_fail(
         "${label} contains unauthenticated header-search/VFS option "
         "'${_option}'")

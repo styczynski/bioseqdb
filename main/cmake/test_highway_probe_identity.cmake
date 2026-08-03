@@ -159,6 +159,57 @@ elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-vfs-shell")
       "SHELL:-ivfsoverlay ${TEST_ROOT}/shadow-overlay.yaml"
     DEFINITIONS HWY_TEST_POLICY=1)
   message(FATAL_ERROR "SHELL VFS overlay unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-vfs-driver-alias")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS -vfsoverlay "${TEST_ROOT}/shadow-overlay.yaml"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "driver VFS overlay alias unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-cxx-isystem")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS -cxx-isystem "${TEST_ROOT}/shadow-cxx-system"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "C++ system search override unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-stdlib-isystem")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS
+      "SHELL:-stdlib++-isystem ${TEST_ROOT}/shadow-stdlib-system"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "stdlib system search override unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-iwithsysroot")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS -iwithsysroot "${TEST_ROOT}/shadow-sysroot-search"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "sysroot-relative search override unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-resource-dir")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS "-resource-dir=${TEST_ROOT}/shadow-resource-dir"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "compiler resource directory override unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-nostdinc")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS -nostdinc
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "standard include suppression unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-nostdincxx")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS "SHELL:-nostdinc++"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "C++ include suppression unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-nostdlibinc")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS -nostdlibinc
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "stdlib include suppression unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-nobuiltininc")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS -nobuiltininc
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "builtin include suppression unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-ibuiltininc")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS -ibuiltininc
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "builtin include state override unexpectedly succeeded")
 elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "framework-search")
   _bioseq_highway_prepare_direct_probe_policy(_arguments
     CONFIGURED_FLAGS "-F${TEST_ROOT}/shadow-frameworks"
@@ -422,6 +473,26 @@ _contract_expect_child_failure(
   header-search-joined "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
   header-vfs-shell "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-vfs-driver-alias "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-cxx-isystem "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-stdlib-isystem "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-iwithsysroot "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-resource-dir "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-nostdinc "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-nostdincxx "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-nostdlibinc "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-nobuiltininc "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-ibuiltininc "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
   framework-search "unauthenticated header-search/VFS option")
 _contract_expect_child_failure(
