@@ -180,7 +180,7 @@ private:
 
 	static constexpr void transpose8(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x2<D>) {
 		const hn::RepartitionToWide<D> dw;
-		
+
 		const VecT v0 = matrix[0];
 		const VecT v1 = matrix[1];
 		const VecT v2 = matrix[2];
@@ -194,18 +194,18 @@ private:
 		const VecT t0 = InterleaveLower(d, v0, v1);
 		const VecT t1 = InterleaveLower(d, v2, v3);
 		const VecT t2 = InterleaveLower(d, v4, v5);
-		const VecT t3 = InterleaveLower(d, v6, v7); 
+		const VecT t3 = InterleaveLower(d, v6, v7);
 
 		const VecT t4 = InterleaveUpper(d, v0, v1);
 		const VecT t5 = InterleaveUpper(d, v2, v3);
 		const VecT t6 = InterleaveUpper(d, v4, v5);
 		const VecT t7 = InterleaveUpper(d, v6, v7);
-		
+
 		const VecT e0 = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
 		const VecT e1 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
 		const VecT e2 = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
 		const VecT e3 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
-		
+
 		const VecT e4 = BitCast(d, InterleaveLower(dw, BitCast(dw, t4), BitCast(dw, t5)));
 		const VecT e5 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t4), BitCast(dw, t5)));
 		const VecT e6 = BitCast(d, InterleaveLower(dw, BitCast(dw, t6), BitCast(dw, t7)));
@@ -215,7 +215,7 @@ private:
 
 		matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e2)));
 		matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e2)));
-		
+
 		matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e3)));
 		matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e3)));
 
@@ -254,7 +254,7 @@ private:
 		const VecT e15 = matrix[15];
 
 		const hn::RepartitionToWideX3<D> dww;
-		
+
 		matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e8)));
 		matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e8)));
 		matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e9)));
@@ -303,7 +303,7 @@ public:
 		return data;
 	}
 
-	template<typename T, size_t K> 
+	template<typename T, size_t K>
 	constexpr size_t fill_with_offsets(
 		D& d, const std::array<size_t, K> offsets, const T* data
 	) {
@@ -345,7 +345,7 @@ public:
 				++full_rows_count;
 			}
 		}
-		for(; i < rows_to_load; ++i) { 
+		for(; i < rows_to_load; ++i) {
 			matrix[i] = hn::Zero(d);
 		}
 		return std::make_pair(full_rows_count, partial_filled_rows);
@@ -383,7 +383,7 @@ public:
 	// 	return std::make_pair(full_rows_count, partial_filled_rows);
 	// }
 
-	template<typename T> 
+	template<typename T>
 	constexpr size_t fill(
 		D& d, const size_t context, const T* data
 	) {
