@@ -418,7 +418,7 @@ inline void validate_slot_expression(const slot_spec& slot) {
             "Highway slot '" + slot.family_field + "." + slot.slot_field
             + "' expression must contain {target_namespace} exactly once");
     }
-    static constexpr std::array<std::string_view, 12> forbidden{
+    static constexpr std::array<std::string_view, 11> forbidden{
         "HWY_DYNAMIC_DISPATCH",
         "HWY_DYNAMIC_POINTER",
         "HWY_STATIC_DISPATCH",
@@ -431,6 +431,7 @@ inline void validate_slot_expression(const slot_spec& slot) {
         "select_highway_target_once",
         "registered_highway_dispatch_info",
     };
+    static_assert(!forbidden.back().empty());
     for (std::string_view spelling : forbidden) {
         if (slot.expression.contains(spelling)) {
             throw std::runtime_error(
