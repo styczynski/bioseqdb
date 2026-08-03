@@ -41,7 +41,6 @@ import bioseq.highway.sources.ksw2;
 import bioseq.highway.sources.alignment_utils;
 import bioseq.highway.sources.alignment_lanes;
 import bioseq.sequences.chaining.utils;
-import bioseq.sequences.minimap_port;
 import bioseq.common.context;
 import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
 import bioseq.storage.lazy;      // DOC0263 — canonical erased lazy view
