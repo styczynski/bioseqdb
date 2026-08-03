@@ -48,6 +48,7 @@ import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.highway_contract;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.gpu.vulkan.phase_b_abi;
 import bioseq.gpu.vulkan.phase_c_abi;
