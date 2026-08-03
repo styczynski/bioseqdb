@@ -12224,59 +12224,6 @@ validate_prepared_compilation_environment(
                 "sealed direct-import graph for module '"
                 + module.name + "'");
         }
-        if (!clang_backend::path_within_root(
-                module.pcm_provenance, pcm_root)
-            || !std::filesystem::is_regular_file(
-                module.pcm_provenance)) {
-            throw std::runtime_error(
-                "PREPARE PCM provenance is missing or foreign for "
-                "module '" + module.name + "'");
-        }
-        const std::string provenance =
-            read_file(module.pcm_provenance);
-        const std::string expected_provenance =
-            "bioseq_clang_pcm_provenance/v1\n"
-            "module=" + module.name + "\n"
-            "content_key=" + module.content_key + "\n"
-            "source_sha256=" + module.source_sha256 + "\n"
-            "arguments_sha256=" + module.arguments_sha256 + "\n"
-            "command_input_sha256="
-            + module.command_input_sha256 + "\n"
-            "dependency_content_sha256="
-            + module.dependency_sha256 + "\n"
-            "clang_binary_sha256=" + clang_binary_sha256 + "\n"
-            "clang_scan_deps_sha256="
-            + clang_scan_deps_sha256 + "\n"
-            "pcm_sha256=" + module.pcm_sha256 + "\n";
-        if (provenance != expected_provenance
-            || sha256_hex(provenance)
-                != module.pcm_provenance_sha256) {
-            throw std::runtime_error(
-                "PREPARE PCM provenance is corrupt or stale for module '"
-                + module.name + "'");
-        }
-        if (!clang_backend::path_within_root(
-                module.depfile, pcm_root)
-            || !std::filesystem::is_regular_file(module.depfile)
-            || sha256_hex(read_file(module.depfile))
-                != module.depfile_sha256
-            || clang_backend::relocatable_document_hash(
-                   read_file(module.depfile),
-                   relocation)
-                != module.relocatable_depfile_sha256) {
-            throw std::runtime_error(
-                "PREPARE depfile is missing, foreign, or stale for "
-                "module '" + module.name + "'");
-        }
-        if (!clang_backend::path_within_root(
-                module.pcm, pcm_root)
-            || !std::filesystem::is_regular_file(module.pcm)
-            || sha256_hex(read_file(module.pcm))
-                != module.pcm_sha256) {
-            throw std::runtime_error(
-                "PREPARE PCM is missing, foreign, or corrupt for module '"
-                + module.name + "'");
-        }
         if (!module_by_source.emplace(
                 module.source, module.name).second
             || !pcm_paths.insert(module.pcm).second
@@ -12286,30 +12233,7 @@ validate_prepared_compilation_environment(
                 "PCM path");
         }
     }
-    std::unordered_map<std::string, std::string>
-        dependency_hash_cache;
-    std::unordered_map<std::string, std::string>
-        relocatable_dependency_hash_cache;
     for (const auto& [name, module] : modules) {
-        const std::vector<std::filesystem::path> dependencies =
-            clang_backend::parse_make_depfile(
-                module.depfile,
-                module.directory);
-        if (clang_backend::dependency_content_hash(
-                dependencies,
-                pcm_root,
-                dependency_hash_cache)
-                != module.dependency_sha256
-            || clang_backend::relocatable_dependency_content_hash(
-                   dependencies,
-                   pcm_root,
-                   relocation,
-                   relocatable_dependency_hash_cache)
-                != module.relocatable_dependency_sha256) {
-            throw std::runtime_error(
-                "PREPARE header/source dependency closure is stale for "
-                "module '" + name + "'");
-        }
         for (const std::string& imported : module.imports) {
             if (!modules.contains(imported)) {
                 throw std::runtime_error(
@@ -12319,23 +12243,21 @@ validate_prepared_compilation_environment(
         }
     }
 
-    std::map<std::string, int, std::less<>> state;
-    std::set<std::string, std::less<>> reached;
-    std::function<void(const std::string&)> validate_module =
+    std::map<std::string, int, std::less<>> validation_state;
+    std::function<void(const std::string&)> validate_module_artifacts =
         [&](const std::string& name) {
-            if (state[name] == 2) {
-                reached.insert(name);
+            if (validation_state[name] == 2) {
                 return;
             }
-            if (state[name] == 1) {
+            if (validation_state[name] == 1) {
                 throw std::runtime_error(
                     "PREPARE PCM manifest contains a module cycle at '"
                     + name + "'");
             }
-            state[name] = 1;
+            validation_state[name] = 1;
             const sealed_module& module = modules.at(name);
             for (const std::string& imported : module.imports) {
-                validate_module(imported);
+                validate_module_artifacts(imported);
             }
             std::vector<std::pair<std::string, std::string>>
                 physical_import_keys;
@@ -12411,8 +12333,104 @@ validate_prepared_compilation_environment(
                     "PREPARE artifact spelling differs from its exact "
                     "content-derived path for module '" + name + "'");
             }
-            state[name] = 2;
-            reached.insert(name);
+            validation_state[name] = 2;
+        };
+    for (const auto& entry : modules) {
+        validate_module_artifacts(entry.first);
+    }
+
+    for (const auto& [name, module] : modules) {
+        if (!clang_backend::path_within_root(
+                module.pcm_provenance, pcm_root)
+            || !std::filesystem::is_regular_file(
+                module.pcm_provenance)) {
+            throw std::runtime_error(
+                "PREPARE PCM provenance is missing or foreign for "
+                "module '" + name + "'");
+        }
+        const std::string provenance =
+            read_file(module.pcm_provenance);
+        const std::string expected_provenance =
+            "bioseq_clang_pcm_provenance/v1\n"
+            "module=" + module.name + "\n"
+            "content_key=" + module.content_key + "\n"
+            "source_sha256=" + module.source_sha256 + "\n"
+            "arguments_sha256=" + module.arguments_sha256 + "\n"
+            "command_input_sha256="
+            + module.command_input_sha256 + "\n"
+            "dependency_content_sha256="
+            + module.dependency_sha256 + "\n"
+            "clang_binary_sha256=" + clang_binary_sha256 + "\n"
+            "clang_scan_deps_sha256="
+            + clang_scan_deps_sha256 + "\n"
+            "pcm_sha256=" + module.pcm_sha256 + "\n";
+        if (provenance != expected_provenance
+            || sha256_hex(provenance)
+                != module.pcm_provenance_sha256) {
+            throw std::runtime_error(
+                "PREPARE PCM provenance is corrupt or stale for module '"
+                + name + "'");
+        }
+        if (!clang_backend::path_within_root(
+                module.depfile, pcm_root)
+            || !std::filesystem::is_regular_file(module.depfile)
+            || sha256_hex(read_file(module.depfile))
+                != module.depfile_sha256
+            || clang_backend::relocatable_document_hash(
+                   read_file(module.depfile),
+                   relocation)
+                != module.relocatable_depfile_sha256) {
+            throw std::runtime_error(
+                "PREPARE depfile is missing, foreign, or stale for "
+                "module '" + name + "'");
+        }
+        if (!clang_backend::path_within_root(
+                module.pcm, pcm_root)
+            || !std::filesystem::is_regular_file(module.pcm)
+            || sha256_hex(read_file(module.pcm))
+                != module.pcm_sha256) {
+            throw std::runtime_error(
+                "PREPARE PCM is missing, foreign, or corrupt for module '"
+                + name + "'");
+        }
+    }
+
+    std::unordered_map<std::string, std::string>
+        dependency_hash_cache;
+    std::unordered_map<std::string, std::string>
+        relocatable_dependency_hash_cache;
+    for (const auto& [name, module] : modules) {
+        const std::vector<std::filesystem::path> dependencies =
+            clang_backend::parse_make_depfile(
+                module.depfile,
+                module.directory);
+        if (clang_backend::dependency_content_hash(
+                dependencies,
+                pcm_root,
+                dependency_hash_cache)
+                != module.dependency_sha256
+            || clang_backend::relocatable_dependency_content_hash(
+                   dependencies,
+                   pcm_root,
+                   relocation,
+                   relocatable_dependency_hash_cache)
+                != module.relocatable_dependency_sha256) {
+            throw std::runtime_error(
+                "PREPARE header/source dependency closure is stale for "
+                "module '" + name + "'");
+        }
+    }
+
+    std::set<std::string, std::less<>> reached;
+    std::function<void(const std::string&)> collect_reached =
+        [&](const std::string& name) {
+            if (!reached.insert(name).second) {
+                return;
+            }
+            for (const std::string& imported :
+                 modules.at(name).imports) {
+                collect_reached(imported);
+            }
         };
 
     std::vector<std::filesystem::path> normalized_sources;
@@ -12441,7 +12459,7 @@ validate_prepared_compilation_environment(
          normalized_sources) {
         const std::string& module_name =
             module_by_source.at(source);
-        validate_module(module_name);
+        collect_reached(module_name);
         const sealed_module& module =
             modules.at(module_name);
         const std::vector<clang::tooling::CompileCommand> commands =
