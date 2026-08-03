@@ -77,6 +77,38 @@ inline void append_cigar(
     }
 }
 
+/**
+ * Append the implicit seed span shared by alignment backends. The common
+ * prefix is represented as a match, followed by the query-only insertion or
+ * target-only deletion tail. Adjacent equal opcodes retain the canonical
+ * run-length merge used by append_cigar().
+ */
+inline void append_implicit_seed_cigar(
+    std::vector<CigarOp>& cigar,
+    std::size_t query_length,
+    std::size_t target_length)
+{
+    const auto append_op = [&cigar](std::uint32_t opcode, std::size_t length) {
+        if (length == 0) return;
+        if (!cigar.empty() && cigar.back().opcode == opcode) {
+            cigar.back().length += static_cast<std::uint32_t>(length);
+        } else {
+            cigar.push_back(CigarOp{
+                .length = static_cast<std::uint32_t>(length),
+                .opcode = opcode,
+            });
+        }
+    };
+
+    const std::size_t common_length = std::min(query_length, target_length);
+    append_op(CIGAR_MATCH, common_length);
+    if (query_length > common_length) {
+        append_op(CIGAR_INS, query_length - common_length);
+    } else if (target_length > common_length) {
+        append_op(CIGAR_DEL, target_length - common_length);
+    }
+}
+
 /// Format a CigarOp vector as a human-readable string (e.g. "58M1I33M").
 [[nodiscard]] inline std::string format_cigar(const std::vector<CigarOp>& cigar)
 {

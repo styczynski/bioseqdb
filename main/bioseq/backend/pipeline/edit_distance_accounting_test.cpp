@@ -251,6 +251,28 @@ void check_exact_region(
 
 }  // namespace
 
+TEST_CASE("implicit seed CIGAR assembly is one neutral canonical contract",
+          "[cigar][implicit-seed][contract]") {
+    const auto assembled = [](std::size_t query_length,
+                              std::size_t target_length) {
+        std::vector<CigarOp> cigar;
+        append_implicit_seed_cigar(cigar, query_length, target_length);
+        return format_cigar(cigar);
+    };
+
+    CHECK(assembled(5u, 5u) == "5M");
+    CHECK(assembled(7u, 5u) == "5M2I");
+    CHECK(assembled(5u, 7u) == "5M2D");
+    CHECK(assembled(4u, 0u) == "4I");
+    CHECK(assembled(0u, 4u) == "4D");
+    CHECK(assembled(0u, 0u).empty());
+
+    std::vector<CigarOp> existing{
+        CigarOp{.length = 3u, .opcode = CIGAR_MATCH}};
+    append_implicit_seed_cigar(existing, 5u, 7u);
+    CHECK(format_cigar(existing) == "8M2D");
+}
+
 TEST_CASE("Single-seed exact edit accounting compares implicit seed ranks",
           "[edit-distance][single-seed][ksw2][block-aligner][batched]") {
     context::context ctx;
