@@ -7058,7 +7058,7 @@ struct relocation_context {
 }
 
 inline constexpr std::string_view MODULE_PREPARATION_POLICY_VERSION =
-    "bioseq_clang_module_preparation/v2";
+    "bioseq_clang_module_preparation/v3";
 
 struct module_build_record {
     std::string module_name;
@@ -8347,7 +8347,7 @@ void scan_make_dependencies(module_build_record& record) {
         scan_object.string(),
     };
     clang::dependencies::DependencyScanningService service{
-        clang::dependencies::ScanningMode::DependencyDirectivesScan,
+        clang::dependencies::ScanningMode::CanonicalPreprocessing,
         clang::dependencies::ScanningOutputFormat::P1689,
     };
     clang::tooling::DependencyScanningTool scanner{service};
