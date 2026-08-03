@@ -10,6 +10,7 @@ module;
 
 export module bioseq.simd.utils;
 import bioseq.common.mlogging;
+import bioseq.common.templating;
 
 export {
 
@@ -17,6 +18,7 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+using ::bioseq::common::templating::for_each_index;
 
 template <typename T, typename D>
 inline constexpr std::vector<T> extract_lanes(

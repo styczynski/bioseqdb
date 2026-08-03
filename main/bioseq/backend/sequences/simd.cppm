@@ -28,6 +28,7 @@ import bioseq.storage.lazy;
 import bioseq.sequences.simd_iteration_geometry;
 
 import bioseq.simd.utils;
+export import bioseq.simd.vector_stream;
 
 export {
 

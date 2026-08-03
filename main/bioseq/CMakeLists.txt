@@ -1030,6 +1030,7 @@ unset(_bioseq_template_flatten_authored_cppm_candidates)
 
 set(BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_dispatch_contract_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index_impl.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
@@ -1175,7 +1176,6 @@ target_sources(bioseq_runtime_core
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_TBB_PARTITION_LINK_SHIM_SOURCE})
 
 set(BIOSEQ_NOPG_SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/vector_compare.cpp
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cpp
