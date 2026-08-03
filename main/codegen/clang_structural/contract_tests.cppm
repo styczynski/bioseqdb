@@ -419,23 +419,6 @@ inline void publish_prepared(
     return document;
 }
 
-[[nodiscard]] inline std::string replace_exact_once(
-    std::string document,
-    std::string_view marker,
-    std::string_view replacement,
-    std::string_view role) {
-    const std::size_t position = document.find(marker);
-    if (position == std::string::npos
-        || document.find(marker, position + marker.size())
-            != std::string::npos) {
-        throw std::runtime_error(
-            "PREPARE contract fixture cannot identify one exact "
-            + std::string{role});
-    }
-    document.replace(position, marker.size(), replacement);
-    return document;
-}
-
 [[nodiscard]] inline std::filesystem::path first_pcm_dependency(
     const prepared_compilation_environment& prepared) {
     const auto pcm = std::ranges::find_if(
@@ -1613,14 +1596,9 @@ inline int invoke() {
         "dependency-only guard could not remove one PCM commit marker");
     const std::filesystem::path interrupted_pcm_depfile{
         interrupted_pcm.string() + ".d"};
-    std::filesystem::path interrupted_full_pcm = interrupted_pcm;
-    interrupted_full_pcm.replace_extension(".full.pcm");
     write_file(
         interrupted_pcm_depfile,
         "this is an intentionally malformed stale compiler depfile\n");
-    write_file(
-        interrupted_full_pcm,
-        "this is an intentionally stale transient full BMI\n");
     const prepared_compilation_environment recovered_guard =
         prepare_guard();
     require(
@@ -1636,10 +1614,8 @@ inline int invoke() {
         "an interrupted PCM tuple was not rebuilt while the committed "
         "sibling remained a validated hit");
     require(
-        !std::filesystem::exists(interrupted_pcm_depfile)
-            && !std::filesystem::exists(interrupted_full_pcm),
-        "recovered PCM publication retained a stale transient full BMI "
-        "or depfile");
+        !std::filesystem::exists(interrupted_pcm_depfile),
+        "recovered PCM publication retained its stale transient depfile");
     const prepared_compilation_environment recovered_warm_guard =
         prepare_guard();
     require(
@@ -1723,10 +1699,6 @@ inline int invoke() {
             {
                 "-resource-dir",
                 (root / "untrusted-resource-dir").string(),
-                "--precompile",
-                "-fmodule-output="
-                    + (root / "untrusted-output.pcm").string(),
-                "-fmodules-reduced-bmi",
                 "-save-temps",
                 "--save-temps",
                 "-save-temps=obj",
@@ -1789,8 +1761,6 @@ inline int invoke() {
         "resource directory with the selected Clang resource directory");
     require(
         !first.compile_database_json.contains("save-temps")
-            && !first.compile_database_json.contains(
-                "untrusted-output.pcm")
             && first.compile_database_json.contains(
                 "\"-DKEEP_SAVE_TEMPS=1\"")
             && first.compile_database_json.contains("\"-g\""),
@@ -2362,41 +2332,8 @@ inline int invoke() {
                 == "fixture.conditional_root",
         "owned compile database cannot resolve selected-Clang builtin "
         "headers in the LibTooling module-graph pass");
-    const auto root_pcm = std::ranges::find_if(
-        first.dependencies,
-        [](const std::filesystem::path& dependency) {
-            return dependency.extension() == ".pcm"
-                && dependency.filename().string().starts_with(
-                    "fixture-conditional_root-");
-        });
-    require(
-        root_pcm != first.dependencies.end(),
-        "PREPARE contract fixture did not publish the root PCM");
-    const std::filesystem::path pcm = *root_pcm;
-    std::filesystem::path full_pcm = pcm;
-    full_pcm.replace_extension(".full.pcm");
-    const std::string pcm_json = json_escape(pcm.string());
-    const std::string full_pcm_json =
-        json_escape(full_pcm.string());
-    const std::string compiler_depfile_json =
-        json_escape(pcm.string() + ".d");
-    const std::string bmi_suffix =
-        "\"--precompile\", \"-fmodules-reduced-bmi\", "
-        "\"-fmodule-output=" + pcm_json + "\", \""
-        + json_escape(conditional_root.string())
-        + "\", \"-o\", \"" + full_pcm_json
-        + "\", \"-MD\", \"-MF\", \""
-        + compiler_depfile_json + "\", \"-MT\", \""
-        + pcm_json + "\"";
-    require(
-        first.compile_database_json.contains(bmi_suffix)
-            && !first.compile_database_json.contains("\"-c\"")
-            && !first.compile_database_json.contains(".pcm.o")
-            && !std::filesystem::exists(full_pcm)
-            && !std::filesystem::exists(
-                std::filesystem::path{pcm.string() + ".o"}),
-        "owned compile database is not the exact dual-BMI --precompile "
-        "command or retained a transient full BMI/object output");
+    const std::filesystem::path pcm =
+        first_pcm_dependency(first);
     require(
         std::ranges::find(first.dependencies, pcm)
             != first.dependencies.end()
@@ -2459,87 +2396,6 @@ inline int invoke() {
 
     const std::string original_owned_database =
         read_file(owned_database);
-    const std::string owned_output_marker =
-        "\"-o\", \"" + full_pcm_json + "\"";
-    write_file(
-        owned_database,
-        replace_exact_once(
-            original_owned_database,
-            owned_output_marker,
-            owned_output_marker + ", " + owned_output_marker,
-            "BMI output pair"));
-    require_failure(
-        [&] {
-            static_cast<void>(scan_module_graph_from_database(
-                {conditional_root},
-                owned_database,
-                "production",
-                production_pcm_root));
-        },
-        "ambiguous full BMI output",
-        "duplicate full-BMI output");
-    const std::filesystem::path foreign_full_pcm =
-        root / "foreign-output.full.pcm";
-    const std::string foreign_output_marker =
-        "\"-o\", \"" + json_escape(foreign_full_pcm.string()) + "\"";
-    write_file(
-        owned_database,
-        replace_exact_once(
-            original_owned_database,
-            owned_output_marker,
-            foreign_output_marker,
-            "BMI output pair"));
-    require_failure(
-        [&] {
-            static_cast<void>(scan_module_graph_from_database(
-                {conditional_root},
-                owned_database,
-                "production",
-                production_pcm_root));
-        },
-        "foreign or ambiguous PCM/depfile output",
-        "foreign full-BMI output");
-    const std::string reduced_output_marker =
-        "\"-fmodule-output=" + pcm_json + "\"";
-    write_file(
-        owned_database,
-        replace_exact_once(
-            original_owned_database,
-            reduced_output_marker,
-            reduced_output_marker + ", " + reduced_output_marker,
-            "reduced BMI output"));
-    require_failure(
-        [&] {
-            static_cast<void>(scan_module_graph_from_database(
-                {conditional_root},
-                owned_database,
-                "production",
-                production_pcm_root));
-        },
-        "ambiguous reduced BMI output",
-        "duplicate reduced-BMI output");
-    const std::string foreign_reduced_output_marker =
-        "\"-fmodule-output="
-        + json_escape((root / "foreign-reduced.pcm").string())
-        + "\"";
-    write_file(
-        owned_database,
-        replace_exact_once(
-            original_owned_database,
-            reduced_output_marker,
-            foreign_reduced_output_marker,
-            "reduced BMI output"));
-    require_failure(
-        [&] {
-            static_cast<void>(scan_module_graph_from_database(
-                {conditional_root},
-                owned_database,
-                "production",
-                production_pcm_root));
-        },
-        "foreign or ambiguous PCM/depfile output",
-        "foreign reduced-BMI output");
-    write_file(owned_database, original_owned_database);
     write_file(
         owned_database,
         original_owned_database + "\n");
@@ -2932,12 +2788,10 @@ inline int invoke() {
         linked_leaf_pcm,
         "PCM output is a symlink or non-regular file",
         "PCM leaf confinement");
-    std::filesystem::path linked_full_pcm = linked_leaf_pcm;
-    linked_full_pcm.replace_extension(".full.pcm");
     reject_leaf_symlink(
-        linked_full_pcm,
-        "PCM full BMI output is a symlink or non-regular file",
-        "PCM full-BMI leaf confinement");
+        std::filesystem::path{linked_leaf_pcm.string() + ".o"},
+        "PCM object output is a symlink or non-regular file",
+        "PCM object leaf confinement");
     reject_leaf_symlink(
         std::filesystem::path{linked_leaf_pcm.string() + ".d"},
         "PCM dependency output is a symlink or non-regular file",

@@ -6261,8 +6261,7 @@ structural_arguments_adjuster() {
             "--serialize-diagnostics",
         };
         static const std::set<std::string> drop_flags{
-            "-c", "--precompile", "-MD", "-MMD", "-MG", "-MP",
-            "-M", "-MM",
+            "-c", "-MD", "-MMD", "-MG", "-MP", "-M", "-MM",
         };
         clang::tooling::CommandLineArguments expanded;
         for (const std::string& argument : arguments) {
@@ -6641,143 +6640,6 @@ retarget_compile_command(
     return *relative.begin() != "..";
 }
 
-inline constexpr std::string_view MODULE_PREPARATION_POLICY_VERSION =
-    "bioseq_clang_module_preparation/v5";
-inline constexpr std::string_view MODULE_PREPARATION_ACTION_MODE =
-    "clang-driver:--precompile,-fmodules-reduced-bmi;"
-    "reduced=-fmodule-output;full=-o;"
-    "dependencies=-MD,-MF,-MT=reduced";
-inline constexpr std::string_view TRANSIENT_FULL_PCM_EXTENSION =
-    ".full.pcm";
-
-struct owned_bmi_command_artifacts {
-    std::filesystem::path pcm;
-    std::filesystem::path full_pcm;
-    std::filesystem::path depfile;
-};
-
-[[nodiscard]] owned_bmi_command_artifacts
-validate_owned_bmi_command(
-    const clang::tooling::CompileCommand& command,
-    const std::filesystem::path& pcm_root) {
-    std::optional<std::filesystem::path> reduced_pcm_output;
-    std::optional<std::filesystem::path> full_pcm_output;
-    std::optional<std::filesystem::path> depfile_output;
-    std::optional<std::filesystem::path> depfile_target;
-    std::size_t precompile_actions = 0u;
-    std::size_t reduced_bmi_flags = 0u;
-    std::size_t dependency_actions = 0u;
-    const auto command_path =
-        [&](std::string_view spelling) {
-            return std::filesystem::absolute(
-                absolute_command_path(
-                    command.Directory,
-                    std::filesystem::path{
-                        std::string{spelling}}))
-                .lexically_normal();
-        };
-    const auto capture_path =
-        [&](std::optional<std::filesystem::path>& output,
-            std::string_view spelling,
-            std::string_view role) {
-            if (output || spelling.empty()
-                || spelling.front() == '-') {
-                throw std::runtime_error(
-                    "owned Clang BMI-only command has an ambiguous "
-                    + std::string{role} + " for "
-                    + command.Filename);
-            }
-            output = command_path(spelling);
-        };
-    for (std::size_t index = 0;
-         index < command.CommandLine.size();
-         ++index) {
-        const std::string& argument = command.CommandLine[index];
-        if (argument == "--precompile") {
-            ++precompile_actions;
-        } else if (argument == "-fmodules-reduced-bmi") {
-            ++reduced_bmi_flags;
-        } else if (argument.starts_with("-fmodule-output=")) {
-            capture_path(
-                reduced_pcm_output,
-                std::string_view{argument}.substr(
-                    std::string_view{"-fmodule-output="}.size()),
-                "reduced BMI output");
-        } else if (argument == "-MD") {
-            ++dependency_actions;
-        } else if (argument == "-o" || argument == "-MF"
-                   || argument == "-MT") {
-            if (index + 1 >= command.CommandLine.size()) {
-                throw std::runtime_error(
-                    "owned Clang BMI-only command has a value-less "
-                    + argument + " for " + command.Filename);
-            }
-            const std::string& value = command.CommandLine[++index];
-            if (argument == "-o") {
-                capture_path(
-                    full_pcm_output, value, "full BMI output");
-            } else if (argument == "-MF") {
-                capture_path(
-                    depfile_output, value, "compiler depfile output");
-            } else {
-                capture_path(
-                    depfile_target, value, "compiler depfile target");
-            }
-        } else if (argument == "-c"
-                   || argument == "-S"
-                   || argument == "-E"
-                   || argument == "-emit-llvm"
-                   || argument == "-fsyntax-only"
-                   || argument == "-MMD"
-                   || argument == "-M"
-                   || argument == "-MM"
-                   || argument == "-MJ"
-                   || argument.starts_with("-fmodule-output")
-                   || (argument.starts_with("-o")
-                       && argument.size() > 2u)
-                   || (argument.starts_with("-MF")
-                       && argument.size() > 3u)
-                   || (argument.starts_with("-MT")
-                       && argument.size() > 3u)) {
-            throw std::runtime_error(
-                "owned Clang command is not an exact BMI-only "
-                "--precompile action for " + command.Filename);
-        }
-    }
-    if (precompile_actions != 1u
-        || reduced_bmi_flags != 1u
-        || dependency_actions != 1u
-        || !reduced_pcm_output || !full_pcm_output
-        || !depfile_output || !depfile_target) {
-        throw std::runtime_error(
-            "owned Clang command is not an exact BMI-only --precompile "
-            "action with one reduced BMI and compiler depfile for "
-            + command.Filename);
-    }
-    std::filesystem::path expected_full_pcm = *reduced_pcm_output;
-    expected_full_pcm.replace_extension(
-        std::filesystem::path{
-            std::string{TRANSIENT_FULL_PCM_EXTENSION}});
-    const std::filesystem::path expected_depfile{
-        reduced_pcm_output->string() + ".d"};
-    if (reduced_pcm_output->extension() != ".pcm"
-        || !path_within_root(*reduced_pcm_output, pcm_root)
-        || *full_pcm_output != expected_full_pcm
-        || !path_within_root(*full_pcm_output, pcm_root)
-        || *depfile_output != expected_depfile
-        || !path_within_root(*depfile_output, pcm_root)
-        || *depfile_target != *reduced_pcm_output) {
-        throw std::runtime_error(
-            "owned Clang BMI-only command has a foreign or ambiguous "
-            "PCM/depfile output for " + command.Filename);
-    }
-    return {
-        .pcm = *reduced_pcm_output,
-        .full_pcm = *full_pcm_output,
-        .depfile = *depfile_output,
-    };
-}
-
 void validate_owned_compile_database(
     const clang::tooling::CompilationDatabase& database,
     const std::vector<std::filesystem::path>& source_paths,
@@ -6805,18 +6667,20 @@ void validate_owned_compile_database(
                 "owned Clang compile database profile mismatch for "
                 + source.string());
         }
-        static_cast<void>(validate_owned_bmi_command(
-            *selected, pcm_root));
+        bool has_owned_pcm_output = false;
         for (const std::string& argument :
              selected->CommandLine) {
             std::string_view pcm_path;
-            if (argument.starts_with("-fmodule-file=")) {
+            if (argument.starts_with("-fmodule-output=")) {
+                pcm_path = std::string_view{argument}.substr(
+                    std::string_view{"-fmodule-output="}.size());
+                has_owned_pcm_output = true;
+            } else if (argument.starts_with("-fmodule-file=")) {
                 const std::string_view mapping =
                     std::string_view{argument}.substr(
                         std::string_view{"-fmodule-file="}.size());
                 const std::size_t separator = mapping.find('=');
                 if (separator == std::string_view::npos
-                    || separator == 0u
                     || separator + 1 == mapping.size()) {
                     throw std::runtime_error(
                         "malformed owned Clang module mapping for "
@@ -6834,6 +6698,11 @@ void validate_owned_compile_database(
                     "outside its authority root for "
                     + source.string());
             }
+        }
+        if (!has_owned_pcm_output) {
+            throw std::runtime_error(
+                "owned Clang compile command has no content-keyed PCM "
+                "output for " + source.string());
         }
     }
 }
@@ -6985,7 +6854,6 @@ void validate_owned_compile_database(
         || argument == "-MMD" || argument == "-MP"
         || argument == "-M" || argument == "-MM"
         || argument == "-fsyntax-only"
-        || argument == "--precompile"
         || argument == "-save-temps"
         || argument == "--save-temps"
         || argument.starts_with("-save-temps=")
@@ -7190,6 +7058,9 @@ struct relocation_context {
     return result;
 }
 
+inline constexpr std::string_view MODULE_PREPARATION_POLICY_VERSION =
+    "bioseq_clang_module_preparation/v4";
+
 struct module_build_record {
     std::string module_name;
     std::filesystem::path source_path;
@@ -7238,7 +7109,7 @@ struct active_import_artifact_paths {
 
 struct pcm_artifact_paths {
     std::filesystem::path pcm;
-    std::filesystem::path full_pcm;
+    std::filesystem::path object;
     std::filesystem::path depfile;
     std::filesystem::path provenance;
 };
@@ -8229,8 +8100,6 @@ derive_active_import_artifact_paths(
     const std::vector<std::pair<std::string, std::string>>& imports) {
     std::string material =
         std::string{MODULE_PREPARATION_POLICY_VERSION}
-        + "\n" + std::string{MODULE_PREPARATION_ACTION_MODE}
-        + "\n" + std::string{TRANSIENT_FULL_PCM_EXTENSION}
         + "\n" + std::string{CLANG_VERSION_STRING}
         + "\n" + std::string{clang_binary_sha256}
         + "\n" + std::string{clang_scan_deps_sha256}
@@ -8268,13 +8137,9 @@ derive_active_import_artifact_paths(
         / (safe_module_filename(module_name) + "-"
            + std::string{relocatable_content_key.substr(0, 20)}
            + ".pcm");
-    std::filesystem::path full_pcm = pcm;
-    full_pcm.replace_extension(
-        std::filesystem::path{
-            std::string{TRANSIENT_FULL_PCM_EXTENSION}});
     return {
         .pcm = pcm,
-        .full_pcm = full_pcm,
+        .object = pcm.string() + ".o",
         .depfile = pcm.string() + ".d",
         .provenance = pcm.string() + ".provenance",
     };
@@ -8284,18 +8149,18 @@ derive_active_import_artifact_paths(
     std::vector<std::string> direct_arguments,
     const std::filesystem::path& source_spelling,
     const pcm_artifact_paths& artifacts) {
-    direct_arguments.emplace_back("--precompile");
-    direct_arguments.emplace_back("-fmodules-reduced-bmi");
     direct_arguments.push_back(
         "-fmodule-output=" + artifacts.pcm.string());
+    direct_arguments.emplace_back("-fmodules-reduced-bmi");
+    direct_arguments.emplace_back("-c");
     direct_arguments.push_back(source_spelling.string());
     direct_arguments.emplace_back("-o");
-    direct_arguments.push_back(artifacts.full_pcm.string());
+    direct_arguments.push_back(artifacts.object.string());
     direct_arguments.emplace_back("-MD");
     direct_arguments.emplace_back("-MF");
     direct_arguments.push_back(artifacts.depfile.string());
     direct_arguments.emplace_back("-MT");
-    direct_arguments.push_back(artifacts.pcm.string());
+    direct_arguments.push_back(artifacts.depfile.string());
     return direct_arguments;
 }
 
@@ -8303,8 +8168,7 @@ void validate_pcm_artifact_leaves(
     const std::filesystem::path& pcm_root,
     const pcm_artifact_paths& artifacts) {
     validate_owned_leaf(pcm_root, artifacts.pcm, "PCM output");
-    validate_owned_leaf(
-        pcm_root, artifacts.full_pcm, "PCM full BMI output");
+    validate_owned_leaf(pcm_root, artifacts.object, "PCM object output");
     validate_owned_leaf(
         pcm_root, artifacts.depfile, "PCM dependency output");
     validate_owned_leaf(
@@ -8320,7 +8184,7 @@ void remove_pcm_artifact_tuple(
     remove_owned_leaf_if_present(
         pcm_root, artifacts.depfile, "PCM dependency output");
     remove_owned_leaf_if_present(
-        pcm_root, artifacts.full_pcm, "PCM full BMI output");
+        pcm_root, artifacts.object, "PCM object output");
     remove_owned_leaf_if_present(
         pcm_root, artifacts.pcm, "PCM output");
 }
@@ -8339,7 +8203,7 @@ class scoped_pcm_publication {
         for (const std::filesystem::path& path : {
                  artifacts_.provenance,
                  artifacts_.depfile,
-                 artifacts_.full_pcm,
+                 artifacts_.object,
                  artifacts_.pcm}) {
             std::error_code ignored;
             std::filesystem::remove(path, ignored);
@@ -9329,9 +9193,6 @@ load_compile_database(const std::filesystem::path& path) {
             }
         };
     for (const clang::tooling::CompileCommand& command : all_commands) {
-        const clang_backend::owned_bmi_command_artifacts bmi_artifacts =
-            clang_backend::validate_owned_bmi_command(
-                command, pcm_root);
         const std::filesystem::path source =
             clang_backend::absolute_normalized_path(
                 clang_backend::absolute_command_path(
@@ -9343,8 +9204,16 @@ load_compile_database(const std::filesystem::path& path) {
                 source.string()
                 + ": declaration-probe prepared root provides no named module");
         }
+        std::optional<std::filesystem::path> output_pcm;
         for (const std::string& argument : command.CommandLine) {
-            if (argument.starts_with("-fmodule-file=")) {
+            if (argument.starts_with("-fmodule-output=")) {
+                if (output_pcm) {
+                    throw std::runtime_error(
+                        "declaration-probe prepared root has multiple PCM outputs");
+                }
+                output_pcm = argument.substr(
+                    std::string_view{"-fmodule-output="}.size());
+            } else if (argument.starts_with("-fmodule-file=")) {
                 const std::string_view mapping =
                     std::string_view{argument}.substr(
                         std::string_view{"-fmodule-file="}.size());
@@ -9361,8 +9230,12 @@ load_compile_database(const std::filesystem::path& path) {
                         std::string{mapping.substr(separator + 1)}});
             }
         }
+        if (!output_pcm) {
+            throw std::runtime_error(
+                "declaration-probe prepared root has no PCM output");
+        }
         add_prepared_pcm(
-            provider.provided_module, bmi_artifacts.pcm);
+            provider.provided_module, *output_pcm);
     }
     const std::vector<clang::tooling::CompileCommand> donor_commands =
         database->getCompileCommands(signature_identity.string());
@@ -10319,25 +10192,13 @@ prepare_compilation_environment(
             const std::uintmax_t built_size =
                 std::filesystem::file_size(
                     pcm_artifacts.pcm, size_error);
-            std::error_code full_size_error;
-            const bool full_pcm_exists =
-                clang_backend::owned_regular_file_exists(
-                    pcm_root,
-                    pcm_artifacts.full_pcm,
-                    "PCM full BMI output");
-            const std::uintmax_t full_built_size = full_pcm_exists
-                ? std::filesystem::file_size(
-                      pcm_artifacts.full_pcm, full_size_error)
-                : 0;
             if (size_error || built_size == 0
-                || full_size_error || full_built_size == 0
                 || !clang_backend::owned_regular_file_exists(
                     pcm_root,
                     pcm_artifacts.depfile,
                     "PCM dependency output")) {
                 throw std::runtime_error(
-                    "Clang reported success without fresh reduced/full "
-                    "BMI and depfile for '"
+                    "Clang reported success without fresh PCM and depfile for '"
                     + module_name + "'");
             }
             const std::vector<std::filesystem::path>
@@ -10384,18 +10245,17 @@ prepare_compilation_environment(
                     clang_binary_sha256,
                     clang_scan_deps_sha256,
                     record.pcm_sha256);
-            // The full BMI and compiler depfile are transient witnesses,
-            // not part of the committed v5 tuple. The reduced BMI is the
-            // published import artifact; provenance is its atomic commit
-            // marker and is therefore published last.
+            // Transient compiler siblings are not part of the committed v4
+            // tuple. The provenance file is the atomic commit marker and is
+            // therefore published last.
             clang_backend::remove_owned_leaf_if_present(
                 pcm_root,
                 pcm_artifacts.depfile,
                 "PCM dependency output");
             clang_backend::remove_owned_leaf_if_present(
                 pcm_root,
-                pcm_artifacts.full_pcm,
-                "PCM full BMI output");
+                pcm_artifacts.object,
+                "PCM object output");
             clang_backend::atomic_write_owned_file(
                 pcm_root,
                 pcm_artifacts.provenance,
@@ -10412,8 +10272,8 @@ prepare_compilation_environment(
                 "PCM dependency output");
             clang_backend::remove_owned_leaf_if_present(
                 pcm_root,
-                pcm_artifacts.full_pcm,
-                "PCM full BMI output");
+                pcm_artifacts.object,
+                "PCM object output");
         }
         observed_actions.push_back(preparation_action_record{
             .kind = preparation_action_kind::pcm_compilation,
@@ -12638,14 +12498,9 @@ validate_prepared_compilation_environment(
         }
         const clang::tooling::CompileCommand& command =
             commands.front();
-        const clang_backend::owned_bmi_command_artifacts bmi_artifacts =
-            clang_backend::validate_owned_bmi_command(
-                command, pcm_root);
-        const std::filesystem::path output =
-            clang_backend::weakly_canonical_path(
-                bmi_artifacts.pcm);
         std::map<std::string, std::filesystem::path, std::less<>>
             mappings;
+        std::optional<std::filesystem::path> output;
         std::optional<std::filesystem::path> resource_dir;
         for (std::size_t argument_index = 0;
              argument_index < command.CommandLine.size();
@@ -12676,6 +12531,16 @@ validate_prepared_compilation_environment(
                         "owned compile database duplicates a module "
                         "mapping");
                 }
+            } else if (argument.starts_with("-fmodule-output=")) {
+                if (output) {
+                    throw std::runtime_error(
+                        "owned compile database duplicates its PCM "
+                        "output");
+                }
+                output = clang_backend::weakly_canonical_path(
+                    std::filesystem::path{
+                        argument.substr(
+                            std::string{"-fmodule-output="}.size())});
             } else if (argument == "-resource-dir") {
                 if (resource_dir
                     || argument_index + 1
@@ -12724,7 +12589,7 @@ validate_prepared_compilation_environment(
         for (const std::string& imported : module.imports) {
             collect_expected_mapping(imported);
         }
-        if (output != module.pcm
+        if (!output || *output != module.pcm
             || mappings.size()
                 != expected_mapping_closure.size()) {
             throw std::runtime_error(
