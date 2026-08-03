@@ -347,10 +347,31 @@ inline void validate_fixed_output_paths(const command_line& command) {
     return absolute.lexically_normal();
 }
 
+struct prepare_output_authority {
+    std::filesystem::path configured_root;
+    std::filesystem::path canonical_root;
+    std::filesystem::path configured_metadata;
+    std::filesystem::path canonical_metadata;
+};
+
+[[nodiscard]] inline std::filesystem::path canonical_prepare_output(
+    const prepare_output_authority& authority,
+    const std::filesystem::path& configured_path) {
+    return authority.canonical_metadata
+        / absolute_spelling(configured_path).filename();
+}
+
 inline void validate_prepare_fixed_output_paths(
-    const prepare_command_line& command) {
+    const prepare_command_line& command,
+    const prepare_output_authority& authority) {
     const std::filesystem::path configured_root =
         absolute_spelling(command.pcm_root);
+    if (configured_root != authority.configured_root
+        || path_identity(configured_root)
+            != authority.canonical_root) {
+        throw std::runtime_error(
+            "PREPARE PCM root changed from its entry identity");
+    }
     std::error_code error;
     const std::filesystem::file_status root_status =
         std::filesystem::symlink_status(configured_root, error);
@@ -368,6 +389,10 @@ inline void validate_prepare_fixed_output_paths(
     }
     const std::filesystem::path metadata =
         configured_root / "metadata";
+    if (metadata != authority.configured_metadata) {
+        throw std::runtime_error(
+            "PREPARE metadata spelling changed from entry");
+    }
     error.clear();
     const std::filesystem::file_status metadata_status =
         std::filesystem::symlink_status(metadata, error);
@@ -382,12 +407,10 @@ inline void validate_prepare_fixed_output_paths(
         throw std::runtime_error(
             "PREPARE metadata directory must be a real directory");
     }
-    const std::filesystem::path canonical_root =
-        path_identity(configured_root);
     if (path_identity(metadata)
-        != canonical_root / "metadata") {
+        != authority.canonical_metadata) {
         throw std::runtime_error(
-            "PREPARE metadata directory escapes --pcm-root");
+            "PREPARE metadata directory changed from its entry identity");
     }
     const std::initializer_list<std::pair<
         std::filesystem::path, std::string_view>> outputs{
@@ -403,16 +426,19 @@ inline void validate_prepare_fixed_output_paths(
             absolute_spelling(configured);
         const std::filesystem::path expected =
             metadata / std::filesystem::path{std::string{filename}};
+        const std::filesystem::path canonical_output =
+            authority.canonical_metadata
+            / std::filesystem::path{std::string{filename}};
         if (output != expected
             || path_identity(output.parent_path())
-                != canonical_root / "metadata") {
+                != authority.canonical_metadata) {
             throw std::runtime_error(
                 "PREPARE output must use its exact fixed metadata path: "
                 + expected.string());
         }
         error.clear();
         const std::filesystem::file_status status =
-            std::filesystem::symlink_status(output, error);
+            std::filesystem::symlink_status(canonical_output, error);
         if (error
             || (std::filesystem::exists(status)
                 && (std::filesystem::is_symlink(status)
@@ -424,18 +450,94 @@ inline void validate_prepare_fixed_output_paths(
     }
 }
 
+[[nodiscard]] inline prepare_output_authority
+seal_prepare_output_authority(const prepare_command_line& command) {
+    prepare_output_authority authority{
+        .configured_root = absolute_spelling(command.pcm_root),
+    };
+    authority.canonical_root =
+        path_identity(authority.configured_root);
+    authority.configured_metadata =
+        authority.configured_root / "metadata";
+    authority.canonical_metadata =
+        authority.canonical_root / "metadata";
+    const std::filesystem::path configured_stamp =
+        absolute_spelling(command.stamp);
+    if (configured_stamp
+            != authority.configured_metadata / "prepare.stamp"
+        || path_identity(configured_stamp.parent_path())
+            != authority.canonical_metadata) {
+        throw std::runtime_error(
+            "PREPARE stamp must use its exact fixed metadata path");
+    }
+    return authority;
+}
+
+class prepare_completion_stamp_guard {
+  public:
+    explicit prepare_completion_stamp_guard(
+        const prepare_output_authority& authority)
+        : stamp_(authority.canonical_metadata / "prepare.stamp") {
+        remove_stamp(true);
+    }
+
+    prepare_completion_stamp_guard(
+        const prepare_completion_stamp_guard&) = delete;
+    prepare_completion_stamp_guard& operator=(
+        const prepare_completion_stamp_guard&) = delete;
+
+    ~prepare_completion_stamp_guard() {
+        if (active_) remove_stamp(false);
+    }
+
+    void commit() noexcept { active_ = false; }
+
+  private:
+    void remove_stamp(bool strict) {
+        std::error_code error;
+        const std::filesystem::file_status status =
+            std::filesystem::symlink_status(stamp_, error);
+        if (error) {
+            if (strict) {
+                throw std::runtime_error(
+                    "cannot inspect PREPARE completion stamp: "
+                    + error.message());
+            }
+            return;
+        }
+        if (!std::filesystem::exists(status)) return;
+        if (!std::filesystem::is_regular_file(status)
+            && !std::filesystem::is_symlink(status)) {
+            if (strict) {
+                throw std::runtime_error(
+                    "PREPARE completion stamp is non-regular");
+            }
+            return;
+        }
+        std::filesystem::remove(stamp_, error);
+        if (strict && error) {
+            throw std::runtime_error(
+                "cannot invalidate PREPARE completion stamp: "
+                + error.message());
+        }
+    }
+
+    std::filesystem::path stamp_;
+    bool active_{true};
+};
+
 inline void ensure_prepare_metadata_directory(
-    const prepare_command_line& command) {
-    const std::filesystem::path configured_root =
-        absolute_spelling(command.pcm_root);
+    const prepare_command_line& command,
+    const prepare_output_authority& authority) {
     std::error_code error;
-    std::filesystem::create_directories(configured_root, error);
+    std::filesystem::create_directories(
+        authority.canonical_root, error);
     if (error) {
         throw std::runtime_error(
             "cannot create PREPARE PCM root: " + error.message());
     }
-    const std::filesystem::path metadata =
-        configured_root / "metadata";
+    const std::filesystem::path& metadata =
+        authority.canonical_metadata;
     const std::filesystem::file_status status =
         std::filesystem::symlink_status(metadata, error);
     if (error) {
@@ -455,15 +557,17 @@ inline void ensure_prepare_metadata_directory(
         throw std::runtime_error(
             "PREPARE metadata directory changed before creation");
     }
+    validate_prepare_fixed_output_paths(command, authority);
 }
 
 inline void write_prepare_output(
     const prepare_command_line& command,
+    const prepare_output_authority& authority,
     const std::filesystem::path& configured_path,
     std::string_view content) {
-    validate_prepare_fixed_output_paths(command);
+    validate_prepare_fixed_output_paths(command, authority);
     const std::filesystem::path path =
-        absolute_spelling(configured_path);
+        canonical_prepare_output(authority, configured_path);
     if (std::filesystem::is_regular_file(path)
         && read_file(path) == content) {
         return;
@@ -503,7 +607,7 @@ inline void write_prepare_output(
             "cannot finish staged PREPARE output: "
             + temporary.string());
     }
-    validate_prepare_fixed_output_paths(command);
+    validate_prepare_fixed_output_paths(command, authority);
     std::error_code error;
     std::filesystem::rename(temporary, path, error);
     if (error) {
@@ -512,51 +616,402 @@ inline void write_prepare_output(
             "cannot atomically publish PREPARE output: "
             + error.message());
     }
-    validate_prepare_fixed_output_paths(command);
+    validate_prepare_fixed_output_paths(command, authority);
+}
+
+struct prepare_file_snapshot {
+    std::filesystem::path configured_spelling;
+    std::filesystem::path identity;
+    std::string sha256;
+
+    bool operator==(const prepare_file_snapshot&) const = default;
+};
+
+[[nodiscard]] inline std::vector<prepare_file_snapshot>
+capture_prepare_file_snapshot(
+    std::vector<std::filesystem::path> paths,
+    std::string_view role) {
+    std::ranges::sort(
+        paths,
+        {},
+        [](const std::filesystem::path& path) {
+            return absolute_spelling(path).generic_string();
+        });
+    paths.erase(
+        std::ranges::unique(
+            paths,
+            {},
+            [](const std::filesystem::path& path) {
+                return absolute_spelling(path).generic_string();
+            }).begin(),
+        paths.end());
+    std::vector<prepare_file_snapshot> result;
+    result.reserve(paths.size());
+    for (const std::filesystem::path& path : paths) {
+        const std::filesystem::path spelling =
+            absolute_spelling(path);
+        require_regular_file(spelling, role);
+        const std::filesystem::path identity =
+            path_identity(spelling);
+        result.push_back(prepare_file_snapshot{
+            .configured_spelling = spelling,
+            .identity = identity,
+            .sha256 = sha256_hex(read_file(identity)),
+        });
+    }
+    return result;
+}
+
+[[nodiscard]] inline bool same_preparation_identity(
+    const clang_structural::preparation_module_identity& left,
+    const clang_structural::preparation_module_identity& right) {
+    return left.module_name == right.module_name
+        && path_identity(left.source_path)
+            == path_identity(right.source_path)
+        && left.source_sha256 == right.source_sha256;
+}
+
+inline void require_same_dependency_authority(
+    const clang_structural::dependency_compilation_authority& expected,
+    const clang_structural::dependency_compilation_authority& actual,
+    std::string_view role) {
+    const bool roots_match =
+        expected.root_source_paths.size()
+            == actual.root_source_paths.size()
+        && std::ranges::equal(
+            expected.root_source_paths,
+            actual.root_source_paths,
+            [](const std::filesystem::path& left,
+               const std::filesystem::path& right) {
+                return path_identity(left) == path_identity(right);
+            });
+    const bool canonical_match =
+        expected.canonical_inputs.size()
+            == actual.canonical_inputs.size()
+        && std::ranges::equal(
+            expected.canonical_inputs,
+            actual.canonical_inputs,
+            same_preparation_identity);
+    if (!roots_match
+        || !same_preparation_identity(
+            expected.signature_donor, actual.signature_donor)
+        || !canonical_match
+        || expected.canonical_token_import_sha256
+            != actual.canonical_token_import_sha256) {
+        throw std::runtime_error(
+            "PREPARE dependency compilation authority changed "
+            + std::string{role});
+    }
+}
+
+struct prepare_entry_authority {
+    clang_structural::dependency_compilation_authority dependency;
+    prepare_file_snapshot raw_compile_database;
+    prepare_file_snapshot clang_binary;
+    prepare_file_snapshot clang_scan_deps;
+    prepare_file_snapshot llvm_config;
+    prepare_file_snapshot compiler_module_inventory;
+};
+
+[[nodiscard]] inline prepare_file_snapshot capture_prepare_file(
+    const std::filesystem::path& path,
+    std::string_view role) {
+    return capture_prepare_file_snapshot({path}, role).front();
+}
+
+inline void require_expected_prepare_hash(
+    const prepare_file_snapshot& file,
+    std::string_view expected,
+    std::string_view role) {
+    if (expected.size() != 64 || file.sha256 != expected) {
+        throw std::runtime_error(
+            "PREPARE " + std::string{role}
+            + " hash differs from configured authority");
+    }
+}
+
+[[nodiscard]] inline prepare_entry_authority
+seal_prepare_entry_authority(
+    const prepare_command_line& command,
+    const prepare_output_authority& output_authority) {
+    validate_prepare_fixed_output_paths(
+        command, output_authority);
+    prepare_entry_authority authority{
+        .dependency =
+            clang_structural::derive_dependency_compilation_authority(
+                {command.source},
+                command.signature_source,
+                command.raw_compile_database,
+                "production"),
+        .raw_compile_database = capture_prepare_file(
+            command.raw_compile_database, "raw compile database"),
+        .clang_binary = capture_prepare_file(
+            command.clang_binary, "clang binary"),
+        .clang_scan_deps = capture_prepare_file(
+            command.clang_scan_deps, "clang-scan-deps binary"),
+        .llvm_config = capture_prepare_file(
+            command.llvm_config, "llvm-config binary"),
+        .compiler_module_inventory = capture_prepare_file(
+            command.compiler_module_inventory,
+            "compiler module inventory"),
+    };
+    require_expected_prepare_hash(
+        authority.clang_binary,
+        command.clang_sha256,
+        "clang binary");
+    require_expected_prepare_hash(
+        authority.clang_scan_deps,
+        command.clang_scan_deps_sha256,
+        "clang-scan-deps binary");
+    require_expected_prepare_hash(
+        authority.llvm_config,
+        command.llvm_config_sha256,
+        "llvm-config binary");
+    require_expected_prepare_hash(
+        authority.compiler_module_inventory,
+        command.compiler_module_inventory_sha256,
+        "compiler module inventory");
+    return authority;
+}
+
+inline void revalidate_prepare_entry_authority(
+    const prepare_command_line& command,
+    const prepare_output_authority& output_authority,
+    const prepare_entry_authority& expected,
+    const clang_structural::prepared_compilation_environment*
+        prepared = nullptr) {
+    validate_prepare_fixed_output_paths(
+        command, output_authority);
+    const std::vector<prepare_file_snapshot> actual_files =
+        capture_prepare_file_snapshot(
+            {
+                command.raw_compile_database,
+                command.clang_binary,
+                command.clang_scan_deps,
+                command.llvm_config,
+                command.compiler_module_inventory,
+            },
+            "entry authority file");
+    std::vector<prepare_file_snapshot> expected_files{
+        expected.raw_compile_database,
+        expected.clang_binary,
+        expected.clang_scan_deps,
+        expected.llvm_config,
+        expected.compiler_module_inventory,
+    };
+    std::ranges::sort(
+        expected_files,
+        {},
+        &prepare_file_snapshot::configured_spelling);
+    if (actual_files != expected_files) {
+        throw std::runtime_error(
+            "PREPARE raw compile database or tool authority changed");
+    }
+    const clang_structural::dependency_compilation_authority actual =
+        clang_structural::derive_dependency_compilation_authority(
+            {command.source},
+            command.signature_source,
+            command.raw_compile_database,
+            "production");
+    require_same_dependency_authority(
+        expected.dependency, actual, "after entry sealing");
+    if (prepared != nullptr) {
+        if (prepared->canonical_token_import_sha256
+                != expected.dependency.canonical_token_import_sha256
+            || prepared->authority
+                != clang_structural::dependency_compilation_manifest_authority(
+                    "core", expected.dependency)
+            || prepared->dependency_root_sources.size()
+                != expected.dependency.root_source_paths.size()
+            || !std::ranges::equal(
+                prepared->dependency_root_sources,
+                expected.dependency.root_source_paths,
+                [](const std::filesystem::path& left,
+                   const std::filesystem::path& right) {
+                    return path_identity(left)
+                        == path_identity(right);
+                })) {
+            throw std::runtime_error(
+                "PREPARE environment differs from its sealed dependency authority");
+        }
+    }
+}
+
+inline void require_prepare_document(
+    const prepare_command_line& command,
+    const prepare_output_authority& authority,
+    const std::filesystem::path& configured_path,
+    std::string_view expected_content,
+    std::string_view role) {
+    validate_prepare_fixed_output_paths(command, authority);
+    const std::filesystem::path path =
+        canonical_prepare_output(authority, configured_path);
+    require_regular_file(path, role);
+    if (read_file(path) != expected_content) {
+        throw std::runtime_error(
+            "published PREPARE " + std::string{role}
+            + " changed before completion");
+    }
 }
 
 [[nodiscard]] inline int execute_prepare(prepare_command_line command) {
+    const prepare_output_authority output_authority =
+        seal_prepare_output_authority(command);
+    prepare_completion_stamp_guard stamp_guard{output_authority};
+    validate_prepare_fixed_output_paths(command, output_authority);
     require_regular_file(command.source, "template_flatten source");
     require_regular_file(command.signature_source, "signature source");
-    if (path_identity(command.source) == path_identity(command.signature_source)) {
+    if (path_identity(command.source)
+        == path_identity(command.signature_source)) {
         throw std::runtime_error(
             "scan-only canonical source cannot be its own compilation-signature donor");
     }
-    validate_prepare_fixed_output_paths(command);
-    ensure_prepare_metadata_directory(command);
+    ensure_prepare_metadata_directory(command, output_authority);
+    const prepare_entry_authority entry_authority =
+        seal_prepare_entry_authority(command, output_authority);
     clang_structural::prepared_compilation_environment prepared =
         clang_structural::prepare_dependency_compilation_environment(
-            command.source,
-            command.signature_source,
-            command.raw_compile_database,
-            command.clang_binary,
-            command.clang_scan_deps,
-            command.llvm_config,
-            command.compiler_module_inventory,
+            entry_authority.dependency.canonical_inputs.front()
+                .source_path,
+            entry_authority.dependency.signature_donor.source_path,
+            entry_authority.raw_compile_database.identity,
+            entry_authority.clang_binary.identity,
+            entry_authority.clang_scan_deps.identity,
+            entry_authority.llvm_config.identity,
+            entry_authority.compiler_module_inventory.identity,
             command.clang_sha256,
             command.clang_scan_deps_sha256,
             command.llvm_config_sha256,
             command.compiler_module_inventory_sha256,
-            command.pcm_root,
+            output_authority.canonical_root,
             "production",
             "core");
+    invoke_prepare_publication_test_checkpoint(
+        prepare_publication_checkpoint::after_environment_built);
+    revalidate_prepare_entry_authority(
+        command, output_authority, entry_authority, &prepared);
     const std::string action_trace =
         clang_structural::render_preparation_action_trace(prepared);
     prepared.dependencies.push_back(command.source);
     prepared.dependencies.push_back(command.signature_source);
+    const std::string depfile = render_depfile(
+        command.stamp, prepared.dependencies);
     write_prepare_output(
         command,
+        output_authority,
         command.compile_database_output, prepared.compile_database_json);
     write_prepare_output(
-        command, command.pcm_manifest, prepared.pcm_manifest_json);
-    write_prepare_output(command, command.action_trace, action_trace);
+        command,
+        output_authority,
+        command.pcm_manifest,
+        prepared.pcm_manifest_json);
+    invoke_prepare_publication_test_checkpoint(
+        prepare_publication_checkpoint::after_db_manifest_publish);
+    revalidate_prepare_entry_authority(
+        command, output_authority, entry_authority, &prepared);
+    const std::filesystem::path compile_database =
+        canonical_prepare_output(
+            output_authority,
+            command.compile_database_output);
+    const std::filesystem::path pcm_manifest =
+        canonical_prepare_output(
+            output_authority, command.pcm_manifest);
+    const std::string manifest_authority =
+        clang_structural::dependency_compilation_manifest_authority(
+            "core", entry_authority.dependency);
+    clang_structural::validate_dependency_compilation_authority_seal(
+        entry_authority.dependency, compile_database);
+    const clang_structural::prepared_compilation_validation validated =
+        clang_structural::validate_prepared_compilation_environment(
+            entry_authority.dependency.root_source_paths,
+            compile_database,
+            output_authority.canonical_root,
+            pcm_manifest,
+            entry_authority.clang_binary.identity,
+            entry_authority.clang_scan_deps.identity,
+            entry_authority.llvm_config.identity,
+            entry_authority.compiler_module_inventory.identity,
+            command.clang_sha256,
+            command.clang_scan_deps_sha256,
+            command.llvm_config_sha256,
+            command.compiler_module_inventory_sha256,
+            "production",
+            manifest_authority);
+    if (validated.compilation_signature
+            != prepared.compilation_signature
+        || validated.relocatable_compilation_signature
+            != prepared.relocatable_compilation_signature
+        || validated.compiler_profile != prepared.compiler_profile
+        || validated.authority != prepared.authority
+        || validated.owned_compile_database_sha256
+            != sha256_hex(prepared.compile_database_json)
+        || validated.manifest_sha256
+            != sha256_hex(prepared.pcm_manifest_json)
+        || validated.clang_binary_sha256
+            != prepared.clang_binary_sha256
+        || validated.clang_scan_deps_sha256
+            != prepared.clang_scan_deps_sha256
+        || validated.llvm_config_sha256
+            != prepared.llvm_config_sha256
+        || validated.compiler_module_inventory_sha256
+            != prepared.compiler_module_inventory_sha256) {
+        throw std::runtime_error(
+            "on-disk PREPARE database or manifest differs from the built environment");
+    }
+    const std::vector<prepare_file_snapshot>
+        completion_authority_snapshot =
+            capture_prepare_file_snapshot(
+                prepared.completion_authority_files,
+                "completion authority dependency");
+    write_prepare_output(
+        command, output_authority, command.action_trace, action_trace);
+    static_cast<void>(
+        clang_structural::validate_preparation_action_trace(
+            canonical_prepare_output(
+                output_authority, command.action_trace),
+            entry_authority.dependency,
+            validated));
     write_prepare_output(
         command,
+        output_authority,
         command.depfile,
-        render_depfile(command.stamp, std::move(prepared.dependencies)));
-    write_prepare_output(
+        depfile);
+    invoke_prepare_publication_test_checkpoint(
+        prepare_publication_checkpoint::before_completion_stamp);
+    revalidate_prepare_entry_authority(
+        command, output_authority, entry_authority, &prepared);
+    if (capture_prepare_file_snapshot(
+            prepared.completion_authority_files,
+            "completion authority dependency")
+        != completion_authority_snapshot) {
+        throw std::runtime_error(
+            "PREPARE dependency identity or bytes changed before completion");
+    }
+    require_prepare_document(
         command,
-        command.stamp,
+        output_authority,
+        command.compile_database_output,
+        prepared.compile_database_json,
+        "compile database");
+    require_prepare_document(
+        command,
+        output_authority,
+        command.pcm_manifest,
+        prepared.pcm_manifest_json,
+        "PCM manifest");
+    require_prepare_document(
+        command,
+        output_authority,
+        command.action_trace,
+        action_trace,
+        "action trace");
+    require_prepare_document(
+        command,
+        output_authority,
+        command.depfile,
+        depfile,
+        "depfile");
+    const std::string stamp =
         "bioseq_template_flatten_prepare_stamp/v1\n"
         "profile=production\n"
         "authority=core\n"
@@ -570,8 +1025,13 @@ inline void write_prepare_output(
         "pcm_manifest_sha256=" + sha256_hex(prepared.pcm_manifest_json)
             + "\nprepare_action_trace_sha256="
             + sha256_hex(action_trace)
-            + "\n");
-    touch_stamp(command.stamp);
+            + "\n";
+    write_prepare_output(
+        command,
+        output_authority,
+        command.stamp,
+        stamp);
+    stamp_guard.commit();
     return 0;
 }
 
@@ -780,6 +1240,10 @@ inline void validate_configure_handshake(
 }
 
 }  // namespace detail
+
+int execute_prepare_contract(prepare_command_line command) {
+    return detail::execute_prepare(std::move(command));
+}
 
 inline int self_test() {
     try {

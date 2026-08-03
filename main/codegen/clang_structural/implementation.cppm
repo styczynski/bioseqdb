@@ -10611,6 +10611,23 @@ prepare_compilation_environment(
     manifest << "\n  ]\n}\n";
     const std::string pcm_manifest_document = manifest.str();
 
+    std::vector<std::filesystem::path> completion_authority_files =
+        dependencies;
+    for (const std::string& module_name : build_order) {
+        const clang_backend::module_build_record& record =
+            modules.at(module_name);
+        completion_authority_files.push_back(
+            record.dependency_scan_database_path);
+        completion_authority_files.push_back(
+            record.dependency_scan_result_path);
+        completion_authority_files.push_back(
+            record.dependency_scan_diagnostics_path);
+        completion_authority_files.push_back(record.depfile_path);
+    }
+    std::ranges::sort(completion_authority_files);
+    completion_authority_files.erase(
+        std::ranges::unique(completion_authority_files).begin(),
+        completion_authority_files.end());
     std::ranges::sort(dependencies);
     dependencies.erase(
         std::ranges::unique(dependencies).begin(),
@@ -10635,6 +10652,8 @@ prepare_compilation_environment(
                 + relocatable_compilation_signature + "\n"
                 + relocatable_owned_compile_database_sha256 + "\n"),
         .dependencies = std::move(dependencies),
+        .completion_authority_files =
+            std::move(completion_authority_files),
         .compiler_profile = std::string{compiler_profile},
         .authority = std::string{authority},
         .clang_binary_sha256 = clang_binary_sha256,
@@ -10869,6 +10888,15 @@ prepare_compilation_environment(
     prepared.dependencies.erase(
         std::ranges::unique(prepared.dependencies).begin(),
         prepared.dependencies.end());
+    prepared.completion_authority_files.insert(
+        prepared.completion_authority_files.end(),
+        prepared.dependencies.begin(),
+        prepared.dependencies.end());
+    std::ranges::sort(prepared.completion_authority_files);
+    prepared.completion_authority_files.erase(
+        std::ranges::unique(
+            prepared.completion_authority_files).begin(),
+        prepared.completion_authority_files.end());
     return prepared;
 }
 
@@ -11451,6 +11479,15 @@ prepare_dependency_compilation_environment(
     prepared.dependencies.erase(
         std::ranges::unique(prepared.dependencies).begin(),
         prepared.dependencies.end());
+    prepared.completion_authority_files.insert(
+        prepared.completion_authority_files.end(),
+        prepared.dependencies.begin(),
+        prepared.dependencies.end());
+    std::ranges::sort(prepared.completion_authority_files);
+    prepared.completion_authority_files.erase(
+        std::ranges::unique(
+            prepared.completion_authority_files).begin(),
+        prepared.completion_authority_files.end());
     std::ostringstream dependency_lines;
     for (const std::filesystem::path& dependency :
          prepared.dependencies) {

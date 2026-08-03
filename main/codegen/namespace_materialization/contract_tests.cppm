@@ -1752,6 +1752,330 @@ inline void verify_preparation_action_trace_stamp_binding() {
         "PREPARE stamp accepts duplicate action-trace bindings");
 }
 
+#if defined(BIOSEQ_PREPARE_TEST_CLANG_BINARY) \
+    && defined(BIOSEQ_PREPARE_TEST_CLANG_SCAN_DEPS) \
+    && defined(BIOSEQ_PREPARE_TEST_LLVM_CONFIG) \
+    && defined(BIOSEQ_PREPARE_TEST_COMPILER_INVENTORY) \
+    && defined(BIOSEQ_PREPARE_TEST_CLANG_SHA256) \
+    && defined(BIOSEQ_PREPARE_TEST_CLANG_SCAN_DEPS_SHA256) \
+    && defined(BIOSEQ_PREPARE_TEST_LLVM_CONFIG_SHA256) \
+    && defined(BIOSEQ_PREPARE_TEST_COMPILER_INVENTORY_SHA256)
+
+struct prepare_transaction_fixture {
+    scoped_temp_directory temporary;
+    std::filesystem::path root{temporary.path()};
+    std::filesystem::path canonical{root / "canonical.cppm"};
+    std::filesystem::path donor{root / "donor.cppm"};
+    std::filesystem::path provider{root / "provider.cppm"};
+    std::filesystem::path header{root / "provider.hpp"};
+    std::filesystem::path response{root / "provider.rsp"};
+    std::filesystem::path raw_database{
+        root / "compile_commands.json"};
+    std::filesystem::path physical_pcm_root{
+        root / "pcm-authority"};
+    std::filesystem::path alternate_pcm_root{
+        root / "pcm-retarget"};
+    std::filesystem::path configured_pcm_root{root / "pcm"};
+    prepare_command_line command;
+
+    prepare_transaction_fixture() {
+        write_if_different(
+            canonical,
+            "export module fixture.prepare_transaction.canonical;\n"
+            "import fixture.prepare_transaction.provider;\n"
+            "namespace fixture::prepare_transaction {\n"
+            "inline int canonical_body_must_not_reach_sema() {\n"
+            "  static_assert(false, \"canonical body reached Sema\");\n"
+            "  return 0;\n"
+            "}\n"
+            "}\n");
+        write_if_different(
+            donor,
+            "export module fixture.prepare_transaction.donor;\n"
+            "export int prepare_transaction_donor();\n");
+        write_if_different(
+            header,
+            "#pragma once\n"
+            "#ifndef PREPARE_TRANSACTION_RESPONSE_VALUE\n"
+            "#error provider response file was not expanded\n"
+            "#endif\n"
+            "inline constexpr int prepare_transaction_header_value =\n"
+            "    PREPARE_TRANSACTION_RESPONSE_VALUE;\n");
+        write_if_different(
+            response,
+            "-DPREPARE_TRANSACTION_RESPONSE_VALUE=17\n");
+        write_if_different(
+            provider,
+            "module;\n"
+            "#include \"provider.hpp\"\n"
+            "export module fixture.prepare_transaction.provider;\n"
+            "export inline int prepare_transaction_provider() {\n"
+            "  return prepare_transaction_header_value;\n"
+            "}\n");
+        std::filesystem::create_directory(physical_pcm_root);
+        std::filesystem::create_directory(alternate_pcm_root);
+        std::filesystem::create_directory_symlink(
+            physical_pcm_root, configured_pcm_root);
+        const std::filesystem::path clang{
+            BIOSEQ_PREPARE_TEST_CLANG_BINARY};
+        const auto arguments = [&](
+                                   const std::filesystem::path& source,
+                                   bool use_response = false) {
+            std::vector<std::string> result{
+                clang.string(),
+                "-std=c++26",
+                "-x",
+                "c++-module",
+            };
+            if (use_response) {
+                result.push_back("@" + response.string());
+            }
+            result.push_back(source.string());
+            return result;
+        };
+        const auto render_command = [&](
+                                        std::ostringstream& output,
+                                        const std::filesystem::path& source,
+                                        bool use_response,
+                                        bool first) {
+            output << (first ? "" : ",\n")
+                   << "  {\n    \"directory\": \""
+                   << json_escape(root.string())
+                   << "\",\n    \"file\": \""
+                   << json_escape(source.string())
+                   << "\",\n    \"arguments\": [";
+            const std::vector<std::string> command_arguments =
+                arguments(source, use_response);
+            for (std::size_t index = 0;
+                 index < command_arguments.size();
+                 ++index) {
+                output << (index == 0 ? "" : ", ")
+                       << "\"" << json_escape(command_arguments[index])
+                       << "\"";
+            }
+            output << "]\n  }";
+        };
+        std::ostringstream database;
+        database << "[\n";
+        render_command(database, canonical, false, true);
+        render_command(database, donor, false, false);
+        render_command(database, provider, true, false);
+        database << "\n]\n";
+        write_if_different(raw_database, database.str());
+        const std::filesystem::path metadata =
+            configured_pcm_root / "metadata";
+        command = prepare_command_line{
+            .source = canonical,
+            .signature_source = donor,
+            .raw_compile_database = raw_database,
+            .clang_binary = clang,
+            .clang_scan_deps =
+                BIOSEQ_PREPARE_TEST_CLANG_SCAN_DEPS,
+            .llvm_config = BIOSEQ_PREPARE_TEST_LLVM_CONFIG,
+            .compiler_module_inventory =
+                BIOSEQ_PREPARE_TEST_COMPILER_INVENTORY,
+            .clang_sha256 = BIOSEQ_PREPARE_TEST_CLANG_SHA256,
+            .clang_scan_deps_sha256 =
+                BIOSEQ_PREPARE_TEST_CLANG_SCAN_DEPS_SHA256,
+            .llvm_config_sha256 =
+                BIOSEQ_PREPARE_TEST_LLVM_CONFIG_SHA256,
+            .compiler_module_inventory_sha256 =
+                BIOSEQ_PREPARE_TEST_COMPILER_INVENTORY_SHA256,
+            .pcm_root = configured_pcm_root,
+            .compile_database_output =
+                metadata / "prepare_compile_commands.json",
+            .pcm_manifest = metadata / "pcm_manifest.json",
+            .action_trace = metadata / "prepare_actions.json",
+            .depfile = metadata / "prepare.d",
+            .stamp = metadata / "prepare.stamp",
+        };
+    }
+
+    [[nodiscard]] std::filesystem::path canonical_stamp() const {
+        return physical_pcm_root / "metadata/prepare.stamp";
+    }
+};
+
+struct preserved_prepare_file {
+    std::filesystem::path path;
+    std::string content;
+    std::filesystem::file_time_type mtime;
+
+    explicit preserved_prepare_file(std::filesystem::path file)
+        : path(std::move(file)),
+          content(read_file(path)),
+          mtime(std::filesystem::last_write_time(path)) {}
+
+    void mutate(std::string_view suffix) const {
+        write_if_different(path, content + std::string{suffix});
+        std::filesystem::last_write_time(path, mtime);
+    }
+
+    void restore() const {
+        write_if_different(path, content);
+        std::filesystem::last_write_time(path, mtime);
+    }
+};
+
+class scoped_prepare_checkpoint final {
+  public:
+    explicit scoped_prepare_checkpoint(
+        prepare_publication_checkpoint_callback callback) {
+        set_prepare_publication_test_checkpoint(
+            std::move(callback));
+    }
+
+    scoped_prepare_checkpoint(const scoped_prepare_checkpoint&) = delete;
+    scoped_prepare_checkpoint& operator=(
+        const scoped_prepare_checkpoint&) = delete;
+
+    ~scoped_prepare_checkpoint() {
+        clear_prepare_publication_test_checkpoint();
+    }
+};
+
+inline void verify_prepare_authority_revalidation_transaction() {
+    prepare_transaction_fixture fixture;
+    const auto require_failed_without_stamp =
+        [&](std::string_view contract) {
+            require(
+                !std::filesystem::exists(fixture.canonical_stamp()),
+                std::string{contract}
+                    + " left a PREPARE completion stamp after failure");
+        };
+    const auto require_clean_retry = [&](std::string_view contract) {
+        require(
+            execute_prepare_contract(fixture.command) == 0
+                && std::filesystem::is_regular_file(
+                    fixture.canonical_stamp()),
+            std::string{contract}
+                + " did not converge on a clean stamped retry");
+    };
+    const auto verify_file_mutation = [&]<typename Mutator>(
+                                          const std::filesystem::path& path,
+                                          prepare_publication_checkpoint point,
+                                          std::string_view contract,
+                                          Mutator&& mutator) {
+        preserved_prepare_file preserved{path};
+        bool fired = false;
+        {
+            scoped_prepare_checkpoint checkpoint{
+                [&](const prepare_publication_checkpoint actual) {
+                    if (actual != point || std::exchange(fired, true)) {
+                        return;
+                    }
+                    std::invoke(mutator, preserved);
+                }};
+            require_rejected(
+                [&] {
+                    static_cast<void>(
+                        execute_prepare_contract(fixture.command));
+                },
+                contract);
+        }
+        require(fired, std::string{contract} + " checkpoint did not fire");
+        require_failed_without_stamp(contract);
+        preserved.restore();
+        require_clean_retry(contract);
+    };
+
+    verify_file_mutation(
+        fixture.canonical,
+        prepare_publication_checkpoint::after_environment_built,
+        "canonical-source authority mutation",
+        [](const preserved_prepare_file& file) {
+            file.mutate("// canonical authority mutation\n");
+        });
+    verify_file_mutation(
+        fixture.raw_database,
+        prepare_publication_checkpoint::after_environment_built,
+        "raw compile-database authority mutation",
+        [](const preserved_prepare_file& file) {
+            file.mutate(" \n");
+        });
+    verify_file_mutation(
+        fixture.provider,
+        prepare_publication_checkpoint::after_db_manifest_publish,
+        "provider mutation after DB/manifest publication",
+        [](const preserved_prepare_file& file) {
+            file.mutate("// provider authority mutation\n");
+        });
+    verify_file_mutation(
+        fixture.response,
+        prepare_publication_checkpoint::before_completion_stamp,
+        "response-file mutation before completion",
+        [](const preserved_prepare_file& file) {
+            file.mutate("-DPREPARE_TRANSACTION_UNUSED=1\n");
+        });
+    verify_file_mutation(
+        fixture.header,
+        prepare_publication_checkpoint::before_completion_stamp,
+        "header mutation before completion",
+        [](const preserved_prepare_file& file) {
+            file.mutate("// header authority mutation\n");
+        });
+
+    bool throw_fired = false;
+    {
+        scoped_prepare_checkpoint checkpoint{
+            [&](const prepare_publication_checkpoint point) {
+                if (point
+                        == prepare_publication_checkpoint::
+                            after_db_manifest_publish
+                    && !std::exchange(throw_fired, true)) {
+                    throw std::runtime_error(
+                        "injected failure after DB/manifest publication");
+                }
+            }};
+        require_rejected(
+            [&] {
+                static_cast<void>(
+                    execute_prepare_contract(fixture.command));
+            },
+            "injected post-publication failure");
+    }
+    require(throw_fired, "post-publication failure checkpoint did not fire");
+    require_failed_without_stamp("post-publication failure");
+    require_clean_retry("post-publication failure");
+
+    bool retarget_fired = false;
+    {
+        scoped_prepare_checkpoint checkpoint{
+            [&](const prepare_publication_checkpoint point) {
+                if (point
+                        != prepare_publication_checkpoint::
+                            after_environment_built
+                    || std::exchange(retarget_fired, true)) {
+                    return;
+                }
+                require(
+                    std::filesystem::remove(
+                        fixture.configured_pcm_root),
+                    "root-retarget contract could not remove the entry link");
+                std::filesystem::create_directory_symlink(
+                    fixture.alternate_pcm_root,
+                    fixture.configured_pcm_root);
+            }};
+        require_rejected(
+            [&] {
+                static_cast<void>(
+                    execute_prepare_contract(fixture.command));
+            },
+            "PCM-root symlink retarget");
+    }
+    require(retarget_fired, "PCM-root retarget checkpoint did not fire");
+    require_failed_without_stamp("PCM-root symlink retarget");
+    require(
+        std::filesystem::remove(fixture.configured_pcm_root),
+        "root-retarget contract could not remove the alternate link");
+    std::filesystem::create_directory_symlink(
+        fixture.physical_pcm_root,
+        fixture.configured_pcm_root);
+    require_clean_retry("PCM-root symlink retarget");
+}
+
+#endif
+
 }  // namespace detail
 
 inline void run_namespace_materialization_contract_tests() {
@@ -1770,6 +2094,16 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_policy_neutral_publication_envelope();
     detail::verify_authenticated_incremental_publication();
     detail::verify_interrupted_publication_recovery();
+#if defined(BIOSEQ_PREPARE_TEST_CLANG_BINARY) \
+    && defined(BIOSEQ_PREPARE_TEST_CLANG_SCAN_DEPS) \
+    && defined(BIOSEQ_PREPARE_TEST_LLVM_CONFIG) \
+    && defined(BIOSEQ_PREPARE_TEST_COMPILER_INVENTORY) \
+    && defined(BIOSEQ_PREPARE_TEST_CLANG_SHA256) \
+    && defined(BIOSEQ_PREPARE_TEST_CLANG_SCAN_DEPS_SHA256) \
+    && defined(BIOSEQ_PREPARE_TEST_LLVM_CONFIG_SHA256) \
+    && defined(BIOSEQ_PREPARE_TEST_COMPILER_INVENTORY_SHA256)
+    detail::verify_prepare_authority_revalidation_transaction();
+#endif
 }
 
 }  // namespace bioseq::codegen::namespace_materialization

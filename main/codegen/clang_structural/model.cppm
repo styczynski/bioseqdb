@@ -440,6 +440,10 @@ struct prepared_compilation_environment {
     std::string relocatable_compile_database_sha256;
     std::string relocatable_pcm_manifest_sha256;
     std::vector<std::filesystem::path> dependencies;
+    /// Exact files whose bytes/identities must remain stable from the final
+    /// manifest validation through completion-stamp publication. This is an
+    /// in-memory transaction guard and is intentionally not a wire field.
+    std::vector<std::filesystem::path> completion_authority_files;
     std::vector<std::filesystem::path> dependency_root_sources;
     std::string canonical_token_import_sha256;
     std::string compiler_profile;

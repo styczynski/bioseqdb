@@ -3,6 +3,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -226,6 +227,40 @@ struct prepare_command_line {
     std::filesystem::path depfile;
     std::filesystem::path stamp;
 };
+
+enum class prepare_publication_checkpoint : std::uint8_t {
+    after_environment_built,
+    after_db_manifest_publish,
+    before_completion_stamp,
+};
+
+using prepare_publication_checkpoint_callback =
+    std::function<void(prepare_publication_checkpoint)>;
+
+inline thread_local prepare_publication_checkpoint_callback
+    prepare_publication_test_checkpoint_callback;
+
+inline void set_prepare_publication_test_checkpoint(
+    prepare_publication_checkpoint_callback callback) {
+    prepare_publication_test_checkpoint_callback =
+        std::move(callback);
+}
+
+inline void clear_prepare_publication_test_checkpoint() {
+    prepare_publication_test_checkpoint_callback = {};
+}
+
+inline void invoke_prepare_publication_test_checkpoint(
+    prepare_publication_checkpoint checkpoint) {
+    if (prepare_publication_test_checkpoint_callback) {
+        prepare_publication_test_checkpoint_callback(checkpoint);
+    }
+}
+
+/// Contract-only bridge implemented by the primary module after its contract
+/// partition is imported. Production callers use `run`.
+[[nodiscard]] int execute_prepare_contract(
+    prepare_command_line command);
 
 struct command_line {
     std::string name;
