@@ -6067,7 +6067,7 @@ void check_two_stack_minimizer_topology_case() {
 }
 
 TEST_CASE("reference SIMD pipe runtime and constexpr dispatch use fixed target table",
-          "[pipe][reference-simd][runtime][constexpr][route][proof]") {
+          "[pipe][reference-simd][runtime][constexpr][route][proof][highway]") {
     using namespace ::bioseq::simd;
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint64_t>;
@@ -6115,7 +6115,7 @@ TEST_CASE("reference SIMD pipe runtime and constexpr dispatch use fixed target t
 }
 
 TEST_CASE("source-owned reference minimizer topology closes DNA4/DNA5 by four widths",
-          "[pipe][reference-simd][topology][dna5][n-reset]") {
+          "[pipe][reference-simd][topology][dna5][n-reset][highway]") {
     check_reference_minimizer_topology_case<seq::dna4, std::uint8_t>();
     check_reference_minimizer_topology_case<seq::dna4, std::uint16_t>();
     check_reference_minimizer_topology_case<seq::dna4, std::uint32_t>();
@@ -6127,7 +6127,7 @@ TEST_CASE("source-owned reference minimizer topology closes DNA4/DNA5 by four wi
 }
 
 TEST_CASE("source-owned two-stack topology closes DNA4/DNA5 by four widths",
-          "[pipe][exact-simd][topology][dna5][n-reset]") {
+          "[pipe][exact-simd][topology][dna5][n-reset][highway]") {
     check_two_stack_minimizer_topology_case<seq::dna4, std::uint8_t>();
     check_two_stack_minimizer_topology_case<seq::dna4, std::uint16_t>();
     check_two_stack_minimizer_topology_case<seq::dna4, std::uint32_t>();
@@ -6390,7 +6390,7 @@ TEST_CASE("Indexed dna4 u64 queries use admitted typed u32 B8 continuation with 
 }
 
 TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
-          "[pipe][ksw2-batched][execution-proof][integration]") {
+          "[pipe][ksw2-batched][execution-proof][integration][highway]") {
     using ::bioseq::simd::BaseAlignmentAlgorithmType;
     using ::bioseq::simd::ChainingAlgorithmType;
     using ::bioseq::simd::Minimap2Params;
@@ -6738,7 +6738,7 @@ TEST_CASE("fragmented Paper ntHash unwinds its vector and memory permit for ever
 }
 
 TEST_CASE("Paper ntHash SIMD pipe executes distinct sketch proof without fallback",
-          "[paper-nthash][simd][pipe][proof][fail-closed]") {
+          "[paper-nthash][simd][pipe][proof][fail-closed][highway]") {
     using ::bioseq::simd::Minimap2Params;
     using ::bioseq::simd::MinimizerAlgorithmType;
     using ::bioseq::simd::ChainingAlgorithmType;

@@ -18,6 +18,7 @@ import bioseq.integration_tests.common;
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 
 using namespace bioseq_int_tests;
@@ -578,11 +579,14 @@ TEST_CASE("DOC0398 plain EXPLAIN reports the complete Highway dispatch plan",
         plan, "Highway Compiled Architectures");
     const auto runnable = find_explain_property(
         plan, "Highway Runnable Architectures");
+    const auto executed = find_explain_property(
+        plan, "* Highway Executed Architecture");
 
     REQUIRE(planned.has_value());
     REQUIRE(supported.has_value());
     REQUIRE(compiled.has_value());
     REQUIRE(runnable.has_value());
+    REQUIRE_FALSE(executed.has_value());
     REQUIRE_FALSE(planned->empty());
     REQUIRE(*planned != "none");
     REQUIRE(*supported != "none");
@@ -797,13 +801,35 @@ TEST_CASE("DOC0398 every runnable Highway target preserves public query results"
             "SELECT bioseq_internal.set_highway_target_for_test({});",
             baseline_mask)));
     }
+    const std::uint64_t unsupported_positive_bits =
+        ~baseline_bits
+        & static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max());
+    REQUIRE(unsupported_positive_bits != 0u);
+    const std::uint64_t unsupported_target_bit =
+        unsupported_positive_bits
+        & (~unsupported_positive_bits + std::uint64_t{1});
+    REQUIRE(sql_fails(ctx, fmt::format(
+        "SELECT bioseq_internal.set_highway_target_for_test({});",
+        static_cast<std::int64_t>(unsupported_target_bit))));
 
     const std::string public_sql = fmt::format(
-        "SELECT pk, seq0 FROM {} WHERE mmsearch(seq0, "
+        "SELECT pk, seq0, bioseq.cigar(pk) AS cigar, "
+        "bioseq.edit(pk) AS edit_distance FROM {} WHERE mmsearch(seq0, "
         "'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32)) ORDER BY pk;",
         kTable);
     const rowset_t baseline_rows = query_rows(ctx, public_sql);
     REQUIRE_FALSE(baseline_rows.empty());
+    for (const auto& row : baseline_rows) {
+        REQUIRE(row.size() == 4u);
+        REQUIRE(row[0].has_value());
+        REQUIRE(row[1].has_value());
+        REQUIRE(row[2].has_value());
+        REQUIRE_FALSE(row[2]->empty());
+        REQUIRE(is_valid_cigar(*row[2]));
+        REQUIRE(row[3].has_value());
+        REQUIRE(std::stoll(*row[3]) >= 0);
+    }
 
     std::uint64_t remaining = baseline_bits;
     while (remaining != 0u) {
