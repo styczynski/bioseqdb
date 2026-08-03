@@ -354,6 +354,12 @@ struct prepare_output_authority {
     std::filesystem::path canonical_metadata;
 };
 
+inline void accept_absent_prepare_path(std::error_code& error) noexcept {
+    if (error == std::errc::no_such_file_or_directory) {
+        error.clear();
+    }
+}
+
 [[nodiscard]] inline std::filesystem::path canonical_prepare_output(
     const prepare_output_authority& authority,
     const std::filesystem::path& configured_path) {
@@ -375,6 +381,7 @@ inline void validate_prepare_fixed_output_paths(
     std::error_code error;
     const std::filesystem::file_status root_status =
         std::filesystem::symlink_status(configured_root, error);
+    accept_absent_prepare_path(error);
     if (error) {
         throw std::runtime_error(
             "cannot inspect --pcm-root: "
@@ -396,6 +403,7 @@ inline void validate_prepare_fixed_output_paths(
     error.clear();
     const std::filesystem::file_status metadata_status =
         std::filesystem::symlink_status(metadata, error);
+    accept_absent_prepare_path(error);
     if (error) {
         throw std::runtime_error(
             "cannot inspect PREPARE metadata directory: "
@@ -439,6 +447,7 @@ inline void validate_prepare_fixed_output_paths(
         error.clear();
         const std::filesystem::file_status status =
             std::filesystem::symlink_status(canonical_output, error);
+        accept_absent_prepare_path(error);
         if (error
             || (std::filesystem::exists(status)
                 && (std::filesystem::is_symlink(status)
@@ -497,9 +506,7 @@ class prepare_completion_stamp_guard {
         std::error_code error;
         const std::filesystem::file_status status =
             std::filesystem::symlink_status(stamp_, error);
-        if (error == std::errc::no_such_file_or_directory) {
-            return;
-        }
+        accept_absent_prepare_path(error);
         if (error) {
             if (strict) {
                 throw std::runtime_error(
@@ -543,6 +550,7 @@ inline void ensure_prepare_metadata_directory(
         authority.canonical_metadata;
     const std::filesystem::file_status status =
         std::filesystem::symlink_status(metadata, error);
+    accept_absent_prepare_path(error);
     if (error) {
         throw std::runtime_error(
             "cannot inspect PREPARE metadata directory: "
