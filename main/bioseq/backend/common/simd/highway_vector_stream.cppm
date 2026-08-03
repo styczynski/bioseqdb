@@ -791,47 +791,107 @@ auto lift_op(Op&& op, Args&&... args) {
 }
 
 // ============================================================================
-// Operation tag structs — one per Highway op.
-// Each is two lines; not constexpr because hn::* ops are not constexpr.
+// Operation tags for Highway's regular forwarding operations. The operation
+// kind is data, not a source-generating macro, so every callable retains a
+// compiler-proven body boundary for target materialization.
 // ============================================================================
 
-#define BIOSEQ_VS_DEFINE_TAG(NAME)                                                   \
-    struct op_##NAME {                                                               \
-        template <typename... Xs> [[gnu::always_inline]] HWY_INLINE                  \
-        static auto apply(Xs&&... xs) {                                              \
-            return hn::NAME(std::forward<Xs>(xs)...);                                \
-        }                                                                            \
-    }
-// NOTE — this macro is purely a NAMING shortcut: it expands to a struct with
-// a static apply() forwarding to hn::<Name>. There is no logic in the macro,
-// it is exactly the long-hand form repeated 25 times. main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md forbids
-// macros for *code logic*; this is type-name boilerplate that has no other
-// expression. We #undef it immediately after the registrations to limit blast
-// radius. The §10.B fallback in the plan was the long-hand form (~280 LOC of
-// pure repetition); we ship the macro form for compactness and use comment
-// blocks to delimit it explicitly.
+enum class regular_op {
+    add,
+    sub,
+    mul,
+    min,
+    max,
+    and_,
+    or_,
+    xor_,
+    and_not,
+    not_,
+    neg,
+    abs,
+    eq,
+    ne,
+    lt,
+    gt,
+    le,
+    ge,
+    shift_left_same,
+    shift_right_same,
+    mask_from_vec,
+};
 
-BIOSEQ_VS_DEFINE_TAG(Add);
-BIOSEQ_VS_DEFINE_TAG(Sub);
-BIOSEQ_VS_DEFINE_TAG(Mul);
-BIOSEQ_VS_DEFINE_TAG(Min);
-BIOSEQ_VS_DEFINE_TAG(Max);
-BIOSEQ_VS_DEFINE_TAG(And);
-BIOSEQ_VS_DEFINE_TAG(Or);
-BIOSEQ_VS_DEFINE_TAG(Xor);
-BIOSEQ_VS_DEFINE_TAG(AndNot);
-BIOSEQ_VS_DEFINE_TAG(Not);
-BIOSEQ_VS_DEFINE_TAG(Neg);
-BIOSEQ_VS_DEFINE_TAG(Abs);
-BIOSEQ_VS_DEFINE_TAG(Eq);
-BIOSEQ_VS_DEFINE_TAG(Ne);
-BIOSEQ_VS_DEFINE_TAG(Lt);
-BIOSEQ_VS_DEFINE_TAG(Gt);
-BIOSEQ_VS_DEFINE_TAG(Le);
-BIOSEQ_VS_DEFINE_TAG(Ge);
-BIOSEQ_VS_DEFINE_TAG(ShiftLeftSame);
-BIOSEQ_VS_DEFINE_TAG(ShiftRightSame);
-BIOSEQ_VS_DEFINE_TAG(MaskFromVec);
+template <regular_op Operation>
+struct regular_op_tag {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        if constexpr (Operation == regular_op::add) {
+            return hn::Add(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::sub) {
+            return hn::Sub(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::mul) {
+            return hn::Mul(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::min) {
+            return hn::Min(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::max) {
+            return hn::Max(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::and_) {
+            return hn::And(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::or_) {
+            return hn::Or(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::xor_) {
+            return hn::Xor(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::and_not) {
+            return hn::AndNot(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::not_) {
+            return hn::Not(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::neg) {
+            return hn::Neg(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::abs) {
+            return hn::Abs(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::eq) {
+            return hn::Eq(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::ne) {
+            return hn::Ne(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::lt) {
+            return hn::Lt(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::gt) {
+            return hn::Gt(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::le) {
+            return hn::Le(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::ge) {
+            return hn::Ge(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::shift_left_same) {
+            return hn::ShiftLeftSame(std::forward<Xs>(xs)...);
+        } else if constexpr (Operation == regular_op::shift_right_same) {
+            return hn::ShiftRightSame(std::forward<Xs>(xs)...);
+        } else {
+            static_assert(Operation == regular_op::mask_from_vec);
+            return hn::MaskFromVec(std::forward<Xs>(xs)...);
+        }
+    }
+};
+
+using op_Add = regular_op_tag<regular_op::add>;
+using op_Sub = regular_op_tag<regular_op::sub>;
+using op_Mul = regular_op_tag<regular_op::mul>;
+using op_Min = regular_op_tag<regular_op::min>;
+using op_Max = regular_op_tag<regular_op::max>;
+using op_And = regular_op_tag<regular_op::and_>;
+using op_Or = regular_op_tag<regular_op::or_>;
+using op_Xor = regular_op_tag<regular_op::xor_>;
+using op_AndNot = regular_op_tag<regular_op::and_not>;
+using op_Not = regular_op_tag<regular_op::not_>;
+using op_Neg = regular_op_tag<regular_op::neg>;
+using op_Abs = regular_op_tag<regular_op::abs>;
+using op_Eq = regular_op_tag<regular_op::eq>;
+using op_Ne = regular_op_tag<regular_op::ne>;
+using op_Lt = regular_op_tag<regular_op::lt>;
+using op_Gt = regular_op_tag<regular_op::gt>;
+using op_Le = regular_op_tag<regular_op::le>;
+using op_Ge = regular_op_tag<regular_op::ge>;
+using op_ShiftLeftSame = regular_op_tag<regular_op::shift_left_same>;
+using op_ShiftRightSame = regular_op_tag<regular_op::shift_right_same>;
+using op_MaskFromVec = regular_op_tag<regular_op::mask_from_vec>;
 
 template <typename M>
 [[gnu::always_inline]] HWY_INLINE decltype(auto)
@@ -875,8 +935,6 @@ struct op_IfThenZeroElse {
     }
 };
 
-#undef BIOSEQ_VS_DEFINE_TAG
-
 }  // namespace vec_stream_internal
 
 /// Single-template wrapper that any op can be registered with. The constraint
@@ -901,63 +959,173 @@ auto lifted(Args&&... args) {
 // hn::* ops). Each is a single-line forward to lifted<OpTag>.
 // ============================================================================
 
-#define BIOSEQ_VS_BINARY_WRAPPER(NAME)                                              \
-    template <typename A, typename B>                                                \
-    requires (any_arg_is_stream<A, B>)                                               \
-    [[nodiscard]] HWY_INLINE auto NAME(A&& a, B&& b) {                               \
-        return lifted<vec_stream_internal::op_##NAME>(                               \
-            std::forward<A>(a), std::forward<B>(b));                                 \
-    }
-
-#define BIOSEQ_VS_UNARY_WRAPPER(NAME)                                               \
-    template <typename A>                                                            \
-    requires (is_any_stream_v<A>)                                                    \
-    [[nodiscard]] HWY_INLINE auto NAME(A&& a) {                                      \
-        return lifted<vec_stream_internal::op_##NAME>(std::forward<A>(a));           \
-    }
-
-#define BIOSEQ_VS_TERNARY_WRAPPER(NAME)                                             \
-    template <typename A, typename B, typename C>                                    \
-    requires (any_arg_is_stream<A, B, C>)                                            \
-    [[nodiscard]] HWY_INLINE auto NAME(A&& a, B&& b, C&& c) {                        \
-        return lifted<vec_stream_internal::op_##NAME>(                               \
-            std::forward<A>(a), std::forward<B>(b), std::forward<C>(c));             \
-    }
-
 // Binary lifts — both vec/vec and mask/mask are handled here; the constraint
 // `any_arg_is_stream` matches whichever stream type the user supplies.
-BIOSEQ_VS_BINARY_WRAPPER(Add)
-BIOSEQ_VS_BINARY_WRAPPER(Sub)
-BIOSEQ_VS_BINARY_WRAPPER(Mul)
-BIOSEQ_VS_BINARY_WRAPPER(Min)
-BIOSEQ_VS_BINARY_WRAPPER(Max)
-BIOSEQ_VS_BINARY_WRAPPER(And)
-BIOSEQ_VS_BINARY_WRAPPER(Or)
-BIOSEQ_VS_BINARY_WRAPPER(Xor)
-BIOSEQ_VS_BINARY_WRAPPER(AndNot)
-BIOSEQ_VS_BINARY_WRAPPER(Eq)
-BIOSEQ_VS_BINARY_WRAPPER(Ne)
-BIOSEQ_VS_BINARY_WRAPPER(Lt)
-BIOSEQ_VS_BINARY_WRAPPER(Gt)
-BIOSEQ_VS_BINARY_WRAPPER(Le)
-BIOSEQ_VS_BINARY_WRAPPER(Ge)
-BIOSEQ_VS_BINARY_WRAPPER(ShiftLeftSame)
-BIOSEQ_VS_BINARY_WRAPPER(ShiftRightSame)
-BIOSEQ_VS_BINARY_WRAPPER(IfThenElseZero)
-BIOSEQ_VS_BINARY_WRAPPER(IfThenZeroElse)
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Add(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Add>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Sub(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Sub>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Mul(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Mul>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Min(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Min>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Max(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Max>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto And(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_And>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Or(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Or>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Xor(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Xor>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto AndNot(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_AndNot>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Eq(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Eq>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Ne(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Ne>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Lt(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Lt>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Gt(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Gt>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Le(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Le>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto Ge(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_Ge>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto ShiftLeftSame(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_ShiftLeftSame>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto ShiftRightSame(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_ShiftRightSame>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto IfThenElseZero(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_IfThenElseZero>(
+        std::forward<A>(a), std::forward<B>(b));
+}
+
+template <typename A, typename B>
+requires (any_arg_is_stream<A, B>)
+[[nodiscard]] HWY_INLINE auto IfThenZeroElse(A&& a, B&& b) {
+    return lifted<vec_stream_internal::op_IfThenZeroElse>(
+        std::forward<A>(a), std::forward<B>(b));
+}
 
 // Unary lifts.
-BIOSEQ_VS_UNARY_WRAPPER(Not)
-BIOSEQ_VS_UNARY_WRAPPER(Neg)
-BIOSEQ_VS_UNARY_WRAPPER(Abs)
-BIOSEQ_VS_UNARY_WRAPPER(MaskFromVec)
+template <typename A>
+requires (is_any_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto Not(A&& a) {
+    return lifted<vec_stream_internal::op_Not>(std::forward<A>(a));
+}
+
+template <typename A>
+requires (is_any_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto Neg(A&& a) {
+    return lifted<vec_stream_internal::op_Neg>(std::forward<A>(a));
+}
+
+template <typename A>
+requires (is_any_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto Abs(A&& a) {
+    return lifted<vec_stream_internal::op_Abs>(std::forward<A>(a));
+}
+
+template <typename A>
+requires (is_any_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto MaskFromVec(A&& a) {
+    return lifted<vec_stream_internal::op_MaskFromVec>(std::forward<A>(a));
+}
 
 // Ternary lifts (full {stream, scalar}^3 = 27 cases handled in one wrapper).
-BIOSEQ_VS_TERNARY_WRAPPER(IfThenElse)
-
-#undef BIOSEQ_VS_BINARY_WRAPPER
-#undef BIOSEQ_VS_UNARY_WRAPPER
-#undef BIOSEQ_VS_TERNARY_WRAPPER
+template <typename A, typename B, typename C>
+requires (any_arg_is_stream<A, B, C>)
+[[nodiscard]] HWY_INLINE auto IfThenElse(A&& a, B&& b, C&& c) {
+    return lifted<vec_stream_internal::op_IfThenElse>(
+        std::forward<A>(a), std::forward<B>(b), std::forward<C>(c));
+}
 
 // ============================================================================
 // Templated shifts — non-type template parameter, written long-hand.
