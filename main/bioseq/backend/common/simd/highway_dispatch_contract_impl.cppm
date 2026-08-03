@@ -20,14 +20,14 @@ HighwayDispatchInfo highway_dispatch_info(
     const std::int64_t cpu_supported_targets = hwy::SupportedTargets();
     const std::int64_t runnable_targets =
         compiled_targets & cpu_supported_targets;
-    std::int64_t planned_target = 0;
-    for (const std::int64_t target :
-         hwy::SupportedAndGeneratedTargets()) {
-        if ((runnable_targets & target) != 0) {
-            planned_target = target;
-            break;
-        }
-    }
+    const std::uint64_t runnable_bits =
+        static_cast<std::uint64_t>(runnable_targets);
+    // Highway assigns higher-priority targets to lower bits. Isolating the
+    // least-significant runnable bit is therefore equivalent to taking the
+    // first SupportedAndGeneratedTargets() entry, without allocating in this
+    // noexcept cold-path contract.
+    const std::int64_t planned_target = static_cast<std::int64_t>(
+        runnable_bits & (~runnable_bits + std::uint64_t{1}));
 
     return HighwayDispatchInfo{
         .compiled_targets = compiled_targets,
