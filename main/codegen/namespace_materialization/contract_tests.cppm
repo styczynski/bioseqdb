@@ -1008,26 +1008,47 @@ inline void verify_production_declaration_heads_and_probes() {
     }
 
     require(
-        occurrences(selector->content, "switch (alphabet_code)") == 1u
+        occurrences(selector->content, "\n    switch (alphabet_code)") == 1u
             && occurrences(
                    selector->content,
-                   "switch (storage_unit_byte_width)")
+                   "\n            switch (storage_unit_byte_width)")
                 == 2u
-            && occurrences(selector->content, "        case 0: {") == 1u
-            && occurrences(selector->content, "        case 1: {") == 1u
-            && occurrences(selector->content, "                case 1: {") == 2u
-            && occurrences(selector->content, "                case 2: {") == 2u
-            && occurrences(selector->content, "                case 4: {") == 2u
-            && occurrences(selector->content, "                case 8: {") == 2u,
+            && occurrences(selector->content, "\n        case 0: {") == 1u
+            && occurrences(selector->content, "\n        case 1: {") == 1u,
         "scheduler selector must route the exact two-by-four identity switch");
-    for (const std::string_view identity : scheduler_identity_namespaces) {
+    constexpr std::array<std::string_view, 4u> width_case_spellings{
+        "1", "2", "4", "8"};
+    std::array<std::size_t, scheduler_identity_namespaces.size()>
+        route_positions{};
+    for (std::size_t identity_index = 0u;
+         identity_index < scheduler_identity_namespaces.size();
+         ++identity_index) {
+        const std::string route =
+            "\n                case "
+            + std::string{width_case_spellings[identity_index % 4u]}
+            + ": {\n                    return ::"
+            + std::string{scheduler_identity_namespaces[identity_index]}
+            + "::process_sequences(";
         require(
-            occurrences(
-                selector->content,
-                "return ::" + std::string{identity} + "::process_sequences(")
-                == 1u,
-            "scheduler selector must route exactly once to every identity root");
+            occurrences(selector->content, route) == 1u,
+            "scheduler selector must bind every width case to its exact identity");
+        route_positions[identity_index] = selector->content.find(route);
     }
+    const std::size_t alphabet_dna4 =
+        selector->content.find("\n        case 0: {");
+    const std::size_t alphabet_dna5 =
+        selector->content.find("\n        case 1: {");
+    require(
+        alphabet_dna4 < route_positions[0]
+            && route_positions[0] < route_positions[1]
+            && route_positions[1] < route_positions[2]
+            && route_positions[2] < route_positions[3]
+            && route_positions[3] < alphabet_dna5
+            && alphabet_dna5 < route_positions[4]
+            && route_positions[4] < route_positions[5]
+            && route_positions[5] < route_positions[6]
+            && route_positions[6] < route_positions[7],
+        "scheduler selector must preserve the exact alphabet/width route order");
 }
 
 inline void verify_exact_edits() {
