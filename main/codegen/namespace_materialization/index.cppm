@@ -427,6 +427,11 @@ inline void validate_configure_handshake(
             "production",
             clang_structural::dependency_compilation_manifest_authority(
                 "core", dependency_authority));
+    recover_interrupted_publication(
+        command.output_root,
+        command.artifact_manifest,
+        command.stamp,
+        template_flatten_policy);
     const previous_publication previous = read_previous_publication(
         command.artifact_manifest,
         command.output_root,

@@ -1494,6 +1494,218 @@ inline void verify_authenticated_incremental_publication() {
         "publication ownership rejects traversal outside its exact root");
 }
 
+inline void verify_interrupted_publication_recovery() {
+    struct fault_case {
+        publication_fault_point point{};
+        std::size_t ordinal{};
+    };
+    constexpr std::array faults{
+        fault_case{publication_fault_point::preparing_intent_durable, 0u},
+        fault_case{publication_fault_point::desired_artifact_staged, 0u},
+        fault_case{publication_fault_point::desired_artifact_staged, 1u},
+        fault_case{publication_fault_point::ready_intent_durable, 0u},
+        fault_case{publication_fault_point::desired_artifact_promoted, 0u},
+        fault_case{publication_fault_point::desired_artifact_promoted, 1u},
+        fault_case{publication_fault_point::stale_artifact_removed, 0u},
+        fault_case{publication_fault_point::manifest_committed, 0u},
+    };
+    const auto make_artifact = [](std::filesystem::path path,
+                                  std::string content) {
+        return publication_artifact{
+            .relative_path = std::move(path),
+            .content = content,
+            .content_sha256 = sha256_hex(content),
+        };
+    };
+
+    for (const bool changed_retry : {false, true}) {
+        for (const fault_case fault : faults) {
+            scoped_temp_directory temporary;
+            const std::filesystem::path root = temporary.path();
+            const std::filesystem::path manifest = root / "artifacts.json";
+            const std::filesystem::path stamp = root / "publication.stamp";
+            const auto render = [&root](
+                                    std::string prior,
+                                    std::vector<publication_artifact> artifacts,
+                                    std::string_view topology) {
+                return render_publication_manifest(publication_manifest_request{
+                    .output_root = root,
+                    .policy = "template_flatten",
+                    .name = "interruption_contract",
+                    .topology_digest = sha256_hex(topology),
+                    .prior_manifest_identity = std::move(prior),
+                    .policy_evidence_json =
+                        R"({"schema_version":1,"producer":"interruption-contract"})",
+                    .artifacts = std::move(artifacts),
+                });
+            };
+            const auto publish = [&](const rendered_publication_manifest& rendered,
+                                     std::vector<publication_artifact> artifacts) {
+                publish_artifacts(publication_request{
+                    .output_root = root,
+                    .artifact_manifest = manifest,
+                    .stamp = stamp,
+                    .artifact_manifest_json = rendered.json,
+                    .artifacts = std::move(artifacts),
+                });
+            };
+
+            const std::vector<publication_artifact> initial{
+                make_artifact("keep.cppm", "module interruption.keep;\n"),
+                make_artifact("replace.cppm", "module interruption.old;\n"),
+                make_artifact(
+                    "nested/stale.cppm", "module interruption.stale;\n"),
+            };
+            const rendered_publication_manifest initial_manifest =
+                render({}, initial, "interruption topology 0");
+            publish(initial_manifest, initial);
+            const auto sentinel = std::filesystem::file_time_type::clock::now()
+                - std::chrono::hours{24};
+            std::filesystem::last_write_time(root / "keep.cppm", sentinel);
+
+            const previous_publication previous = read_previous_publication(
+                manifest, root, "template_flatten", {});
+            const std::vector<publication_artifact> transition{
+                make_artifact("keep.cppm", "module interruption.keep;\n"),
+                make_artifact("replace.cppm", "module interruption.new;\n"),
+                make_artifact("nested/added.cppm", "module interruption.added;\n"),
+            };
+            const rendered_publication_manifest transition_manifest = render(
+                previous.manifest_identity,
+                transition,
+                "interruption topology 1");
+            publication_fault_for_testing = publication_fault_injection{
+                .point = fault.point,
+                .ordinal = fault.ordinal,
+            };
+            require_rejected(
+                [&] { publish(transition_manifest, transition); },
+                "every durable publication boundary must be interruptible");
+            publication_fault_for_testing.reset();
+
+            recover_interrupted_publication(
+                root, manifest, stamp, "template_flatten");
+            const previous_publication recovered = read_previous_publication(
+                manifest, root, "template_flatten", {});
+            const std::vector<publication_artifact> final_artifacts =
+                changed_retry
+                ? std::vector<publication_artifact>{
+                      make_artifact(
+                          "keep.cppm", "module interruption.keep;\n"),
+                      make_artifact(
+                          "replace.cppm", "module interruption.newer;\n"),
+                      make_artifact(
+                          "final.cppm", "module interruption.final;\n"),
+                  }
+                : transition;
+            const rendered_publication_manifest final_manifest = render(
+                recovered.manifest_identity,
+                final_artifacts,
+                changed_retry ? "interruption topology 2"
+                              : "interruption topology 1");
+            publish(final_manifest, final_artifacts);
+
+            require(
+                read_file(root / "keep.cppm")
+                        == "module interruption.keep;\n"
+                    && std::filesystem::last_write_time(root / "keep.cppm")
+                        == sentinel
+                    && read_file(root / "replace.cppm")
+                        == (changed_retry ? "module interruption.newer;\n"
+                                          : "module interruption.new;\n")
+                    && std::filesystem::is_regular_file(
+                        root / (changed_retry ? "final.cppm"
+                                              : "nested/added.cppm"))
+                    && !std::filesystem::exists(root / "nested/stale.cppm")
+                    && (!changed_retry
+                        || !std::filesystem::exists(root / "nested/added.cppm"))
+                    && std::filesystem::is_regular_file(stamp),
+                "same-input and changed-input retries converge without rewriting unchanged artifacts");
+            require(
+                read_file(manifest)
+                    == (changed_retry ? final_manifest.json
+                                      : transition_manifest.json),
+                "interruption recovery preserves one exact manifest identity chain");
+            for (const std::filesystem::path& path : std::array{
+                     std::filesystem::path{manifest.string() + ".transaction"},
+                     std::filesystem::path{manifest.string() + ".transaction.tmp"},
+                     std::filesystem::path{manifest.string() + ".ready"},
+                     std::filesystem::path{(root / "replace.cppm").string()
+                                           + ".tmp"},
+                     std::filesystem::path{(root / "nested/added.cppm").string()
+                                           + ".tmp"},
+                     std::filesystem::path{(root / "final.cppm").string()
+                                           + ".tmp"},
+                 }) {
+                require(
+                    !std::filesystem::exists(path),
+                    "successful retry removes every protocol path");
+            }
+        }
+    }
+
+    scoped_temp_directory temporary;
+    const std::filesystem::path root = temporary.path();
+    const std::filesystem::path manifest = root / "artifacts.json";
+    const std::filesystem::path stamp = root / "publication.stamp";
+    const std::vector<publication_artifact> initial{
+        make_artifact("replace.cppm", "module interruption.old;\n"),
+    };
+    const auto render = [&root](
+                            std::string prior,
+                            std::vector<publication_artifact> artifacts) {
+        return render_publication_manifest(publication_manifest_request{
+            .output_root = root,
+            .policy = "template_flatten",
+            .name = "interruption_adversarial_contract",
+            .topology_digest = sha256_hex("interruption adversarial topology"),
+            .prior_manifest_identity = std::move(prior),
+            .policy_evidence_json = R"({"schema_version":1})",
+            .artifacts = std::move(artifacts),
+        });
+    };
+    const auto publish = [&](const rendered_publication_manifest& rendered,
+                             std::vector<publication_artifact> artifacts) {
+        publish_artifacts(publication_request{
+            .output_root = root,
+            .artifact_manifest = manifest,
+            .stamp = stamp,
+            .artifact_manifest_json = rendered.json,
+            .artifacts = std::move(artifacts),
+        });
+    };
+    const rendered_publication_manifest first = render({}, initial);
+    publish(first, initial);
+    const previous_publication previous = read_previous_publication(
+        manifest, root, "template_flatten", {});
+    const std::vector<publication_artifact> replacement{
+        make_artifact("replace.cppm", "module interruption.new;\n"),
+    };
+    const rendered_publication_manifest second = render(
+        previous.manifest_identity, replacement);
+    publication_fault_for_testing = publication_fault_injection{
+        .point = publication_fault_point::ready_intent_durable,
+    };
+    require_rejected(
+        [&] { publish(second, replacement); },
+        "adversarial fixture must stop with an authenticated READY intent");
+    publication_fault_for_testing.reset();
+    write_if_different(
+        std::filesystem::path{(root / "replace.cppm").string() + ".tmp"},
+        "tampered staged bytes\n");
+    require_rejected(
+        [&] {
+            recover_interrupted_publication(
+                root, manifest, stamp, "template_flatten");
+        },
+        "READY recovery rejects staged bytes outside the authenticated digest");
+    require(
+        read_file(manifest) == first.json
+            && read_file(root / "replace.cppm")
+                == "module interruption.old;\n",
+        "rejected READY recovery preserves the authenticated live publication");
+}
+
 }  // namespace detail
 
 inline void run_namespace_materialization_contract_tests() {
@@ -1510,6 +1722,7 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_template_flatten_manifest_evidence();
     detail::verify_policy_neutral_publication_envelope();
     detail::verify_authenticated_incremental_publication();
+    detail::verify_interrupted_publication_recovery();
 }
 
 }  // namespace bioseq::codegen::namespace_materialization

@@ -389,6 +389,11 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
         extract_sources(plan.source_inventory, structural, graph);
     validate_slot_callable_ownership(
         plan.source_inventory, plan.extracted_sources);
+    namespace_materialization::recover_interrupted_publication(
+        command.output_root,
+        command.artifact_manifest,
+        command.stamp,
+        publication_policy);
     const namespace_materialization::previous_publication previous =
         namespace_materialization::read_previous_publication(
             command.artifact_manifest,

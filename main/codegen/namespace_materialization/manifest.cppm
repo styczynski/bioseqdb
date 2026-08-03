@@ -6,6 +6,8 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <ios>
 #include <limits>
 #include <optional>
 #include <set>
@@ -2288,6 +2290,102 @@ inline void validate_physical_root(const fs::path& root) {
     }
 }
 
+/// The publication protocol uses same-directory renames so POSIX rename(2),
+/// as exposed by std::filesystem on macOS and Linux, replaces one regular file
+/// atomically. Never emulate replacement by deleting the live destination.
+inline void atomic_replace_regular_file(
+    const fs::path& source,
+    const fs::path& destination,
+    std::string_view owner) {
+    if (source.parent_path() != destination.parent_path()) {
+        throw std::runtime_error(
+            std::string{owner} + ": atomic replacement must stay in one directory");
+    }
+    require_regular_or_missing(source, owner);
+    if (!fs::is_regular_file(symlink_status_or_missing(source, owner))) {
+        throw std::runtime_error(
+            std::string{owner} + ": replacement source is not a regular file: "
+            + source.string());
+    }
+    require_regular_or_missing(destination, owner);
+    std::error_code error;
+    fs::rename(source, destination, error);
+    if (error) {
+        throw std::runtime_error(
+            std::string{owner} + ": cannot atomically replace "
+            + destination.string() + ": " + error.message());
+    }
+}
+
+/// Writes one protocol-owned staging path. The caller must have authenticated
+/// that the fixed staging name is absent before installing the PREPARING
+/// intent. Closing and rereading before the phase rename makes process-crash
+/// recovery deterministic; sudden host power loss is outside this protocol's
+/// durability claim.
+inline void write_new_staging_file(
+    const fs::path& path,
+    std::string_view content,
+    std::string_view owner) {
+    reject_symlink_chain(path.parent_path(), owner);
+    std::error_code error;
+    fs::create_directories(path.parent_path(), error);
+    if (error) {
+        throw std::runtime_error(
+            std::string{owner} + ": cannot create staging directory "
+            + path.parent_path().string() + ": " + error.message());
+    }
+    require_regular_or_missing(path, owner);
+    if (symlink_status_or_missing(path, owner).type()
+        != fs::file_type::not_found) {
+        throw std::runtime_error(
+            std::string{owner} + ": refusing an occupied staging path "
+            + path.string());
+    }
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            throw std::runtime_error(
+                std::string{owner} + ": cannot write " + path.string());
+        }
+        output.write(content.data(), static_cast<std::streamsize>(content.size()));
+        output.flush();
+        if (!output) {
+            throw std::runtime_error(
+                std::string{owner} + ": cannot finish writing " + path.string());
+        }
+    }
+    if (read_file(path) != content) {
+        throw std::runtime_error(
+            std::string{owner} + ": staged bytes failed readback validation: "
+            + path.string());
+    }
+}
+
+inline void remove_regular_file(
+    const fs::path& path,
+    std::string_view owner) {
+    require_regular_or_missing(path, owner);
+    const fs::file_status status = symlink_status_or_missing(path, owner);
+    if (status.type() == fs::file_type::not_found) return;
+    std::error_code error;
+    if (!fs::remove(path, error) || error) {
+        throw std::runtime_error(
+            std::string{owner} + ": cannot remove " + path.string() + ": "
+            + error.message());
+    }
+}
+
+inline void prune_empty_publication_directories(
+    fs::path parent,
+    const fs::path& output_root) {
+    std::error_code error;
+    while (parent != output_root) {
+        error.clear();
+        if (!fs::remove(parent, error) || error) break;
+        parent = parent.parent_path();
+    }
+}
+
 }  // namespace detail
 
 /// Renders the complete ordered topology handshake for one materialization.
@@ -2907,6 +3005,99 @@ struct previous_publication_snapshot {
     std::string document;
 };
 
+enum class publication_fault_point : std::uint8_t {
+    preparing_intent_durable,
+    desired_artifact_staged,
+    ready_intent_durable,
+    desired_artifact_promoted,
+    stale_artifact_removed,
+    manifest_committed,
+};
+
+struct publication_fault_injection {
+    publication_fault_point point{};
+    std::size_t ordinal{};
+};
+
+inline thread_local std::optional<publication_fault_injection>
+    publication_fault_for_testing;
+
+inline void maybe_inject_publication_fault(
+    const publication_fault_point point,
+    const std::size_t ordinal = 0u) {
+    if (!publication_fault_for_testing.has_value()
+        || publication_fault_for_testing->point != point
+        || publication_fault_for_testing->ordinal != ordinal) {
+        return;
+    }
+    publication_fault_for_testing.reset();
+    throw std::runtime_error("injected publication interruption");
+}
+
+struct publication_protocol_paths {
+    std::filesystem::path output_root;
+    std::filesystem::path manifest;
+    std::filesystem::path manifest_relative;
+    std::filesystem::path stamp;
+    std::filesystem::path stamp_relative;
+    std::filesystem::path transaction;
+    std::filesystem::path transaction_relative;
+    std::filesystem::path transaction_scratch;
+    std::filesystem::path ready;
+    std::filesystem::path ready_relative;
+};
+
+[[nodiscard]] inline publication_protocol_paths publication_protocol(
+    const std::filesystem::path& output_root,
+    const std::filesystem::path& manifest,
+    const std::filesystem::path& stamp) {
+    validate_physical_root(output_root);
+    const std::filesystem::path manifest_relative = path_beneath_root(
+        manifest, output_root, "artifact manifest destination");
+    if (manifest_relative.extension() != ".json") {
+        throw std::runtime_error(
+            "artifact manifest destination must use .json");
+    }
+    const std::filesystem::path stamp_relative = path_beneath_root(
+        stamp, output_root, "publication stamp destination");
+    const std::filesystem::path transaction{
+        manifest.string() + ".transaction"};
+    const std::filesystem::path ready{manifest.string() + ".ready"};
+    publication_protocol_paths result{
+        .output_root = output_root,
+        .manifest = manifest,
+        .manifest_relative = manifest_relative,
+        .stamp = stamp,
+        .stamp_relative = stamp_relative,
+        .transaction = transaction,
+        .transaction_relative = path_beneath_root(
+            transaction, output_root, "publication PREPARING intent"),
+        .transaction_scratch =
+            std::filesystem::path{transaction.string() + ".tmp"},
+        .ready = ready,
+        .ready_relative = path_beneath_root(
+            ready, output_root, "publication READY intent"),
+    };
+    std::set<std::filesystem::path> identities;
+    const auto reserve = [&identities](
+                             const std::filesystem::path& relative,
+                             std::string_view owner) {
+        const std::filesystem::path temporary{relative.string() + ".tmp"};
+        if (!identities.insert(relative).second
+            || !identities.insert(temporary).second) {
+            throw std::runtime_error(
+                std::string{owner}
+                + " aliases another publication protocol path: "
+                + relative.string());
+        }
+    };
+    reserve(result.manifest_relative, "artifact manifest destination");
+    reserve(result.stamp_relative, "publication stamp destination");
+    reserve(result.transaction_relative, "publication PREPARING intent");
+    reserve(result.ready_relative, "publication READY intent");
+    return result;
+}
+
 [[nodiscard]] inline previous_publication_snapshot
 read_previous_publication_snapshot(
     const std::filesystem::path& manifest_path,
@@ -2956,7 +3147,367 @@ inline void require_unchanged_previous_publication_snapshot(
     }
 }
 
+inline void require_pending_predecessor(
+    const previous_publication& desired,
+    const previous_publication& previous) {
+    if ((!previous.present && !desired.prior_manifest_identity.empty())
+        || (previous.present
+            && previous.manifest_identity != desired.prior_manifest_identity)
+        || (previous.present && previous.name != desired.name)) {
+        throw std::runtime_error(
+            "pending publication is not linked to the live manifest identity");
+    }
+}
+
+inline void validate_protocol_ownership_paths(
+    const publication_protocol_paths& protocol,
+    const previous_publication& desired,
+    const previous_publication& previous) {
+    std::set<std::filesystem::path> identities;
+    const auto reserve = [&identities](
+                             const std::filesystem::path& relative,
+                             std::string_view owner) {
+        const std::filesystem::path temporary{relative.string() + ".tmp"};
+        if (!identities.insert(relative).second
+            || !identities.insert(temporary).second) {
+            throw std::runtime_error(
+                std::string{owner}
+                + " aliases a publication destination or protocol path: "
+                + relative.string());
+        }
+    };
+    reserve(protocol.manifest_relative, "artifact manifest destination");
+    reserve(protocol.stamp_relative, "publication stamp destination");
+    reserve(protocol.transaction_relative, "publication PREPARING intent");
+    reserve(protocol.ready_relative, "publication READY intent");
+    std::set<std::filesystem::path> desired_paths;
+    for (const owned_publication_artifact& artifact : desired.artifacts) {
+        reserve(artifact.relative_path, "desired publication artifact");
+        desired_paths.insert(artifact.relative_path);
+    }
+    for (const owned_publication_artifact& artifact : previous.artifacts) {
+        if (desired_paths.contains(artifact.relative_path)) continue;
+        reserve(
+            artifact.relative_path,
+            "authenticated stale publication artifact");
+    }
+}
+
+[[nodiscard]] inline std::optional<std::string> regular_file_digest(
+    const std::filesystem::path& path,
+    std::string_view owner) {
+    require_regular_or_missing(path, owner);
+    const std::filesystem::file_status status =
+        symlink_status_or_missing(path, owner);
+    if (status.type() == std::filesystem::file_type::not_found) {
+        return std::nullopt;
+    }
+    return sha256_hex(read_file(path));
+}
+
+[[nodiscard]] inline const owned_publication_artifact* find_owned_artifact(
+    const previous_publication& publication,
+    const std::filesystem::path& relative) noexcept {
+    const auto found = std::ranges::find_if(
+        publication.artifacts,
+        [&relative](const owned_publication_artifact& artifact) {
+            return artifact.relative_path == relative;
+        });
+    return found == publication.artifacts.end() ? nullptr : &*found;
+}
+
+enum class pending_publication_phase : std::uint8_t {
+    preparing,
+    ready,
+};
+
+struct pending_publication {
+    pending_publication_phase phase{};
+    std::filesystem::path path;
+    std::string document;
+    previous_publication desired;
+};
+
+[[nodiscard]] inline std::optional<pending_publication>
+read_pending_publication(
+    const publication_protocol_paths& protocol,
+    std::string_view expected_policy) {
+    const std::filesystem::path manifest_scratch{
+        protocol.manifest.string() + ".tmp"};
+    const std::filesystem::path stamp_scratch{protocol.stamp.string() + ".tmp"};
+    const std::filesystem::path ready_scratch{protocol.ready.string() + ".tmp"};
+    for (const auto& [path, owner] : std::array{
+             std::pair{manifest_scratch, std::string_view{"manifest scratch"}},
+             std::pair{stamp_scratch, std::string_view{"stamp scratch"}},
+             std::pair{ready_scratch, std::string_view{"READY scratch"}},
+         }) {
+        require_regular_or_missing(path, owner);
+        if (symlink_status_or_missing(path, owner).type()
+            != std::filesystem::file_type::not_found) {
+            throw std::runtime_error(
+                std::string{owner} + " is not owned by a recoverable phase: "
+                + path.string());
+        }
+    }
+
+    const std::filesystem::file_status preparing_status =
+        symlink_status_or_missing(
+            protocol.transaction, "publication PREPARING intent");
+    const std::filesystem::file_status ready_status = symlink_status_or_missing(
+        protocol.ready, "publication READY intent");
+    const std::filesystem::file_status scratch_status =
+        symlink_status_or_missing(
+            protocol.transaction_scratch,
+            "publication PREPARING intent scratch");
+    if (scratch_status.type() != std::filesystem::file_type::not_found) {
+        require_regular_or_missing(
+            protocol.transaction_scratch,
+            "publication PREPARING intent scratch");
+        if (preparing_status.type() != std::filesystem::file_type::not_found
+            || ready_status.type() != std::filesystem::file_type::not_found) {
+            throw std::runtime_error(
+                "publication PREPARING scratch aliases an installed phase");
+        }
+        // Staging never begins until this scratch has been atomically renamed
+        // to PREPARING, so an isolated regular scratch is always abortable.
+        remove_regular_file(
+            protocol.transaction_scratch,
+            "publication PREPARING intent scratch");
+        return std::nullopt;
+    }
+    if (preparing_status.type() != std::filesystem::file_type::not_found
+        && ready_status.type() != std::filesystem::file_type::not_found) {
+        throw std::runtime_error(
+            "ambiguous publication state contains PREPARING and READY intents");
+    }
+    if (preparing_status.type() == std::filesystem::file_type::not_found
+        && ready_status.type() == std::filesystem::file_type::not_found) {
+        return std::nullopt;
+    }
+    const pending_publication_phase phase =
+        preparing_status.type() != std::filesystem::file_type::not_found
+        ? pending_publication_phase::preparing
+        : pending_publication_phase::ready;
+    const std::filesystem::path& path =
+        phase == pending_publication_phase::preparing ? protocol.transaction
+                                                       : protocol.ready;
+    require_regular_or_missing(path, "pending publication intent");
+    std::string document = read_file(path);
+    if (document.contains('\0')) {
+        throw std::runtime_error(
+            "pending publication intent contains NUL bytes");
+    }
+    previous_publication desired = parse_publication_manifest(
+        document,
+        "pending publication intent",
+        protocol.output_root,
+        expected_policy,
+        std::string_view{});
+    return pending_publication{
+        .phase = phase,
+        .path = path,
+        .document = std::move(document),
+        .desired = std::move(desired),
+    };
+}
+
+inline void require_pending_document_unchanged(
+    const pending_publication& pending) {
+    require_regular_or_missing(pending.path, "revalidated publication intent");
+    if (read_file(pending.path) != pending.document) {
+        throw std::runtime_error(
+            "pending publication intent changed after authentication");
+    }
+}
+
+inline void abort_preparing_publication(
+    const publication_protocol_paths& protocol,
+    const pending_publication& pending,
+    const previous_publication_snapshot& previous_snapshot) {
+    require_pending_document_unchanged(pending);
+    require_unchanged_previous_publication_snapshot(
+        protocol.manifest, previous_snapshot);
+    for (const owned_publication_artifact& artifact :
+         pending.desired.artifacts) {
+        const std::filesystem::path staging = std::filesystem::path{
+            (protocol.output_root / artifact.relative_path).string() + ".tmp"};
+        remove_regular_file(staging, "aborted publication staging artifact");
+        prune_empty_publication_directories(
+            staging.parent_path(), protocol.output_root);
+    }
+    require_pending_document_unchanged(pending);
+    require_unchanged_previous_publication_snapshot(
+        protocol.manifest, previous_snapshot);
+    remove_regular_file(pending.path, "aborted publication PREPARING intent");
+}
+
+inline void roll_forward_ready_publication(
+    const publication_protocol_paths& protocol,
+    const pending_publication& pending,
+    const previous_publication_snapshot& previous_snapshot) {
+    struct promotion {
+        const owned_publication_artifact* desired{};
+        const owned_publication_artifact* previous{};
+        std::filesystem::path destination;
+        std::filesystem::path staging;
+    };
+    std::vector<promotion> promotions;
+    std::set<std::filesystem::path> desired_paths;
+    for (const owned_publication_artifact& artifact :
+         pending.desired.artifacts) {
+        desired_paths.insert(artifact.relative_path);
+        const std::filesystem::path destination =
+            protocol.output_root / artifact.relative_path;
+        const std::filesystem::path staging{
+            destination.string() + ".tmp"};
+        const std::optional<std::string> live_digest = regular_file_digest(
+            destination, "READY desired publication artifact");
+        const std::optional<std::string> staged_digest = regular_file_digest(
+            staging, "READY staged publication artifact");
+        if (live_digest == artifact.content_sha256) {
+            if (staged_digest.has_value()) {
+                throw std::runtime_error(
+                    "READY publication has both live and staged desired bytes: "
+                    + artifact.relative_path.string());
+            }
+            continue;
+        }
+        if (staged_digest != artifact.content_sha256) {
+            throw std::runtime_error(
+                "READY publication is missing authenticated staged bytes: "
+                + artifact.relative_path.string());
+        }
+        const owned_publication_artifact* prior = find_owned_artifact(
+            previous_snapshot.publication, artifact.relative_path);
+        if (live_digest.has_value()
+            && (prior == nullptr
+                || prior->content_sha256 != live_digest.value())) {
+            throw std::runtime_error(
+                "READY publication would overwrite unowned or modified bytes: "
+                + artifact.relative_path.string());
+        }
+        promotions.push_back(promotion{
+            .desired = &artifact,
+            .previous = prior,
+            .destination = destination,
+            .staging = staging,
+        });
+    }
+
+    std::vector<const owned_publication_artifact*> stale_artifacts;
+    for (const owned_publication_artifact& artifact :
+         previous_snapshot.publication.artifacts) {
+        if (desired_paths.contains(artifact.relative_path)) continue;
+        const std::filesystem::path stale =
+            protocol.output_root / artifact.relative_path;
+        const std::optional<std::string> digest = regular_file_digest(
+            stale, "READY stale publication artifact");
+        if (digest.has_value() && digest != artifact.content_sha256) {
+            throw std::runtime_error(
+                "READY publication would delete modified stale bytes: "
+                + artifact.relative_path.string());
+        }
+        stale_artifacts.push_back(&artifact);
+    }
+
+    require_pending_document_unchanged(pending);
+    require_unchanged_previous_publication_snapshot(
+        protocol.manifest, previous_snapshot);
+    for (std::size_t ordinal = 0u; ordinal < promotions.size(); ++ordinal) {
+        const promotion& item = promotions[ordinal];
+        if (regular_file_digest(
+                item.staging, "revalidated staged publication artifact")
+            != item.desired->content_sha256) {
+            throw std::runtime_error(
+                "staged publication artifact changed during promotion: "
+                + item.staging.string());
+        }
+        const std::optional<std::string> live_digest = regular_file_digest(
+            item.destination, "revalidated live publication artifact");
+        if (live_digest.has_value()
+            && (item.previous == nullptr
+                || live_digest != item.previous->content_sha256)) {
+            throw std::runtime_error(
+                "live publication artifact changed during promotion: "
+                + item.destination.string());
+        }
+        atomic_replace_regular_file(
+            item.staging, item.destination, "publication artifact promotion");
+        if (regular_file_digest(
+                item.destination, "promoted publication artifact")
+            != item.desired->content_sha256) {
+            throw std::runtime_error(
+                "promoted publication artifact digest mismatch: "
+                + item.destination.string());
+        }
+        maybe_inject_publication_fault(
+            publication_fault_point::desired_artifact_promoted, ordinal);
+    }
+    for (std::size_t ordinal = 0u; ordinal < stale_artifacts.size(); ++ordinal) {
+        const owned_publication_artifact& artifact = *stale_artifacts[ordinal];
+        const std::filesystem::path stale =
+            protocol.output_root / artifact.relative_path;
+        const std::optional<std::string> digest = regular_file_digest(
+            stale, "revalidated stale publication artifact");
+        if (!digest.has_value()) continue;
+        if (digest != artifact.content_sha256) {
+            throw std::runtime_error(
+                "stale publication artifact changed during deletion: "
+                + stale.string());
+        }
+        remove_regular_file(stale, "authenticated stale publication artifact");
+        prune_empty_publication_directories(
+            stale.parent_path(), protocol.output_root);
+        maybe_inject_publication_fault(
+            publication_fault_point::stale_artifact_removed, ordinal);
+    }
+    require_pending_document_unchanged(pending);
+    require_unchanged_previous_publication_snapshot(
+        protocol.manifest, previous_snapshot);
+    atomic_replace_regular_file(
+        protocol.ready, protocol.manifest, "publication manifest commit");
+    if (read_file(protocol.manifest) != pending.document) {
+        throw std::runtime_error(
+            "committed publication manifest bytes differ from READY intent");
+    }
+    maybe_inject_publication_fault(
+        publication_fault_point::manifest_committed);
+}
+
 }  // namespace detail
+
+/// Resolves a process interruption before callers authenticate the predecessor
+/// used to render their next manifest. PREPARING is abort-only; READY is
+/// roll-forward-only, preserving one exact manifest identity chain even when
+/// the caller's current inputs changed after the interrupted invocation.
+inline void recover_interrupted_publication(
+    const std::filesystem::path& output_root,
+    const std::filesystem::path& artifact_manifest,
+    const std::filesystem::path& stamp,
+    std::string_view expected_policy) {
+    const detail::publication_protocol_paths protocol =
+        detail::publication_protocol(output_root, artifact_manifest, stamp);
+    const std::optional<detail::pending_publication> pending =
+        detail::read_pending_publication(protocol, expected_policy);
+    if (!pending.has_value()) return;
+    const detail::previous_publication_snapshot previous_snapshot =
+        detail::read_previous_publication_snapshot(
+            artifact_manifest,
+            output_root,
+            expected_policy,
+            std::string_view{});
+    detail::require_pending_predecessor(
+        pending->desired, previous_snapshot.publication);
+    detail::validate_protocol_ownership_paths(
+        protocol, pending->desired, previous_snapshot.publication);
+    if (pending->phase == detail::pending_publication_phase::preparing) {
+        detail::abort_preparing_publication(
+            protocol, *pending, previous_snapshot);
+        return;
+    }
+    detail::roll_forward_ready_publication(
+        protocol, *pending, previous_snapshot);
+}
 
 [[nodiscard]] inline previous_publication read_previous_publication(
     const std::filesystem::path& manifest_path,
@@ -2974,34 +3525,9 @@ inline void require_unchanged_previous_publication_snapshot(
 /// Atomically publishes the complete desired set and removes only stale paths
 /// authenticated by the immediately preceding manifest identity.
 inline void publish_artifacts(const publication_request& request) {
-    detail::validate_physical_root(request.output_root);
-    const std::filesystem::path manifest_relative = detail::path_beneath_root(
-        request.artifact_manifest,
-        request.output_root,
-        "artifact manifest destination");
-    if (manifest_relative.extension() != ".json") {
-        throw std::runtime_error(
-            "artifact manifest destination must use .json");
-    }
-    const std::filesystem::path stamp_relative = detail::path_beneath_root(
-        request.stamp, request.output_root, "publication stamp destination");
-    std::set<std::filesystem::path> publication_path_identities;
-    const auto reserve_publication_path =
-        [&publication_path_identities](
-            const std::filesystem::path& relative,
-            std::string_view owner) {
-            const std::filesystem::path temporary{
-                relative.string() + ".tmp"};
-            if (!publication_path_identities.insert(relative).second
-                || !publication_path_identities.insert(temporary).second) {
-                throw std::runtime_error(
-                    std::string{owner}
-                    + " aliases another publication destination or temporary path: "
-                    + relative.string());
-            }
-        };
-    reserve_publication_path(manifest_relative, "artifact manifest destination");
-    reserve_publication_path(stamp_relative, "publication stamp destination");
+    const detail::publication_protocol_paths protocol =
+        detail::publication_protocol(
+            request.output_root, request.artifact_manifest, request.stamp);
 
     const previous_publication desired_manifest =
         detail::parse_publication_manifest(
@@ -3010,6 +3536,15 @@ inline void publish_artifacts(const publication_request& request) {
             request.output_root,
             std::string_view{},
             std::string_view{});
+
+    // Defense in depth for direct callers. Production generators recover
+    // before reading the predecessor so changed inputs can render from the
+    // manifest identity committed by a pending READY transaction.
+    recover_interrupted_publication(
+        request.output_root,
+        request.artifact_manifest,
+        request.stamp,
+        desired_manifest.policy);
 
     const detail::previous_publication_snapshot previous_snapshot =
         detail::read_previous_publication_snapshot(
@@ -3025,15 +3560,7 @@ inline void publish_artifacts(const publication_request& request) {
             == detail::publication_noop_projection(
                 request.artifact_manifest_json,
                 "desired artifacts manifest");
-    if ((!previous.present
-         && !desired_manifest.prior_manifest_identity.empty())
-        || (previous.present
-            && previous.manifest_identity
-                != desired_manifest.prior_manifest_identity)
-        || (previous.present && previous.name != desired_manifest.name)) {
-        throw std::runtime_error(
-            "prior manifest identity does not authorize stale cleanup");
-    }
+    detail::require_pending_predecessor(desired_manifest, previous);
 
     std::vector<owned_publication_artifact> requested;
     requested.reserve(request.artifacts.size());
@@ -3041,11 +3568,10 @@ inline void publish_artifacts(const publication_request& request) {
     for (const publication_artifact& artifact : request.artifacts) {
         const std::filesystem::path relative = detail::checked_relative_path(
             artifact.relative_path, "desired publication artifact");
-        if (relative == manifest_relative) {
+        if (relative == protocol.manifest_relative) {
             throw std::runtime_error(
                 "artifacts.json must be published through its dedicated field");
         }
-        reserve_publication_path(relative, "desired publication artifact");
         const bool production = artifact.artifact_class
             == publication_artifact_class::production_cppm;
         if ((production && relative.extension() != ".cppm")
@@ -3092,6 +3618,8 @@ inline void publish_artifacts(const publication_request& request) {
                 + actual.relative_path.string() + "'");
         }
     }
+    detail::validate_protocol_ownership_paths(
+        protocol, desired_manifest, previous);
 
     detail::require_write_destination(
         request.artifact_manifest, "artifact manifest destination");
@@ -3121,16 +3649,8 @@ inline void publish_artifacts(const publication_request& request) {
         }
     }
 
-    std::vector<owned_publication_artifact> stale_artifacts;
     for (const owned_publication_artifact& artifact : previous.artifacts) {
-        if (artifact.relative_path == manifest_relative) {
-            throw std::runtime_error(
-                "previous manifest recursively claims its own ownership path");
-        }
         if (requested_paths.contains(artifact.relative_path)) continue;
-        reserve_publication_path(
-            artifact.relative_path,
-            "authenticated stale publication artifact");
         const std::filesystem::path stale =
             request.output_root / artifact.relative_path;
         detail::require_regular_or_missing(
@@ -3144,63 +3664,63 @@ inline void publish_artifacts(const publication_request& request) {
                 "refusing to delete a modified stale publication artifact: "
                 + stale.string());
         }
-        stale_artifacts.push_back(artifact);
     }
 
     detail::require_unchanged_previous_publication_snapshot(
         request.artifact_manifest, previous_snapshot);
+    if (idempotent_republication) {
+        touch_stamp(request.stamp);
+        return;
+    }
+
+    detail::write_new_staging_file(
+        protocol.transaction_scratch,
+        request.artifact_manifest_json,
+        "publication PREPARING intent scratch");
+    detail::atomic_replace_regular_file(
+        protocol.transaction_scratch,
+        protocol.transaction,
+        "publication PREPARING intent installation");
+    detail::maybe_inject_publication_fault(
+        detail::publication_fault_point::preparing_intent_durable);
+
+    std::size_t staged_ordinal = 0u;
     for (const publication_artifact& artifact : request.artifacts) {
-        write_if_different(
-            request.output_root / artifact.relative_path, artifact.content);
-    }
-    for (const owned_publication_artifact& artifact : stale_artifacts) {
-        const std::filesystem::path stale =
+        const std::filesystem::path destination =
             request.output_root / artifact.relative_path;
-        const std::filesystem::file_status status =
-            detail::symlink_status_or_missing(
-                stale, "authenticated stale publication artifact");
-        if (status.type() == std::filesystem::file_type::not_found) continue;
-        if (!std::filesystem::is_regular_file(status)) {
-            throw std::runtime_error(
-                "refusing non-regular stale publication artifact: "
-                + stale.string());
+        if (detail::regular_file_digest(
+                destination, "publication artifact staging preflight")
+            == artifact.content_sha256) {
+            continue;
         }
-        if (sha256_hex(read_file(stale)) != artifact.content_sha256) {
-            throw std::runtime_error(
-                "refusing to delete a stale publication artifact replaced "
-                "after preflight: "
-                + stale.string());
-        }
-        const std::filesystem::file_status revalidated_status =
-            detail::symlink_status_or_missing(
-                stale, "revalidated stale publication artifact");
-        if (!std::filesystem::is_regular_file(revalidated_status)) {
-            throw std::runtime_error(
-                "refusing stale publication artifact replaced during deletion: "
-                + stale.string());
-        }
-        if (sha256_hex(read_file(stale)) != artifact.content_sha256) {
-            throw std::runtime_error(
-                "refusing stale publication artifact changed during deletion: "
-                + stale.string());
-        }
-        std::error_code error;
-        if (!std::filesystem::remove(stale, error) || error) {
-            throw std::runtime_error(
-                "cannot remove authenticated stale publication artifact: "
-                + stale.string() + ": " + error.message());
-        }
-        std::filesystem::path parent = stale.parent_path();
-        while (parent != request.output_root) {
-            error.clear();
-            if (!std::filesystem::remove(parent, error) || error) break;
-            parent = parent.parent_path();
-        }
+        const std::filesystem::path staging{destination.string() + ".tmp"};
+        detail::write_new_staging_file(
+            staging, artifact.content, "publication artifact staging");
+        detail::maybe_inject_publication_fault(
+            detail::publication_fault_point::desired_artifact_staged,
+            staged_ordinal++);
     }
-    if (!idempotent_republication) {
-        write_if_different(
-            request.artifact_manifest, request.artifact_manifest_json);
+
+    detail::require_unchanged_previous_publication_snapshot(
+        request.artifact_manifest, previous_snapshot);
+    if (read_file(protocol.transaction) != request.artifact_manifest_json) {
+        throw std::runtime_error(
+            "publication PREPARING intent changed during staging");
     }
+    detail::atomic_replace_regular_file(
+        protocol.transaction,
+        protocol.ready,
+        "publication READY phase transition");
+    detail::maybe_inject_publication_fault(
+        detail::publication_fault_point::ready_intent_durable);
+    const detail::pending_publication ready{
+        .phase = detail::pending_publication_phase::ready,
+        .path = protocol.ready,
+        .document = request.artifact_manifest_json,
+        .desired = desired_manifest,
+    };
+    detail::roll_forward_ready_publication(
+        protocol, ready, previous_snapshot);
     touch_stamp(request.stamp);
 }
 
