@@ -66,6 +66,7 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -7753,6 +7754,12 @@ struct compiler_module_inventory {
         path.is_absolute() ? path : std::filesystem::absolute(path));
 }
 
+void accept_absent_owned_path(std::error_code& error) noexcept {
+    if (error == std::errc::no_such_file_or_directory) {
+        error.clear();
+    }
+}
+
 [[nodiscard]] std::string relocatable_argument_material(
     const std::vector<std::string>& arguments,
     const relocation_context& relocation,
@@ -7763,6 +7770,7 @@ struct compiler_module_inventory {
     std::error_code error;
     const std::filesystem::file_status status =
         std::filesystem::symlink_status(configured_root, error);
+    accept_absent_owned_path(error);
     if (error) {
         throw std::runtime_error(
             "cannot inspect PREPARE PCM root: "
@@ -7809,6 +7817,7 @@ struct compiler_module_inventory {
     std::error_code error;
     const std::filesystem::file_status status =
         std::filesystem::symlink_status(directory, error);
+    accept_absent_owned_path(error);
     if (error) {
         throw std::runtime_error(
             "cannot inspect PREPARE owned directory: "
@@ -7889,6 +7898,7 @@ void validate_owned_leaf(
     error.clear();
     const std::filesystem::file_status status =
         std::filesystem::symlink_status(normalized, error);
+    accept_absent_owned_path(error);
     if (error) {
         throw std::runtime_error(
             "cannot inspect " + std::string{role} + ": "
