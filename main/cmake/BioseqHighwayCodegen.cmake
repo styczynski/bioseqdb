@@ -92,7 +92,6 @@ function(_bioseq_highway_collect_target_usage
     list(APPEND _resolved_include_dirs "${_include_dir}")
   endforeach()
   list(REMOVE_DUPLICATES _resolved_include_dirs)
-  list(SORT _resolved_include_dirs)
 
   get_target_property(_definitions hwy::hwy INTERFACE_COMPILE_DEFINITIONS)
   if(NOT _definitions OR _definitions STREQUAL "_definitions-NOTFOUND")
@@ -171,6 +170,266 @@ function(_bioseq_highway_find_header output include_dirs relative_path)
     "cannot find ${relative_path} beneath the hwy::hwy include directories")
 endfunction()
 
+function(_bioseq_highway_parse_depfile
+    output depfile expected_target base_directory)
+  if(NOT IS_ABSOLUTE "${depfile}" OR NOT EXISTS "${depfile}"
+      OR IS_DIRECTORY "${depfile}")
+    _bioseq_highway_fail(
+      "target probe did not produce an absolute regular depfile: ${depfile}")
+  endif()
+  if(NOT IS_ABSOLUTE "${base_directory}"
+      OR NOT IS_DIRECTORY "${base_directory}")
+    _bioseq_highway_fail(
+      "target-probe depfile base must be an absolute directory: "
+      "${base_directory}")
+  endif()
+  if(NOT expected_target MATCHES "^[A-Za-z0-9_.+-]+$")
+    _bioseq_highway_fail(
+      "target-probe depfile target is malformed: ${expected_target}")
+  endif()
+
+  file(READ "${depfile}" _contents)
+  if(_contents STREQUAL "")
+    _bioseq_highway_fail("target-probe depfile is empty: ${depfile}")
+  endif()
+  string(REPLACE "\r\n" "\n" _contents "${_contents}")
+  if(_contents MATCHES "\r")
+    _bioseq_highway_fail(
+      "target-probe depfile contains a bare carriage return: ${depfile}")
+  endif()
+  string(REPLACE "\\\n" " " _contents "${_contents}")
+  if(NOT _contents MATCHES "\n$")
+    _bioseq_highway_fail(
+      "target-probe depfile must end with one complete rule: ${depfile}")
+  endif()
+  string(REGEX REPLACE "\n$" "" _contents "${_contents}")
+  if(_contents MATCHES "\n")
+    _bioseq_highway_fail(
+      "target-probe depfile contains multiple logical rules: ${depfile}")
+  endif()
+
+  set(_prefix "${expected_target}:")
+  string(LENGTH "${_prefix}" _prefix_length)
+  string(LENGTH "${_contents}" _contents_length)
+  if(_contents_length LESS _prefix_length)
+    _bioseq_highway_fail(
+      "target-probe depfile omits its owned target: ${depfile}")
+  endif()
+  string(SUBSTRING "${_contents}" 0 ${_prefix_length} _actual_prefix)
+  if(NOT _actual_prefix STREQUAL _prefix)
+    _bioseq_highway_fail(
+      "target-probe depfile has a foreign or ambiguous target: ${depfile}")
+  endif()
+  string(SUBSTRING "${_contents}" ${_prefix_length} -1 _prerequisites)
+
+  # Parse the make dependency spelling directly. The compiler escapes spaces,
+  # '#', ':', and backslashes with a backslash and spells a literal '$' as
+  # '$$'. Reject incomplete or multi-rule syntax instead of accepting a
+  # partially decoded dependency set.
+  string(LENGTH "${_prerequisites}" _length)
+  set(_cursor 0)
+  set(_escaped FALSE)
+  set(_token "")
+  set(_dependencies)
+  while(_cursor LESS _length)
+    string(SUBSTRING "${_prerequisites}" ${_cursor} 1 _character)
+    if(_escaped)
+      string(APPEND _token "${_character}")
+      set(_escaped FALSE)
+    elseif(_character STREQUAL "\\")
+      set(_escaped TRUE)
+    elseif(_character MATCHES "[ \t]")
+      if(NOT _token STREQUAL "")
+        list(APPEND _dependencies "${_token}")
+        set(_token "")
+      endif()
+    elseif(_character STREQUAL "$")
+      math(EXPR _next_cursor "${_cursor} + 1")
+      if(_next_cursor GREATER_EQUAL _length)
+        _bioseq_highway_fail(
+          "target-probe depfile contains an incomplete '$$' escape: "
+          "${depfile}")
+      endif()
+      string(SUBSTRING "${_prerequisites}" ${_next_cursor} 1
+        _next_character)
+      if(NOT _next_character STREQUAL "$")
+        _bioseq_highway_fail(
+          "target-probe depfile contains an unescaped '$': ${depfile}")
+      endif()
+      string(APPEND _token "$")
+      set(_cursor ${_next_cursor})
+    elseif(_character STREQUAL "#")
+      _bioseq_highway_fail(
+        "target-probe depfile contains an unescaped '#': ${depfile}")
+    elseif(_character STREQUAL ";")
+      _bioseq_highway_fail(
+        "target-probe dependency paths cannot contain ';': ${depfile}")
+    else()
+      string(APPEND _token "${_character}")
+    endif()
+    math(EXPR _cursor "${_cursor} + 1")
+  endwhile()
+  if(_escaped)
+    _bioseq_highway_fail(
+      "target-probe depfile ends with an incomplete escape: ${depfile}")
+  endif()
+  if(NOT _token STREQUAL "")
+    list(APPEND _dependencies "${_token}")
+  endif()
+  if(NOT _dependencies)
+    _bioseq_highway_fail(
+      "target-probe depfile contains no dependencies: ${depfile}")
+  endif()
+
+  set(_normalized_dependencies)
+  foreach(_dependency IN LISTS _dependencies)
+    if(NOT IS_ABSOLUTE "${_dependency}")
+      get_filename_component(_dependency "${_dependency}" ABSOLUTE
+        BASE_DIR "${base_directory}")
+    endif()
+    cmake_path(NORMAL_PATH _dependency)
+    list(APPEND _normalized_dependencies "${_dependency}")
+  endforeach()
+  list(REMOVE_DUPLICATES _normalized_dependencies)
+  list(SORT _normalized_dependencies)
+  set(${output} "${_normalized_dependencies}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_header_closure
+    output_paths output_records output_digest)
+  cmake_parse_arguments(PARSE_ARGV 3 ARG "" ""
+    "INCLUDE_DIRS;DEPENDENCIES")
+  if(ARG_UNPARSED_ARGUMENTS)
+    _bioseq_highway_fail(
+      "unknown header-closure arguments: ${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+  if(NOT ARG_INCLUDE_DIRS OR NOT ARG_DEPENDENCIES)
+    _bioseq_highway_fail(
+      "header closure requires include roots and compiler dependencies")
+  endif()
+
+  # Canonical de-duplication preserves the compiler's include-search order.
+  # The resulting ordinal is stable when the same include tree is relocated.
+  set(_include_roots)
+  foreach(_include_root IN LISTS ARG_INCLUDE_DIRS)
+    _bioseq_highway_reject_control_characters(
+      "Highway include root" "${_include_root}")
+    if(_include_root MATCHES "[;|]")
+      _bioseq_highway_fail(
+        "Highway include root contains a reserved separator: "
+        "${_include_root}")
+    endif()
+    if(NOT IS_ABSOLUTE "${_include_root}"
+        OR NOT IS_DIRECTORY "${_include_root}")
+      _bioseq_highway_fail(
+        "Highway include root must be an absolute directory: "
+        "${_include_root}")
+    endif()
+    file(REAL_PATH "${_include_root}" _include_root)
+    list(FIND _include_roots "${_include_root}" _root_index)
+    if(_root_index EQUAL -1)
+      list(APPEND _include_roots "${_include_root}")
+    endif()
+  endforeach()
+
+  set(_canonical_dependencies)
+  foreach(_dependency IN LISTS ARG_DEPENDENCIES)
+    _bioseq_highway_reject_control_characters(
+      "target-probe dependency" "${_dependency}")
+    if(_dependency MATCHES "[;|]")
+      _bioseq_highway_fail(
+        "target-probe dependency contains a reserved separator: "
+        "${_dependency}")
+    endif()
+    if(NOT IS_ABSOLUTE "${_dependency}" OR NOT EXISTS "${_dependency}"
+        OR IS_DIRECTORY "${_dependency}")
+      _bioseq_highway_fail(
+        "target-probe dependency is not an absolute regular file: "
+        "${_dependency}")
+    endif()
+    file(REAL_PATH "${_dependency}" _dependency)
+    list(APPEND _canonical_dependencies "${_dependency}")
+  endforeach()
+  list(REMOVE_DUPLICATES _canonical_dependencies)
+  list(SORT _canonical_dependencies)
+
+  set(_closure_entries)
+  foreach(_dependency IN LISTS _canonical_dependencies)
+    set(_root_ordinal 0)
+    foreach(_include_root IN LISTS _include_roots)
+      cmake_path(IS_PREFIX _include_root "${_dependency}"
+        NORMALIZE _inside_root)
+      if(_inside_root)
+        file(RELATIVE_PATH _relative_path
+          "${_include_root}" "${_dependency}")
+        file(TO_CMAKE_PATH "${_relative_path}" _relative_path)
+        if(_relative_path STREQUAL ""
+            OR _relative_path MATCHES "^\\.\\./")
+          _bioseq_highway_fail(
+            "cannot derive a contained relative Highway header path for "
+            "${_dependency}")
+        endif()
+        list(APPEND _closure_entries
+          "${_root_ordinal}/${_relative_path}\t${_dependency}")
+        break()
+      endif()
+      math(EXPR _root_ordinal "${_root_ordinal} + 1")
+    endforeach()
+  endforeach()
+  if(NOT _closure_entries)
+    _bioseq_highway_fail(
+      "target-probe depfile contains no dependency beneath a Highway "
+      "include root")
+  endif()
+  list(SORT _closure_entries)
+
+  set(_closure_paths)
+  set(_closure_records)
+  set(_closure_identities)
+  foreach(_entry IN LISTS _closure_entries)
+    if(NOT _entry MATCHES "^([^\t]+)\t(.+)$")
+      _bioseq_highway_fail(
+        "internal malformed Highway closure entry: ${_entry}")
+    endif()
+    set(_identity "${CMAKE_MATCH_1}")
+    set(_dependency "${CMAKE_MATCH_2}")
+    list(FIND _closure_identities "${_identity}" _identity_index)
+    if(NOT _identity_index EQUAL -1)
+      _bioseq_highway_fail(
+        "Highway header closure contains duplicate identity ${_identity}")
+    endif()
+    list(APPEND _closure_identities "${_identity}")
+    list(APPEND _closure_paths "${_dependency}")
+    file(SHA256 "${_dependency}" _dependency_digest)
+    list(APPEND _closure_records "${_identity}\t${_dependency_digest}")
+  endforeach()
+
+  foreach(_required_header IN ITEMS
+      hwy/highway.h hwy/detect_targets.h hwy/targets.h)
+    _bioseq_highway_find_header(
+      _required_path "${_include_roots}" "${_required_header}")
+    file(REAL_PATH "${_required_path}" _required_path)
+    list(FIND _closure_paths "${_required_path}" _required_index)
+    if(_required_index EQUAL -1)
+      _bioseq_highway_fail(
+        "compiler depfile omits required Highway header "
+        "${_required_header}")
+    endif()
+  endforeach()
+
+  set(_digest_stream "bioseq-highway-header-closure-v1\n")
+  foreach(_record IN LISTS _closure_records)
+    string(APPEND _digest_stream "${_record}\n")
+  endforeach()
+  string(SHA256 _closure_digest "${_digest_stream}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_closure_paths})
+
+  set(${output_paths} "${_closure_paths}" PARENT_SCOPE)
+  set(${output_records} "${_closure_records}" PARENT_SCOPE)
+  set(${output_digest} "${_closure_digest}" PARENT_SCOPE)
+endfunction()
+
 function(_bioseq_highway_probe_targets)
   set(_one_value_arguments
     PROBE_DIR
@@ -194,6 +453,8 @@ function(_bioseq_highway_probe_targets)
 
   file(MAKE_DIRECTORY "${ARG_PROBE_DIR}")
   set(_probe_source "${ARG_PROBE_DIR}/target_inventory_probe.cppm")
+  set(_probe_depfile "${ARG_PROBE_DIR}/target_inventory_probe.d")
+  set(_probe_depfile_target bioseq_highway_target_inventory_probe)
   string(CONCAT _probe_contents
     "// Generated configure-time Highway target inventory probe.\n"
     "// Target operations are irrelevant here; choose opposite toggle state\n"
@@ -240,7 +501,8 @@ function(_bioseq_highway_probe_targets)
     else()
       list(APPEND _probe_arguments "-std=c++${CMAKE_CXX_STANDARD}")
     endif()
-    list(APPEND _probe_arguments -E -P -x c++)
+    list(APPEND _probe_arguments -E -P -x c++
+      -MD -MF "${_probe_depfile}" -MT "${_probe_depfile_target}")
     foreach(_definition IN LISTS ARG_DEFINITIONS)
       list(APPEND _probe_arguments "-D${_definition}")
     endforeach()
@@ -248,22 +510,17 @@ function(_bioseq_highway_probe_targets)
       list(APPEND _probe_arguments -isystem "${_include_dir}")
     endforeach()
     list(APPEND _probe_arguments "${_probe_source}")
-  elseif(MSVC)
-    list(APPEND _probe_arguments /nologo /EP /TP /std:c++latest)
-    foreach(_definition IN LISTS ARG_DEFINITIONS)
-      list(APPEND _probe_arguments "/D${_definition}")
-    endforeach()
-    foreach(_include_dir IN LISTS ARG_INCLUDE_DIRS)
-      list(APPEND _probe_arguments "/I${_include_dir}")
-    endforeach()
-    list(APPEND _probe_arguments "${_probe_source}")
   else()
     _bioseq_highway_fail(
-      "unsupported target-probe compiler ${CMAKE_CXX_COMPILER_ID}")
+      "full-closure target probe requires GNU, Clang, or AppleClang; got "
+      "${CMAKE_CXX_COMPILER_ID}")
   endif()
 
+  file(REMOVE "${_probe_depfile}")
+  set(_probe_working_directory "${CMAKE_CURRENT_BINARY_DIR}")
   execute_process(
     COMMAND ${_compiler_command} ${_probe_arguments}
+    WORKING_DIRECTORY "${_probe_working_directory}"
     RESULT_VARIABLE _probe_status
     OUTPUT_VARIABLE _probe_output
     ERROR_VARIABLE _probe_error)
@@ -272,6 +529,13 @@ function(_bioseq_highway_probe_targets)
       "HWY_VISIT_TARGETS preprocessor probe failed with exit code "
       "${_probe_status}:\n${_probe_error}")
   endif()
+  _bioseq_highway_parse_depfile(
+    _probe_dependencies "${_probe_depfile}" "${_probe_depfile_target}"
+    "${_probe_working_directory}")
+  _bioseq_highway_header_closure(
+    _highway_header_paths _highway_header_records _highway_digest
+    INCLUDE_DIRS ${ARG_INCLUDE_DIRS}
+    DEPENDENCIES ${_probe_dependencies})
 
   string(REGEX MATCHALL
     "BIOSEQ_HIGHWAY_TARGET_RECORD\\([ \\t]*\"[A-Z0-9_]+\",[ \\t]*\"[A-Z0-9_]+\",[ \\t]*\"[^\"]+\"[ \\t]*\\)"
@@ -467,19 +731,6 @@ function(_bioseq_highway_probe_targets)
       "#define ${_policy_name} ${_policy_value}\n")
   endforeach()
   string(SHA256 _policy_digest "${_policy_block}")
-  _bioseq_highway_find_header(
-    _detect_targets_header "${ARG_INCLUDE_DIRS}" "hwy/detect_targets.h")
-  _bioseq_highway_find_header(
-    _highway_header "${ARG_INCLUDE_DIRS}" "hwy/highway.h")
-  _bioseq_highway_find_header(
-    _targets_header "${ARG_INCLUDE_DIRS}" "hwy/targets.h")
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${_detect_targets_header}" "${_highway_header}" "${_targets_header}")
-  file(SHA256 "${_detect_targets_header}" _detect_targets_digest)
-  file(SHA256 "${_highway_header}" _highway_header_digest)
-  file(SHA256 "${_targets_header}" _targets_header_digest)
-  string(SHA256 _highway_digest
-    "${_detect_targets_digest}\n${_highway_header_digest}\n${_targets_header_digest}\n")
 
   set(${ARG_OUTPUT_RECORDS} "${_target_records}" PARENT_SCOPE)
   set(${ARG_OUTPUT_ORDER} "${_target_order}" PARENT_SCOPE)

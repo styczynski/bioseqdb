@@ -671,6 +671,16 @@ endif()
 include(BioseqCodegen)
 include(BioseqHighwayCodegen)
 include(BioseqTemplateFlattenCodegen)
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
+  add_test(
+    NAME bioseq_highway_header_closure_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cmake/highway-header-closure-contract"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_header_closure.cmake")
+  set_tests_properties(
+    bioseq_highway_header_closure_contract
+    PROPERTIES LABELS "core;unit;cmake;highway")
+endif()
 set(_bioseq_codegen_components)
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
   list(APPEND _bioseq_codegen_components sql)
