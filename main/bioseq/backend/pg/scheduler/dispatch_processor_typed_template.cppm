@@ -1573,8 +1573,8 @@ inline void append_packed_cigar_slice(
 		ERRCODE_FEATURE_NOT_SUPPORTED,
 		"Paper ntHash SIMD minimizer execution is unsupported for this request",
 		diagnostic.c_str(),
-		"Paper ntHash SIMD has no scalar or Exact SIMD fallback; use DNA4 with "
-		"packed uint32/uint64 storage, W=10, K=15, and an admissible range, or "
+		"Paper ntHash requires DNA4 or DNA5 with a supported packed "
+		"storage width, W=10, K=15, and an admissible range, or "
 		"select another algorithm explicitly.");
 }
 

@@ -31,7 +31,6 @@ using ::bioseq::minimizers::MinimizerKernelAlgorithm;
 using ::bioseq::minimizers::MinimizerKernelInvocation;
 using ::bioseq::minimizers::MinimizerKernelResult;
 using ::bioseq::minimizers::MinimizerKernelStatus;
-using ::bioseq::minimizers::PackedSequenceAlphabet;
 
 namespace paper_nthash_internal {
 
@@ -1027,67 +1026,18 @@ template<class StorageUnit>
 
 } // namespace coarse_paper_detail
 
-/** One fixed-target, one-shot resident packed paper-ntHash call. */
-[[nodiscard]] inline MinimizerKernelResult paper_nthash_fixed(
-    MinimizerKernelInvocation& invocation)
-{
-#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-    (void)invocation;
-    MinimizerKernelResult unavailable{};
-    unavailable.status = MinimizerKernelStatus::invalid_configuration;
-    return unavailable;
-#else
-    MinimizerKernelResult result{};
-    result.proof.algorithm = MinimizerKernelAlgorithm::paper_nthash;
-    result.proof.target = static_cast<std::int64_t>(HWY_TARGET);
-
-    if (!invocation.sequence.final_segment
-        || invocation.fragments.present()
-        || invocation.emitted_position_base != 0u
-        || invocation.sequence.begin_symbol != 0u
-        || invocation.window != 10u
-        || invocation.kmer != 15u
-        || invocation.sequence.alphabet_code
-            != static_cast<std::uint8_t>(PackedSequenceAlphabet::dna4)
-        || invocation.sequence.end_symbol
-            > static_cast<std::size_t>(
-                MinimapSketchData::pos_field_mask) + 1u) {
-        result.status = MinimizerKernelStatus::invalid_configuration;
-        return result;
-    }
-
-    bool accepted = false;
-    switch (invocation.sequence.storage_unit_bytes) {
-        case 4u:
-            accepted = coarse_paper_detail::run<std::uint32_t>(
-                invocation, result);
-            break;
-        case 8u:
-            accepted = coarse_paper_detail::run<std::uint64_t>(
-                invocation, result);
-            break;
-        default:
-            result.status = MinimizerKernelStatus::invalid_configuration;
-            break;
-    }
-    if (!accepted && result.status == MinimizerKernelStatus::ok) {
-        result.status = MinimizerKernelStatus::invalid_sequence_view;
-    }
-    return result;
-#endif
-}
-
-// Native SVE/RVV vectors are sizeless, so the fixed-target ring aggregates
-// above cannot represent them as C++ data members. These targets execute an
-// exact target-local storage fallback: the same R=7 ntHash recurrence and
-// left/right tied-endpoint policy are evaluated over scalar u32 storage. The
-// proof branch is explicit and never reports vector work.
+// Native SVE/RVV vectors are sizeless, and the fixed packed body is natively
+// DNA4/u32-oriented. Scalable targets, low-width storage, DNA5, and unsupported
+// fixed lane shapes therefore execute this exact target-local storage fallback:
+// the same R=7 recurrence and left/right tied-endpoint policy over typed packed
+// storage. The proof branch is explicit and never reports vector work.
 namespace scalable_paper_nthash_fallback {
 
 struct candidate {
     std::uint32_t hash = 0;
     std::uint64_t last_position = 0;
     std::uint32_t strand = 0;
+    bool valid = false;
 };
 
 [[nodiscard]] constexpr bool same_identity(
@@ -1099,7 +1049,7 @@ struct candidate {
         && first.strand == second.strand;
 }
 
-template<class Collector, class Range>
+template<sequence_alphabet Alphabet, class Collector, class Range>
 void collect_exact(
     Collector& collector,
     Range& range,
@@ -1111,7 +1061,8 @@ void collect_exact(
     std::array<candidate, packed_paper_nthash_max_window> candidate_ring{};
     std::uint32_t forward = 0;
     std::uint32_t reverse = 0;
-    std::size_t symbols_seen = 0;
+    std::size_t symbol_position = 0;
+    std::size_t valid_symbols = 0;
     std::size_t next_symbol_slot = 0;
     std::size_t candidates_seen = 0;
     bool previous_valid = false;
@@ -1128,10 +1079,19 @@ void collect_exact(
     };
 
     for (const auto raw_rank : range.template iterable<BP>()) {
-        const std::uint8_t rank = static_cast<std::uint8_t>(raw_rank);
-        if (symbols_seen < kmer) {
-            symbol_ring[symbols_seen] = rank;
-            const std::size_t offset = symbols_seen;
+        const std::uint8_t rank = nt4_normalize<Alphabet>(
+            static_cast<std::uint8_t>(raw_rank));
+        if (rank >= kNt4Sentinel) {
+            // Match minimap2's dna5 ambiguity contract: the N occupies its
+            // timeline slot, but no k-mer spanning it is hashable.  Both
+            // rolling directions restart and require K fresh nt4 symbols.
+            forward = 0u;
+            reverse = 0u;
+            valid_symbols = 0u;
+            next_symbol_slot = 0u;
+        } else if (valid_symbols < kmer) {
+            symbol_ring[valid_symbols] = rank;
+            const std::size_t offset = valid_symbols;
             const int forward_rotation = static_cast<int>(
                 ((kmer - 1u - offset) * 7u) & 31u);
             const int reverse_rotation = static_cast<int>(
@@ -1142,8 +1102,8 @@ void collect_exact(
             reverse ^= std::rotl(
                 paper_nthash_internal::forward_table[3u - rank],
                 reverse_rotation);
-            ++symbols_seen;
-            if (symbols_seen < kmer) continue;
+            ++valid_symbols;
+            if (valid_symbols == kmer) next_symbol_slot = 0u;
         } else {
             const std::uint8_t outgoing =
                 symbol_ring[next_symbol_slot];
@@ -1161,49 +1121,56 @@ void collect_exact(
                 ^ std::rotl(
                     paper_nthash_internal::forward_table[3u - rank],
                     static_cast<int>(((kmer - 1u) * 7u) & 31u));
-            ++symbols_seen;
         }
 
-        const std::size_t candidate_index = symbols_seen - kmer;
-        candidate_ring[candidate_index % window] = candidate{
-            .hash = static_cast<std::uint32_t>(forward + reverse),
-            .last_position = candidate_index + kmer - 1u,
-            .strand = reverse < forward ? 1u : 0u,
-        };
-        ++candidates_seen;
-        if (candidates_seen < window) continue;
-
-        const std::size_t window_start = candidates_seen - window;
-        std::size_t left = window_start;
-        std::size_t right = window_start;
-        std::uint32_t minimum =
-            candidate_ring[window_start % window].hash;
-        for (std::size_t slot = 1u; slot < window; ++slot) {
-            const std::size_t index = window_start + slot;
-            const std::uint32_t hash =
-                candidate_ring[index % window].hash;
-            if (hash < minimum) {
-                minimum = hash;
-                left = index;
-                right = index;
-            } else if (hash == minimum) {
-                right = index;
+        if (symbol_position + 1u >= kmer) {
+            const std::size_t candidate_index = candidates_seen;
+            candidate_ring[candidate_index % window] = candidate{
+                .hash = static_cast<std::uint32_t>(forward + reverse),
+                .last_position = symbol_position,
+                .strand = reverse < forward ? 1u : 0u,
+                .valid = valid_symbols >= kmer,
+            };
+            ++candidates_seen;
+            if (candidates_seen >= window) {
+                const std::size_t window_start = candidates_seen - window;
+                std::size_t left = 0u;
+                std::size_t right = 0u;
+                std::uint32_t minimum = 0u;
+                bool found = false;
+                for (std::size_t slot = 0u; slot < window; ++slot) {
+                    const std::size_t index = window_start + slot;
+                    const candidate& value =
+                        candidate_ring[index % window];
+                    if (!value.valid) continue;
+                    if (!found || value.hash < minimum) {
+                        found = true;
+                        minimum = value.hash;
+                        left = index;
+                        right = index;
+                    } else if (value.hash == minimum) {
+                        right = index;
+                    }
+                }
+                if (found) {
+                    emit(candidate_ring[left % window], false);
+                    if (right != left) {
+                        emit(candidate_ring[right % window], true);
+                    }
+                }
             }
         }
-        emit(candidate_ring[left % window], false);
-        if (right != left) {
-            emit(candidate_ring[right % window], true);
-        }
+        ++symbol_position;
     }
 }
 
-template<class StorageUnit>
+template<sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] bool run(
     MinimizerKernelInvocation& invocation,
     MinimizerKernelResult& result)
 {
     return ::bioseq::minimizers::kernel_detail::
-        with_borrowed_compact_range<seq::dna4, StorageUnit>(
+        with_borrowed_compact_range<Alphabet, StorageUnit>(
             invocation.sequence,
             [&invocation, &result]<class Range>(Range& range) {
                 minimizer_sink_collector<MinimapSketchData> collector{
@@ -1231,7 +1198,7 @@ template<class StorageUnit>
                 proof.scalable_storage_fallback_input_symbols =
                     range.bp_size();
 
-                collect_exact(
+                collect_exact<Alphabet>(
                     collector,
                     range,
                     invocation.kmer,
@@ -1251,8 +1218,16 @@ template<class StorageUnit>
 
 } // namespace scalable_paper_nthash_fallback
 
-[[nodiscard]] inline MinimizerKernelResult
-paper_nthash_scalable_storage_fallback(
+/** Source-topology-owned exact paper-ntHash case. */
+template<sequence_alphabet Alphabet, class StorageUnit>
+requires (
+    (std::same_as<Alphabet, seq::dna4>
+        || std::same_as<Alphabet, seq::dna5>)
+    && (std::same_as<StorageUnit, std::uint8_t>
+        || std::same_as<StorageUnit, std::uint16_t>
+        || std::same_as<StorageUnit, std::uint32_t>
+        || std::same_as<StorageUnit, std::uint64_t>))
+[[nodiscard]] inline MinimizerKernelResult paper_nthash_case(
     MinimizerKernelInvocation& invocation)
 {
     MinimizerKernelResult result{};
@@ -1265,8 +1240,6 @@ paper_nthash_scalable_storage_fallback(
         || invocation.sequence.begin_symbol != 0u
         || invocation.window != 10u
         || invocation.kmer != 15u
-        || invocation.sequence.alphabet_code
-            != static_cast<std::uint8_t>(PackedSequenceAlphabet::dna4)
         || invocation.sequence.end_symbol
             > static_cast<std::size_t>(
                 MinimapSketchData::pos_field_mask) + 1u) {
@@ -1284,37 +1257,33 @@ paper_nthash_scalable_storage_fallback(
     }
 
     bool accepted = false;
-    switch (invocation.sequence.storage_unit_bytes) {
-        case 4u:
-            accepted = scalable_paper_nthash_fallback::run<std::uint32_t>(
+#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV \
+    || HWY_TARGET == HWY_SCALAR
+    accepted = scalable_paper_nthash_fallback::run<
+        Alphabet, StorageUnit>(invocation, result);
+#else
+    if constexpr (std::same_as<Alphabet, seq::dna4>
+                  && sizeof(StorageUnit) >= sizeof(std::uint32_t)) {
+        using d_t = hn::ScalableTag<std::uint32_t>;
+        const std::size_t lanes = hn::Lanes(d_t{});
+        if (lanes == 4u || lanes == 8u) {
+            accepted = coarse_paper_detail::run<StorageUnit>(
                 invocation, result);
-            break;
-        case 8u:
-            accepted = scalable_paper_nthash_fallback::run<std::uint64_t>(
-                invocation, result);
-            break;
-        default:
-            result.status = MinimizerKernelStatus::invalid_configuration;
-            result.family_status = static_cast<std::uint32_t>(
-                PackedPaperNthashStatus::unsupported_storage);
-            break;
+        } else {
+            accepted = scalable_paper_nthash_fallback::run<
+                Alphabet, StorageUnit>(invocation, result);
+        }
+    } else {
+        accepted = scalable_paper_nthash_fallback::run<
+            Alphabet, StorageUnit>(invocation, result);
     }
+#endif
     if (!accepted && result.status == MinimizerKernelStatus::ok) {
         result.status = MinimizerKernelStatus::invalid_sequence_view;
         result.family_status = static_cast<std::uint32_t>(
             PackedPaperNthashStatus::invalid_range);
     }
     return result;
-}
-
-[[nodiscard]] inline MinimizerKernelResult paper_nthash(
-    MinimizerKernelInvocation& invocation)
-{
-#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-    return paper_nthash_scalable_storage_fallback(invocation);
-#else
-    return paper_nthash_fixed(invocation);
-#endif
 }
 
 } // namespace target

@@ -1300,9 +1300,9 @@ set(BIOSEQ_HIGHWAY_GENERATED_ROOT
   "${CMAKE_CURRENT_BINARY_DIR}/generated/highway")
 
 # Probe the unattached scheduler source as raw tokens before constructing any
-# Highway alignment slots. The topology manifest is the single alphabet/width/
-# shard authority shared by both generators; neither frontend may rediscover
-# or multiply the other's domain.
+# typed Highway alignment or minimizer slots. The topology manifest is the
+# single alphabet/width/shard authority shared by both generators; neither
+# frontend may rediscover or multiply the other's domain.
 set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm")
 set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT
@@ -1324,6 +1324,13 @@ bioseq_template_flatten_read_group(
   OUT_LABELS BIOSEQ_TYPED_ALPHABET_LABELS
   OUT_REPLACEMENTS BIOSEQ_TYPED_ALPHABET_REPLACEMENTS
   OUT_ORDINALS BIOSEQ_TYPED_ALPHABET_ORDINALS)
+bioseq_template_flatten_read_group(
+  TOPOLOGY_MANIFEST "${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
+  ROLE identity
+  GROUP width
+  OUT_LABELS BIOSEQ_TYPED_WIDTH_LABELS
+  OUT_REPLACEMENTS BIOSEQ_TYPED_WIDTH_REPLACEMENTS
+  OUT_ORDINALS BIOSEQ_TYPED_WIDTH_ORDINALS)
 
 set(BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS)
 set(BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS)
@@ -1355,6 +1362,71 @@ unset(_bioseq_highway_alignment_family)
 unset(_bioseq_highway_alignment_alphabet_label)
 unset(_bioseq_highway_alignment_alphabet_replacement)
 unset(_bioseq_highway_alignment_alphabet_ordinal)
+
+# Minimizer target wrappers use the same scheduler-owned alphabet/width axes.
+# Each synthetic family is one Cartesian case; the Highway renderer validates
+# exact 2 x 4 closure and folds these leaves back into the neutral three-member
+# MinimizerKernels table.
+set(BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS)
+set(BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS)
+foreach(_bioseq_highway_minimizer_alphabet_label
+    _bioseq_highway_minimizer_alphabet_replacement
+    _bioseq_highway_minimizer_alphabet_ordinal
+    IN ZIP_LISTS
+      BIOSEQ_TYPED_ALPHABET_LABELS
+      BIOSEQ_TYPED_ALPHABET_REPLACEMENTS
+      BIOSEQ_TYPED_ALPHABET_ORDINALS)
+  foreach(_bioseq_highway_minimizer_width_label
+      _bioseq_highway_minimizer_width_replacement
+      _bioseq_highway_minimizer_width_ordinal
+      IN ZIP_LISTS
+        BIOSEQ_TYPED_WIDTH_LABELS
+        BIOSEQ_TYPED_WIDTH_REPLACEMENTS
+        BIOSEQ_TYPED_WIDTH_ORDINALS)
+    if(NOT _bioseq_highway_minimizer_width_replacement
+        MATCHES "^[1-9][0-9]*$")
+      message(FATAL_ERROR
+        "scheduler topology width replacement must be a positive byte count: "
+        "'${_bioseq_highway_minimizer_width_replacement}'")
+    endif()
+    math(EXPR _bioseq_highway_minimizer_width_minus_one
+      "${_bioseq_highway_minimizer_width_replacement} - 1")
+    math(EXPR _bioseq_highway_minimizer_width_power_remainder
+      "${_bioseq_highway_minimizer_width_replacement} & ${_bioseq_highway_minimizer_width_minus_one}")
+    if(_bioseq_highway_minimizer_width_replacement GREATER 8
+        OR NOT _bioseq_highway_minimizer_width_power_remainder EQUAL 0)
+      message(FATAL_ERROR
+        "scheduler topology minimizer width must be a power-of-two byte count "
+        "no greater than eight: "
+        "'${_bioseq_highway_minimizer_width_replacement}'")
+    endif()
+    math(EXPR _bioseq_highway_minimizer_width_bits
+      "${_bioseq_highway_minimizer_width_replacement} * 8")
+    set(_bioseq_highway_minimizer_family
+      "minimizer_case_${_bioseq_highway_minimizer_alphabet_ordinal}_${_bioseq_highway_minimizer_width_replacement}")
+    set(_bioseq_highway_minimizer_template_arguments
+      "${_bioseq_highway_minimizer_alphabet_replacement},::std::uint${_bioseq_highway_minimizer_width_bits}_t")
+    list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS
+      "minimizer_reference|${_bioseq_highway_minimizer_family}|reference_minimap_int|&::bioseq::simd::{target_namespace}::reference_minimap_int_case<${_bioseq_highway_minimizer_template_arguments}>"
+      "minimizer_two_stack|${_bioseq_highway_minimizer_family}|two_stack_nthash|&::bioseq::simd::{target_namespace}::two_stack_nthash_case<${_bioseq_highway_minimizer_template_arguments}>"
+      "minimizer_paper|${_bioseq_highway_minimizer_family}|paper_nthash|&::bioseq::simd::{target_namespace}::paper_nthash_case<${_bioseq_highway_minimizer_template_arguments}>")
+    list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS
+      "${_bioseq_highway_minimizer_family}|reference_minimap_int"
+      "${_bioseq_highway_minimizer_family}|two_stack_nthash"
+      "${_bioseq_highway_minimizer_family}|paper_nthash")
+  endforeach()
+endforeach()
+unset(_bioseq_highway_minimizer_family)
+unset(_bioseq_highway_minimizer_template_arguments)
+unset(_bioseq_highway_minimizer_width_bits)
+unset(_bioseq_highway_minimizer_width_power_remainder)
+unset(_bioseq_highway_minimizer_width_minus_one)
+unset(_bioseq_highway_minimizer_width_label)
+unset(_bioseq_highway_minimizer_width_replacement)
+unset(_bioseq_highway_minimizer_width_ordinal)
+unset(_bioseq_highway_minimizer_alphabet_label)
+unset(_bioseq_highway_minimizer_alphabet_replacement)
+unset(_bioseq_highway_minimizer_alphabet_ordinal)
 
 bioseq_add_highway_codegen(
   REQUIRE_COMPLETE_TABLE
@@ -1394,17 +1466,13 @@ bioseq_add_highway_codegen(
     "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|simd_utils"
     "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|simd_utils"
   SLOT_RECORDS
-    "minimizer_reference|minimizers|reference_minimap_int|&::bioseq::simd::{target_namespace}::reference_minimap_int"
-    "minimizer_two_stack|minimizers|two_stack_nthash|&::bioseq::simd::{target_namespace}::two_stack_nthash"
-    "minimizer_paper|minimizers|paper_nthash|&::bioseq::simd::{target_namespace}::paper_nthash"
+    ${BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS}
     "prefilter|common|sneaky_snake_simd_batch|&bioseq::sequences::prefilters::{target_namespace}::sneaky_snake_simd_batch"
     "chaining|chaining|chain_anchors_simd|&::bioseq::simd::{target_namespace}::chain_anchors_simd"
     "indexing|indexing|validate_non_scatter_local32_w2|&bioseq::indexing::{target_namespace}::validate_non_scatter_local32_w2"
   REQUIRED_SLOT_RECORDS
-    "minimizers|reference_minimap_int"
-    "minimizers|two_stack_nthash"
-    "minimizers|paper_nthash"
+    ${BIOSEQ_HIGHWAY_MINIMIZER_REQUIRED_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_REQUIRED_SLOT_RECORDS}
     "common|sneaky_snake_simd_batch"
     "chaining|chain_anchors_simd"

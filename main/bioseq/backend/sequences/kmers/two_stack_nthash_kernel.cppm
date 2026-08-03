@@ -32,7 +32,6 @@ using ::bioseq::minimizers::MinimizerKernelAlgorithm;
 using ::bioseq::minimizers::MinimizerKernelInvocation;
 using ::bioseq::minimizers::MinimizerKernelResult;
 using ::bioseq::minimizers::MinimizerKernelStatus;
-using ::bioseq::minimizers::PackedSequenceAlphabet;
 using ::bioseq::minimizers::TwoStackRoute;
 
 /**
@@ -4408,44 +4407,6 @@ template<sequence_alphabet Alphabet, class StorageUnit>
 #endif
 }
 
-template<sequence_alphabet Alphabet>
-[[nodiscard]] bool dispatch_storage(
-    MinimizerKernelInvocation& invocation,
-    MinimizerKernelResult& result)
-{
-    switch (invocation.sequence.storage_unit_bytes) {
-        case 1u:
-            return run<Alphabet, std::uint8_t>(invocation, result);
-        case 2u:
-            return run<Alphabet, std::uint16_t>(invocation, result);
-        case 4u:
-            return run<Alphabet, std::uint32_t>(invocation, result);
-        case 8u:
-            return run<Alphabet, std::uint64_t>(invocation, result);
-        default:
-            return false;
-    }
-}
-
-template<sequence_alphabet Alphabet>
-[[nodiscard]] bool dispatch_fragment_storage(
-    MinimizerKernelInvocation& invocation,
-    MinimizerKernelResult& result)
-{
-    switch (invocation.sequence.storage_unit_bytes) {
-        case 1u:
-            return run_fragmented<Alphabet, std::uint8_t>(invocation, result);
-        case 2u:
-            return run_fragmented<Alphabet, std::uint16_t>(invocation, result);
-        case 4u:
-            return run_fragmented<Alphabet, std::uint32_t>(invocation, result);
-        case 8u:
-            return run_fragmented<Alphabet, std::uint64_t>(invocation, result);
-        default:
-            return false;
-    }
-}
-
 } // namespace coarse_two_stack_detail
 
 /**
@@ -4453,7 +4414,8 @@ template<sequence_alphabet Alphabet>
  * continuation is created, consumed and finalized inside the checked driver;
  * no target-dependent state crosses the neutral ABI.
  */
-[[nodiscard]] inline MinimizerKernelResult two_stack_nthash_fixed(
+template<sequence_alphabet Alphabet, class StorageUnit>
+[[nodiscard]] inline MinimizerKernelResult two_stack_nthash_fixed_case(
     MinimizerKernelInvocation& invocation)
 {
 #if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
@@ -4482,33 +4444,21 @@ template<sequence_alphabet Alphabet>
     bool accepted = false;
     switch (invocation.two_stack_route) {
         case TwoStackRoute::chronological_continuation:
-            switch (static_cast<PackedSequenceAlphabet>(
-                invocation.sequence.alphabet_code)) {
-                case PackedSequenceAlphabet::dna4:
-                    accepted = invocation.fragments.present()
-                        ? coarse_two_stack_detail::
-                            dispatch_fragment_storage<seq::dna4>(
-                                invocation, result)
-                        : coarse_two_stack_detail::dispatch_storage<seq::dna4>(
-                            invocation, result);
-                    break;
-                case PackedSequenceAlphabet::dna5:
-                    accepted = invocation.fragments.present()
-                        ? coarse_two_stack_detail::
-                            dispatch_fragment_storage<seq::dna5>(
-                                invocation, result)
-                        : coarse_two_stack_detail::dispatch_storage<seq::dna5>(
-                            invocation, result);
-                    break;
-            }
+            accepted = invocation.fragments.present()
+                ? coarse_two_stack_detail::run_fragmented<
+                    Alphabet, StorageUnit>(invocation, result)
+                : coarse_two_stack_detail::run<Alphabet, StorageUnit>(
+                    invocation, result);
             break;
         case TwoStackRoute::resident_report76:
-            if (invocation.sequence.alphabet_code
-                    != static_cast<std::uint8_t>(
-                        PackedSequenceAlphabet::dna4)
-                || invocation.sequence.storage_unit_bytes
-                    != sizeof(std::uint32_t)
-                || invocation.window != 10u
+            if constexpr (!std::same_as<Alphabet, seq::dna4>
+                          || !std::same_as<StorageUnit, std::uint32_t>) {
+                result.family_status = static_cast<std::uint32_t>(
+                    TwoStackContinuationStatus::invalid_static_configuration);
+                result.status = MinimizerKernelStatus::invalid_configuration;
+                break;
+            }
+            if (invocation.window != 10u
                 || invocation.kmer != 15u
                 || invocation.emitted_position_base != 0u
                 || invocation.fragments.present()) {
@@ -4649,42 +4599,6 @@ template<sequence_alphabet Alphabet, class StorageUnit>
 }
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END scalable_two_stack_storage_fallback
 
-template<sequence_alphabet Alphabet>
-[[nodiscard]] bool decode_for_storage(
-    MinimizerKernelInvocation& invocation,
-    std::vector<Alphabet>& decoded)
-{
-    const bool fragmented = invocation.fragments.present();
-    switch (invocation.sequence.storage_unit_bytes) {
-        case 1u:
-            return fragmented
-                ? decode_fragments<Alphabet, std::uint8_t>(
-                    invocation, decoded)
-                : decode_resident<Alphabet, std::uint8_t>(
-                    invocation, decoded);
-        case 2u:
-            return fragmented
-                ? decode_fragments<Alphabet, std::uint16_t>(
-                    invocation, decoded)
-                : decode_resident<Alphabet, std::uint16_t>(
-                    invocation, decoded);
-        case 4u:
-            return fragmented
-                ? decode_fragments<Alphabet, std::uint32_t>(
-                    invocation, decoded)
-                : decode_resident<Alphabet, std::uint32_t>(
-                    invocation, decoded);
-        case 8u:
-            return fragmented
-                ? decode_fragments<Alphabet, std::uint64_t>(
-                    invocation, decoded)
-                : decode_resident<Alphabet, std::uint64_t>(
-                    invocation, decoded);
-        default:
-            return false;
-    }
-}
-
 struct offset_sink_collector {
     minimizer_sink_collector<MinimapSketchData>& sink;
     std::size_t position_base;
@@ -4748,8 +4662,9 @@ void execute_scalar(
 
 } // namespace scalable_two_stack_fallback
 
+template<sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] inline MinimizerKernelResult
-two_stack_nthash_scalable_storage_fallback(
+two_stack_nthash_scalable_storage_fallback_case(
     MinimizerKernelInvocation& invocation)
 {
     MinimizerKernelResult result{};
@@ -4773,10 +4688,8 @@ two_stack_nthash_scalable_storage_fallback(
         return result;
     }
     if (invocation.two_stack_route == TwoStackRoute::resident_report76
-        && (invocation.sequence.alphabet_code
-                != static_cast<std::uint8_t>(PackedSequenceAlphabet::dna4)
-            || invocation.sequence.storage_unit_bytes
-                != sizeof(std::uint32_t)
+        && (!std::same_as<Alphabet, seq::dna4>
+            || !std::same_as<StorageUnit, std::uint32_t>
             || invocation.window != 10u
             || invocation.kmer != 15u
             || invocation.emitted_position_base != 0u
@@ -4787,39 +4700,19 @@ two_stack_nthash_scalable_storage_fallback(
         return result;
     }
 
-    bool decoded_ok = false;
-    switch (static_cast<PackedSequenceAlphabet>(
-        invocation.sequence.alphabet_code)) {
-        case PackedSequenceAlphabet::dna4: {
-            std::vector<seq::dna4> decoded;
-            decoded_ok = scalable_two_stack_fallback::
-                decode_for_storage<seq::dna4>(invocation, decoded);
-            if (decoded_ok
-                && decoded.size()
-                    <= static_cast<std::size_t>(
-                        MinimapSketchData::pos_field_mask)
-                        - invocation.emitted_position_base + 1u) {
-                scalable_two_stack_fallback::execute_scalar(
-                    invocation, std::move(decoded), result);
-                return result;
-            }
-            break;
-        }
-        case PackedSequenceAlphabet::dna5: {
-            std::vector<seq::dna5> decoded;
-            decoded_ok = scalable_two_stack_fallback::
-                decode_for_storage<seq::dna5>(invocation, decoded);
-            if (decoded_ok
-                && decoded.size()
-                    <= static_cast<std::size_t>(
-                        MinimapSketchData::pos_field_mask)
-                        - invocation.emitted_position_base + 1u) {
-                scalable_two_stack_fallback::execute_scalar(
-                    invocation, std::move(decoded), result);
-                return result;
-            }
-            break;
-        }
+    std::vector<Alphabet> decoded;
+    const bool decoded_ok = invocation.fragments.present()
+        ? scalable_two_stack_fallback::decode_fragments<
+            Alphabet, StorageUnit>(invocation, decoded)
+        : scalable_two_stack_fallback::decode_resident<
+            Alphabet, StorageUnit>(invocation, decoded);
+    if (decoded_ok
+        && decoded.size()
+            <= static_cast<std::size_t>(MinimapSketchData::pos_field_mask)
+                - invocation.emitted_position_base + 1u) {
+        scalable_two_stack_fallback::execute_scalar(
+            invocation, std::move(decoded), result);
+        return result;
     }
     result.status = decoded_ok
         ? MinimizerKernelStatus::invalid_configuration
@@ -4831,13 +4724,23 @@ two_stack_nthash_scalable_storage_fallback(
     return result;
 }
 
-[[nodiscard]] inline MinimizerKernelResult two_stack_nthash(
+/** Source-topology-owned exact two-stack case. */
+template<sequence_alphabet Alphabet, class StorageUnit>
+requires (
+    (std::same_as<Alphabet, seq::dna4>
+        || std::same_as<Alphabet, seq::dna5>)
+    && (std::same_as<StorageUnit, std::uint8_t>
+        || std::same_as<StorageUnit, std::uint16_t>
+        || std::same_as<StorageUnit, std::uint32_t>
+        || std::same_as<StorageUnit, std::uint64_t>))
+[[nodiscard]] inline MinimizerKernelResult two_stack_nthash_case(
     MinimizerKernelInvocation& invocation)
 {
 #if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-    return two_stack_nthash_scalable_storage_fallback(invocation);
+    return two_stack_nthash_scalable_storage_fallback_case<
+        Alphabet, StorageUnit>(invocation);
 #else
-    return two_stack_nthash_fixed(invocation);
+    return two_stack_nthash_fixed_case<Alphabet, StorageUnit>(invocation);
 #endif
 }
 

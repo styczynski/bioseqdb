@@ -1626,8 +1626,8 @@ static_assert(packed_paper_nthash_index_pg_errcode(
 		 errmsg("%s", message),
 		 errdetail_internal("%s: status=%.*s %s", operation,
 			 static_cast<int>(status_name.size()), status_name.data(), detail),
-		 errhint("Paper ntHash SIMD has no scalar or Exact SIMD fallback; use "
-			 "DNA4 with supported packed storage and vector shape, or increase "
+		 errhint("Paper ntHash requires DNA4 or DNA5 with supported packed "
+			 "storage and W=10/K=15, or increase "
 			 "the index memory limit when status=admission_denied.")));
 	pg_unreachable();
 }

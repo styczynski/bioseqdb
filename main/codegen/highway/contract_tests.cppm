@@ -1,6 +1,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -810,6 +811,198 @@ inline void verify_typed_alignment_binder() {
         "a typed alignment family mixing alphabet arguments is rejected");
 }
 
+inline void verify_typed_minimizer_binder() {
+    generation_plan plan = two_target_plan();
+    plan.source_inventory.require_complete_table = false;
+    plan.source_inventory.required_slots.clear();
+    plan.source_inventory.slots.clear();
+
+    const auto append_case = [&plan](
+        const std::uint8_t alphabet_code,
+        const std::string_view alphabet,
+        const std::uint8_t storage_unit_bytes,
+        const std::string_view storage_unit) {
+        const std::string family =
+            "minimizer_case_" + std::to_string(alphabet_code) + "_"
+            + std::to_string(storage_unit_bytes);
+        const auto append = [&](
+            const std::string_view owner,
+            const std::string_view member) {
+            plan.source_inventory.slots.push_back(slot_spec{
+                .owner_key = std::string{owner},
+                .family_field = family,
+                .slot_field = std::string{member},
+                .expression =
+                    "&::bioseq::simd::{target_namespace}::"
+                    + std::string{member} + "_case<"
+                    + std::string{alphabet} + ","
+                    + std::string{storage_unit} + ">",
+            });
+        };
+        append("minimizer_reference", "reference_minimap_int");
+        append("minimizer_two_stack", "two_stack_nthash");
+        append("minimizer_paper", "paper_nthash");
+    };
+
+    // Deliberately reverse both axes: renderer output must still be ordered by
+    // source-owned alphabet ordinal and storage byte width.
+    for (const auto& [bytes, storage] : std::array{
+             std::pair<std::uint8_t, std::string_view>{
+                 8u, "::std::uint64_t"},
+             std::pair<std::uint8_t, std::string_view>{
+                 4u, "::std::uint32_t"},
+             std::pair<std::uint8_t, std::string_view>{
+                 2u, "::std::uint16_t"},
+             std::pair<std::uint8_t, std::string_view>{
+                 1u, "::std::uint8_t"},
+         }) {
+        append_case(1u, "::seq::dna5", bytes, storage);
+    }
+    for (const auto& [bytes, storage] : std::array{
+             std::pair<std::uint8_t, std::string_view>{
+                 8u, "::std::uint64_t"},
+             std::pair<std::uint8_t, std::string_view>{
+                 4u, "::std::uint32_t"},
+             std::pair<std::uint8_t, std::string_view>{
+                 2u, "::std::uint16_t"},
+             std::pair<std::uint8_t, std::string_view>{
+                 1u, "::std::uint8_t"},
+         }) {
+        append_case(0u, "::seq::dna4", bytes, storage);
+    }
+
+    const generation_result generated = render_generation(plan);
+    std::size_t checked_binders = 0u;
+    for (const generated_artifact& artifact : generated.artifacts) {
+        if (artifact.kind != artifact_kind::binder) continue;
+        ++checked_binders;
+        require(
+            artifact.content.contains("import bioseq.sequences;")
+                && artifact.content.contains(
+                    "MinimizerDispatch_reference_minimap_int")
+                && artifact.content.contains(
+                    "MinimizerDispatch_two_stack_nthash")
+                && artifact.content.contains(
+                    "MinimizerDispatch_paper_nthash")
+                && artifact.content.contains(
+                    "table.minimizers.reference_minimap_int = "
+                    "&MinimizerDispatch_reference_minimap_int")
+                && artifact.content.contains(
+                    "table.minimizers.two_stack_nthash = "
+                    "&MinimizerDispatch_two_stack_nthash")
+                && artifact.content.contains(
+                    "table.minimizers.paper_nthash = "
+                    "&MinimizerDispatch_paper_nthash")
+                && artifact.content.contains(
+                    "highway_kernel_set(HighwayKernelId::"
+                    "minimizer_reference_minimap_int)")
+                && artifact.content.contains(
+                    "highway_kernel_set(HighwayKernelId::"
+                    "minimizer_two_stack_nthash)")
+                && artifact.content.contains(
+                    "highway_kernel_set(HighwayKernelId::"
+                    "minimizer_paper_nthash)")
+                && occurrences(
+                       artifact.content,
+                       "switch (invocation.sequence.alphabet_code)") == 3u
+                && occurrences(
+                       artifact.content,
+                       "switch (invocation.sequence.storage_unit_bytes)")
+                    == 6u
+                && occurrences(
+                       artifact.content,
+                       "reference_minimap_int_case<") == 8u
+                && occurrences(
+                       artifact.content,
+                       "two_stack_nthash_case<") == 8u
+                && occurrences(
+                       artifact.content,
+                       "paper_nthash_case<") == 8u
+                && occurrences(
+                       artifact.content,
+                       "MinimizerKernelStatus::invalid_configuration") == 3u
+                && !artifact.content.contains("table.minimizer_case_"),
+            "each binder folds the exact typed minimizer matrix into three "
+            "neutral runtime wrappers");
+
+        const std::size_t dna4_u8 = artifact.content.find(
+            "reference_minimap_int_case<::seq::dna4,::std::uint8_t>");
+        const std::size_t dna4_u16 = artifact.content.find(
+            "reference_minimap_int_case<::seq::dna4,::std::uint16_t>");
+        const std::size_t dna5_u8 = artifact.content.find(
+            "reference_minimap_int_case<::seq::dna5,::std::uint8_t>");
+        require(
+            dna4_u8 != std::string::npos
+                && dna4_u16 != std::string::npos
+                && dna5_u8 != std::string::npos
+                && dna4_u8 < dna4_u16 && dna4_u16 < dna5_u8,
+            "typed minimizer wrapper cases are deterministically ordered");
+    }
+    require(
+        checked_binders == 2u,
+        "both fixed targets receive typed minimizer wrappers");
+
+    generation_plan incomplete = plan;
+    incomplete.source_inventory.slots.erase(
+        incomplete.source_inventory.slots.begin(),
+        incomplete.source_inventory.slots.begin() + 3);
+    require_rejected(
+        [&] { (void)render_generation(incomplete); },
+        "a typed minimizer registry missing one Cartesian case is rejected");
+
+    generation_plan missing_member = plan;
+    missing_member.source_inventory.slots.pop_back();
+    require_rejected(
+        [&] { (void)render_generation(missing_member); },
+        "a typed minimizer family missing an algorithm member is rejected");
+
+    generation_plan duplicate_member = plan;
+    duplicate_member.source_inventory.slots.push_back(
+        duplicate_member.source_inventory.slots.front());
+    require_rejected(
+        [&] { (void)render_generation(duplicate_member); },
+        "a duplicate typed minimizer algorithm member is rejected");
+
+    generation_plan second_registry = plan;
+    second_registry.source_inventory.slots.push_back(slot_spec{
+        .owner_key = "minimizer_reference",
+        .family_field = "minimizers",
+        .slot_field = "reference_minimap_int",
+        .expression =
+            "&::bioseq::simd::{target_namespace}::reference_minimap_int",
+    });
+    require_rejected(
+        [&] { (void)render_generation(second_registry); },
+        "typed minimizer cases reject a second hand-owned root-slot registry");
+
+    generation_plan mixed = plan;
+    mixed.source_inventory.slots.front().expression =
+        "&::bioseq::simd::{target_namespace}::reference_minimap_int_case<"
+        "::seq::dna4,::std::uint64_t>";
+    require_rejected(
+        [&] { (void)render_generation(mixed); },
+        "a typed minimizer family mixing template arguments is rejected");
+
+    generation_plan mismatched_width = plan;
+    for (slot_spec& slot : mismatched_width.source_inventory.slots) {
+        if (slot.family_field == "minimizer_case_1_8") {
+            slot.family_field = "minimizer_case_1_3";
+        }
+    }
+    require_rejected(
+        [&] { (void)render_generation(mismatched_width); },
+        "a typed minimizer case with an invalid topology byte width is "
+        "rejected");
+
+    generation_plan wrong_leaf = plan;
+    wrong_leaf.source_inventory.slots.front().expression =
+        "&::bioseq::simd::{target_namespace}::paper_nthash_case<"
+        "::seq::dna5,::std::uint64_t>";
+    require_rejected(
+        [&] { (void)render_generation(wrong_leaf); },
+        "a typed minimizer member naming the wrong case leaf is rejected");
+}
+
 }  // namespace contract_detail
 
 void run_highway_contract_self_tests() {
@@ -822,6 +1015,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_type_only_target_source();
     contract_detail::verify_shared_publication_envelope();
     contract_detail::verify_typed_alignment_binder();
+    contract_detail::verify_typed_minimizer_binder();
 }
 
 }  // namespace bioseq::codegen::highway

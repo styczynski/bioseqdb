@@ -1378,7 +1378,10 @@ struct PackedPaperNthashExecutionProof {
                 && window_size > 0
                 && window_size <= packed_paper_nthash_max_window
                 && nthash_rotation == 7
-                && source_storage_unit_bytes >= sizeof(std::uint32_t)
+                && (source_storage_unit_bytes == sizeof(std::uint8_t)
+                    || source_storage_unit_bytes == sizeof(std::uint16_t)
+                    || source_storage_unit_bytes == sizeof(std::uint32_t)
+                    || source_storage_unit_bytes == sizeof(std::uint64_t))
                 && segments_combined > 0
                 && positions_are_segment_local
                 && fail_closed_rejections == 0

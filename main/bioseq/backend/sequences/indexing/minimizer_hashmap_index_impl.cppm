@@ -603,11 +603,14 @@ collect_packed_paper_nthash_index_erased(
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::invalid_configuration);
     }
-    if (request.alphabet != PackedPaperNthashIndexAlphabet::dna4) {
+    if (request.alphabet != PackedPaperNthashIndexAlphabet::dna4
+        && request.alphabet != PackedPaperNthashIndexAlphabet::dna5) {
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_alphabet);
     }
-    if (request.storage_unit_bytes != sizeof(std::uint32_t)
+    if (request.storage_unit_bytes != sizeof(std::uint8_t)
+        && request.storage_unit_bytes != sizeof(std::uint16_t)
+        && request.storage_unit_bytes != sizeof(std::uint32_t)
         && request.storage_unit_bytes != sizeof(std::uint64_t)) {
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_storage);
@@ -625,7 +628,15 @@ collect_packed_paper_nthash_index_erased(
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_representation);
     }
-    const std::size_t letters_per_unit = request.storage_unit_bytes * 4u;
+    const bool dna4 = request.alphabet
+        == PackedPaperNthashIndexAlphabet::dna4;
+    const std::uint8_t bits_per_symbol = dna4 ? 2u : 3u;
+    const std::uint8_t alphabet_code = static_cast<std::uint8_t>(
+        dna4
+            ? bioseq::minimizers::PackedSequenceAlphabet::dna4
+            : bioseq::minimizers::PackedSequenceAlphabet::dna5);
+    const std::size_t letters_per_unit =
+        request.storage_unit_bytes * 8u / bits_per_symbol;
     if (request.storage_units
             > (std::numeric_limits<std::size_t>::max)()
                 / letters_per_unit
@@ -637,9 +648,8 @@ collect_packed_paper_nthash_index_erased(
     if (request.sequence.storage_units != request.storage_units
         || request.sequence.end_symbol != request.local_bp_size
         || request.sequence.begin_symbol != 0u
-        || request.sequence.alphabet_code != static_cast<std::uint8_t>(
-            bioseq::minimizers::PackedSequenceAlphabet::dna4)
-        || request.sequence.bits_per_symbol != 2u
+        || request.sequence.alphabet_code != alphabet_code
+        || request.sequence.bits_per_symbol != bits_per_symbol
         || request.sequence.storage_unit_bytes != request.storage_unit_bytes
         || request.letters_per_unit != letters_per_unit
         || !request.sequence.final_segment) {

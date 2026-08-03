@@ -68,6 +68,7 @@ namespace detail {
            << "#include <hwy/detect_targets.h>\n"
            << "#undef HWY_TARGET\n"
            << "#define HWY_TARGET " << target.token << "\n"
+           << "#include <cstdint>\n"
            << "#include <hwy/aligned_allocator.h>\n"
            << "#include <hwy/highway.h>\n\n";
     return output.str();
@@ -321,6 +322,397 @@ collect_alignment_families(
     return result;
 }
 
+inline constexpr std::string_view minimizer_case_family_prefix =
+    "minimizer_case_";
+
+[[nodiscard]] inline bool is_minimizer_case_family(
+    const std::string_view family) noexcept {
+    return family.starts_with(minimizer_case_family_prefix);
+}
+
+struct minimizer_required_member final {
+    std::string_view slot;
+    std::string_view owner;
+};
+
+inline constexpr std::array<minimizer_required_member, 3>
+    minimizer_required_members{{
+        {"reference_minimap_int", "minimizer_reference"},
+        {"two_stack_nthash", "minimizer_two_stack"},
+        {"paper_nthash", "minimizer_paper"},
+    }};
+
+struct minimizer_case_binding final {
+    std::uint8_t alphabet_code{};
+    std::uint8_t storage_unit_bytes{};
+    std::string alphabet_type;
+    std::string storage_unit_type;
+    std::map<std::string, const slot_spec*, std::less<>> members;
+};
+
+[[nodiscard]] inline std::uint8_t parse_minimizer_case_number(
+    const std::string_view spelling,
+    const std::string_view field,
+    const std::string_view family) {
+    if (spelling.empty()
+        || (spelling.size() > 1u && spelling.front() == '0')) {
+        throw std::runtime_error(
+            "typed minimizer family '" + std::string{family}
+            + "' has a non-canonical " + std::string{field});
+    }
+
+    std::uint32_t result = 0u;
+    for (const char character : spelling) {
+        if (character < '0' || character > '9') {
+            throw std::runtime_error(
+                "typed minimizer family '" + std::string{family}
+                + "' has a non-numeric " + std::string{field});
+        }
+        result = result * 10u
+               + static_cast<std::uint32_t>(character - '0');
+        if (result > 255u) {
+            throw std::runtime_error(
+                "typed minimizer family '" + std::string{family} + "' "
+                + std::string{field} + " exceeds uint8_t");
+        }
+    }
+    return static_cast<std::uint8_t>(result);
+}
+
+[[nodiscard]] inline std::pair<std::uint8_t, std::uint8_t>
+minimizer_case_coordinates(const std::string_view family) {
+    if (!is_minimizer_case_family(family)) {
+        throw std::runtime_error(
+            "typed minimizer slot family must be named "
+            "minimizer_case_<alphabet-code>_<storage-bytes>: "
+            + std::string{family});
+    }
+    const std::string_view suffix =
+        family.substr(minimizer_case_family_prefix.size());
+    const std::size_t separator = suffix.find('_');
+    if (separator == std::string_view::npos
+        || separator == 0u
+        || separator + 1u == suffix.size()
+        || suffix.find('_', separator + 1u) != std::string_view::npos) {
+        throw std::runtime_error(
+            "typed minimizer slot family must be named "
+            "minimizer_case_<alphabet-code>_<storage-bytes>: "
+            + std::string{family});
+    }
+
+    const std::uint8_t alphabet_code = parse_minimizer_case_number(
+        suffix.substr(0u, separator), "alphabet code", family);
+    const std::uint8_t storage_unit_bytes = parse_minimizer_case_number(
+        suffix.substr(separator + 1u), "storage byte width", family);
+    if (storage_unit_bytes == 0u || storage_unit_bytes > 8u
+        || (storage_unit_bytes & (storage_unit_bytes - 1u)) != 0u) {
+        throw std::runtime_error(
+            "typed minimizer family '" + std::string{family}
+            + "' storage byte width must be a power of two no greater "
+              "than eight");
+    }
+    return {alphabet_code, storage_unit_bytes};
+}
+
+[[nodiscard]] inline bool qualified_type_name(
+    const std::string_view spelling) noexcept {
+    std::string_view remaining = spelling;
+    if (remaining.starts_with("::")) remaining.remove_prefix(2u);
+    if (remaining.empty()) return false;
+
+    while (!remaining.empty()) {
+        const std::size_t separator = remaining.find("::");
+        const std::string_view component = remaining.substr(0u, separator);
+        if (component.empty()
+            || !std::ranges::all_of(component, [](const char character) {
+                   return (character >= 'a' && character <= 'z')
+                       || (character >= 'A' && character <= 'Z')
+                       || (character >= '0' && character <= '9')
+                       || character == '_';
+               })
+            || !((component.front() >= 'a' && component.front() <= 'z')
+                 || (component.front() >= 'A' && component.front() <= 'Z')
+                 || component.front() == '_')) {
+            return false;
+        }
+        if (separator == std::string_view::npos) return true;
+        remaining.remove_prefix(separator + 2u);
+    }
+    return false;
+}
+
+[[nodiscard]] inline std::pair<std::string, std::string>
+minimizer_case_types(const slot_spec& slot) {
+    const std::string expected_suffix =
+        "{target_namespace}::" + slot.slot_field + "_case<";
+    const std::size_t marker = slot.expression.find(expected_suffix);
+    if (!slot.expression.starts_with('&')
+        || marker == std::string::npos
+        || slot.expression.find(
+               expected_suffix, marker + expected_suffix.size())
+            != std::string::npos
+        || !slot.expression.ends_with('>')) {
+        throw std::runtime_error(
+            "typed minimizer slot '" + slot.family_field + "."
+            + slot.slot_field + "' must name its matching *_case<Alphabet, "
+              "StorageUnit> target callable");
+    }
+
+    const std::size_t arguments_begin = marker + expected_suffix.size();
+    const std::string_view arguments{
+        slot.expression.data() + arguments_begin,
+        slot.expression.size() - arguments_begin - 1u};
+    const std::size_t comma = arguments.find(',');
+    if (comma == std::string_view::npos
+        || comma == 0u
+        || comma + 1u == arguments.size()
+        || arguments.find(',', comma + 1u) != std::string_view::npos
+        || arguments.find_first_of("<>") != std::string_view::npos) {
+        throw std::runtime_error(
+            "typed minimizer slot '" + slot.family_field + "."
+            + slot.slot_field
+            + "' must have exactly two simple type arguments");
+    }
+
+    const std::string alphabet{arguments.substr(0u, comma)};
+    const std::string storage{arguments.substr(comma + 1u)};
+    if (!qualified_type_name(alphabet) || !qualified_type_name(storage)) {
+        throw std::runtime_error(
+            "typed minimizer slot '" + slot.family_field + "."
+            + slot.slot_field
+            + "' template arguments must be qualified type names");
+    }
+    return {alphabet, storage};
+}
+
+[[nodiscard]] inline std::vector<minimizer_case_binding>
+collect_minimizer_cases(
+    const std::map<
+        std::string,
+        std::vector<const slot_spec*>,
+        std::less<>>& families) {
+    std::vector<minimizer_case_binding> result;
+    std::set<std::pair<std::uint8_t, std::uint8_t>> coordinates;
+    std::map<std::uint8_t, std::string> alphabet_types;
+    std::map<std::string, std::uint8_t, std::less<>> alphabet_codes;
+    std::map<std::uint8_t, std::string> storage_types;
+
+    for (const auto& [family, slots] : families) {
+        if (!is_minimizer_case_family(family)) continue;
+
+        const auto [alphabet_code, storage_unit_bytes] =
+            minimizer_case_coordinates(family);
+        if (!coordinates.emplace(
+                alphabet_code, storage_unit_bytes).second) {
+            throw std::runtime_error(
+                "duplicate typed minimizer case for alphabet code "
+                + std::to_string(alphabet_code) + " and storage byte width "
+                + std::to_string(storage_unit_bytes));
+        }
+
+        minimizer_case_binding binding{
+            .alphabet_code = alphabet_code,
+            .storage_unit_bytes = storage_unit_bytes,
+        };
+        for (const slot_spec* slot : slots) {
+            const auto required = std::ranges::find(
+                minimizer_required_members,
+                slot->slot_field,
+                &minimizer_required_member::slot);
+            if (required == minimizer_required_members.end()
+                || slot->owner_key != required->owner
+                || !binding.members.emplace(
+                        slot->slot_field, slot).second) {
+                throw std::runtime_error(
+                    "typed minimizer family '" + family
+                    + "' must use each required algorithm member exactly once "
+                      "and from its registered owner");
+            }
+
+            const auto [alphabet, storage] = minimizer_case_types(*slot);
+            if (binding.alphabet_type.empty()) {
+                binding.alphabet_type = alphabet;
+                binding.storage_unit_type = storage;
+            } else if (binding.alphabet_type != alphabet
+                       || binding.storage_unit_type != storage) {
+                throw std::runtime_error(
+                    "typed minimizer family '" + family
+                    + "' mixes template arguments");
+            }
+        }
+
+        if (binding.members.size() != minimizer_required_members.size()) {
+            throw std::runtime_error(
+                "typed minimizer family '" + family
+                + "' must bind exactly three algorithm members");
+        }
+        for (const minimizer_required_member& member
+             : minimizer_required_members) {
+            if (!binding.members.contains(member.slot)) {
+                throw std::runtime_error(
+                    "typed minimizer family '" + family
+                    + "' is missing required member '"
+                    + std::string{member.slot} + "'");
+            }
+        }
+
+        const std::string expected_storage_type =
+            "::std::uint"
+            + std::to_string(
+                static_cast<unsigned int>(storage_unit_bytes) * 8u)
+            + "_t";
+        if (binding.storage_unit_type != expected_storage_type) {
+            throw std::runtime_error(
+                "typed minimizer family '" + family
+                + "' storage type does not match its topology byte width");
+        }
+
+        const auto [alphabet_found, inserted_alphabet] =
+            alphabet_types.emplace(alphabet_code, binding.alphabet_type);
+        if (!inserted_alphabet
+            && alphabet_found->second != binding.alphabet_type) {
+            throw std::runtime_error(
+                "typed minimizer alphabet code "
+                + std::to_string(alphabet_code)
+                + " maps to more than one alphabet type");
+        }
+        const auto [code_found, inserted_code] =
+            alphabet_codes.emplace(binding.alphabet_type, alphabet_code);
+        if (!inserted_code && code_found->second != alphabet_code) {
+            throw std::runtime_error(
+                "typed minimizer alphabet type '" + binding.alphabet_type
+                + "' maps to more than one alphabet code");
+        }
+        const auto [storage_found, inserted_storage] =
+            storage_types.emplace(
+                storage_unit_bytes, binding.storage_unit_type);
+        if (!inserted_storage
+            && storage_found->second != binding.storage_unit_type) {
+            throw std::runtime_error(
+                "typed minimizer storage byte width "
+                + std::to_string(storage_unit_bytes)
+                + " maps to more than one storage type");
+        }
+        result.push_back(std::move(binding));
+    }
+
+    if (result.empty()) return result;
+    if (families.contains("minimizers")) {
+        throw std::runtime_error(
+            "typed minimizer cases may not coexist with a second root-table "
+            "minimizer slot registry");
+    }
+    if (result.size() != 8u || alphabet_types.size() != 2u
+        || storage_types.size() != 4u) {
+        throw std::runtime_error(
+            "typed minimizer registry must be the exact source-owned "
+            "two-alphabet by four-storage-width matrix");
+    }
+    for (const auto& [alphabet_code, alphabet] : alphabet_types) {
+        static_cast<void>(alphabet);
+        for (const auto& [storage_unit_bytes, storage] : storage_types) {
+            static_cast<void>(storage);
+            if (!coordinates.contains(
+                    {alphabet_code, storage_unit_bytes})) {
+                throw std::runtime_error(
+                    "typed minimizer registry is not a closed Cartesian matrix");
+            }
+        }
+    }
+
+    std::ranges::sort(
+        result,
+        {},
+        [](const minimizer_case_binding& binding) {
+            return std::pair{
+                binding.alphabet_code, binding.storage_unit_bytes};
+        });
+    return result;
+}
+
+[[nodiscard]] inline std::string minimizer_wrapper_name(
+    const std::string_view member) {
+    return "MinimizerDispatch_" + std::string{member};
+}
+
+[[nodiscard]] inline std::string minimizer_callable_expression(
+    const slot_spec& slot,
+    const std::string_view target_namespace) {
+    std::string expression = replace_target_namespace(
+        slot.expression,
+        target_namespace);
+    if (!expression.starts_with('&')) {
+        throw std::runtime_error(
+            "typed minimizer callable lost its address-of marker");
+    }
+    expression.erase(0u, 1u);
+    return expression;
+}
+
+inline void render_minimizer_wrappers(
+    std::ostringstream& output,
+    const std::vector<minimizer_case_binding>& cases,
+    const target_spec& target) {
+    if (cases.empty()) return;
+
+    for (const minimizer_required_member& member
+         : minimizer_required_members) {
+        output
+            << "[[nodiscard]] HWY_ATTR "
+               "::bioseq::minimizers::MinimizerKernelResult "
+            << minimizer_wrapper_name(member.slot) << "(\n"
+            << "    ::bioseq::minimizers::MinimizerKernelInvocation& "
+               "invocation) {\n"
+            << "    switch (invocation.sequence.alphabet_code) {\n";
+
+        std::size_t begin = 0u;
+        while (begin < cases.size()) {
+            const std::uint8_t alphabet_code =
+                cases[begin].alphabet_code;
+            output << "        case "
+                   << static_cast<unsigned int>(alphabet_code) << "u:\n"
+                   << "            switch ("
+                      "invocation.sequence.storage_unit_bytes) {\n";
+            std::size_t end = begin;
+            while (end < cases.size()
+                   && cases[end].alphabet_code == alphabet_code) {
+                const minimizer_case_binding& binding = cases[end];
+                const slot_spec* slot =
+                    binding.members.find(member.slot)->second;
+                output << "                case "
+                       << static_cast<unsigned int>(
+                              binding.storage_unit_bytes)
+                       << "u:\n"
+                       << "                    return "
+                       << minimizer_callable_expression(
+                              *slot, target.name_space)
+                       << "(invocation);\n";
+                ++end;
+            }
+            output << "                default:\n"
+                   << "                    break;\n"
+                   << "            }\n"
+                   << "            break;\n";
+            begin = end;
+        }
+        output
+            << "        default:\n"
+            << "            break;\n"
+            << "    }\n"
+            << "    ::bioseq::minimizers::MinimizerKernelResult result{};\n"
+            << "    result.proof.algorithm = "
+               "::bioseq::minimizers::MinimizerKernelAlgorithm::"
+            << member.slot << ";\n"
+            << "    result.proof.target = "
+               "static_cast<::std::int64_t>(HWY_TARGET);\n"
+            << "    result.status = "
+               "::bioseq::minimizers::MinimizerKernelStatus::"
+               "invalid_configuration;\n"
+            << "    return result;\n"
+            << "}\n\n";
+    }
+}
+
 [[nodiscard]] inline std::string_view kernel_enumerator_for_owner(
     std::string_view owner) {
     if (owner == "minimizer_reference") {
@@ -401,13 +793,23 @@ collect_alignment_families(
     const generation_plan& plan,
     const target_spec& target) {
     const std::string module = generated_module_name(target);
+    std::map<std::string, std::vector<const slot_spec*>, std::less<>> families;
+    for (const slot_spec& slot : plan.source_inventory.slots) {
+        families[slot.family_field].push_back(&slot);
+    }
+    const std::vector<alignment_family_binding> alignment_families =
+        collect_alignment_families(families);
+    const std::vector<minimizer_case_binding> minimizer_cases =
+        collect_minimizer_cases(families);
+
     std::ostringstream output;
     output << fixed_target_fragment(plan.target_inventory, target)
            << "// Generated target binding; do not edit.\n"
            << "module " << module << ";\n\n"
            << "import " << plan.source_inventory.contract_module << ";\n";
     for (const slot_spec& slot : plan.source_inventory.slots) {
-        if (is_alignment_family(slot.family_field)) {
+        if (is_alignment_family(slot.family_field)
+            || is_minimizer_case_family(slot.family_field)) {
             output << "import bioseq.sequences;\n";
             break;
         }
@@ -416,8 +818,9 @@ collect_alignment_families(
         output << "import :" << source.source.partition << ";\n";
     }
     output << "\nnamespace bioseq::simd_dispatch::" << target.name_space
-           << " {\n\n"
-           << "HWY_ATTR HighwayKernelTable MakeHighwayKernelTable() noexcept {\n"
+           << " {\n\n";
+    render_minimizer_wrappers(output, minimizer_cases, target);
+    output << "HWY_ATTR HighwayKernelTable MakeHighwayKernelTable() noexcept {\n"
            << "    HighwayKernelTable table{};\n";
 
     std::set<std::string, std::less<>> available_kernel_ids;
@@ -436,12 +839,6 @@ collect_alignment_families(
         output << "        ;\n";
     }
 
-    std::map<std::string, std::vector<const slot_spec*>, std::less<>> families;
-    for (const slot_spec& slot : plan.source_inventory.slots) {
-        families[slot.family_field].push_back(&slot);
-    }
-    const std::vector<alignment_family_binding> alignment_families =
-        collect_alignment_families(families);
     for (const alignment_family_binding& family : alignment_families) {
         const auto code = static_cast<unsigned int>(family.alphabet_code);
         output << "    static const ::bioseq::simd::AlignmentKernels<"
@@ -467,8 +864,18 @@ collect_alignment_families(
                << "    table.alignment_by_alphabet = "
                   "alignment_by_alphabet;\n";
     }
+    if (!minimizer_cases.empty()) {
+        for (const minimizer_required_member& member
+             : minimizer_required_members) {
+            output << "    table.minimizers." << member.slot << " = &"
+                   << minimizer_wrapper_name(member.slot) << ";\n";
+        }
+    }
     for (const auto& [family, slots] : families) {
-        if (is_alignment_family(family)) continue;
+        if (is_alignment_family(family)
+            || is_minimizer_case_family(family)) {
+            continue;
+        }
         if (slots.size() == 1 && slots.front()->slot_field == "@") {
             output << "    table." << family << " = "
                    << replace_target_namespace(

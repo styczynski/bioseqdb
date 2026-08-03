@@ -4828,6 +4828,26 @@ minimizer_kernel_view(const Descriptor& descriptor)
     };
 }
 
+/** Preserve any scheduler-supported resident packing before materialising. */
+template <sequence_alphabet Alphabet>
+[[nodiscard]] inline std::optional<typename bioseq::storage::
+    basic_lazy_sequence_view<Alphabet>::resident_packed_region>
+try_minimizer_resident_packed(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    sequence_size_t from,
+    sequence_size_t to)
+{
+    for (const std::uint8_t width :
+         std::array<std::uint8_t, 4>{1u, 2u, 4u, 8u}) {
+        auto descriptor = sequence.try_resident_packed(from, to, width);
+        if (descriptor.has_value()
+            && descriptor->leading_symbol_offset == 0u) {
+            return descriptor;
+        }
+    }
+    return std::nullopt;
+}
+
 /**
  * Batch adapter from the neutral MinimapSketchData ABI to the caller's exact
  * collector type. Exceptions cannot cross the sink's noexcept commit
@@ -5018,21 +5038,22 @@ template <MinKernelKind Kind, class MinimizerT,
                 TwoStackContinuationStatus::arithmetic_overflow,
                 "query minimizer sketch"};
         }
-        const auto access = bioseq::storage::plan_sequence_access(
-            seq,
-            bioseq::storage::sequence_access_requirement::contiguous_resident,
-            0u,
-            seq.bp_size(),
-            4u);
         std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
         typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
             resident_packed_region descriptor{};
-        const bool borrowed_resident = access.route
-                == bioseq::storage::sequence_access_route::borrow_resident
-            && access.resident.has_value();
+        const auto native_resident = try_minimizer_resident_packed(
+            seq, 0u, seq.bp_size());
+        const bool borrowed_resident = native_resident.has_value();
         if (borrowed_resident) {
-            descriptor = *access.resident;
+            descriptor = *native_resident;
         } else {
+            const auto access = bioseq::storage::plan_sequence_access(
+                seq,
+                bioseq::storage::sequence_access_requirement::
+                    contiguous_resident,
+                0u,
+                seq.bp_size(),
+                4u);
             auto permit =
                 bioseq::parallelism::MemoryAdmissionController::instance()
                     .try_reserve(access.admission_bytes);
@@ -5049,7 +5070,9 @@ template <MinKernelKind Kind, class MinimizerT,
             chronological_continuation;
         if constexpr (std::same_as<Alphabet, ::seq::dna4>
                       && exact_simd_minimizer_representation<MinimizerT>) {
-            if (borrowed_resident && w == 10u && k == 15u) [[likely]] {
+            if (borrowed_resident
+                && descriptor.storage_unit_byte_width == sizeof(std::uint32_t)
+                && w == 10u && k == 15u) [[likely]] {
                 route = ::bioseq::minimizers::TwoStackRoute::resident_report76;
             }
         }
@@ -5076,74 +5099,57 @@ template <MinKernelKind Kind, class MinimizerT,
         }
         return result.proof.two_stack;
     } else if constexpr (Kind == MinKernelKind::Simd) {
-        if constexpr (bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-                          traits::logical_bits_per_symbol != 2u) {
-            // Preserve the historical reference-SIMD contract for non-DNA4
-            // alphabets: its explicitly documented route is scalar.
-            collect_minimizers_segment_scalar<MinimizerT>(
-                c, seq, 0u, seq.bp_size(), w, k);
-        } else {
-            const auto run_reference = [&](const auto& descriptor) {
-                const auto result =
-                    invoke_selected_minimizer_kernel<MinimizerT>(
-                        highway,
-                        ::bioseq::simd_dispatch::HighwayKernelId::
-                            minimizer_reference_minimap_int,
-                        ::bioseq::minimizers::MinimizerKernelAlgorithm::
-                            reference_minimap_int,
-                        minimizer_kernel_view<Alphabet>(descriptor),
-                        w,
-                        k,
-                        c);
-                if (!result.ok()
-                    || result.proof.reference.kernel_calls == 0u) {
-                    throw std::runtime_error(
-                        "selected Highway reference minimizer declined");
-                }
-            };
-            if (auto descriptor = seq.try_resident_packed(
-                    0u, seq.bp_size(), sizeof(std::uint64_t));
-                descriptor.has_value()
-                    && descriptor->leading_symbol_offset == 0u) {
-                run_reference(*descriptor);
-                return {};
+        const auto run_reference = [&](const auto& descriptor) {
+            const auto result =
+                invoke_selected_minimizer_kernel<MinimizerT>(
+                    highway,
+                    ::bioseq::simd_dispatch::HighwayKernelId::
+                        minimizer_reference_minimap_int,
+                    ::bioseq::minimizers::MinimizerKernelAlgorithm::
+                        reference_minimap_int,
+                    minimizer_kernel_view<Alphabet>(descriptor),
+                    w,
+                    k,
+                    c);
+            if (!result.ok()
+                || result.proof.reference.kernel_calls == 0u) {
+                throw std::runtime_error(
+                    "selected Highway reference minimizer declined");
             }
-            if (auto descriptor = seq.try_resident_packed(
-                    0u, seq.bp_size(), sizeof(std::uint32_t));
-                descriptor.has_value()
-                    && descriptor->leading_symbol_offset == 0u) {
-                run_reference(*descriptor);
-                return {};
-            }
-            const auto access = bioseq::storage::plan_sequence_access(
-                seq,
-                bioseq::storage::sequence_access_requirement::
-                    contiguous_resident,
-                0u,
-                seq.bp_size(),
-                sizeof(std::uint32_t));
-            std::optional<
-                bioseq::storage::admitted_packed_region<Alphabet>> owner;
-            typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-                resident_packed_region descriptor{};
-            if (access.route
-                    == bioseq::storage::sequence_access_route::borrow_resident
-                && access.resident.has_value()) {
-                descriptor = *access.resident;
-            } else {
-                auto permit = bioseq::parallelism::
-                    MemoryAdmissionController::instance().try_reserve(
-                        access.admission_bytes);
-                if (!permit) {
-                    throw std::bad_alloc{};
-                }
-                owner.emplace(bioseq::storage::materialize_packed_region(
-                    seq, 0u, seq.bp_size(), sizeof(std::uint32_t),
-                    std::move(*permit)));
-                descriptor = owner->descriptor();
-            }
-            run_reference(descriptor);
+        };
+        if (auto descriptor = try_minimizer_resident_packed(
+                seq, 0u, seq.bp_size()); descriptor.has_value()) {
+            run_reference(*descriptor);
+            return {};
         }
+        const auto access = bioseq::storage::plan_sequence_access(
+            seq,
+            bioseq::storage::sequence_access_requirement::
+                contiguous_resident,
+            0u,
+            seq.bp_size(),
+            sizeof(std::uint32_t));
+        std::optional<
+            bioseq::storage::admitted_packed_region<Alphabet>> owner;
+        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+            resident_packed_region descriptor{};
+        if (access.route
+                == bioseq::storage::sequence_access_route::borrow_resident
+            && access.resident.has_value()) {
+            descriptor = *access.resident;
+        } else {
+            auto permit = bioseq::parallelism::
+                MemoryAdmissionController::instance().try_reserve(
+                    access.admission_bytes);
+            if (!permit) {
+                throw std::bad_alloc{};
+            }
+            owner.emplace(bioseq::storage::materialize_packed_region(
+                seq, 0u, seq.bp_size(), sizeof(std::uint32_t),
+                std::move(*permit)));
+            descriptor = owner->descriptor();
+        }
+        run_reference(descriptor);
     } else {
         collect_minimizers_segment_scalar<MinimizerT>(
             c, seq, 0u, seq.bp_size(), w, k);
@@ -5321,23 +5327,22 @@ minimizer_dispatch_range(
                 "PaperNtHashSimd currently requires W=10 and K=15; "
                 "fallback is forbidden");
         }
-        if constexpr (!std::same_as<Alphabet, ::seq::dna4>) {
-            throw PaperNtHashRuntimeError(
-                "PaperNtHashSimd requires the DNA4 alphabet; fallback is forbidden");
+        auto run_paper = [&](const auto& descriptor) {
+            return invoke_selected_minimizer_kernel<MinimizerT>(
+                highway,
+                ::bioseq::simd_dispatch::HighwayKernelId::
+                    minimizer_paper_nthash,
+                ::bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash,
+                minimizer_kernel_view<Alphabet>(descriptor),
+                window_size,
+                kmer_size,
+                collector);
+        };
+        ::bioseq::minimizers::MinimizerKernelResult result{};
+        if (auto native = try_minimizer_resident_packed(
+                seq, lo_bp, hi_bp); native.has_value()) {
+            result = run_paper(*native);
         } else {
-            auto run_paper = [&](const auto& descriptor) {
-                return invoke_selected_minimizer_kernel<MinimizerT>(
-                    highway,
-                    ::bioseq::simd_dispatch::HighwayKernelId::
-                        minimizer_paper_nthash,
-                    ::bioseq::minimizers::MinimizerKernelAlgorithm::
-                        paper_nthash,
-                    minimizer_kernel_view<Alphabet>(descriptor),
-                    window_size,
-                    kmer_size,
-                    collector);
-            };
-            ::bioseq::minimizers::MinimizerKernelResult result{};
             const auto access = bioseq::storage::plan_sequence_access(
                 seq,
                 bioseq::storage::sequence_access_requirement::
@@ -5345,44 +5350,38 @@ minimizer_dispatch_range(
                 lo_bp,
                 hi_bp,
                 sizeof(std::uint32_t));
-            if (access.route
-                    == bioseq::storage::sequence_access_route::borrow_resident
-                && access.resident.has_value()) {
-                result = run_paper(*access.resident);
-            } else {
-                bioseq::parallelism::MemoryAdmissionFailure failure{};
-                auto permit =
-                    bioseq::parallelism::MemoryAdmissionController::instance()
-                        .try_reserve(access.admission_bytes, &failure);
-                if (!permit) {
-                    throw PaperNtHashRuntimeError(fmt::format(
-                        "packed-range admission failed: reason={} "
-                        "requested_bytes={} reserved_bytes={} budget_bytes={}",
-                        bioseq::parallelism::memory_admission_failure_reason_name(
-                            failure.reason),
-                        failure.requested_bytes,
-                        failure.reserved_bytes,
-                        failure.budget_ceiling_bytes));
-                }
-                auto owner = bioseq::storage::materialize_packed_region(
-                    seq, lo_bp, hi_bp, sizeof(std::uint32_t),
-                    std::move(*permit));
-                result = run_paper(owner.descriptor());
-            }
-            if (!result.ok()
-                || !result.proof.paper.accepted(
-                    /*require_nonempty_vector_work=*/false)) {
+            bioseq::parallelism::MemoryAdmissionFailure failure{};
+            auto permit =
+                bioseq::parallelism::MemoryAdmissionController::instance()
+                    .try_reserve(access.admission_bytes, &failure);
+            if (!permit) {
                 throw PaperNtHashRuntimeError(fmt::format(
-                    "checked resident kernel declined without fallback: "
-                    "status={} lo_bp={} hi_bp={} w={} k={}",
-                    static_cast<unsigned>(result.status),
-                    lo_bp, hi_bp, window_size, kmer_size));
+                    "packed-range admission failed: reason={} "
+                    "requested_bytes={} reserved_bytes={} budget_bytes={}",
+                    bioseq::parallelism::memory_admission_failure_reason_name(
+                        failure.reason),
+                    failure.requested_bytes,
+                    failure.reserved_bytes,
+                    failure.budget_ceiling_bytes));
             }
-            return MinimizerRangeExecutionProof{
-                .paper_nthash = result.proof.paper,
-                .paper_nthash_present = true,
-            };
+            auto owner = bioseq::storage::materialize_packed_region(
+                seq, lo_bp, hi_bp, sizeof(std::uint32_t),
+                std::move(*permit));
+            result = run_paper(owner.descriptor());
         }
+        if (!result.ok()
+            || !result.proof.paper.accepted(
+                /*require_nonempty_vector_work=*/false)) {
+            throw PaperNtHashRuntimeError(fmt::format(
+                "checked resident kernel declined without fallback: "
+                "status={} lo_bp={} hi_bp={} w={} k={}",
+                static_cast<unsigned>(result.status),
+                lo_bp, hi_bp, window_size, kmer_size));
+        }
+        return MinimizerRangeExecutionProof{
+            .paper_nthash = result.proof.paper,
+            .paper_nthash_present = true,
+        };
     }
     if (backend == MinimizerSketchBackend::ExactSimd) {
         const bool require_resident = exact_simd_route
@@ -5409,20 +5408,23 @@ minimizer_dispatch_range(
                 TwoStackContinuationStatus::arithmetic_overflow,
                 "target minimizer range sketch"};
         }
-        const auto access = bioseq::storage::plan_sequence_access(
-            seq,
-            bioseq::storage::sequence_access_requirement::contiguous_resident,
-            lo_bp,
-            hi_bp,
-            4u);
         std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
         typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
             resident_packed_region descriptor{};
-        if (access.route
-                == bioseq::storage::sequence_access_route::borrow_resident
-            && access.resident.has_value()) {
-            descriptor = *access.resident;
+        const auto native_resident = require_resident
+            ? std::optional<typename bioseq::storage::
+                basic_lazy_sequence_view<Alphabet>::resident_packed_region>{}
+            : try_minimizer_resident_packed(seq, lo_bp, hi_bp);
+        if (native_resident.has_value()) {
+            descriptor = *native_resident;
         } else {
+            const auto access = bioseq::storage::plan_sequence_access(
+                seq,
+                bioseq::storage::sequence_access_requirement::
+                    contiguous_resident,
+                lo_bp,
+                hi_bp,
+                4u);
             auto permit =
                 bioseq::parallelism::MemoryAdmissionController::instance()
                     .try_reserve(access.admission_bytes);
@@ -6370,12 +6372,11 @@ enum class QuerySketchPlanRoute : std::uint8_t {
  * Resolve the query-sketch Highway function without adding the minimizer
  * algorithm as another describe-template dimension.  Scalar and Vulkan
  * sketching are concrete non-Highway routes and therefore map to an empty
- * set.  The slow reference selector is alphabet- and route-sensitive: DNA4
- * can reach its Highway entry on a raw, non-segmented recompute, whereas DNA5
- * and compatible-persisted query preparation are deliberately scalar.  Paper
- * ntHash is executable only for its checked DNA4/W10/K15 domain.  Unknown or
- * unsupported values are ambiguous and must be rejected by the plan renderer
- * rather than silently advertised as scalar.
+ * set.  Both source-owned nucleotide alphabets reach the slow reference and
+ * paper families on a raw, non-segmented recompute; compatible-persisted query
+ * preparation performs no Highway work. Paper ntHash retains its W10/K15
+ * gate. Unknown or unsupported values are ambiguous and must be rejected by
+ * the plan renderer rather than silently advertised as scalar.
  */
 [[nodiscard]] constexpr std::optional<
     ::bioseq::simd_dispatch::HighwayKernelSet>
@@ -6399,8 +6400,7 @@ planned_query_minimizer_highway_kernels(
         case Algorithm::VULKAN_MINIMAP_INT:
             return ::bioseq::simd_dispatch::HighwayKernelSet{};
         case Algorithm::SIMD_MINIMAP2_SLOW:
-            if (alphabet_code == dna5_code
-                || route
+            if (route
                     == QuerySketchPlanRoute::compatible_persisted_only) {
                 return ::bioseq::simd_dispatch::HighwayKernelSet{};
             }
@@ -6410,8 +6410,7 @@ planned_query_minimizer_highway_kernels(
             return ::bioseq::simd_dispatch::highway_kernel_set(
                 Kernel::minimizer_two_stack_nthash);
         case Algorithm::PAPER_NTHASH_SIMD:
-            if (alphabet_code != dna4_code
-                || params.window_size != 10
+            if (params.window_size != 10
                 || params.kmer_size != 15) {
                 return std::nullopt;
             }
@@ -6475,14 +6474,18 @@ static_assert([]() consteval {
             Kernel::minimizer_reference_minimap_int)
         && slow_dna4_persisted.has_value()
         && slow_dna4_persisted->none()
-        && slow_dna5.has_value() && slow_dna5->none()
+        && slow_dna5.has_value()
+        && *slow_dna5 == ::bioseq::simd_dispatch::highway_kernel_set(
+            Kernel::minimizer_reference_minimap_int)
         && exact_dna5.has_value()
         && *exact_dna5 == ::bioseq::simd_dispatch::highway_kernel_set(
             Kernel::minimizer_two_stack_nthash)
         && paper_dna4.has_value()
         && *paper_dna4 == ::bioseq::simd_dispatch::highway_kernel_set(
             Kernel::minimizer_paper_nthash)
-        && !paper_dna5.has_value()
+        && paper_dna5.has_value()
+        && *paper_dna5 == ::bioseq::simd_dispatch::highway_kernel_set(
+            Kernel::minimizer_paper_nthash)
         && !paper_wrong_window.has_value()
         && !paper_wrong_kmer.has_value()
         && scalar_dna4.has_value() && scalar_dna4->none()

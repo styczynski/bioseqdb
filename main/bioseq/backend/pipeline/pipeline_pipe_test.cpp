@@ -5955,6 +5955,98 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
+template <sequence_alphabet Alphabet, class StorageUnit>
+void check_reference_minimizer_topology_case() {
+    using namespace ::bioseq::simd;
+    using sequence_type = sequence_custom_alphabet<Alphabet, StorageUnit>;
+    using range_type = compact_sequence_range<sequence_type>;
+    using collector_type = sketch_collector_t<MinimapSketchData>;
+    using pipe::MinKernelKind;
+
+    std::vector<Alphabet> data(4099u);
+    for (std::size_t index = 0u; index < data.size(); ++index) {
+        std::uint8_t rank = static_cast<std::uint8_t>(index & 3u);
+        if constexpr (std::same_as<Alphabet, seq::dna5>) {
+            rank = index % 97u == 41u
+                ? 3u
+                : std::array<std::uint8_t, 4>{0u, 1u, 2u, 4u}[index & 3u];
+        }
+        data[index].assign_rank(rank);
+    }
+    range_type resident(data);
+    auto lazy = bioseq::storage::make_lazy_in_memory(resident);
+    const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
+    const auto* table = fixed_highway_kernels();
+
+    collector_type selected_collector;
+    (void)pipe::minimizer_dispatch<
+        MinKernelKind::Simd, MinimapSketchData>(
+            selected_collector, view, 10u, 15u, table);
+    collector_type scalar_collector;
+    (void)pipe::minimizer_dispatch<
+        MinKernelKind::Scalar, MinimapSketchData>(
+            scalar_collector, view, 10u, 15u, table);
+
+    const auto& selected = selected_collector.extract_sketches_data();
+    const auto& scalar = scalar_collector.extract_sketches_data();
+    CAPTURE(sizeof(StorageUnit), std::same_as<Alphabet, seq::dna5>);
+    REQUIRE(selected.size() == scalar.size());
+    for (std::size_t index = 0u; index < selected.size(); ++index) {
+        CAPTURE(index);
+        REQUIRE(selected[index].raw_value() == scalar[index].raw_value());
+    }
+}
+
+template <sequence_alphabet Alphabet, class StorageUnit>
+void check_two_stack_minimizer_topology_case() {
+    using namespace ::bioseq::simd;
+    using sequence_type = sequence_custom_alphabet<Alphabet, StorageUnit>;
+    using range_type = compact_sequence_range<sequence_type>;
+    using collector_type = sketch_collector_t<MinimapSketchData>;
+    using pipe::MinKernelKind;
+
+    std::vector<Alphabet> data(4099u);
+    for (std::size_t index = 0u; index < data.size(); ++index) {
+        std::uint8_t rank = static_cast<std::uint8_t>(index & 3u);
+        if constexpr (std::same_as<Alphabet, seq::dna5>) {
+            rank = index % 101u == 53u
+                ? 3u
+                : std::array<std::uint8_t, 4>{0u, 1u, 2u, 4u}[index & 3u];
+        }
+        data[index].assign_rank(rank);
+    }
+    range_type resident(data);
+    auto lazy = bioseq::storage::make_lazy_in_memory(resident);
+    const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
+
+    collector_type selected_collector;
+    const auto proof = pipe::minimizer_dispatch<
+        MinKernelKind::ExactSimd, MinimapSketchData>(
+            selected_collector,
+            view,
+            11u,
+            15u,
+            fixed_highway_kernels());
+    REQUIRE(proof.accepted(false));
+
+    collector_type scalar_collector;
+    (void)pipe::minimizer_dispatch<
+        MinKernelKind::Scalar, MinimapSketchData>(
+            scalar_collector,
+            view,
+            11u,
+            15u,
+            fixed_highway_kernels());
+    const auto& selected = selected_collector.extract_sketches_data();
+    const auto& scalar = scalar_collector.extract_sketches_data();
+    CAPTURE(sizeof(StorageUnit), std::same_as<Alphabet, seq::dna5>);
+    REQUIRE(selected.size() == scalar.size());
+    for (std::size_t index = 0u; index < selected.size(); ++index) {
+        CAPTURE(index);
+        REQUIRE(selected[index].raw_value() == scalar[index].raw_value());
+    }
+}
+
 TEST_CASE("reference SIMD pipe runtime and constexpr dispatch use fixed target table",
           "[pipe][reference-simd][runtime][constexpr][route][proof]") {
     using namespace ::bioseq::simd;
@@ -6001,6 +6093,30 @@ TEST_CASE("reference SIMD pipe runtime and constexpr dispatch use fixed target t
         CAPTURE(index);
         REQUIRE(runtime[index].raw_value() == scalar[index].raw_value());
     }
+}
+
+TEST_CASE("source-owned reference minimizer topology closes DNA4/DNA5 by four widths",
+          "[pipe][reference-simd][topology][dna5][n-reset]") {
+    check_reference_minimizer_topology_case<seq::dna4, std::uint8_t>();
+    check_reference_minimizer_topology_case<seq::dna4, std::uint16_t>();
+    check_reference_minimizer_topology_case<seq::dna4, std::uint32_t>();
+    check_reference_minimizer_topology_case<seq::dna4, std::uint64_t>();
+    check_reference_minimizer_topology_case<seq::dna5, std::uint8_t>();
+    check_reference_minimizer_topology_case<seq::dna5, std::uint16_t>();
+    check_reference_minimizer_topology_case<seq::dna5, std::uint32_t>();
+    check_reference_minimizer_topology_case<seq::dna5, std::uint64_t>();
+}
+
+TEST_CASE("source-owned two-stack topology closes DNA4/DNA5 by four widths",
+          "[pipe][exact-simd][topology][dna5][n-reset]") {
+    check_two_stack_minimizer_topology_case<seq::dna4, std::uint8_t>();
+    check_two_stack_minimizer_topology_case<seq::dna4, std::uint16_t>();
+    check_two_stack_minimizer_topology_case<seq::dna4, std::uint32_t>();
+    check_two_stack_minimizer_topology_case<seq::dna4, std::uint64_t>();
+    check_two_stack_minimizer_topology_case<seq::dna5, std::uint8_t>();
+    check_two_stack_minimizer_topology_case<seq::dna5, std::uint16_t>();
+    check_two_stack_minimizer_topology_case<seq::dna5, std::uint32_t>();
+    check_two_stack_minimizer_topology_case<seq::dna5, std::uint64_t>();
 }
 #endif
 
@@ -6312,7 +6428,7 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
     REQUIRE_FALSE(tampered.ksw2_batched_execution_accepted(true));
 }
 
-template <class StorageUnit>
+template <sequence_alphabet Alphabet, class StorageUnit>
 void check_fragmented_paper_range_materialization() {
     using ::bioseq::simd::MinimizerSketchBackend;
     using ::bioseq::simd::pipe::PaperNtHashRuntimeError;
@@ -6320,7 +6436,7 @@ void check_fragmented_paper_range_materialization() {
     using ::bioseq::simd::pipe::
         minimizer_range_proof_matches_backend;
     using packed_sequence =
-        sequence_custom_alphabet<seq::dna4, StorageUnit>;
+        sequence_custom_alphabet<Alphabet, StorageUnit>;
     using range_type = compact_sequence_range<packed_sequence>;
     using chunked_scanner = bioseq::storage::sequence_scanner_test_chunked<
         StorageUnit, 2>;
@@ -6329,8 +6445,18 @@ void check_fragmented_paper_range_materialization() {
     using collector_type =
         ::bioseq::simd::sketch_collector_t<minimizer_type>;
 
-    auto data = doc0307_e2e::make_dna4(
-        4'123, 0xF12A6E57u + sizeof(StorageUnit));
+    std::vector<Alphabet> data(4'123u);
+    std::uint64_t state = 0xF12A6E57u + sizeof(StorageUnit);
+    for (std::size_t index = 0u; index < data.size(); ++index) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        std::uint8_t rank = static_cast<std::uint8_t>((state >> 33u) & 3u);
+        if constexpr (std::same_as<Alphabet, seq::dna5>) {
+            rank = index % 113u == 61u
+                ? 3u
+                : std::array<std::uint8_t, 4>{0u, 1u, 2u, 4u}[rank];
+        }
+        data[index].assign_rank(rank);
+    }
     range_type range(data);
     auto resident_owner = bioseq::storage::make_lazy_in_memory(range);
     const auto resident_view =
@@ -6388,14 +6514,15 @@ void check_fragmented_paper_range_materialization() {
                 MinimizerSketchBackend::PaperNtHashSimd,
                 fragmented_proof,
                 /*require_nonempty_vector_work=*/true));
-            /* Paper consumes canonical, genuinely typed u32 storage.  A u64
-             * source is admission-materialized rather than reinterpreted, so
-             * the execution proof records the kernel input width—not the
-             * facade's original resident width. */
+            /* Resident source widths remain typed topology inputs. A scanner
+             * slice without stable resident storage is admitted into the
+             * canonical u32 materialization case. */
             REQUIRE(fragmented_proof.paper_nthash.source_storage_unit_bytes
                     == sizeof(std::uint32_t));
-            REQUIRE(fragmented_proof.paper_nthash
-                    == resident_proof.paper_nthash);
+            REQUIRE(resident_proof.paper_nthash.source_storage_unit_bytes
+                    == sizeof(StorageUnit));
+            REQUIRE(fragmented_proof.paper_nthash.scheme_id
+                    == resident_proof.paper_nthash.scheme_id);
 
             collector_type rejected_collector;
             REQUIRE_THROWS_AS(
@@ -6440,8 +6567,14 @@ void check_fragmented_paper_range_materialization() {
 
 TEST_CASE("Paper ntHash fragmented ranges materialize only their packed slice with local coordinates",
           "[paper-nthash][simd][pipe][fragmented][range][fail-closed]") {
-    check_fragmented_paper_range_materialization<std::uint32_t>();
-    check_fragmented_paper_range_materialization<std::uint64_t>();
+    check_fragmented_paper_range_materialization<seq::dna4, std::uint8_t>();
+    check_fragmented_paper_range_materialization<seq::dna4, std::uint16_t>();
+    check_fragmented_paper_range_materialization<seq::dna4, std::uint32_t>();
+    check_fragmented_paper_range_materialization<seq::dna4, std::uint64_t>();
+    check_fragmented_paper_range_materialization<seq::dna5, std::uint8_t>();
+    check_fragmented_paper_range_materialization<seq::dna5, std::uint16_t>();
+    check_fragmented_paper_range_materialization<seq::dna5, std::uint32_t>();
+    check_fragmented_paper_range_materialization<seq::dna5, std::uint64_t>();
 }
 
 enum class InjectedScannerLeaf {

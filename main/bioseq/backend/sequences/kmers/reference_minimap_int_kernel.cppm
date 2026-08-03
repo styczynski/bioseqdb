@@ -29,7 +29,6 @@ using ::bioseq::minimizers::MinimizerKernelInvocation;
 using ::bioseq::minimizers::MinimizerKernelResult;
 using ::bioseq::minimizers::MinimizerKernelStatus;
 using ::bioseq::minimizers::MinimizerSink;
-using ::bioseq::minimizers::PackedSequenceAlphabet;
 using ::bioseq::minimizers::PackedSequenceKernelView;
 
 using ::bioseq::minimizers::minimizer_sink_collector;
@@ -535,41 +534,54 @@ template<sequence_alphabet Alphabet, class StorageUnit>
             reset_reference_simd_minimizer_test_receipt();
 #endif
 #if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-            collect_reference_scalable_storage_fallback(
-                collector,
-                range,
-                invocation.window,
-                invocation.kmer);
-#ifdef BIOSEQ_TEST_INDEXES
-            reference_simd_minimizer_test_receipt.kernel_calls = 1u;
-            reference_simd_minimizer_test_receipt.last_storage_unit_bytes =
-                sizeof(StorageUnit);
-            reference_simd_minimizer_test_receipt.
-                scalable_storage_fallback_calls = 1u;
-            reference_simd_minimizer_test_receipt.
-                scalable_storage_fallback_input_symbols = range.bp_size();
-#endif
+            constexpr bool use_exact_storage_fallback = true;
 #else
-            if (invocation.window == 10u && invocation.kmer == 15u) {
-                collect_minimizers_simd_constexpr<
-                    10u, 15u, minimap_int_hasher, MinimapSketchData>(
-                        collector, range, range.begin(), range.end());
-            } else {
-                collect_minimizers_simd<
-                    minimap_int_hasher, MinimapSketchData>(
-                        collector, range, range.begin(), range.end(),
-                    invocation.window, invocation.kmer);
-            }
+            // The legacy SIMD minimap-int hasher consumes dna5 ranks directly,
+            // and its rolling lane cannot hold K=15 in u8/u16 storage. The
+            // canonical scalar collector normalizes A/C/G/T to nt4, resets at
+            // N, and hashes in a wide scalar state. Keep those topology cases
+            // exact until target-native implementations provide those same
+            // semantics.
+            constexpr bool use_exact_storage_fallback =
+                std::same_as<Alphabet, seq::dna5>
+                || sizeof(StorageUnit) < sizeof(std::uint32_t);
 #endif
+            if constexpr (use_exact_storage_fallback) {
+                collect_reference_scalable_storage_fallback(
+                    collector,
+                    range,
+                    invocation.window,
+                    invocation.kmer);
+#ifdef BIOSEQ_TEST_INDEXES
+                reference_simd_minimizer_test_receipt.kernel_calls = 1u;
+                reference_simd_minimizer_test_receipt.last_storage_unit_bytes =
+                    sizeof(StorageUnit);
+                reference_simd_minimizer_test_receipt.
+                    scalable_storage_fallback_calls = 1u;
+                reference_simd_minimizer_test_receipt.
+                    scalable_storage_fallback_input_symbols = range.bp_size();
+#endif
+            } else {
+                if (invocation.window == 10u && invocation.kmer == 15u) {
+                    collect_minimizers_simd_constexpr<
+                        10u, 15u, minimap_int_hasher, MinimapSketchData>(
+                            collector, range, range.begin(), range.end());
+                } else {
+                    collect_minimizers_simd<
+                        minimap_int_hasher, MinimapSketchData>(
+                            collector, range, range.begin(), range.end(),
+                        invocation.window, invocation.kmer);
+                }
+            }
 
             const bool flushed = collector.flush();
             result.emitted = collector.committed_size();
 #ifdef BIOSEQ_TEST_INDEXES
-#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-            reference_simd_minimizer_test_receipt.
-                scalable_storage_fallback_minimizers_emitted =
-                    result.emitted;
-#endif
+            if constexpr (use_exact_storage_fallback) {
+                reference_simd_minimizer_test_receipt.
+                    scalable_storage_fallback_minimizers_emitted =
+                        result.emitted;
+            }
             const auto receipt =
                 reference_simd_minimizer_test_receipt_snapshot();
             result.proof.reference = {
@@ -589,14 +601,14 @@ template<sequence_alphabet Alphabet, class StorageUnit>
             result.proof.reference.kernel_calls = 1u;
             result.proof.reference.last_storage_unit_bytes =
                 sizeof(StorageUnit);
-#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-            result.proof.reference.scalable_storage_fallback_calls = 1u;
-            result.proof.reference.
-                scalable_storage_fallback_input_symbols = range.bp_size();
-            result.proof.reference.
-                scalable_storage_fallback_minimizers_emitted =
-                    result.emitted;
-#endif
+            if constexpr (use_exact_storage_fallback) {
+                result.proof.reference.scalable_storage_fallback_calls = 1u;
+                result.proof.reference.
+                    scalable_storage_fallback_input_symbols = range.bp_size();
+                result.proof.reference.
+                    scalable_storage_fallback_minimizers_emitted =
+                        result.emitted;
+            }
 #endif
             if (!flushed || !collector.ok()) {
                 result.status = MinimizerKernelStatus::sink_rejected;
@@ -605,26 +617,25 @@ template<sequence_alphabet Alphabet, class StorageUnit>
         });
 }
 
-template<sequence_alphabet Alphabet>
-[[nodiscard]] bool dispatch_reference_storage(
-    MinimizerKernelInvocation& invocation,
-    MinimizerKernelResult& result)
-{
-    switch (invocation.sequence.storage_unit_bytes) {
-        case 4u:
-            return run_reference<Alphabet, std::uint32_t>(
-                invocation, result);
-        case 8u:
-            return run_reference<Alphabet, std::uint64_t>(
-                invocation, result);
-        default:
-            return false;
-    }
-}
-
 } // namespace minimizer_kernel_detail
 
-[[nodiscard]] inline MinimizerKernelResult reference_minimap_int(
+/**
+ * One topology-materialized reference-minimizer case.
+ *
+ * Alphabet and storage width are selected by the generated target binder from
+ * the scheduler-owned template-flatten topology.  Keeping this leaf typed
+ * removes the second hand-maintained runtime alphabet/width registry while the
+ * neutral table retains its single concrete function pointer.
+ */
+template<sequence_alphabet Alphabet, class StorageUnit>
+requires (
+    (std::same_as<Alphabet, seq::dna4>
+        || std::same_as<Alphabet, seq::dna5>)
+    && (std::same_as<StorageUnit, std::uint8_t>
+        || std::same_as<StorageUnit, std::uint16_t>
+        || std::same_as<StorageUnit, std::uint32_t>
+        || std::same_as<StorageUnit, std::uint64_t>))
+[[nodiscard]] inline MinimizerKernelResult reference_minimap_int_case(
     MinimizerKernelInvocation& invocation)
 {
     MinimizerKernelResult result{};
@@ -650,23 +661,16 @@ template<sequence_alphabet Alphabet>
         return result;
     }
 
-    bool accepted = false;
-    switch (static_cast<PackedSequenceAlphabet>(
-        invocation.sequence.alphabet_code)) {
-        case PackedSequenceAlphabet::dna4:
-            accepted =
-                minimizer_kernel_detail::dispatch_reference_storage<seq::dna4>(
-                    invocation, result);
-            break;
-        case PackedSequenceAlphabet::dna5:
-            result.status = MinimizerKernelStatus::invalid_configuration;
-            break;
-    }
+    const bool accepted = minimizer_kernel_detail::run_reference<
+        Alphabet, StorageUnit>(invocation, result);
     if (!accepted && result.status == MinimizerKernelStatus::ok) {
         result.status = MinimizerKernelStatus::invalid_sequence_view;
     }
     return result;
 }
+
+static_assert(
+    ::bioseq::simd::supports_scalar_hash<minimap_int_hasher, seq::dna5>);
 
 } // namespace target
 } // namespace bioseq::simd

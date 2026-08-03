@@ -4932,8 +4932,8 @@ TEST_CASE("inactive format-4 MPS canonicalizes periodic Paper ties within admiss
     require_complete_generation_rows(*encoded, sink.rows);
 }
 
-TEST_CASE("inactive format-4 MPS Paper rejects DNA5 without fallback",
-          "[indexing][minimizer-hashmap][wire][encoder][mps][paper][fail-closed]") {
+TEST_CASE("format-4 MPS Paper admits DNA5 and preserves the explicit N-reset fallback",
+          "[indexing][minimizer-hashmap][wire][encoder][mps][paper][dna5]") {
     using namespace bioseq::indexing;
     constexpr std::size_t fragment_units = 64;
     constexpr std::uint64_t fragment_bp = fragment_units * 21u;
@@ -4953,36 +4953,28 @@ TEST_CASE("inactive format-4 MPS Paper rejects DNA5 without fallback",
     const std::uint64_t admission_before =
         bioseq::parallelism::MemoryAdmissionController::instance()
             .reserved_bytes();
-    bool rejected = false;
-    try {
-        (void)MpsIndex::spill_generation_replay_runs_serial(
-            storage,
-            lazy_view,
-            MinimizerSketchBackend::PaperNtHashSimd,
-            fixed_minimizer_kernels(),
-            fragment_bp,
-            kMinimizerPreferredSegmentSpanBp,
-            &evidence);
-    } catch (const PackedPaperNthashIndexRuntimeError& error) {
-        rejected = true;
-        REQUIRE(error.status()
-            == PackedPaperNthashIndexStatus::unsupported_alphabet);
-        REQUIRE(std::string_view{error.what()}.contains(
-            "minimizers_per_sequence build"));
-    }
-    REQUIRE(rejected);
-    REQUIRE_FALSE(evidence.spill_complete);
-    REQUIRE_FALSE(evidence.spill_accepted());
+    auto spill = MpsIndex::spill_generation_replay_runs_serial(
+        storage,
+        lazy_view,
+        MinimizerSketchBackend::PaperNtHashSimd,
+        fixed_minimizer_kernels(),
+        fragment_bp,
+        kMinimizerPreferredSegmentSpanBp,
+        &evidence);
+    REQUIRE(spill.has_value());
+    REQUIRE(evidence.spill_complete);
+    REQUIRE(evidence.spill_accepted());
     REQUIRE(evidence.scalar_core_runs == 0);
     REQUIRE(evidence.exact_simd_core_runs == 0);
-    REQUIRE(evidence.paper_nthash_core_runs == 1);
+    REQUIRE(evidence.paper_nthash_core_runs > 0);
     REQUIRE(evidence.vulkan_core_runs == 0);
     REQUIRE(evidence.packed_paper_proof_present);
     REQUIRE(evidence.packed_paper_status
-        == PackedPaperNthashIndexStatus::unsupported_alphabet);
-    REQUIRE(evidence.packed_paper_proof.fail_closed_rejections == 1);
-    REQUIRE(evidence.packed_paper_proof.fallback_calls == 0);
-    REQUIRE(storage.segment_spill_run_count() == 0);
+        == PackedPaperNthashIndexStatus::ok);
+    REQUIRE(evidence.packed_paper_proof.accepted(true));
+    REQUIRE(evidence.packed_paper_proof.fail_closed_rejections == 0);
+    REQUIRE(evidence.packed_paper_proof.fallback_calls > 0);
+    REQUIRE(storage.segment_spill_run_count() > 0);
     REQUIRE(bioseq::parallelism::MemoryAdmissionController::instance()
         .reserved_bytes() == admission_before);
 }
@@ -5306,7 +5298,7 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
     using namespace bioseq::indexing;
     using Index = MinimizersPerFragmentIndex<FakeFragmentStorage<>>;
 
-    SECTION("DNA5 is not silently normalized to the Paper DNA4 kernel") {
+    SECTION("DNA5 executes the ambiguity-aware Paper topology case") {
         using chunked = sequence_scanner_test_chunked<std::uint64_t, 64>;
         std::vector<seq::dna5> data(4096);
         for (std::size_t index = 0; index < data.size(); ++index) {
@@ -5330,24 +5322,19 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
         const std::uint64_t admission_before =
             bioseq::parallelism::MemoryAdmissionController::instance()
                 .reserved_bytes();
-        bool rejected = false;
-        try {
-            (void)encode_minimizer_generation(producer, sink, options);
-        } catch (const PackedPaperNthashIndexRuntimeError& error) {
-            rejected = true;
-            REQUIRE(error.status()
-                == PackedPaperNthashIndexStatus::unsupported_alphabet);
-            REQUIRE(std::string_view{error.what()}.contains(
-                "MPF generation replay"));
-        }
-        REQUIRE(rejected);
-        REQUIRE(sink.rows.empty());
-        REQUIRE(producer.scan_count() == 1u);
+        const auto encoded = encode_minimizer_generation(
+            producer, sink, options);
+        REQUIRE(encoded.has_value());
+        REQUIRE_FALSE(sink.rows.empty());
+        REQUIRE(producer.scan_count() == 2u);
         REQUIRE(producer.packed_paper_proof_present());
         REQUIRE(producer.packed_paper_status()
-            == PackedPaperNthashIndexStatus::unsupported_alphabet);
-        REQUIRE(producer.packed_paper_proof().fail_closed_rejections == 1);
+            == PackedPaperNthashIndexStatus::ok);
+        REQUIRE(producer.packed_paper_proof().accepted(true));
+        REQUIRE(producer.packed_paper_proof().fallback_calls > 0u);
+        REQUIRE(producer.packed_paper_proof().fail_closed_rejections == 0);
         REQUIRE_FALSE(producer.exact_simd_proof_present());
+        require_complete_generation_rows(*encoded, sink.rows);
         REQUIRE(bioseq::parallelism::MemoryAdmissionController::instance()
             .reserved_bytes() == admission_before);
     }
