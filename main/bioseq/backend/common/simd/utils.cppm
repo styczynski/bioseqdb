@@ -37,6 +37,21 @@ inline constexpr std::vector<T> extract_lanes(
     return extract_lanes<T>(d, hn::VecFromMask(d, input));
 }
 
+template <class D, typename T, class VecT = hn::Vec<D>>
+std::vector<T> hwy_to_vector(D& d, const VecT& value) {
+    const size_t lane_count = hn::Lanes(d);
+#if HWY_TARGET == HWY_RVV
+    auto storage = hn::AllocateAligned<T>(lane_count);
+    T* HWY_RESTRICT lanes = storage.get();
+#else
+    // This works around an SVE compile error on GCC 11 and 12. Calling
+    // AllocateAligned here would seem to require it be marked with HWY_ATTR.
+    HWY_ALIGN T lanes[hn::MaxLanes(d)];
+#endif
+    hn::Store(value, d, lanes);
+    return std::vector<T>(lanes, lanes + lane_count);
+}
+
 template <typename T, typename InfoT, typename I = void>
 struct hwy_vector_string_printer {
     static inline std::string format_block(
