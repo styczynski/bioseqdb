@@ -4133,8 +4133,9 @@ add_dependencies(postgresql_bioseq
   "${BIOSEQ_TYPED_GENERATION_TARGET}")
 
 # Generated target primaries are the only exported providers. Their private
-# binder/algorithm partitions and the dispatch-processor registry are ordinary
-# module implementation units, all owned exactly once by the extension DSO.
+# binder implementation units and cold inventory are ordinary private sources.
+# Algorithm partitions and the dispatch-processor registry are named module
+# partition providers, so CMake must own them through a CXX_MODULES file set.
 set_source_files_properties(
   ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES}
   ${BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS}
@@ -4143,20 +4144,19 @@ set_source_files_properties(
   PROPERTIES GENERATED TRUE)
 set_source_files_properties(
   ${BIOSEQ_HIGHWAY_GENERATED_TARGET_BINDERS}
-  "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
   "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PROPERTIES COMPILE_OPTIONS "-x;c++")
 target_sources(postgresql_bioseq
   PRIVATE
     ${BIOSEQ_HIGHWAY_GENERATED_TARGET_BINDERS}
-    "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}"
     "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY}"
   PRIVATE FILE_SET bioseq_highway_generated_primaries
     TYPE CXX_MODULES
     BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
     FILES
       ${BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES}
-      ${BIOSEQ_HIGHWAY_GENERATED_TARGET_PARTITIONS})
+      ${BIOSEQ_HIGHWAY_GENERATED_TARGET_PARTITIONS}
+      "${BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY}")
 target_link_libraries(postgresql_bioseq PRIVATE
   bioseq_highway_target_policy)
 target_link_libraries(bioseq_modules_nopg PRIVATE
