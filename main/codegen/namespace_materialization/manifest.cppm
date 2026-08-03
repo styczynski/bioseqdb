@@ -14,6 +14,7 @@ module;
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -423,7 +424,8 @@ inline void validate_plan_identity(const generation_plan& plan) {
 
     if (plan.frontend_actions.dependency_preparation_validations != 1u
         || plan.frontend_actions.canonical_token_slice_scans != 2u
-        || plan.frontend_actions.signature_donor_token_slice_scans != 1u
+        || plan.frontend_actions.signature_donor_token_slice_scans
+            != 1u + plan.declaration_probes.size()
         || plan.frontend_actions.body_free_declaration_probe_scans
             != plan.declaration_probes.size()
         || plan.frontend_actions.artifact_render_passes != 2u
@@ -1254,6 +1256,18 @@ inline void validate_template_flatten_publication_manifest(
             std::string_view{"body_bearing_compiler_invocations"},
         },
         "template_flatten evidence frontend_action_ledger");
+    const std::uint64_t body_free_probe_count = require_unsigned(
+        require_member(
+            frontend_actions,
+            "body_free_declaration_probe_scans",
+            owner),
+        "frontend_action_ledger.body_free_declaration_probe_scans");
+    const std::uint64_t signature_donor_slice_count = require_unsigned(
+        require_member(
+            frontend_actions,
+            "signature_donor_token_slice_scans",
+            owner),
+        "frontend_action_ledger.signature_donor_token_slice_scans");
     if (require_unsigned(
             require_member(
                 frontend_actions,
@@ -1266,13 +1280,7 @@ inline void validate_template_flatten_publication_manifest(
                    frontend_actions, "canonical_token_slice_scans", owner),
                "frontend_action_ledger.canonical_token_slice_scans")
             != 2u
-        || require_unsigned(
-               require_member(
-                   frontend_actions,
-                   "signature_donor_token_slice_scans",
-                   owner),
-               "frontend_action_ledger.signature_donor_token_slice_scans")
-            != 1u
+        || signature_donor_slice_count != 1u + body_free_probe_count
         || require_unsigned(
                require_member(
                    frontend_actions, "artifact_render_passes", owner),
@@ -1288,16 +1296,11 @@ inline void validate_template_flatten_publication_manifest(
         throw std::runtime_error(
             std::string{owner}
             + ": frontend ledger must record one preparation validation, "
-              "two canonical and one signature-donor token slices, two "
+              "two canonical token slices, one signature-donor slice per "
+              "probe plus dependency derivation, two "
               "render passes, and zero observed "
               "body-bearing compiler invocations");
     }
-    const std::uint64_t body_free_probe_count = require_unsigned(
-        require_member(
-            frontend_actions,
-            "body_free_declaration_probe_scans",
-            owner),
-        "frontend_action_ledger.body_free_declaration_probe_scans");
 
     const json_value& obligations = require_member(
         root, "cmake_compilation_obligations", owner);
@@ -1361,6 +1364,8 @@ inline void validate_template_flatten_publication_manifest(
             std::string{owner}
             + ": declaration probes disagree with the frontend action count");
     }
+    std::set<std::tuple<std::string, std::string, std::string>>
+        unmatched_probe_evidence;
     for (const json_value& probe : probes.children) {
         require_exact_members(
             probe,
@@ -1372,18 +1377,18 @@ inline void validate_template_flatten_publication_manifest(
                 std::string_view{"declarations"},
             },
             "template_flatten evidence declaration probe");
-        static_cast<void>(checked_relative_path(
+        const std::string probe_source = checked_relative_path(
             fs::path{require_string(
                 require_member(probe, "source", owner), "probe.source")},
-            "template_flatten evidence declaration probe source"));
-        require_sha256(
-            require_string(
-                require_member(probe, "source_sha256", owner),
-                "probe.source_sha256"),
-            "probe.source_sha256");
-        if (require_string(
-                require_member(probe, "module", owner), "probe.module")
-                .empty()
+            "template_flatten evidence declaration probe source")
+                                             .generic_string();
+        const std::string probe_sha256{require_string(
+            require_member(probe, "source_sha256", owner),
+            "probe.source_sha256")};
+        require_sha256(probe_sha256, "probe.source_sha256");
+        const std::string probe_module{require_string(
+            require_member(probe, "module", owner), "probe.module")};
+        if (probe_module.empty()
             || require_string(
                    require_member(probe, "clang_version", owner),
                    "probe.clang_version")
@@ -1391,6 +1396,12 @@ inline void validate_template_flatten_publication_manifest(
             throw std::runtime_error(
                 std::string{owner}
                 + ": declaration probe module and Clang version are required");
+        }
+        if (!unmatched_probe_evidence.emplace(
+                 probe_source, probe_module, probe_sha256).second) {
+            throw std::runtime_error(
+                std::string{owner}
+                + ": declaration probe evidence must bind unique artifacts");
         }
         const json_value& declarations = require_member(
             probe, "declarations", owner);
@@ -1547,11 +1558,22 @@ inline void validate_template_flatten_publication_manifest(
                 std::string{owner}
                 + ": artifact kind disagrees with its validation class");
         }
+        if (kind == "declaration_probe"
+            && unmatched_probe_evidence.erase(std::tuple{
+                   path_text,
+                   std::string{module},
+                   publication.artifacts[index].content_sha256})
+                != 1u) {
+            throw std::runtime_error(
+                std::string{owner}
+                + ": declaration probe evidence does not bind its exact "
+                  "artifact path, module, and digest");
+        }
     }
     if (api_partition_count != 1u || selector_partition_count != 1u
         || declaration_probe_count != body_free_probe_count
         || implementation_unit_count != body_bearing_obligation_count
-        || manifest_count != 1u) {
+        || manifest_count != 1u || !unmatched_probe_evidence.empty()) {
         throw std::runtime_error(
             std::string{owner}
             + ": rendered artifacts disagree with distinct CMake "
@@ -2711,6 +2733,7 @@ render_publication_manifest(const publication_manifest_request& request) {
             }
         }
     }
+    std::set<const materialization_artifact*> matched_probe_artifacts;
     for (const clang_structural::translation_unit& probe :
          plan.declaration_probes) {
         const std::filesystem::path probe_source = detail::path_beneath_root(
@@ -2719,12 +2742,15 @@ render_publication_manifest(const publication_manifest_request& request) {
             "declaration probe source");
         const auto artifact = std::ranges::find_if(
             ordered,
-            [&probe](const materialization_artifact* candidate) {
+            [&probe, &probe_source, &matched_probe_artifacts](
+                const materialization_artifact* candidate) {
                 return candidate->artifact_kind
                         == materialization_artifact::kind::declaration_probe
+                    && candidate->relative_path == probe_source
                     && candidate->module_name
                         == probe.source_module.provided_module
-                    && sha256_hex(candidate->content) == probe.source_sha256;
+                    && sha256_hex(candidate->content) == probe.source_sha256
+                    && !matched_probe_artifacts.contains(candidate);
             });
         if (artifact == ordered.end()) {
             throw std::runtime_error(
@@ -2732,6 +2758,18 @@ render_publication_manifest(const publication_manifest_request& request) {
                 "rendered artifact: "
                 + probe_source.string());
         }
+        matched_probe_artifacts.insert(*artifact);
+    }
+    if (matched_probe_artifacts.size()
+        != std::ranges::count_if(
+            ordered,
+            [](const materialization_artifact* artifact) {
+                return artifact->artifact_kind
+                    == materialization_artifact::kind::declaration_probe;
+            })) {
+        throw std::runtime_error(
+            "body-free declaration probe evidence must bijectively cover its "
+            "rendered artifacts");
     }
 
     std::ostringstream evidence;

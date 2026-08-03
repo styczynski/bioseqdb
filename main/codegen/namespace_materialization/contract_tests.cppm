@@ -57,6 +57,19 @@ inline void require_rejected(Callable&& callable, std::string_view message) {
     return source;
 }
 
+[[nodiscard]] inline std::size_t occurrences(
+    std::string_view source,
+    std::string_view needle) noexcept {
+    std::size_t count = 0u;
+    std::size_t position = 0u;
+    while ((position = source.find(needle, position))
+           != std::string_view::npos) {
+        ++count;
+        position += needle.size();
+    }
+    return count;
+}
+
 [[nodiscard]] inline std::string normalized_token_digest(
     std::string_view source) {
     const clang_structural::translation_unit unit =
@@ -84,30 +97,35 @@ inline void require_rejected(Callable&& callable, std::string_view message) {
 }
 
 [[nodiscard]] inline std::filesystem::path production_scheduler_source() {
+#ifndef BIOSEQ_NAMESPACE_MATERIALIZATION_TEST_REPOSITORY_ROOT
+    throw std::runtime_error(
+        "namespace-materialization production contracts require the configured "
+        "BIOSEQ_REPOSITORY_ROOT");
+#else
     std::error_code error;
-    std::filesystem::path current = std::filesystem::path{__FILE__};
-    if (!current.is_absolute()) {
-        current = std::filesystem::absolute(current, error);
-        if (error) {
-            throw std::runtime_error(
-                "cannot resolve namespace-materialization contract source path");
-        }
-    }
-    current = std::filesystem::weakly_canonical(current, error);
-    if (error) {
+    const std::filesystem::path configured_root{
+        BIOSEQ_NAMESPACE_MATERIALIZATION_TEST_REPOSITORY_ROOT};
+    if (!configured_root.is_absolute()) {
         throw std::runtime_error(
-            "cannot canonicalize namespace-materialization contract source path");
+            "configured namespace-materialization repository root is not absolute");
     }
-    const std::filesystem::path main_root =
-        current.parent_path().parent_path().parent_path();
-    const std::filesystem::path scheduler = main_root
-        / "bioseq/backend/pg/scheduler/dispatch_processor_typed_template.cppm";
+    const std::filesystem::path repository_root =
+        std::filesystem::weakly_canonical(configured_root, error);
+    if (error || repository_root != configured_root
+        || !std::filesystem::is_directory(repository_root, error) || error) {
+        throw std::runtime_error(
+            "configured namespace-materialization repository root is not its "
+            "canonical directory identity");
+    }
+    const std::filesystem::path scheduler = repository_root
+        / "main/bioseq/backend/pg/scheduler/dispatch_processor_typed_template.cppm";
     if (!std::filesystem::is_regular_file(scheduler, error) || error) {
         throw std::runtime_error(
             "production scheduler materialization source is unavailable: "
             + scheduler.string());
     }
     return std::filesystem::weakly_canonical(scheduler);
+#endif
 }
 
 [[nodiscard]] inline std::vector<std::uint32_t> enabled_ordinals(
@@ -315,7 +333,8 @@ inline void attach_fixture_frontend_evidence(generation_plan& plan) {
     plan.frontend_actions = frontend_action_ledger{
         .dependency_preparation_validations = 1u,
         .canonical_token_slice_scans = 2u,
-        .signature_donor_token_slice_scans = 1u,
+        .signature_donor_token_slice_scans = 1u
+            + static_cast<std::uint32_t>(plan.declaration_probes.size()),
         .body_free_declaration_probe_scans =
             static_cast<std::uint32_t>(plan.declaration_probes.size()),
         .artifact_render_passes = 2u,
@@ -621,6 +640,18 @@ inline void verify_scheduler_profile_policy() {
         "profile 1 rejects newly added alphabet labels until policy is updated");
 }
 
+inline constexpr std::array<std::string_view, 8u>
+    scheduler_identity_namespaces{
+        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w1",
+        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w2",
+        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w4",
+        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w8",
+        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w1",
+        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w2",
+        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w4",
+        "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna5::width_w8",
+    };
+
 inline void verify_production_scheduler_golden() {
     generation_plan plan = production_scheduler_plan();
     require(
@@ -700,7 +731,9 @@ inline void verify_production_scheduler_golden() {
                         std::string_view{"inmemory_segmented"},
                         std::string_view{"inmemory_chunked"},
                         std::string_view{"inmemory_chunked_segmented"},
-                    }[shape],
+                    }[shape]
+                && coordinate.identity_namespace
+                    == scheduler_identity_namespaces[alphabet * 4u + width],
             "production scheduler coordinate order drifted");
     }
     require(
@@ -850,6 +883,7 @@ inline void verify_production_declaration_heads_and_probes() {
         "full scheduler rendering must own API, selector, eight probes, and 56 units");
 
     const materialization_artifact* api = nullptr;
+    const materialization_artifact* selector = nullptr;
     std::map<std::uint32_t, const materialization_artifact*> implementations;
     std::size_t probe_count = 0u;
     std::set<std::uint32_t> probe_representatives;
@@ -858,6 +892,12 @@ inline void verify_production_declaration_heads_and_probes() {
             == materialization_artifact::kind::api_partition) {
             require(api == nullptr, "scheduler rendering repeated its API partition");
             api = &artifact;
+        } else if (artifact.artifact_kind
+                   == materialization_artifact::kind::selector_partition) {
+            require(
+                selector == nullptr,
+                "scheduler rendering repeated its selector partition");
+            selector = &artifact;
         } else if (artifact.artifact_kind
                    == materialization_artifact::kind::implementation_unit) {
             require(
@@ -879,7 +919,8 @@ inline void verify_production_declaration_heads_and_probes() {
         }
     }
     require(
-        api != nullptr && implementations.size() == 56u && probe_count == 8u
+        api != nullptr && selector != nullptr
+            && implementations.size() == 56u && probe_count == 8u
             && probe_representatives
                 == std::set<std::uint32_t>{
                     0u, 7u, 14u, 21u, 28u, 35u, 42u, 49u},
@@ -906,41 +947,46 @@ inline void verify_production_declaration_heads_and_probes() {
             normalized_token_digest(source_head) == expected_digest,
             "authored scheduler declaration-head digest drifted");
 
-        std::size_t api_matches = 0u;
+        std::set<std::string, std::less<>> api_qualified_names;
         for (const clang_structural::declaration_record& declaration :
              api_unit.declarations) {
             if (declaration.name != name) continue;
-            ++api_matches;
+            require(
+                api_qualified_names.insert(declaration.qualified_name).second,
+                "generated API repeated a qualified entry declaration");
             require(
                 declaration_head_digest(api->content, declaration)
                     == expected_digest,
                 "generated API declaration-head digest drifted");
         }
+        std::set<std::string, std::less<>> expected_qualified_names;
+        for (const std::string_view identity : scheduler_identity_namespaces) {
+            expected_qualified_names.emplace(
+                std::string{identity} + "::" + std::string{name});
+        }
         require(
-            api_matches == 8u,
-            "generated API must repeat each exact entry head once per identity");
+            api_qualified_names == expected_qualified_names,
+            "generated API must own each exact entry head in all eight identities");
+    }
 
-        const std::uint32_t coordinate =
-            source_entry->clauses.front().accepted_case_labels.front() == "root"
-            ? 0u
-            : source_entry->clauses.front().accepted_case_labels.front()
-                    == "scanner_pg"
-                ? 1u
-                : source_entry->clauses.front().accepted_case_labels.front()
-                        == "inmemory"
-                    ? 2u
-                    : source_entry->clauses.front().accepted_case_labels.front()
-                            == "inmemory_standard"
-                        ? 3u
-                        : source_entry->clauses.front().accepted_case_labels.front()
-                                == "inmemory_segmented"
-                            ? 4u
-                            : source_entry->clauses.front().accepted_case_labels.front()
-                                    == "inmemory_chunked"
-                                ? 5u
-                                : 6u;
+    constexpr std::array<std::size_t, 7u> head_index_by_shape{
+        6u, 0u, 1u, 2u, 3u, 4u, 5u};
+    for (const materialization_coordinate& coordinate :
+         plan.topology.coordinates) {
+        const std::size_t identity_index = coordinate.ordinal / 7u;
+        const std::size_t shape_index = coordinate.ordinal % 7u;
+        const std::string_view identity =
+            scheduler_identity_namespaces.at(identity_index);
+        const auto& [name, expected_digest] =
+            expected_heads.at(head_index_by_shape.at(shape_index));
         const materialization_artifact& implementation =
-            *implementations.at(coordinate);
+            *implementations.at(coordinate.ordinal);
+        require(
+            occurrences(
+                implementation.content,
+                "namespace " + std::string{identity} + " {")
+                == 1u,
+            "each scheduler implementation must own its exact identity namespace");
         const clang_structural::translation_unit implementation_unit =
             clang_structural::scan_token_slice(
                 implementation.relative_path, implementation.content);
@@ -951,12 +997,36 @@ inline void verify_production_declaration_heads_and_probes() {
             ++definition_matches;
             require(
                 declaration_head_digest(implementation.content, declaration)
-                    == expected_digest,
+                        == expected_digest
+                    && declaration.qualified_name
+                        == std::string{identity} + "::" + std::string{name},
                 "generated implementation declaration-head digest drifted");
         }
         require(
             definition_matches == 1u,
             "generated shard must own exactly one selected entry definition");
+    }
+
+    require(
+        occurrences(selector->content, "switch (alphabet_code)") == 1u
+            && occurrences(
+                   selector->content,
+                   "switch (storage_unit_byte_width)")
+                == 2u
+            && occurrences(selector->content, "        case 0: {") == 1u
+            && occurrences(selector->content, "        case 1: {") == 1u
+            && occurrences(selector->content, "                case 1: {") == 2u
+            && occurrences(selector->content, "                case 2: {") == 2u
+            && occurrences(selector->content, "                case 4: {") == 2u
+            && occurrences(selector->content, "                case 8: {") == 2u,
+        "scheduler selector must route the exact two-by-four identity switch");
+    for (const std::string_view identity : scheduler_identity_namespaces) {
+        require(
+            occurrences(
+                selector->content,
+                "return ::" + std::string{identity} + "::process_sequences(")
+                == 1u,
+            "scheduler selector must route exactly once to every identity root");
     }
 }
 
@@ -1068,11 +1138,11 @@ inline void verify_template_flatten_manifest_evidence() {
     require(
         generated.manifest_identity.size() == 64u
             && generated.artifact_manifest_json.contains(
-                "\"schema_version\": 2")
+                "\"schema_version\": 3")
             && generated.artifact_manifest_json.contains(
                 "\"canonical_token_slice_scans\":2")
             && generated.artifact_manifest_json.contains(
-                "\"signature_donor_token_slice_scans\":1")
+                "\"signature_donor_token_slice_scans\":3")
             && generated.artifact_manifest_json.contains(
                 "\"body_free_declaration_probe_scans\":2")
             && generated.artifact_manifest_json.contains(
@@ -1092,6 +1162,12 @@ inline void verify_template_flatten_manifest_evidence() {
     require_rejected(
         [&] { static_cast<void>(render_generation(false_action)); },
         "template-flatten manifest binds probe scans to probe evidence");
+    generation_plan duplicate_probe = plan;
+    duplicate_probe.declaration_probes.back() =
+        duplicate_probe.declaration_probes.front();
+    require_rejected(
+        [&] { static_cast<void>(render_generation(duplicate_probe)); },
+        "template-flatten manifest binds each probe to one exact artifact");
     generation_plan false_obligation = plan;
     false_obligation.compilation_obligations
         .body_bearing_implementation_units = 3u;

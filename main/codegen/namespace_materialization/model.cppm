@@ -16,7 +16,7 @@ import bioseq.codegen.clang_structural;
 export namespace bioseq::codegen::namespace_materialization {
 
 inline constexpr std::uint32_t topology_schema_version = 1;
-inline constexpr std::uint32_t artifact_schema_version = 2;
+inline constexpr std::uint32_t artifact_schema_version = 3;
 inline constexpr std::uint32_t publication_schema_version = 1;
 inline constexpr std::string_view generator_version =
     "bioseq-namespace-materialization-v1";

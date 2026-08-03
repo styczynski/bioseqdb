@@ -478,8 +478,10 @@ inline void validate_configure_handshake(
         // One direct structural extraction plus the canonical-source scan
         // performed while re-deriving dependency authority in this command.
         .canonical_token_slice_scans = 2u,
-        // Dependency-authority derivation also token-scans its signature donor.
-        .signature_donor_token_slice_scans = 1u,
+        // Dependency-authority derivation and every declaration probe each
+        // token-scan the signature donor once.
+        .signature_donor_token_slice_scans = 1u
+            + static_cast<std::uint32_t>(plan.declaration_probes.size()),
         .body_free_declaration_probe_scans =
             static_cast<std::uint32_t>(plan.declaration_probes.size()),
         .artifact_render_passes = artifact_render_passes + 1u,
