@@ -126,6 +126,9 @@ struct callable_insertion {
     std::size_t body_relative_offset{};
     std::string qualified_name;
     std::string kind;
+    std::string lambda_preceding_token;
+    std::string lambda_following_token;
+    std::size_t lambda_following_relative_offset{};
 };
 
 struct extracted_source {

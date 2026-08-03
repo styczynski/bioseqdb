@@ -5093,21 +5093,78 @@ class structural_visitor final
             lambda->getCallOperator();
         const source_range body_range = source_range_of(
             body->getSourceRange(), sources_, language_);
+        const auto direct_main_file_location = [&](clang::SourceLocation location) {
+            if (location.isInvalid() || location.isMacroID()) {
+                return clang::SourceLocation{};
+            }
+            location = sources_.getSpellingLoc(location);
+            return location.isValid() && sources_.isWrittenInMainFile(location)
+                ? location
+                : clang::SourceLocation{};
+        };
+        const clang::SourceLocation lambda_begin =
+            direct_main_file_location(lambda->getBeginLoc());
         clang::SourceLocation declarator_end =
-            sources_.getExpansionLoc(lambda->getIntroducerRange().getEnd());
+            direct_main_file_location(lambda->getIntroducerRange().getEnd());
         if (lambda->hasExplicitParameters() && call_operator != nullptr) {
             const clang::FunctionTypeLoc function_type =
                 call_operator->getFunctionTypeLoc();
             if (!function_type.isNull()) {
-                declarator_end = sources_.getExpansionLoc(
+                declarator_end = direct_main_file_location(
                     function_type.getRParenLoc());
             } else {
                 declarator_end = {};
             }
+        } else if (const clang::TemplateParameterList* parameters =
+                       lambda->getTemplateParameterList()) {
+            clang::SourceLocation template_end = parameters->getRAngleLoc();
+            if (const clang::Expr* requires_clause =
+                    parameters->getRequiresClause()) {
+                template_end = requires_clause->getEndLoc();
+            }
+            declarator_end = direct_main_file_location(template_end);
         }
-        const source_position insertion = declarator_end.isValid()
+        source_position insertion = declarator_end.isValid()
             ? token_range_of(declarator_end, sources_, language_).end
             : source_position{};
+        bool attribute_geometry_valid = true;
+        if (declarator_end.isValid() && !lambda->hasExplicitParameters()) {
+            const auto& tokens = output_.tokens;
+            std::size_t cursor = static_cast<std::size_t>(std::distance(
+                tokens.begin(),
+                std::ranges::lower_bound(
+                    tokens,
+                    insertion.byte_offset,
+                    {},
+                    [](const lexical_token& token) {
+                        return token.range.begin.byte_offset;
+                    })));
+            while (cursor < tokens.size()
+                   && tokens[cursor].range.begin.byte_offset
+                       < body_range.begin.byte_offset
+                   && detail::attribute_open(tokens, cursor)) {
+                std::size_t close = cursor + 2u;
+                int nested = 0;
+                for (; close + 1u < tokens.size(); ++close) {
+                    if (detail::attribute_open(tokens, close)) {
+                        ++nested;
+                        ++close;
+                    } else if (detail::attribute_close(tokens, close)) {
+                        if (nested == 0) break;
+                        --nested;
+                        ++close;
+                    }
+                }
+                if (close + 1u >= tokens.size()
+                    || tokens[close + 1u].range.end.byte_offset
+                        > body_range.begin.byte_offset) {
+                    attribute_geometry_valid = false;
+                    break;
+                }
+                insertion = tokens[close + 1u].range.end;
+                cursor = close + 2u;
+            }
+        }
         callable_candidates_.push_back(callable_candidate{
             .record = {
                 .kind = callable_kind::lambda,
@@ -5122,13 +5179,11 @@ class structural_visitor final
                 .hwy_attr_insertion = insertion,
             },
             .insertion_proven =
-                declarator_end.isValid()
-                    && sources_.isWrittenInMainFile(declarator_end)
+                lambda_begin.isValid()
+                    && declarator_end.isValid()
+                    && attribute_geometry_valid
                     && insertion.byte_offset
-                        >= source_position_of(
-                               sources_.getExpansionLoc(lambda->getBeginLoc()),
-                               sources_)
-                               .byte_offset
+                        >= source_position_of(lambda_begin, sources_).byte_offset
                     && insertion.byte_offset <= body_range.begin.byte_offset
                     && body_range.begin.byte_offset
                         < body_range.end.byte_offset,

@@ -590,6 +590,9 @@ inline void verify_lambda_attribute_order() {
         .body_relative_offset = source.body.find(')') + 1u,
         .qualified_name = "bioseq::fixture::target::<lambda>",
         .kind = "lambda",
+        .lambda_preceding_token = ")",
+        .lambda_following_token = "constexpr",
+        .lambda_following_relative_offset = source.body.find("constexpr"),
     });
     const std::string rendered = detail::body_with_highway_attributes(source);
     require(

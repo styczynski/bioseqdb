@@ -116,6 +116,27 @@ namespace detail {
                 + ": stale HWY_ATTR insertion geometry while rendering");
         }
         if (lambda) {
+            const bool valid_preceding =
+                !callable->lambda_preceding_token.empty()
+                && callable->body_relative_offset
+                    >= callable->lambda_preceding_token.size()
+                && result.compare(
+                    callable->body_relative_offset
+                        - callable->lambda_preceding_token.size(),
+                    callable->lambda_preceding_token.size(),
+                    callable->lambda_preceding_token) == 0;
+            const bool valid_following =
+                !callable->lambda_following_token.empty()
+                && callable->lambda_following_relative_offset < result.size()
+                && result.compare(
+                    callable->lambda_following_relative_offset,
+                    callable->lambda_following_token.size(),
+                    callable->lambda_following_token) == 0;
+            if (!valid_preceding || !valid_following) {
+                throw std::runtime_error(
+                    source.source.path.string()
+                    + ": stale lambda declarator tokens while rendering");
+            }
             std::string attribute{" HWY_ATTR"};
             const unsigned char next = static_cast<unsigned char>(
                 result[callable->body_relative_offset]);

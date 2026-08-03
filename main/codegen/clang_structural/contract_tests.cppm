@@ -976,7 +976,9 @@ struct worker {
 inline int invoke() {
     auto local = []() constexpr [[gnu::always_inline]] -> int { return 3; };
     auto implicit = [] { return 4; };
-    return local() + implicit();
+    auto generic_implicit = []<class Value> { return sizeof(Value); };
+    return local() + implicit()
+        + static_cast<int>(generic_implicit.operator()<int>());
 }
 }
 namespace [[bioseq::similar]] decoy {}
@@ -1045,8 +1047,8 @@ namespace [[bioseq::similar]] decoy {}
         "Clang structural scan returned an empty namespace USR; "
             + clang_callable_inventory);
     require(
-        clang_namespace.callables.size() == 8,
-        "Clang structural scan expected exactly eight source callable "
+        clang_namespace.callables.size() == 9,
+        "Clang structural scan expected exactly nine source callable "
         "definitions; " + clang_callable_inventory);
     require(
         std::ranges::all_of(
@@ -1104,6 +1106,22 @@ namespace [[bioseq::similar]] decoy {}
             }),
         "Clang structural scan did not place the parenthesis-free lambda "
         "HWY_ATTR insertion immediately after its introducer; "
+            + clang_callable_inventory);
+    require(
+        std::ranges::any_of(
+            clang_namespace.callables,
+            [&](const callable_insertion_record& callable) {
+                const std::size_t insertion =
+                    callable.hwy_attr_insertion.byte_offset;
+                return callable.kind == callable_kind::lambda
+                    && insertion > 0u
+                    && simd_marker_source[insertion - 1u] == '>'
+                    && simd_marker_source.substr(
+                        insertion,
+                        std::string_view{" {"}.size()) == " {";
+            }),
+        "Clang structural scan did not place the parenthesis-free generic "
+        "lambda insertion after its complete template head; "
             + clang_callable_inventory);
     for (const auto [kind, description] : {
              std::pair{callable_kind::function, "free function"},
@@ -1171,6 +1189,30 @@ namespace [[bioseq::similar]] decoy {}
         "Clang structural scan did not map a macro-prefixed callable "
         "insertion to the writable expansion site; "
             + clang_callable_inventory);
+
+    require_failure(
+        [&] {
+            constexpr std::string_view source = R"CPP(
+export module fixture.macro_lambda;
+export namespace bioseq::fixture {
+namespace [[bioseq::simd]] target {
+#define FIXTURE_PARAMS(...) (__VA_ARGS__)
+inline int invoke() {
+    auto local = [] FIXTURE_PARAMS(int value) { return value; };
+    return local(3);
+}
+#undef FIXTURE_PARAMS
+}
+}
+)CPP";
+            static_cast<void>(scan_translation_unit_from_code(
+                "macro_lambda.cppm",
+                source,
+                {"-std=c++20", "-xc++"},
+                "macro_lambda_contract"));
+        },
+        "has no proven compound-body attribute insertion point",
+        "macroized lambda declarator rejection");
 
     const configured_toolchain toolchain;
     assert_toolchain_exists(toolchain);

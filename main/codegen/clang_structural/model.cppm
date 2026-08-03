@@ -168,7 +168,8 @@ struct declaration_specifier_facts {
 /// A callable definition inside a structurally marked namespace.  All ranges
 /// are half-open byte ranges.  hwy_attr_insertion is the compiler-proven
 /// declaration-prefix position for functions (after any outer template head)
-/// and the byte immediately before the opening brace for lambdas.
+/// and the legal GNU-attribute slot after a lambda's parameter list, or after
+/// its complete template head/front attributes when parentheses are omitted.
 struct callable_insertion_record {
     callable_kind kind{callable_kind::function};
     std::string qualified_name;

@@ -1012,10 +1012,33 @@ inline void validate_inventories(
                 callable.hwy_attr_insertion.byte_offset;
             const bool lambda = callable.kind
                 == clang_structural::callable_kind::lambda;
+            const auto preceding_token = std::ranges::find_if(
+                unit.tokens,
+                [&](const clang_structural::lexical_token& token) {
+                    return token.range.end.byte_offset == insertion;
+                });
+            const auto following_token = std::ranges::find_if(
+                unit.tokens,
+                [&](const clang_structural::lexical_token& token) {
+                    return token.range.begin.byte_offset >= insertion;
+                });
+            const bool valid_lambda_suffix = !lambda
+                || (preceding_token != unit.tokens.end()
+                    && following_token != unit.tokens.end()
+                    && following_token->range.begin.byte_offset
+                        <= callable.body_range.begin.byte_offset
+                    && std::ranges::contains(
+                        std::array<std::string_view, 11>{
+                            "{", "mutable", "constexpr", "consteval", "static",
+                            "noexcept", "[", "->", "requires", "__attribute__",
+                            "__declspec",
+                        },
+                        following_token->spelling));
             const bool valid_lambda = !lambda
                 || (insertion
                         >= callable.declaration_range.begin.byte_offset
-                    && insertion <= callable.body_range.begin.byte_offset);
+                    && insertion <= callable.body_range.begin.byte_offset
+                    && valid_lambda_suffix);
             const bool valid_named_callable = lambda
                 || (insertion >= callable.declaration_range.begin.byte_offset
                     && insertion < callable.body_range.begin.byte_offset);
@@ -1030,6 +1053,15 @@ inline void validate_inventories(
                 .body_relative_offset = insertion - body_begin,
                 .qualified_name = callable.qualified_name,
                 .kind = detail::callable_kind_name(callable.kind),
+                .lambda_preceding_token = lambda
+                    ? preceding_token->spelling
+                    : std::string{},
+                .lambda_following_token = lambda
+                    ? following_token->spelling
+                    : std::string{},
+                .lambda_following_relative_offset = lambda
+                    ? following_token->range.begin.byte_offset - body_begin
+                    : 0u,
             });
         }
         std::ranges::sort(
