@@ -497,6 +497,9 @@ class prepare_completion_stamp_guard {
         std::error_code error;
         const std::filesystem::file_status status =
             std::filesystem::symlink_status(stamp_, error);
+        if (error == std::errc::no_such_file_or_directory) {
+            return;
+        }
         if (error) {
             if (strict) {
                 throw std::runtime_error(
