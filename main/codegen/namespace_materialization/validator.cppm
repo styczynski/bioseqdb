@@ -812,6 +812,27 @@ attributes_named(
     return result;
 }
 
+/// Shared configure/structural handshake used by production generation and
+/// mutation contracts. A topology change always requires CMake to rebuild its
+/// source graph; generation never chooses one side of a mismatch.
+inline void validate_configure_topology_digest(
+    const topology_plan& topology,
+    std::string_view configured_digest) {
+    const bool canonical_sha256 = configured_digest.size() == 64u
+        && std::ranges::all_of(configured_digest, [](const char value) {
+               return (value >= '0' && value <= '9')
+                   || (value >= 'a' && value <= 'f');
+           });
+    if (!canonical_sha256
+        || configured_digest != topology.topology_digest) {
+        throw std::runtime_error(
+            "configure-time and structural template_flatten topology "
+            "digests disagree; configured=" + std::string{configured_digest}
+            + ", structural=" + topology.topology_digest
+            + "; reconfigure the build tree");
+    }
+}
+
 inline void validate_enabled_ordinals(
     const topology_plan& topology,
     std::string_view profile,

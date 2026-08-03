@@ -984,14 +984,15 @@ verify_manifest_self_seal(
     static_cast<void>(verify_manifest_self_seal(document, owner));
     std::string projected{document};
     const auto normalize_identity = [&](std::string_view marker,
-                                        const bool allow_empty) {
-        const std::size_t marker_position = projected.find(marker);
-        if (marker_position == std::string::npos
-            || projected.find(marker, marker_position + marker.size())
-                != std::string::npos) {
+                                        const bool allow_empty,
+                                        const bool use_last_occurrence) {
+        const std::size_t marker_position = use_last_occurrence
+            ? projected.rfind(marker)
+            : projected.find(marker);
+        if (marker_position == std::string::npos) {
             throw std::runtime_error(
                 std::string{owner}
-                + ": canonical publication identity field is missing or repeated");
+                + ": canonical publication identity field is missing");
         }
         const std::size_t value_begin = marker_position + marker.size();
         const std::size_t value_end = projected.find('"', value_begin);
@@ -1008,8 +1009,10 @@ verify_manifest_self_seal(
         }
         projected.replace(value_begin, value_size, "<authenticated-identity>");
     };
-    normalize_identity("\"prior_manifest_identity\": \"", true);
-    normalize_identity("\"manifest_identity\": \"", false);
+    normalize_identity(
+        "\n  \"prior_manifest_identity\": \"", true, false);
+    normalize_identity(
+        ",\n  \"manifest_identity\": \"", false, true);
     return projected;
 }
 

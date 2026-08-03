@@ -359,6 +359,8 @@ inline void validate_configure_handshake(
     const configure_topology_provenance& configure,
     std::string_view source_sha256,
     const topology_plan& topology) {
+    validate_configure_topology_digest(
+        topology, command.expected_topology_digest);
     if (configure.generator_version != generator_version
         || configure.policy != template_flatten_policy
         || configure.name != command.name
@@ -369,7 +371,6 @@ inline void validate_configure_handshake(
         || configure.output_module != command.output_module
         || configure.profile != command.profile
         || configure.topology_digest != command.expected_topology_digest
-        || topology.topology_digest != command.expected_topology_digest
         || configure.coordinate_count != topology.coordinates.size()) {
         throw std::runtime_error(
             "configure-time and structural template_flatten topology disagree; "
