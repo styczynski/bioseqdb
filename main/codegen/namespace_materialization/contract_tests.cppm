@@ -1958,6 +1958,7 @@ inline void verify_prepare_authority_revalidation_transaction() {
                                           Mutator&& mutator) {
         preserved_prepare_file preserved{path};
         bool fired = false;
+        std::string rejection_diagnostic;
         {
             scoped_prepare_checkpoint checkpoint{
                 [&](const prepare_publication_checkpoint actual) {
@@ -1966,14 +1967,20 @@ inline void verify_prepare_authority_revalidation_transaction() {
                     }
                     std::invoke(mutator, preserved);
                 }};
-            require_rejected(
-                [&] {
-                    static_cast<void>(
-                        execute_prepare_contract(fixture.command));
-                },
-                contract);
+            try {
+                static_cast<void>(
+                    execute_prepare_contract(fixture.command));
+            } catch (const std::runtime_error& error) {
+                rejection_diagnostic = error.what();
+            }
+            require(
+                !rejection_diagnostic.empty(),
+                std::string{contract} + " mutation was not rejected");
         }
-        require(fired, std::string{contract} + " checkpoint did not fire");
+        require(
+            fired,
+            std::string{contract} + " checkpoint did not fire; earlier "
+                "PREPARE failure: " + rejection_diagnostic);
         require_failed_without_stamp(contract);
         preserved.restore();
         require_clean_retry(contract);
