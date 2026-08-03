@@ -676,11 +676,11 @@ TEST_CASE("DOC0398 BatchJoin attaches executed grouped32 to SeedHitStage",
     constexpr std::string_view query_table =
         "test_explain_highway_grouped32_query";
     constexpr std::string_view query_sequence =
-        "GATCGTACCTAGGCTAACGTTCGATGACCTAGGCTTACGA";
-    constexpr std::string_view target_sequence =
-        "ACGTTGCAGATCCGATGCTAGCATCGATGCTA"
-        "GATCGTACCTAGGCTAACGTTCGATGACCTAGGCTTACGA"
-        "TGCATCGGATACGTTAGCCTAGATCGTACGTA";
+        /* The exact W10/K15 sketch has one minimizer with u32 hash 3694.
+         * The legacy fixture publishes hashes [1, 4096], so the selective
+         * grouped32 reader must load and validate its exact partition. */
+        "ACTTGCAGCCCCCAGTTCATTCAG";
+    const std::string target_sequence(4096u, 'A');
 
     auto ctx = fresh_context({target});
     exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
@@ -700,16 +700,23 @@ TEST_CASE("DOC0398 BatchJoin attaches executed grouped32 to SeedHitStage",
     exec_sql(ctx,
         "SET bioseq.index_async_persist = off; "
         "SET bioseq.recompute_async_persist = off; "
-        "SET bioseq.read_sequence_index = on; "
-        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+        "SET bioseq.read_sequence_index = on;");
+    const auto rowno = query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.column_row_number('{}'::regclass, ctid) "
+        "FROM {} ORDER BY pk LIMIT 1;",
+        target, target));
+    const row_t fixture = query_one(ctx, fmt::format(
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
+        "'{}'::regclass, 'minimizers_per_fragment', {}, "
+        "15::smallint, 10::smallint, 4::smallint, "
+        "'exact_simd');",
+        target, rowno));
+    REQUIRE(fixture.size() == 20u);
+    REQUIRE(fixture[1].value_or("") == "4");
     exec_sql(ctx, fmt::format(
         "SELECT bioseq.set_active_read_index('{}'::regclass, "
         "'minimizers_per_fragment');",
         target));
-    REQUIRE(query_scalar_int(ctx, fmt::format(
-        "SELECT bioseq.update_index('{}'::regclass, "
-        "'minimizers_per_fragment');",
-        target)) == 1);
     exec_sql(ctx, fmt::format(
         "CREATE TEMP TABLE {} "
         "(id int PRIMARY KEY, seq bioseq.seq('dna4',32)); "
