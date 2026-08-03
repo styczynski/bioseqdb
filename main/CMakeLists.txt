@@ -386,18 +386,40 @@ if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
-# Support CXX modules on MacOS correctly
-if (APPLE)
-  set(SDKROOT "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
-  SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -isysroot ${SDKROOT}")
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${SDKROOT}")
+# Prefer the Command Line Tools SDK on the home Apple toolchain, but publish it
+# through CMake's authoritative sysroot input before project() enables C/C++.
+# This keeps ordinary compile rules and direct configure probes byte-for-byte
+# aligned and respects an explicit user/toolchain SDK choice.
+if(NOT APPLE
+    AND DEFINED CACHE{CMAKE_OSX_DEPLOYMENT_TARGET}
+    AND CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "14.0")
+  get_property(_bioseq_legacy_deployment_help CACHE
+    CMAKE_OSX_DEPLOYMENT_TARGET PROPERTY HELPSTRING)
+  if(_bioseq_legacy_deployment_help STREQUAL "")
+    # Migrate only the empty-help cache entry created by the former
+    # unconditional FORCE assignment. Explicit command-line/toolchain cache
+    # entries retain their help marker and remain fail-closed below.
+    unset(CMAKE_OSX_DEPLOYMENT_TARGET CACHE)
+    unset(CMAKE_OSX_DEPLOYMENT_TARGET)
+  endif()
+  unset(_bioseq_legacy_deployment_help)
+endif()
+if(APPLE AND NOT CMAKE_OSX_SYSROOT)
+  set(_bioseq_default_apple_sdk
+    "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+  if(IS_DIRECTORY "${_bioseq_default_apple_sdk}")
+    set(CMAKE_OSX_SYSROOT "${_bioseq_default_apple_sdk}" CACHE PATH
+      "Apple SDK used by Bioseq compilation" FORCE)
+  endif()
+  unset(_bioseq_default_apple_sdk)
+endif()
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING
+    "Minimum Apple deployment target used by Bioseq compilation")
 endif()
 
-# NOTE: the macOS -isysroot flags are applied inside the if(APPLE) block above.
-# A duplicate, *unconditional* copy of those two SET()s used to live here; on a
-# non-Apple toolchain (e.g. AWS_MACHINE_X64) SDKROOT is empty there, so it
-# expanded to a bare `-isysroot ` that swallowed the next flag and broke every
-# compile. Removed — Apple still gets its isysroot from the guarded block.
+# NOTE: do not append `-isysroot` manually to CMAKE_<LANG>_FLAGS here. CMake
+# emits the selected CMAKE_OSX_SYSROOT for each enabled language itself.
 
 # Native build
 #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native")
@@ -635,8 +657,6 @@ set(H3_CORE_SHA256 438db46fc2b388785d2a0d8e26aa5509739240a7b50b2510c416778d871a4
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fdiagnostics-color=always -Wno-everything")
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fdiagnostics-color=always -Wno-everything")
 
-set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "" FORCE)
-
 # If you set any CMAKE_ variables, that can go here.
 # (But usually don't do this, except maybe for C++ standard)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -686,6 +706,14 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_target_order.cmake")
   set_tests_properties(
     bioseq_highway_target_order_contract
+    PROPERTIES LABELS "core;unit;cmake;highway")
+  add_test(
+    NAME bioseq_highway_probe_identity_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cmake/highway-probe-identity-contract"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_probe_identity.cmake")
+  set_tests_properties(
+    bioseq_highway_probe_identity_contract
     PROPERTIES LABELS "core;unit;cmake;highway")
 endif()
 set(_bioseq_codegen_components)

@@ -31,13 +31,578 @@ function(_bioseq_highway_reject_control_characters label value)
   endif()
 endfunction()
 
-function(_bioseq_highway_resolve_platform output)
-  string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _processor)
-  if(_processor MATCHES "^(x86_64|amd64|x64)$")
+function(_bioseq_highway_canonical_identity_directory output label value)
+  _bioseq_highway_reject_control_characters("${label}" "${value}")
+  if("${value}" MATCHES "[;|]")
+    _bioseq_highway_fail(
+      "${label} contains a reserved identity separator: ${value}")
+  endif()
+  if(NOT IS_ABSOLUTE "${value}" OR NOT IS_DIRECTORY "${value}")
+    _bioseq_highway_fail(
+      "${label} must identify an existing absolute directory: ${value}")
+  endif()
+  file(REAL_PATH "${value}" _canonical)
+  set(${output} "${_canonical}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_effective_apple_architecture output)
+  set(_apple_architectures ${CMAKE_OSX_ARCHITECTURES})
+  list(REMOVE_DUPLICATES _apple_architectures)
+  if(NOT _apple_architectures)
+    set(_apple_architectures ${_CMAKE_APPLE_ARCHS_DEFAULT})
+    list(REMOVE_DUPLICATES _apple_architectures)
+  endif()
+  if(NOT _apple_architectures)
+    set(_apple_architectures ${CMAKE_SYSTEM_PROCESSOR})
+    list(REMOVE_DUPLICATES _apple_architectures)
+  endif()
+  list(LENGTH _apple_architectures _apple_architecture_count)
+  if(NOT _apple_architecture_count EQUAL 1)
+    _bioseq_highway_fail(
+      "configure-time Highway target probing cannot represent the ambiguous "
+      "multi-architecture CMAKE_OSX_ARCHITECTURES='"
+      "${CMAKE_OSX_ARCHITECTURES}'")
+  endif()
+  list(GET _apple_architectures 0 _apple_architecture)
+  _bioseq_highway_reject_control_characters(
+    "Apple probe architecture" "${_apple_architecture}")
+  if(NOT _apple_architecture MATCHES "^[A-Za-z0-9_][A-Za-z0-9_+-]*$")
+    _bioseq_highway_fail(
+      "Apple probe architecture has ambiguous driver spelling: "
+      "${_apple_architecture}")
+  endif()
+  set(${output} "${_apple_architecture}" PARENT_SCOPE)
+endfunction()
+
+# CMake adds these driver options outside CMAKE_CXX_FLAGS for ordinary target
+# compilation. The configure-time preprocessor is a direct compiler invocation,
+# so reconstruct the same unambiguous identity explicitly and seal its canonical
+# spelling into the Highway policy/provenance.
+function(_bioseq_highway_configured_probe_identity
+    output_flags output_records output_digest)
+  set(_flags)
+  set(_records)
+
+  if(CMAKE_CXX_COMPILER_TARGET)
+    _bioseq_highway_reject_control_characters(
+      "CMAKE_CXX_COMPILER_TARGET" "${CMAKE_CXX_COMPILER_TARGET}")
+    if(NOT CMAKE_CXX_COMPILER_TARGET MATCHES
+        "^[A-Za-z0-9_][A-Za-z0-9_.+-]*$")
+      _bioseq_highway_fail(
+        "CMAKE_CXX_COMPILER_TARGET has ambiguous driver spelling: "
+        "${CMAKE_CXX_COMPILER_TARGET}")
+    elseif(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$")
+      _bioseq_highway_fail(
+        "CMAKE_CXX_COMPILER_TARGET requires a Clang-family probe driver; got "
+        "${CMAKE_CXX_COMPILER_ID}")
+    endif()
+    set(_target_flag "--target=${CMAKE_CXX_COMPILER_TARGET}")
+    list(APPEND _flags "${_target_flag}")
+    list(APPEND _records "target=${_target_flag}")
+  endif()
+
+  if(CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$")
+      _bioseq_highway_fail(
+        "CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN requires a Clang-family "
+        "probe driver; got ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+    _bioseq_highway_canonical_identity_directory(
+      _external_toolchain "CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN"
+      "${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}")
+    set(_toolchain_flag "--gcc-toolchain=${_external_toolchain}")
+    list(APPEND _flags "${_toolchain_flag}")
+    list(APPEND _records "external-toolchain=${_toolchain_flag}")
+  endif()
+
+  set(_generic_sysroot "")
+  set(_generic_sysroot_owner "")
+  if(CMAKE_SYSROOT_COMPILE)
+    set(_generic_sysroot "${CMAKE_SYSROOT_COMPILE}")
+    set(_generic_sysroot_owner CMAKE_SYSROOT_COMPILE)
+  elseif(CMAKE_SYSROOT)
+    set(_generic_sysroot "${CMAKE_SYSROOT}")
+    set(_generic_sysroot_owner CMAKE_SYSROOT)
+  endif()
+  if(_generic_sysroot)
+    _bioseq_highway_canonical_identity_directory(
+      _generic_sysroot "${_generic_sysroot_owner}" "${_generic_sysroot}")
+  endif()
+
+  if(APPLE)
+    set(_apple_sysroot "")
+    set(_cmake_apple_sysroot "")
+    if(_CMAKE_OSX_SYSROOT_PATH)
+      _bioseq_highway_canonical_identity_directory(
+        _cmake_apple_sysroot "CMake-resolved Apple SDK"
+        "${_CMAKE_OSX_SYSROOT_PATH}")
+    endif()
+    if(CMAKE_OSX_SYSROOT)
+      if(IS_ABSOLUTE "${CMAKE_OSX_SYSROOT}")
+        _bioseq_highway_canonical_identity_directory(
+          _apple_sysroot "CMAKE_OSX_SYSROOT" "${CMAKE_OSX_SYSROOT}")
+      elseif(CMAKE_OSX_SYSROOT MATCHES "^[A-Za-z0-9_.+-]+$")
+        if(_cmake_apple_sysroot)
+          set(_apple_sysroot "${_cmake_apple_sysroot}")
+        else()
+          find_program(_bioseq_highway_xcrun NAMES xcrun)
+          if(NOT _bioseq_highway_xcrun)
+            _bioseq_highway_fail(
+              "CMAKE_OSX_SYSROOT SDK-name spelling '${CMAKE_OSX_SYSROOT}' "
+              "requires xcrun for an authenticated absolute identity")
+          endif()
+          execute_process(
+            COMMAND "${_bioseq_highway_xcrun}"
+              --sdk "${CMAKE_OSX_SYSROOT}" --show-sdk-path
+            RESULT_VARIABLE _sdk_status
+            OUTPUT_VARIABLE _sdk_path
+            ERROR_VARIABLE _sdk_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+          if(NOT _sdk_status EQUAL 0)
+            _bioseq_highway_fail(
+              "cannot resolve CMAKE_OSX_SYSROOT SDK name '"
+              "${CMAKE_OSX_SYSROOT}': ${_sdk_error}")
+          endif()
+          _bioseq_highway_canonical_identity_directory(
+            _apple_sysroot "resolved CMAKE_OSX_SYSROOT" "${_sdk_path}")
+        endif()
+      else()
+        _bioseq_highway_fail(
+          "CMAKE_OSX_SYSROOT has unsupported non-absolute SDK spelling: "
+          "${CMAKE_OSX_SYSROOT}")
+      endif()
+      if(_cmake_apple_sysroot
+          AND NOT _cmake_apple_sysroot STREQUAL _apple_sysroot)
+        _bioseq_highway_fail(
+          "CMAKE_OSX_SYSROOT disagrees with CMake's resolved Apple SDK path")
+      endif()
+    elseif(_cmake_apple_sysroot)
+      # CMake resolves the compiler's implicit SDK even when the public cache
+      # spelling is empty, then injects this path into ordinary compile rules.
+      set(_apple_sysroot "${_cmake_apple_sysroot}")
+    elseif(NOT _generic_sysroot)
+      # The internal resolved path is expected after the C++ language is
+      # enabled. Reproduce CMake's default resolution only when it is absent.
+      find_program(_bioseq_highway_xcrun NAMES xcrun)
+      if(NOT _bioseq_highway_xcrun)
+        _bioseq_highway_fail(
+          "CMake published neither CMAKE_OSX_SYSROOT nor "
+          "_CMAKE_OSX_SYSROOT_PATH, and xcrun is unavailable")
+      endif()
+      set(_default_sdk_arguments)
+      if(CMAKE_GENERATOR STREQUAL "Xcode")
+        list(APPEND _default_sdk_arguments --sdk macosx)
+      endif()
+      execute_process(
+        COMMAND "${_bioseq_highway_xcrun}"
+          ${_default_sdk_arguments} --show-sdk-path
+        RESULT_VARIABLE _sdk_status
+        OUTPUT_VARIABLE _sdk_path
+        ERROR_VARIABLE _sdk_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+      if(NOT _sdk_status EQUAL 0)
+        _bioseq_highway_fail(
+          "cannot resolve the effective default Apple SDK: ${_sdk_error}")
+      endif()
+      _bioseq_highway_canonical_identity_directory(
+        _apple_sysroot "resolved default Apple SDK" "${_sdk_path}")
+    endif()
+    if(_apple_sysroot AND _generic_sysroot
+        AND NOT _apple_sysroot STREQUAL _generic_sysroot)
+      _bioseq_highway_fail(
+        "CMAKE_OSX_SYSROOT and ${_generic_sysroot_owner} resolve to "
+        "different compile sysroots")
+    elseif(NOT _apple_sysroot)
+      set(_apple_sysroot "${_generic_sysroot}")
+    endif()
+    if(_apple_sysroot)
+      list(APPEND _flags -isysroot "${_apple_sysroot}")
+      list(APPEND _records "apple-sysroot=-isysroot|${_apple_sysroot}")
+    endif()
+
+    _bioseq_highway_effective_apple_architecture(_apple_architecture)
+    list(APPEND _flags -arch "${_apple_architecture}")
+    list(APPEND _records "apple-architecture=-arch|${_apple_architecture}")
+
+    if(CMAKE_OSX_DEPLOYMENT_TARGET)
+      _bioseq_highway_reject_control_characters(
+        "CMAKE_OSX_DEPLOYMENT_TARGET" "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+      if(NOT CMAKE_OSX_DEPLOYMENT_TARGET MATCHES
+          "^[0-9]+(\\.[0-9]+)?(\\.[0-9]+)?$")
+        _bioseq_highway_fail(
+          "CMAKE_OSX_DEPLOYMENT_TARGET has unsupported version spelling: "
+          "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+      elseif(NOT CMAKE_CXX_OSX_DEPLOYMENT_TARGET_FLAG)
+        _bioseq_highway_fail(
+          "CMake did not publish CMAKE_CXX_OSX_DEPLOYMENT_TARGET_FLAG for "
+          "configured deployment target ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+      endif()
+      set(_deployment_flag
+        "${CMAKE_CXX_OSX_DEPLOYMENT_TARGET_FLAG}")
+      _bioseq_highway_reject_control_characters(
+        "CMAKE_CXX_OSX_DEPLOYMENT_TARGET_FLAG" "${_deployment_flag}")
+      if(_deployment_flag MATCHES ";")
+        _bioseq_highway_fail(
+          "CMAKE_CXX_OSX_DEPLOYMENT_TARGET_FLAG has ambiguous list spelling")
+      endif()
+      string(REPLACE "<ARCH>" "${_apple_architecture}"
+        _deployment_flag "${_deployment_flag}")
+      if(_deployment_flag MATCHES "<VERSION_MIN>")
+        string(REPLACE "<VERSION_MIN>" "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+          _deployment_flag "${_deployment_flag}")
+      else()
+        string(APPEND _deployment_flag "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+      endif()
+      if(_deployment_flag MATCHES "[<>]" OR _deployment_flag MATCHES "[ |]")
+        _bioseq_highway_fail(
+          "cannot resolve CMake's Apple deployment-target flag template: "
+          "${CMAKE_CXX_OSX_DEPLOYMENT_TARGET_FLAG}")
+      endif()
+      list(APPEND _flags "${_deployment_flag}")
+      list(APPEND _records "apple-deployment=${_deployment_flag}")
+    endif()
+  else()
+    if(CMAKE_OSX_SYSROOT OR CMAKE_OSX_ARCHITECTURES
+        OR CMAKE_OSX_DEPLOYMENT_TARGET)
+      _bioseq_highway_fail(
+        "Apple sysroot/architecture/deployment identity is configured for a "
+        "non-Apple probe platform")
+    endif()
+    if(_generic_sysroot)
+      set(_sysroot_flag "--sysroot=${_generic_sysroot}")
+      list(APPEND _flags "${_sysroot_flag}")
+      list(APPEND _records "sysroot=${_sysroot_flag}")
+    endif()
+  endif()
+
+  set(_identity_stream "bioseq-highway-probe-compilation-identity-v1\n")
+  foreach(_record IN LISTS _records)
+    _bioseq_highway_reject_control_characters(
+      "Highway probe identity record" "${_record}")
+    string(APPEND _identity_stream "${_record}\n")
+  endforeach()
+  string(SHA256 _identity_digest "${_identity_stream}")
+  set(${output_flags} "${_flags}" PARENT_SCOPE)
+  set(${output_records} "${_records}" PARENT_SCOPE)
+  set(${output_digest} "${_identity_digest}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_require_list_suffix label full_list suffix)
+  if(NOT suffix)
+    return()
+  endif()
+  list(LENGTH full_list _full_count)
+  list(LENGTH suffix _suffix_count)
+  if(_full_count LESS _suffix_count)
+    _bioseq_highway_fail("${label} omits configured probe identity flags")
+  endif()
+  math(EXPR _suffix_begin "${_full_count} - ${_suffix_count}")
+  list(SUBLIST full_list ${_suffix_begin} ${_suffix_count} _actual_suffix)
+  if(NOT _actual_suffix STREQUAL suffix)
+    _bioseq_highway_fail(
+      "${label} does not retain normalized probe identity flag ordering")
+  endif()
+endfunction()
+
+function(_bioseq_highway_validate_policy_replacement name value)
+  if(NOT name MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+    _bioseq_highway_fail(
+      "Highway policy macro name is not a source-safe identifier: ${name}")
+  endif()
+  _bioseq_highway_reject_control_characters(
+    "Highway policy replacement for ${name}" "${value}")
+  # The block is emitted as C++ source, so admit only a conservative sequence
+  # of identifier/pp-number/expression punctuation tokens. In particular,
+  # quotes, whitespace, backslashes, '#', '/' and '*' cannot splice a line,
+  # open a comment, or manufacture another directive.
+  if(NOT value MATCHES "^[A-Za-z0-9_().,+<>=!&|~^?:-]+$")
+    _bioseq_highway_fail(
+      "Highway policy definition ${name} has an unsafe canonical source "
+      "replacement '${value}'")
+  endif()
+endfunction()
+
+function(_bioseq_highway_reject_ambient_driver_identity label)
+  foreach(_option IN LISTS ARGN)
+    _bioseq_highway_reject_control_characters("${label}" "${_option}")
+    if(_option MATCHES
+        "^(-target|--target|-isysroot|--sysroot|-gcc-toolchain|--gcc-toolchain|-arch)(=|$)"
+        OR _option MATCHES
+        "(^|[ :])(-target|--target|-isysroot|--sysroot|-gcc-toolchain|--gcc-toolchain|-arch)(=|[ ]|$)"
+        OR _option MATCHES "^-m[A-Za-z0-9-]+-version-min(=|$)"
+        OR _option MATCHES
+        "(^|[ :])-m[A-Za-z0-9-]+-version-min(=|[ ]|$)")
+      _bioseq_highway_fail(
+        "${label} contains dedicated driver identity option '${_option}'; "
+        "use CMAKE_CXX_COMPILER_TARGET, CMAKE_SYSROOT_COMPILE/CMAKE_SYSROOT, "
+        "CMAKE_OSX_SYSROOT/CMAKE_OSX_ARCHITECTURES, or "
+        "CMAKE_OSX_DEPLOYMENT_TARGET/CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN")
+    endif()
+  endforeach()
+endfunction()
+
+function(_bioseq_highway_reject_opaque_preprocessor_inputs label)
+  foreach(_option IN LISTS ARGN)
+    _bioseq_highway_reject_control_characters("${label}" "${_option}")
+    if(_option MATCHES
+        "(^|[ :])(-Xclang|-Xpreprocessor|-cc1)(=|[ ]|$)"
+        OR _option MATCHES "(^|[ :])-Wp,")
+      _bioseq_highway_fail(
+        "${label} contains unauthenticated compiler forwarding option "
+        "'${_option}'")
+    elseif(_option MATCHES "(^|[ :])--config(=|[ ]|$)"
+        OR _option MATCHES "(^|[ :])--?specs(=|[ ]|$)")
+      _bioseq_highway_fail(
+        "${label} contains opaque compiler configuration option "
+        "'${_option}'")
+    elseif(_option MATCHES
+        "(^|[ :,=])(-include-pch|-include|-imacros)")
+      _bioseq_highway_fail(
+        "${label} contains unauthenticated forced preprocessor input "
+        "'${_option}'")
+    elseif(_option MATCHES "(^|[ :,=])@[^ ]+")
+      _bioseq_highway_fail(
+        "${label} contains opaque compiler response-file argument "
+        "'${_option}'")
+    endif()
+  endforeach()
+endfunction()
+
+function(_bioseq_highway_require_single_config_probe)
+  if(CMAKE_CONFIGURATION_TYPES)
+    _bioseq_highway_fail(
+      "configure-time Highway target probing does not support multi-config "
+      "generators; CMAKE_CONFIGURATION_TYPES='"
+      "${CMAKE_CONFIGURATION_TYPES}'")
+  endif()
+endfunction()
+
+function(_bioseq_highway_validate_ambient_policy_mutations
+    label arguments definitions)
+  set(_policy_names)
+  set(_policy_values)
+  foreach(_definition IN LISTS definitions)
+    if(_definition MATCHES "^([^=]+)=(.*)$")
+      set(_name "${CMAKE_MATCH_1}")
+      set(_value "${CMAKE_MATCH_2}")
+    else()
+      set(_name "${_definition}")
+      set(_value 1)
+    endif()
+    _bioseq_highway_validate_policy_replacement("${_name}" "${_value}")
+    list(APPEND _policy_names "${_name}")
+    list(APPEND _policy_values "${_value}")
+  endforeach()
+
+  set(_expanded_arguments)
+  foreach(_argument IN LISTS arguments)
+    if(_argument MATCHES "^SHELL:(.*)$")
+      set(_shell_spelling "${CMAKE_MATCH_1}")
+      separate_arguments(_shell_arguments UNIX_COMMAND "${_shell_spelling}")
+      list(APPEND _expanded_arguments ${_shell_arguments})
+    elseif(_argument MATCHES "^-Wp,(-[DU].*)$")
+      list(APPEND _expanded_arguments "${CMAKE_MATCH_1}")
+    else()
+      list(APPEND _expanded_arguments "${_argument}")
+    endif()
+  endforeach()
+
+  list(LENGTH _expanded_arguments _argument_count)
+  set(_argument_index 0)
+  while(_argument_index LESS _argument_count)
+    list(GET _expanded_arguments ${_argument_index} _argument)
+    set(_mutation "")
+    set(_payload "")
+    if(_argument STREQUAL "-D" OR _argument STREQUAL "-U")
+      set(_mutation "${_argument}")
+      math(EXPR _argument_index "${_argument_index} + 1")
+      if(_argument_index GREATER_EQUAL _argument_count)
+        _bioseq_highway_fail(
+          "${label} contains an unterminated ${_mutation} option")
+      endif()
+      list(GET _expanded_arguments ${_argument_index} _payload)
+    elseif(_argument MATCHES "^(-D|-U)(.*)$")
+      set(_mutation "${CMAKE_MATCH_1}")
+      set(_payload "${CMAKE_MATCH_2}")
+    endif()
+
+    if(_mutation STREQUAL "-D")
+      if(_payload MATCHES "^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+        set(_name "${CMAKE_MATCH_1}")
+        set(_value "${CMAKE_MATCH_2}")
+      elseif(_payload MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+        set(_name "${_payload}")
+        set(_value 1)
+      else()
+        _bioseq_highway_fail(
+          "${label} contains malformed preprocessor definition '${_payload}'")
+      endif()
+      list(FIND _policy_names "${_name}" _policy_index)
+      if(NOT _policy_index EQUAL -1)
+        list(GET _policy_values ${_policy_index} _policy_value)
+        if(NOT _value STREQUAL _policy_value)
+          _bioseq_highway_fail(
+            "${label} defines policy macro ${_name} as '${_value}', but the "
+            "canonical policy block defines '${_policy_value}'")
+        endif()
+      elseif(_name MATCHES "^(HWY_|BIOSEQ_HIGHWAY_)")
+        _bioseq_highway_fail(
+          "${label} defines unregistered Highway policy macro ${_name}")
+      endif()
+    elseif(_mutation STREQUAL "-U")
+      if(NOT _payload MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+        _bioseq_highway_fail(
+          "${label} contains malformed preprocessor undefinition '${_payload}'")
+      endif()
+      list(FIND _policy_names "${_payload}" _policy_index)
+      if(NOT _policy_index EQUAL -1)
+        _bioseq_highway_fail(
+          "${label} undefines canonical policy macro ${_payload}")
+      elseif(_payload MATCHES "^(HWY_|BIOSEQ_HIGHWAY_)")
+        _bioseq_highway_fail(
+          "${label} undefines unregistered Highway policy macro ${_payload}")
+      endif()
+    endif()
+    math(EXPR _argument_index "${_argument_index} + 1")
+  endwhile()
+endfunction()
+
+function(_bioseq_highway_render_policy_block output)
+  set(_policy_block "")
+  foreach(_definition IN LISTS ARGN)
+    if(_definition MATCHES "^([^=]+)=(.*)$")
+      set(_policy_name "${CMAKE_MATCH_1}")
+      set(_policy_value "${CMAKE_MATCH_2}")
+    else()
+      set(_policy_name "${_definition}")
+      set(_policy_value 1)
+    endif()
+    _bioseq_highway_validate_policy_replacement(
+      "${_policy_name}" "${_policy_value}")
+    string(APPEND _policy_block
+      "#define ${_policy_name} ${_policy_value}\n")
+  endforeach()
+  set(${output} "${_policy_block}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_render_target_probe_source output policy_block)
+  string(CONCAT _probe_contents
+    "// Generated configure-time Highway target inventory probe.\n"
+    "// The following canonical block is byte-identical to generated units.\n"
+    "${policy_block}"
+    "// Target operations are irrelevant here; choose opposite toggle state\n"
+    "// so highway.h publishes dispatch macros without expanding ops/*.h.\n"
+    "#ifdef HWY_TARGET_TOGGLE\n"
+    "#undef HWY_TARGET_TOGGLE\n"
+    "#endif\n"
+    "#define HWY_HIGHWAY_PER_TARGET 1\n"
+    "#include <hwy/highway.h>\n"
+    "#define BIOSEQ_HIGHWAY_STRING_IMPL(value) #value\n"
+    "#define BIOSEQ_HIGHWAY_STRING(value) BIOSEQ_HIGHWAY_STRING_IMPL(value)\n"
+    "#define BIOSEQ_HIGHWAY_VISITOR(target, target_namespace) \\\n"
+    "  BIOSEQ_HIGHWAY_TARGET_RECORD(#target, \\\n"
+    "    BIOSEQ_HIGHWAY_STRING(target_namespace), \\\n"
+    "    BIOSEQ_HIGHWAY_STRING(target))\n"
+    "BIOSEQ_HIGHWAY_STATIC_RECORD(\\\n"
+    "  BIOSEQ_HIGHWAY_STRING(HWY_STATIC_NAMESPACE), \\\n"
+    "  BIOSEQ_HIGHWAY_STRING(HWY_STATIC_TARGET))\n"
+    "HWY_VISIT_TARGETS(BIOSEQ_HIGHWAY_VISITOR)\n")
+  set(${output} "${_probe_contents}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_configure_probe_policy
+    output_definitions output_compile_options output_identity_flags
+    output_identity_records output_identity_digest)
+  cmake_parse_arguments(PARSE_ARGV 5 ARG "" "" "DEFINITIONS;COMPILE_OPTIONS")
+  _bioseq_highway_configured_probe_identity(
+    _identity_flags _identity_records _identity_digest)
+  _bioseq_highway_normalize_definitions(_definitions
+    ${ARG_DEFINITIONS}
+    "BIOSEQ_HIGHWAY_PROBE_COMPILATION_IDENTITY=${_identity_digest}")
+  set(_compile_options ${ARG_COMPILE_OPTIONS})
+  _bioseq_highway_reject_ambient_driver_identity(
+    "Highway probe policy compile options" ${_compile_options})
+  _bioseq_highway_reject_opaque_preprocessor_inputs(
+    "Highway probe policy compile options" ${_compile_options})
+  list(APPEND _compile_options ${_identity_flags})
+  _bioseq_highway_require_list_suffix(
+    "Highway probe policy" "${_compile_options}" "${_identity_flags}")
+  set(${output_definitions} "${_definitions}" PARENT_SCOPE)
+  set(${output_compile_options} "${_compile_options}" PARENT_SCOPE)
+  set(${output_identity_flags} "${_identity_flags}" PARENT_SCOPE)
+  set(${output_identity_records} "${_identity_records}" PARENT_SCOPE)
+  set(${output_identity_digest} "${_identity_digest}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_prepare_direct_probe_policy output)
+  cmake_parse_arguments(PARSE_ARGV 1 ARG "" "LABEL"
+    "COMPILER_ARGUMENTS;CONFIGURED_FLAGS;COMPILE_OPTIONS;IDENTITY_FLAGS;DEFINITIONS")
+  if(NOT ARG_LABEL)
+    set(ARG_LABEL "direct Highway preprocessor action")
+  endif()
+
+  _bioseq_highway_require_list_suffix(
+    "${ARG_LABEL}" "${ARG_COMPILE_OPTIONS}" "${ARG_IDENTITY_FLAGS}")
+  set(_ambient_compile_options ${ARG_COMPILE_OPTIONS})
+  if(ARG_IDENTITY_FLAGS)
+    list(LENGTH _ambient_compile_options _compile_option_count)
+    list(LENGTH ARG_IDENTITY_FLAGS _identity_flag_count)
+    math(EXPR _ambient_option_count
+      "${_compile_option_count} - ${_identity_flag_count}")
+    if(_ambient_option_count GREATER 0)
+      list(SUBLIST _ambient_compile_options 0 ${_ambient_option_count}
+        _ambient_compile_options)
+    else()
+      set(_ambient_compile_options)
+    endif()
+  endif()
+
+  _bioseq_highway_reject_ambient_driver_identity(
+    "${ARG_LABEL} compiler/configured options"
+    ${ARG_COMPILER_ARGUMENTS} ${ARG_CONFIGURED_FLAGS}
+    ${_ambient_compile_options})
+  _bioseq_highway_reject_opaque_preprocessor_inputs(
+    "${ARG_LABEL} compiler/configured options"
+    ${ARG_COMPILER_ARGUMENTS} ${ARG_CONFIGURED_FLAGS}
+    ${_ambient_compile_options})
+  set(_ambient_policy_arguments
+    ${ARG_COMPILER_ARGUMENTS} ${ARG_CONFIGURED_FLAGS}
+    ${_ambient_compile_options})
+  _bioseq_highway_validate_ambient_policy_mutations(
+    "${ARG_LABEL}" "${_ambient_policy_arguments}" "${ARG_DEFINITIONS}")
+
+  set(_probe_arguments ${ARG_CONFIGURED_FLAGS} ${ARG_COMPILE_OPTIONS})
+  _bioseq_highway_require_list_suffix(
+    "${ARG_LABEL}" "${_probe_arguments}" "${ARG_IDENTITY_FLAGS}")
+  set(${output} "${_probe_arguments}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_render_probe_identity_provenance
+    output identity_digest)
+  if(NOT identity_digest MATCHES "^[0-9a-f][0-9a-f]+$")
+    _bioseq_highway_fail("probe compilation identity digest is malformed")
+  endif()
+  string(LENGTH "${identity_digest}" _identity_digest_length)
+  if(NOT _identity_digest_length EQUAL 64)
+    _bioseq_highway_fail("probe compilation identity digest is not SHA-256")
+  endif()
+  set(_contents "bioseq-highway-probe-compilation-identity-v1\n")
+  string(APPEND _contents "identity\t${identity_digest}\n")
+  set(_ordinal 0)
+  foreach(_record IN LISTS ARGN)
+    string(APPEND _contents "flag\t${_ordinal}\t${_record}\n")
+    math(EXPR _ordinal "${_ordinal} + 1")
+  endforeach()
+  set(${output} "${_contents}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_platform_from_processor output processor label)
+  string(TOLOWER "${processor}" _processor)
+  if(_processor MATCHES "^(x86_64|x86_64h|amd64|x64)$")
     set(_platform x86_64)
-  elseif(_processor MATCHES "^(aarch64|arm64)$")
+  elseif(_processor MATCHES "^(aarch64[^-]*|arm64[^-]*)$")
     set(_platform aarch64)
-  elseif(_processor MATCHES "^(armv7|armv7l|arm)$")
+  elseif(_processor MATCHES "^(armv7[^-]*|arm)$")
     set(_platform arm)
   elseif(_processor MATCHES "^(ppc64le|powerpc64le)$")
     set(_platform ppc64le)
@@ -55,9 +620,42 @@ function(_bioseq_highway_resolve_platform output)
     string(REGEX REPLACE "[^a-z0-9_]+" "_" _platform "${_processor}")
     if(NOT _platform MATCHES "^[a-z][a-z0-9_]*$")
       _bioseq_highway_fail(
-        "cannot derive a stable platform slug from CMAKE_SYSTEM_PROCESSOR='"
-        "${CMAKE_SYSTEM_PROCESSOR}'")
+        "cannot derive a stable platform slug from ${label}='${processor}'")
     endif()
+  endif()
+  set(${output} "${_platform}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_resolve_platform output)
+  set(_authenticated_platform "")
+  if(CMAKE_CXX_COMPILER_TARGET)
+    string(REGEX REPLACE "-.*$" "" _target_processor
+      "${CMAKE_CXX_COMPILER_TARGET}")
+    _bioseq_highway_platform_from_processor(
+      _target_platform "${_target_processor}" "CMAKE_CXX_COMPILER_TARGET")
+    set(_authenticated_platform "${_target_platform}")
+  endif()
+
+  if(APPLE)
+    _bioseq_highway_effective_apple_architecture(_apple_architecture)
+    _bioseq_highway_platform_from_processor(
+      _apple_platform "${_apple_architecture}"
+      "effective Apple compile architecture")
+    if(_authenticated_platform
+        AND NOT _authenticated_platform STREQUAL _apple_platform)
+      _bioseq_highway_fail(
+        "CMAKE_CXX_COMPILER_TARGET platform ${_authenticated_platform} "
+        "disagrees with effective Apple architecture platform "
+        "${_apple_platform}")
+    endif()
+    set(_authenticated_platform "${_apple_platform}")
+  endif()
+
+  if(_authenticated_platform)
+    set(_platform "${_authenticated_platform}")
+  else()
+    _bioseq_highway_platform_from_processor(
+      _platform "${CMAKE_SYSTEM_PROCESSOR}" "CMAKE_SYSTEM_PROCESSOR")
   endif()
   set(${output} "${_platform}" PARENT_SCOPE)
 endfunction()
@@ -136,7 +734,15 @@ function(_bioseq_highway_normalize_definitions output)
       _bioseq_highway_fail(
         "invalid Highway policy definition '${_definition}'")
     endif()
-    string(REGEX REPLACE "=.*$" "" _name "${_definition}")
+    if(_definition MATCHES "^([^=]+)=(.*)$")
+      set(_name "${CMAKE_MATCH_1}")
+      set(_value "${CMAKE_MATCH_2}")
+    else()
+      set(_name "${_definition}")
+      set(_value 1)
+    endif()
+    _bioseq_highway_validate_policy_replacement("${_name}" "${_value}")
+    set(_canonical_definition "${_name}=${_value}")
     if(_name STREQUAL "HWY_TARGET" OR _name STREQUAL "HWY_ONCE")
       _bioseq_highway_fail(
         "${_name} is generator-owned and cannot be a policy definition")
@@ -144,16 +750,16 @@ function(_bioseq_highway_normalize_definitions output)
     list(FIND _definition_names "${_name}" _existing_index)
     if(NOT _existing_index EQUAL -1)
       list(GET _definition_values ${_existing_index} _existing_definition)
-      if(NOT _existing_definition STREQUAL _definition)
+      if(NOT _existing_definition STREQUAL _canonical_definition)
         _bioseq_highway_fail(
           "conflicting values for Highway policy definition ${_name}: "
-          "'${_existing_definition}' and '${_definition}'")
+          "'${_existing_definition}' and '${_canonical_definition}'")
       endif()
       continue()
     endif()
     list(APPEND _definition_names "${_name}")
-    list(APPEND _definition_values "${_definition}")
-    list(APPEND _definitions "${_definition}")
+    list(APPEND _definition_values "${_canonical_definition}")
+    list(APPEND _definitions "${_canonical_definition}")
   endforeach()
   list(SORT _definitions)
   set(${output} "${_definitions}" PARENT_SCOPE)
@@ -484,7 +1090,7 @@ function(_bioseq_highway_probe_targets)
     OUTPUT_HIGHWAY_DIGEST)
   cmake_parse_arguments(PARSE_ARGV 0 ARG ""
     "${_one_value_arguments}"
-    "INCLUDE_DIRS;DEFINITIONS;COMPILE_OPTIONS")
+    "INCLUDE_DIRS;DEFINITIONS;COMPILE_OPTIONS;IDENTITY_FLAGS")
   foreach(_required IN ITEMS
       PROBE_DIR PLATFORM OUTPUT_RECORDS OUTPUT_ORDER OUTPUT_MASK
       OUTPUT_STATIC_RECORD OUTPUT_POLICY_DIGEST OUTPUT_HIGHWAY_DIGEST)
@@ -492,33 +1098,20 @@ function(_bioseq_highway_probe_targets)
       _bioseq_highway_fail("target probe requires ${_required}")
     endif()
   endforeach()
+  _bioseq_highway_require_single_config_probe()
 
   file(MAKE_DIRECTORY "${ARG_PROBE_DIR}")
   set(_probe_source "${ARG_PROBE_DIR}/target_inventory_probe.cppm")
   set(_probe_depfile "${ARG_PROBE_DIR}/target_inventory_probe.d")
   set(_probe_depfile_target bioseq_highway_target_inventory_probe)
-  string(CONCAT _probe_contents
-    "// Generated configure-time Highway target inventory probe.\n"
-    "// Target operations are irrelevant here; choose opposite toggle state\n"
-    "// so highway.h publishes dispatch macros without expanding ops/*.h.\n"
-    "#ifdef HWY_TARGET_TOGGLE\n"
-    "#undef HWY_TARGET_TOGGLE\n"
-    "#endif\n"
-    "#define HWY_HIGHWAY_PER_TARGET 1\n"
-    "#include <hwy/highway.h>\n"
-    "#define BIOSEQ_HIGHWAY_STRING_IMPL(value) #value\n"
-    "#define BIOSEQ_HIGHWAY_STRING(value) BIOSEQ_HIGHWAY_STRING_IMPL(value)\n"
-    "#define BIOSEQ_HIGHWAY_VISITOR(target, target_namespace) \\\n"
-    "  BIOSEQ_HIGHWAY_TARGET_RECORD(#target, \\\n"
-    "    BIOSEQ_HIGHWAY_STRING(target_namespace), \\\n"
-    "    BIOSEQ_HIGHWAY_STRING(target))\n"
-    "BIOSEQ_HIGHWAY_STATIC_RECORD(\\\n"
-    "  BIOSEQ_HIGHWAY_STRING(HWY_STATIC_NAMESPACE), \\\n"
-    "  BIOSEQ_HIGHWAY_STRING(HWY_STATIC_TARGET))\n"
-    "HWY_VISIT_TARGETS(BIOSEQ_HIGHWAY_VISITOR)\n")
+  _bioseq_highway_render_policy_block(_policy_block ${ARG_DEFINITIONS})
+  string(SHA256 _policy_digest "${_policy_block}")
+  _bioseq_highway_render_target_probe_source(
+    _probe_contents "${_policy_block}")
   _bioseq_highway_write_if_different("${_probe_source}" "${_probe_contents}")
 
   set(_compiler_command)
+  set(_compiler_arg1)
   if(CMAKE_CXX_COMPILER_LAUNCHER)
     list(APPEND _compiler_command ${CMAKE_CXX_COMPILER_LAUNCHER})
   endif()
@@ -536,7 +1129,13 @@ function(_bioseq_highway_probe_targets)
   endif()
   separate_arguments(_configured_flags NATIVE_COMMAND "${_configured_flags}")
 
-  set(_probe_arguments ${_configured_flags} ${ARG_COMPILE_OPTIONS})
+  _bioseq_highway_prepare_direct_probe_policy(_probe_arguments
+    LABEL "direct Highway preprocessor action"
+    COMPILER_ARGUMENTS ${_compiler_arg1}
+    CONFIGURED_FLAGS ${_configured_flags}
+    COMPILE_OPTIONS ${ARG_COMPILE_OPTIONS}
+    IDENTITY_FLAGS ${ARG_IDENTITY_FLAGS}
+    DEFINITIONS ${ARG_DEFINITIONS})
   if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
     if(CMAKE_CXX_EXTENSIONS)
       list(APPEND _probe_arguments "-std=gnu++${CMAKE_CXX_STANDARD}")
@@ -545,9 +1144,6 @@ function(_bioseq_highway_probe_targets)
     endif()
     list(APPEND _probe_arguments -E -P -x c++
       -MD -MF "${_probe_depfile}" -MT "${_probe_depfile_target}")
-    foreach(_definition IN LISTS ARG_DEFINITIONS)
-      list(APPEND _probe_arguments "-D${_definition}")
-    endforeach()
     foreach(_include_dir IN LISTS ARG_INCLUDE_DIRS)
       list(APPEND _probe_arguments -isystem "${_include_dir}")
     endforeach()
@@ -717,29 +1313,13 @@ function(_bioseq_highway_probe_targets)
     endif()
   endforeach()
 
-  # _records_by_bit is already deduplicated and canonicalized in first-seen
-  # HWY_VISIT_TARGETS order. Preserve that order: it is Highway's dispatch
-  # precedence, not a presentation detail that may be sorted by target slug.
+  # _records_by_bit is already deduplicated and canonicalized in exact
+  # HWY_VISIT_TARGETS inventory/provenance order. Preserve that order rather
+  # than sorting by slug. Runtime priority is independently defined by the
+  # least-significant runnable bit / SupportedAndGeneratedTargets ordering.
   _bioseq_highway_finalize_target_inventory(
     _target_records _target_order _compiled_mask _static_target_record
     "${ARG_PLATFORM}" "${_static_target_bit}" ${_records_by_bit})
-
-  # This exact, sorted block is also rendered by the generator ahead of every
-  # Highway include. A bare -DNAME has the preprocessor value 1, so record that
-  # value explicitly rather than relying on driver spelling.
-  set(_policy_block "")
-  foreach(_definition IN LISTS ARG_DEFINITIONS)
-    if(_definition MATCHES "^([^=]+)=(.*)$")
-      set(_policy_name "${CMAKE_MATCH_1}")
-      set(_policy_value "${CMAKE_MATCH_2}")
-    else()
-      set(_policy_name "${_definition}")
-      set(_policy_value 1)
-    endif()
-    string(APPEND _policy_block
-      "#define ${_policy_name} ${_policy_value}\n")
-  endforeach()
-  string(SHA256 _policy_digest "${_policy_block}")
 
   set(${ARG_OUTPUT_RECORDS} "${_target_records}" PARENT_SCOPE)
   set(${ARG_OUTPUT_ORDER} "${_target_order}" PARENT_SCOPE)
@@ -912,11 +1492,12 @@ function(bioseq_add_highway_codegen)
   _bioseq_highway_collect_target_usage(
     _highway_include_dirs _highway_target_definitions
     _highway_target_compile_options)
-  _bioseq_highway_normalize_definitions(_policy_definitions
-    ${_highway_target_definitions} ${ARG_POLICY_DEFINITIONS})
-  set(_policy_compile_options
-    ${_highway_target_compile_options} ${ARG_POLICY_COMPILE_OPTIONS})
-  list(REMOVE_DUPLICATES _policy_compile_options)
+  _bioseq_highway_configure_probe_policy(
+    _policy_definitions _policy_compile_options
+    _probe_identity_flags _probe_identity_records _probe_identity_digest
+    DEFINITIONS ${_highway_target_definitions} ${ARG_POLICY_DEFINITIONS}
+    COMPILE_OPTIONS
+      ${_highway_target_compile_options} ${ARG_POLICY_COMPILE_OPTIONS})
   foreach(_compile_option IN LISTS _policy_compile_options)
     _bioseq_highway_reject_control_characters(
       "Highway policy compile option" "${_compile_option}")
@@ -926,6 +1507,15 @@ function(bioseq_add_highway_codegen)
         "expressions: ${_compile_option}")
     endif()
   endforeach()
+  set(BIOSEQ_HIGHWAY_PROBE_COMPILATION_IDENTITY
+    "${_probe_identity_digest}" CACHE INTERNAL
+    "Authenticated Highway configure-probe compilation identity" FORCE)
+  set(BIOSEQ_HIGHWAY_PROBE_COMPILATION_FLAGS
+    "${_probe_identity_flags}" CACHE INTERNAL
+    "Normalized Highway configure-probe driver flags" FORCE)
+  set(BIOSEQ_HIGHWAY_PROBE_COMPILATION_RECORDS
+    "${_probe_identity_records}" CACHE INTERNAL
+    "Normalized Highway configure-probe provenance records" FORCE)
 
   if(NOT ARG_POLICY_TARGET)
     set(ARG_POLICY_TARGET "${ARG_TARGET}_policy")
@@ -943,6 +1533,17 @@ function(bioseq_add_highway_codegen)
     target_compile_options(
       "${ARG_POLICY_TARGET}" INTERFACE ${_policy_compile_options})
   endif()
+  get_target_property(
+    _published_policy_compile_options "${ARG_POLICY_TARGET}"
+    INTERFACE_COMPILE_OPTIONS)
+  if(NOT _published_policy_compile_options
+      OR _published_policy_compile_options STREQUAL
+        "_published_policy_compile_options-NOTFOUND")
+    set(_published_policy_compile_options)
+  endif()
+  _bioseq_highway_require_list_suffix(
+    "Highway policy target"
+    "${_published_policy_compile_options}" "${_probe_identity_flags}")
 
   set(_domain_topology_names)
   set(_domain_topology_paths)
@@ -1007,6 +1608,13 @@ function(bioseq_add_highway_codegen)
 
   _bioseq_highway_resolve_platform(_platform)
   set(_metadata_dir "${_output_root}/metadata")
+  set(_probe_identity_manifest
+    "${_metadata_dir}/probe/compilation_identity.tsv")
+  _bioseq_highway_render_probe_identity_provenance(
+    _probe_identity_manifest_contents "${_probe_identity_digest}"
+    ${_probe_identity_records})
+  _bioseq_highway_write_if_different(
+    "${_probe_identity_manifest}" "${_probe_identity_manifest_contents}")
   set(_target_manifest "${_metadata_dir}/targets.tsv")
   set(_source_manifest "${_metadata_dir}/sources.tsv")
   set(_artifact_manifest "${_output_root}/artifacts.json")
@@ -1017,6 +1625,7 @@ function(bioseq_add_highway_codegen)
     INCLUDE_DIRS ${_highway_include_dirs}
     DEFINITIONS ${_policy_definitions}
     COMPILE_OPTIONS ${_policy_compile_options}
+    IDENTITY_FLAGS ${_probe_identity_flags}
     OUTPUT_RECORDS _target_records
     OUTPUT_ORDER _target_order
     OUTPUT_MASK _compiled_mask
@@ -1513,6 +2122,9 @@ function(bioseq_add_highway_codegen)
   set_target_properties("${ARG_POLICY_TARGET}" PROPERTIES
     BIOSEQ_HIGHWAY_COMPILED_MASK "${_compiled_mask}"
     BIOSEQ_HIGHWAY_POLICY_DIGEST "${_policy_digest}"
+    BIOSEQ_HIGHWAY_PROBE_COMPILATION_IDENTITY "${_probe_identity_digest}"
+    BIOSEQ_HIGHWAY_PROBE_COMPILATION_FLAGS "${_probe_identity_flags}"
+    BIOSEQ_HIGHWAY_PROBE_COMPILATION_RECORDS "${_probe_identity_records}"
     BIOSEQ_HIGHWAY_TARGET_ORDER "${_target_order}"
     BIOSEQ_HIGHWAY_TARGET_RECORDS "${_target_records}")
 
