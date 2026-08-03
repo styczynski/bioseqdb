@@ -37,6 +37,8 @@ set(CMAKE_CXX_MODULE_STD OFF CACHE BOOL
   "The canary intentionally does not import the standard-library module" FORCE)
 set(CMAKE_CXX_SCAN_FOR_MODULES ON CACHE BOOL
   "Scan the isolated generated module closure" FORCE)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL
+  "Retain the exact GCC canary compile commands" FORCE)
 set(CMAKE_FIND_USE_PACKAGE_REGISTRY OFF)
 set(CMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY ON)
 
@@ -111,18 +113,14 @@ target_sources(bioseq_highway_gcc_module_canary
     FILE_SET CXX_MODULES
     TYPE CXX_MODULES
     FILES "${BIOSEQ_GCC_CANARY_PRIMARY}")
+# The generated API/selector are implementation partitions and instance_0..3
+# plus driver are implementation units. They therefore remain ordinary private
+# sources, but every one is explicitly module-scanned; only the exported
+# primary interface belongs in the CXX_MODULES file set.
 set_source_files_properties(
   ${_generated_sources}
   "${BIOSEQ_GCC_CANARY_DRIVER}"
   PROPERTIES COMPILE_OPTIONS "-x;c++" CXX_SCAN_FOR_MODULES ON)
-target_compile_options(bioseq_highway_gcc_module_canary PRIVATE
-  -fpermissive
-  -fabi-version=0
-  -Wno-expose-global-module-tu-local
-  -Wno-external-tu-local
-  -Wno-template-names-tu-local
-  -Wno-global-module
-  -Wno-template-body)
 set_target_properties(bioseq_highway_gcc_module_canary PROPERTIES
   CXX_STANDARD 26
   CXX_STANDARD_REQUIRED ON

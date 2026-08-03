@@ -171,7 +171,8 @@ foreach(_required_text IN ITEMS
     "instance_3.cppm"
     "BIOSEQ_GCC_CANARY_PRIMARY"
     "BIOSEQ_GCC_CANARY_DRIVER"
-    "BIOSEQ_GCC_CANARY_MAIN")
+    "BIOSEQ_GCC_CANARY_MAIN"
+    "CXX_SCAN_FOR_MODULES ON")
   string(FIND "${_nested}" "${_required_text}" _required_offset)
   if(_required_offset EQUAL -1)
     message(FATAL_ERROR
@@ -190,13 +191,21 @@ file(READ "${_runner}" _runner_source)
 foreach(_sealed_argument IN ITEMS
     "-G Ninja"
     "-DCMAKE_TOOLCHAIN_FILE:FILEPATH="
+    "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING="
+    "-DCMAKE_CXX_FLAGS:STRING="
     "-DCMAKE_CXX_MODULE_STD:BOOL=OFF"
-    "bioseq_verify_gcc16_toolchain_identity")
+    "bioseq_verify_gcc16_toolchain_identity"
+    "--verbose")
   string(FIND "${_runner_source}" "${_sealed_argument}" _sealed_offset)
   if(_sealed_offset EQUAL -1)
     message(FATAL_ERROR
       "Highway GCC canary runner lost sealed argument: ${_sealed_argument}")
   endif()
 endforeach()
+string(FIND "${_nested}" "-fpermissive" _permissive_offset)
+if(NOT _permissive_offset EQUAL -1)
+  message(FATAL_ERROR
+    "Highway GCC canary must not downgrade generated module diagnostics")
+endif()
 
 message(STATUS "Highway GCC canary CMake contracts passed")
