@@ -7058,7 +7058,7 @@ struct relocation_context {
 }
 
 inline constexpr std::string_view MODULE_PREPARATION_POLICY_VERSION =
-    "bioseq_clang_module_preparation/v3";
+    "bioseq_clang_module_preparation/v4";
 
 struct module_build_record {
     std::string module_name;
@@ -8307,10 +8307,13 @@ void scan_active_module_imports(
     });
 }
 
-/// Uses the codegen-linked Clang dependency scanner to obtain the exact make
-/// dependency bytes for the already-authenticated module command. This is a
-/// preprocessing action: unlike `clang -fsyntax-only -MD`, it cannot enter
-/// the body-bearing Sema path.
+/// Uses the codegen-linked Clang Make dependency scanner to obtain the exact
+/// dependency bytes for the already-authenticated module command. Make mode
+/// deliberately uses Clang's dependency forwarder, which includes skipped
+/// include-next files that the P1689 module collector omits. Its
+/// ReadPCHAndPreprocessAction lexes through EOF without entering the
+/// body-bearing Sema path. The separately sealed P1689 result remains the
+/// sole import-graph authority.
 void scan_make_dependencies(module_build_record& record) {
     if (record.direct_arguments.empty()
         || record.depfile_path.empty()) {
@@ -8340,89 +8343,23 @@ void scan_make_dependencies(module_build_record& record) {
     arguments.push_back(record.depfile_path.string());
     arguments.emplace_back("-MT");
     arguments.push_back(record.depfile_path.string());
-    const clang::tooling::CompileCommand command{
-        record.command.Directory,
-        record.source_path.string(),
-        std::move(arguments),
-        scan_object.string(),
-    };
     clang::dependencies::DependencyScanningService service{
         clang::dependencies::ScanningMode::CanonicalPreprocessing,
-        clang::dependencies::ScanningOutputFormat::P1689,
+        clang::dependencies::ScanningOutputFormat::Make,
     };
     clang::tooling::DependencyScanningTool scanner{service};
     clang::IgnoringDiagConsumer diagnostics;
-    std::string make_output;
-    std::string make_output_path;
-    const std::optional<clang::tooling::P1689Rule> rule =
-        scanner.getP1689ModuleDependencyFile(
-            command,
+    const std::optional<std::string> make_output =
+        scanner.getDependencyFile(
+            arguments,
             record.command.Directory,
-            make_output,
-            make_output_path,
             diagnostics);
-    if (!rule || make_output.empty()
-        || make_output_path.empty()) {
+    if (!make_output || make_output->empty()) {
         throw std::runtime_error(
             "linked-Clang make dependency scan failed for module '"
             + record.module_name + "'");
     }
-    std::filesystem::path reported_output{make_output_path};
-    if (reported_output.is_relative()) {
-        reported_output =
-            std::filesystem::path{record.command.Directory}
-            / reported_output;
-    }
-    if (weakly_canonical_path(reported_output)
-        != weakly_canonical_path(record.depfile_path)) {
-        throw std::runtime_error(
-            "linked-Clang make dependency output path differs from "
-            "the content-keyed authority for module '"
-            + record.module_name + "'");
-    }
-    if (!rule->Provides
-        || rule->Provides->ModuleName != record.module_name
-        || rule->Provides->SourcePath.empty()) {
-        throw std::runtime_error(
-            "linked-Clang make dependency scan returned the wrong "
-            "module provider for '" + record.module_name + "'");
-    }
-    std::filesystem::path provided_source{
-        rule->Provides->SourcePath};
-    if (provided_source.is_relative()) {
-        provided_source =
-            std::filesystem::path{record.command.Directory}
-            / provided_source;
-    }
-    if (weakly_canonical_path(provided_source)
-        != weakly_canonical_path(record.source_path)) {
-        throw std::runtime_error(
-            "linked-Clang make dependency scan returned a foreign "
-            "provider source for '" + record.module_name + "'");
-    }
-    std::vector<std::string> imports;
-    imports.reserve(rule->Requires.size());
-    for (const clang::dependencies::P1689ModuleInfo& required :
-         rule->Requires) {
-        std::string imported = required.ModuleName;
-        if (imported.starts_with(':')) {
-            const std::size_t partition =
-                record.module_name.find(':');
-            imported = std::string{record.module_name.substr(
-                0u, partition)} + imported;
-        }
-        imports.push_back(std::move(imported));
-    }
-    std::ranges::sort(imports);
-    imports.erase(
-        std::ranges::unique(imports).begin(), imports.end());
-    if (imports != record.description.imports) {
-        throw std::runtime_error(
-            "linked-Clang make dependency scan import graph differs "
-            "from authenticated P1689 discovery for module '"
-            + record.module_name + "'");
-    }
-    write_if_different(record.depfile_path, make_output);
+    write_if_different(record.depfile_path, *make_output);
     if (std::filesystem::is_symlink(record.depfile_path)
         || !std::filesystem::is_regular_file(
             record.depfile_path)) {
