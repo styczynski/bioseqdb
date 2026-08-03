@@ -202,6 +202,18 @@ namespace bioseq::simd {
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx)
 {
+    const auto highway_plan =
+        ::bioseq::simd_dispatch::registered_highway_dispatch_info();
+    const auto& highway_binding =
+        ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
+    if (highway_binding.target == 0
+        || highway_binding.kernels == nullptr
+        || !highway_binding.kernels->complete()
+        || highway_binding.target != highway_plan.planned_target) {
+        throw std::logic_error{
+            "Highway runtime binding disagrees with the generated target plan"};
+    }
+
     std::map<int32_t, std::vector<MatchResult>> results;
     const bool per_row_query_mode = per_row_query_hdrs != nullptr;
 
@@ -225,18 +237,6 @@ namespace bioseq::simd {
 		throw std::logic_error{
 			"Highway preparation hook is only partially configured"};
 	}
-
-    const auto highway_plan =
-        ::bioseq::simd_dispatch::registered_highway_dispatch_info();
-    const auto& highway_binding =
-        ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
-    if (highway_binding.target == 0
-        || highway_binding.kernels == nullptr
-        || !highway_binding.kernels->complete()
-        || highway_binding.target != highway_plan.planned_target) {
-        throw std::logic_error{
-            "Highway runtime binding disagrees with the generated target plan"};
-    }
     Minimap2Params dispatched_params = base_params;
     dispatched_params.highway_kernels = highway_binding.kernels;
     dispatched_params.highway_dispatch = highway_plan;
