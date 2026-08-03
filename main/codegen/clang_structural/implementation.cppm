@@ -7057,6 +7057,9 @@ struct relocation_context {
     return result;
 }
 
+inline constexpr std::string_view MODULE_PREPARATION_POLICY_VERSION =
+    "bioseq_clang_module_preparation/v2";
+
 struct module_build_record {
     std::string module_name;
     std::filesystem::path source_path;
@@ -9538,7 +9541,9 @@ prepare_compilation_environment(
                 relocation,
                 clang_binary_sha256);
         std::string content_material =
-            std::string{CLANG_VERSION_STRING}
+            std::string{
+                clang_backend::MODULE_PREPARATION_POLICY_VERSION}
+            + "\n" + std::string{CLANG_VERSION_STRING}
             + "\n" + clang_binary_sha256
             + "\n" + clang_scan_deps_sha256
             + "\n" + std::string{compiler_profile}
@@ -9550,7 +9555,9 @@ prepare_compilation_environment(
             + "\n" + record.dependency_scan_result_sha256
             + "\n" + record.dependency_scan_diagnostics_sha256;
         std::string relocatable_content_material =
-            std::string{CLANG_VERSION_STRING}
+            std::string{
+                clang_backend::MODULE_PREPARATION_POLICY_VERSION}
+            + "\n" + std::string{CLANG_VERSION_STRING}
             + "\n" + clang_binary_sha256
             + "\n" + clang_scan_deps_sha256
             + "\n" + std::string{compiler_profile}
@@ -9718,6 +9725,16 @@ prepare_compilation_environment(
         const bool pcm_cache_hit =
             !size_error && existing_size != 0;
         if (!pcm_cache_hit) {
+            if (std::filesystem::is_symlink(
+                    record.pcm_depfile_path)
+                || (std::filesystem::exists(
+                        record.pcm_depfile_path)
+                    && !std::filesystem::is_regular_file(
+                        record.pcm_depfile_path))) {
+                throw std::runtime_error(
+                    "PCM compilation dependency path is not a regular "
+                    "file for '" + module_name + "'");
+            }
             clang_backend::execute_clang(
                 clang_binary,
                 record.owned_arguments,
@@ -11814,7 +11831,9 @@ validate_prepared_compilation_environment(
                 validate_module(imported);
             }
             std::string physical_material =
-                std::string{CLANG_VERSION_STRING}
+                std::string{
+                    clang_backend::MODULE_PREPARATION_POLICY_VERSION}
+                + "\n" + std::string{CLANG_VERSION_STRING}
                 + "\n" + clang_binary_sha256
                 + "\n" + clang_scan_deps_sha256
                 + "\n" + std::string{compiler_profile}
@@ -11826,7 +11845,9 @@ validate_prepared_compilation_environment(
                 + "\n" + module.scan_result_sha256
                 + "\n" + module.scan_diagnostics_sha256;
             std::string relocatable_material =
-                std::string{CLANG_VERSION_STRING}
+                std::string{
+                    clang_backend::MODULE_PREPARATION_POLICY_VERSION}
+                + "\n" + std::string{CLANG_VERSION_STRING}
                 + "\n" + clang_binary_sha256
                 + "\n" + clang_scan_deps_sha256
                 + "\n" + std::string{compiler_profile}
@@ -12027,10 +12048,10 @@ validate_prepared_compilation_environment(
         expected_owned_arguments.emplace_back("-MD");
         expected_owned_arguments.emplace_back("-MF");
         expected_owned_arguments.push_back(
-            module.depfile.string());
+            module.pcm.string() + ".d");
         expected_owned_arguments.emplace_back("-MT");
         expected_owned_arguments.push_back(
-            module.depfile.string());
+            module.pcm.string() + ".d");
         if (command.CommandLine != expected_owned_arguments
             || clang_backend::weakly_canonical_path(
                    command.Directory)
