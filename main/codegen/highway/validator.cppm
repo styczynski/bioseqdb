@@ -344,12 +344,64 @@ inline void validate_no_forbidden_source_macros(
         "DisableTargets",
         "select_highway_target_once",
         "registered_highway_dispatch_info",
+        "STATIC_FACADE",
     };
     for (std::string_view spelling : forbidden) {
         if (source.contains(spelling)) {
             throw std::runtime_error(
                 path.string() + ": registered Highway source contains forbidden '"
                 + std::string{spelling} + "'");
+        }
+    }
+
+    const auto trim_left = [](std::string_view value) noexcept {
+        const std::size_t first = value.find_first_not_of(" \t");
+        return first == std::string_view::npos
+            ? std::string_view{}
+            : value.substr(first);
+    };
+    const auto directive_argument = [&](std::string_view line,
+                                        std::string_view directive) noexcept {
+        line = trim_left(line);
+        if (line.empty() || line.front() != '#') return std::string_view{};
+        line = trim_left(line.substr(1u));
+        if (!line.starts_with(directive)) return std::string_view{};
+        line.remove_prefix(directive.size());
+        if (!line.empty() && line.front() != ' ' && line.front() != '\t') {
+            return std::string_view{};
+        }
+        return trim_left(line);
+    };
+
+    for (std::size_t begin = 0u; begin <= source.size();) {
+        const std::size_t end = source.find_first_of("\r\n", begin);
+        const std::string_view line = source.substr(
+            begin,
+            end == std::string_view::npos ? source.size() - begin : end - begin);
+
+        const std::string_view include = directive_argument(line, "include");
+        if (!include.empty()
+            && (include.front() == '<' || include.front() == '"')
+            && include.contains(".cppm")) {
+            throw std::runtime_error(
+                path.string()
+                + ": registered Highway source may not textually include a .cppm");
+        }
+
+        std::string_view definition = directive_argument(line, "define");
+        const std::size_t name_end = definition.find_first_of(" \t(");
+        const std::string_view name = definition.substr(0u, name_end);
+        if (name == "module" || name == "target") {
+            throw std::runtime_error(
+                path.string() + ": registered Highway source contains forbidden '#define "
+                + std::string{name} + "'");
+        }
+
+        if (end == std::string_view::npos) break;
+        begin = end + 1u;
+        if (begin < source.size() && source[end] == '\r'
+            && source[begin] == '\n') {
+            ++begin;
         }
     }
 }

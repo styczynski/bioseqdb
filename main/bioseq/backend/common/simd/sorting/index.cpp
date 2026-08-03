@@ -18,20 +18,14 @@ module;
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <type_traits>
-#include <utility>
 
 module bioseq.simd.sorting;
-
-import bioseq.simd.vector_stream;
 
 HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::sorting {
 namespace hn = hwy::HWY_NAMESPACE;
 
 namespace detail {
-
-namespace vs = ::bioseq::simd::HWY_NAMESPACE;
 
 [[nodiscard]] inline bool u128_less_ascending(
     const hwy::uint128_t& a,
@@ -87,76 +81,68 @@ inline void sort_u128_small_scalar(
 
 #if HWY_TARGET != HWY_SCALAR || HWY_IDE
 
-template <class D, std::size_t StreamWidth>
-using u128_vec_stream_t = vs::vec_stream<D, std::uint64_t, StreamWidth>;
-
-template <bool Ascending, class D, std::size_t StreamWidth>
+// Scan one compile-time slot at a time instead of collecting vectors or masks
+// into a bundle. Highway vectors are sizeless on SVE/RVV, so they may be
+// locals and function arguments but cannot be elements of arrays or other
+// aggregate storage. Forced inlining turns this recursion into the same
+// straight-line sequence of up to four comparisons used by the old stream
+// implementation without giving a sizeless vector an object representation.
+template <bool Ascending, bool PivotFirst, class D>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
-auto u128_ordered_less_stream(
+auto u128_ordered_less_vec(
     D d,
-    u128_vec_stream_t<D, StreamWidth> a,
-    u128_vec_stream_t<D, StreamWidth> b) noexcept
+    hn::Vec<D> key,
+    hn::Vec<D> pivot) noexcept
 {
-    return [&]<std::size_t... S>(std::index_sequence<S...>)
-        [[gnu::always_inline]] {
-        if constexpr (Ascending) {
-            return vs::mask_stream<D, StreamWidth>::pack(
-                hn::Lt128(d, a[S], b[S])...);
+    if constexpr (Ascending) {
+        if constexpr (PivotFirst) {
+            return hn::Lt128(d, pivot, key);
         } else {
-            return vs::mask_stream<D, StreamWidth>::pack(
-                hn::Lt128(d, b[S], a[S])...);
+            return hn::Lt128(d, key, pivot);
         }
-    }(std::make_index_sequence<StreamWidth>{});
+    } else {
+        if constexpr (PivotFirst) {
+            return hn::Lt128(d, key, pivot);
+        } else {
+            return hn::Lt128(d, pivot, key);
+        }
+    }
 }
 
-template <class D, std::size_t StreamWidth>
+template <std::size_t Slot,
+          std::size_t StreamWidth,
+          bool Ascending,
+          bool PivotFirst,
+          bool Reverse,
+          class D>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
-auto splat_u128_key_stream(D d, const hwy::uint128_t& key) noexcept {
-    const auto v = load_u128_key(d, key);
-    return vs::make_vec_stream<D, std::uint64_t, StreamWidth>(
-        [&](auto) [[gnu::always_inline]] { return v; });
-}
-
-template <class D, std::size_t StreamWidth>
-[[nodiscard, gnu::always_inline]] HWY_INLINE
-auto load_u128_forward_stream(
+std::size_t first_false_u128_block_slot(
     D d,
     const hwy::uint128_t* HWY_RESTRICT keys,
-    std::ptrdiff_t base) noexcept
+    std::ptrdiff_t base,
+    hn::Vec<D> pivot) noexcept
 {
-    return vs::make_vec_stream<D, std::uint64_t, StreamWidth>(
-        [&](auto s_const) [[gnu::always_inline]] {
-            constexpr std::size_t s = decltype(s_const)::value;
-            return load_u128_key(d, keys[static_cast<std::size_t>(base) + s]);
-        });
-}
+    static_assert(StreamWidth >= 1 && StreamWidth <= 4);
+    static_assert(Slot <= StreamWidth);
 
-template <class D, std::size_t StreamWidth>
-[[nodiscard, gnu::always_inline]] HWY_INLINE
-auto load_u128_reverse_stream(
-    D d,
-    const hwy::uint128_t* HWY_RESTRICT keys,
-    std::ptrdiff_t base) noexcept
-{
-    return vs::make_vec_stream<D, std::uint64_t, StreamWidth>(
-        [&](auto s_const) [[gnu::always_inline]] {
-            constexpr std::size_t s = decltype(s_const)::value;
-            const auto offset = static_cast<std::ptrdiff_t>(s);
-            return load_u128_key(d, keys[static_cast<std::size_t>(base - offset)]);
-        });
-}
+    if constexpr (Slot == StreamWidth) {
+        return StreamWidth;
+    } else {
+        constexpr auto offset = static_cast<std::ptrdiff_t>(Slot);
+        const std::ptrdiff_t index = Reverse ? base - offset : base + offset;
+        const auto key = load_u128_key(
+            d, keys[static_cast<std::size_t>(index)]);
 
-template <class D, std::size_t StreamWidth, class MaskStream>
-[[nodiscard, gnu::always_inline]] HWY_INLINE
-std::size_t first_false_u128_mask_slot(D d, const MaskStream& masks) noexcept {
-    std::size_t first_false = StreamWidth;
-    vs::for_each_stream<StreamWidth>([&](auto s_const) [[gnu::always_inline]] {
-        constexpr std::size_t s = decltype(s_const)::value;
-        if (first_false == StreamWidth && hn::AllFalse(d, masks[s])) {
-            first_false = s;
+        const auto ordered_less =
+            u128_ordered_less_vec<Ascending, PivotFirst>(d, key, pivot);
+        if (hn::AllFalse(d, ordered_less)) {
+            return Slot;
         }
-    });
-    return first_false;
+
+        return first_false_u128_block_slot<
+            Slot + 1, StreamWidth, Ascending, PivotFirst, Reverse>(
+                d, keys, base, pivot);
+    }
 }
 
 template <bool Ascending>
@@ -182,17 +168,15 @@ template <std::size_t StreamWidth, bool Ascending, class D>
 {
     std::ptrdiff_t i = 0;
     std::ptrdiff_t j = static_cast<std::ptrdiff_t>(key_count) - 1;
-    const auto pivot_stream = splat_u128_key_stream<D, StreamWidth>(d, pivot);
+    const auto pivot_vec = load_u128_key(d, pivot);
 
     while (i <= j) {
         while (i <= j) {
             while (j - i + 1 >= static_cast<std::ptrdiff_t>(StreamWidth)) {
-                const auto block = load_u128_forward_stream<D, StreamWidth>(d, keys, i);
-                const auto less =
-                    u128_ordered_less_stream<Ascending, D, StreamWidth>(
-                        d, block, pivot_stream);
                 const std::size_t first_false =
-                    first_false_u128_mask_slot<D, StreamWidth>(d, less);
+                    first_false_u128_block_slot<
+                        0, StreamWidth, Ascending, false, false>(
+                            d, keys, i, pivot_vec);
                 if (first_false == StreamWidth) {
                     i += static_cast<std::ptrdiff_t>(StreamWidth);
                     continue;
@@ -210,12 +194,10 @@ template <std::size_t StreamWidth, bool Ascending, class D>
 
         while (i <= j) {
             while (j - i + 1 >= static_cast<std::ptrdiff_t>(StreamWidth)) {
-                const auto block = load_u128_reverse_stream<D, StreamWidth>(d, keys, j);
-                const auto greater =
-                    u128_ordered_less_stream<Ascending, D, StreamWidth>(
-                        d, pivot_stream, block);
                 const std::size_t first_false =
-                    first_false_u128_mask_slot<D, StreamWidth>(d, greater);
+                    first_false_u128_block_slot<
+                        0, StreamWidth, Ascending, true, true>(
+                            d, keys, j, pivot_vec);
                 if (first_false == StreamWidth) {
                     j -= static_cast<std::ptrdiff_t>(StreamWidth);
                     continue;

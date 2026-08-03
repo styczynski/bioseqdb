@@ -1,6 +1,5 @@
 /** Canonical generator input for the exact minimap integer hasher. */
 module;
-#ifndef BIOSEQ_HASHER_MINIMAP_INT_STATIC_FACADE
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.hasher_minimap_int;
@@ -8,55 +7,20 @@ export module bioseq.highway.sources.hasher_minimap_int;
 import std;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
+import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.highway.sources.hasher_base;
 import bioseq.highway.sources.hasher_lexic;
 import bioseq.highway.sources.simd_utils;
-#endif
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 template<sequence_alphabet alphabet_t>
-struct minimap_int_hasher {
+struct minimap_int_hasher
+    : ::bioseq::simd::minimap_int_hasher<alphabet_t> {
 public:
 	using base_hasher_t = lexic_hasher<alphabet_t>;
-
-	// scalar
-	template<typename input_t>
-	class scalar_hash : public hasher_base<
-        scalar_hash<input_t>,
-        alphabet_t,
-        input_t
-    >{
-	public:
-        using traits = scalar_hash<input_t>::hasher_base::traits;
-	private:
-		typename base_hasher_t::template scalar_hash<input_t> base_hasher;
-		const traits::input_t mask;
-	public:
-		explicit scalar_hash(
-			const size_t& kmer_length
-		): base_hasher(kmer_length), mask((static_cast<traits::input_t>(1)<<2*kmer_length) - 1) {};
-
-		template<size_t offset>
-        static constexpr size_t shift = std::min(offset, sizeof(input_t) * 8 - 1);
-
-		constexpr traits::hasher_return_t next(traits::input_t incoming, traits::input_t outgoing) {
-			auto [key, base_strand] = base_hasher.next(std::move(incoming), std::move(outgoing));
-
-			key = (~key + (key << shift<21>)) & mask;
-			key = key ^ key >> shift<24>;
-			key = ((key + (key << shift<3>)) + (key << shift<8>)) & mask;
-			key = key ^ key >> shift<14>;
-			key = ((key + (key << shift<2>)) + (key << shift<4>)) & mask;
-			key = key ^ key >> shift<28>;
-			key = (key + (key << shift<31>)) & mask;
-
-			return std::make_pair(key, base_strand);
-			//return std::make_pair(static_cast<input_t>(key), base_strand);
-		}
-	};
 
 	template<typename input_t, typename d_t>
 	class simd_hash : public simd_hasher_base<
@@ -133,40 +97,6 @@ public:
 
 	};
 
-	// Static "post-lex" scramble — the seven-step integer mix from the
-	// minimap_int scalar_hash::next() body, applied to a precomputed lex
-	// kmer. Kept as the scalar reference/helper; the two-stack SIMD path uses
-	// `scramble_simd` below and carries the vector result with window state.
-	//
-	// The bit-pattern is identical
-	// to scalar_hash<input_t>::next's emit value because the body below is
-	// the literal copy of that body's scramble half (the lex-rolling half
-	// stays in the caller).
-	//
-	// Shifts are clamped via `clamp` so that on narrow `input_t` (e.g.
-	// uint8_t) we don't shift past `sizeof(input_t)*8 - 1` and invoke UB.
-	// The same clamp pattern is used in the simd_hash::next body and in
-	// the inline scramble lambdas this method replaces.
-	template<typename input_t>
-	[[nodiscard]] static constexpr input_t scramble(
-		const input_t& lex_kmer,
-		const input_t& kmer_mask
-	) {
-		constexpr size_t storage_max_shift = sizeof(input_t) * 8 - 1;
-		constexpr auto clamp = [](size_t s) constexpr -> size_t {
-			return s > storage_max_shift ? storage_max_shift : s;
-		};
-		input_t key = lex_kmer;
-		key = (~key + (key << clamp(21))) & kmer_mask;
-		key = key ^ (key >> clamp(24));
-		key = ((key + (key << clamp(3))) + (key << clamp(8))) & kmer_mask;
-		key = key ^ (key >> clamp(14));
-		key = ((key + (key << clamp(2))) + (key << clamp(4))) & kmer_mask;
-		key = key ^ (key >> clamp(28));
-		key = (key + (key << clamp(31))) & kmer_mask;
-		return key;
-	}
-
 	// Highway sibling of `scramble`: the exact same seven-step integer mix,
 	// applied to every canonical-kmer lane before two-stack window selection.
 	// Keeping this beside the scalar definition makes scalar/SIMD drift visible
@@ -208,7 +138,8 @@ public:
 
 
 };
-static_assert(supports_scalar_hash<minimap_int_hasher, seq::dna4>);
+static_assert(
+    ::bioseq::simd::supports_scalar_hash<minimap_int_hasher, seq::dna4>);
 static_assert(supports_simd_hash<minimap_int_hasher, seq::dna4>);
 
 } // namespace target

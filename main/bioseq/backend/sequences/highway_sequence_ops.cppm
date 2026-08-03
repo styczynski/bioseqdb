@@ -1,6 +1,5 @@
 /** Canonical generator input for exact minimizer sequence iteration. */
 module;
-#ifndef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.sequence_ops;
@@ -12,24 +11,17 @@ import bioseq.storage.lazy;
 import bioseq.sequences.simd_iteration_geometry;
 import bioseq.highway.sources.simd_utils;
 import bioseq.highway.sources.vector_stream;
-#endif
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
-#ifndef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
 namespace hn = hwy::HWY_NAMESPACE;
-#endif
 
 inline void highway_kernel_invariant(
     const bool condition, const std::string_view message)
 {
-#ifdef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
-    DEBUG_ASSERT(condition, message);
-#else
     if (!condition) {
         throw std::logic_error{std::string{message}};
     }
-#endif
 }
 
 template <typename T>

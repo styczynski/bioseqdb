@@ -1,6 +1,5 @@
 /** Canonical generator input for minimizer-owned Highway utilities. */
 module;
-#ifndef BIOSEQ_SIMD_UTILS_STATIC_FACADE
 #include <hwy/highway.h>
 #include <hwy/aligned_allocator.h>
 
@@ -8,7 +7,6 @@ export module bioseq.highway.sources.simd_utils;
 
 import std;
 import bioseq.common.templating;
-#endif
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {

@@ -13,6 +13,7 @@ import bioseq.storage.lazy;
 import bioseq.storage.size;
 import bioseq.sequences.kmers.highway_contract;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.highway.sources.sequence_ops;
 import bioseq.highway.sources.hasher_base;
 import bioseq.highway.sources.hasher_lexic;

@@ -1,13 +1,11 @@
 /** Canonical generator input for exact minimizer vector streams. */
 module;
-#ifndef BIOSEQ_VECTOR_STREAM_STATIC_FACADE
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.vector_stream;
 
 import std;
 import bioseq.highway.sources.simd_utils;
-#endif
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {

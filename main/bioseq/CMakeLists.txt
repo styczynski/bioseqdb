@@ -816,6 +816,15 @@ foreach(_bioseq_highway_candidate IN LISTS
 
   file(READ "${_bioseq_highway_candidate}"
     _bioseq_highway_candidate_contents)
+  string(REGEX MATCH
+    "(^|[\r\n])[ \t]*#[ \t]*include[ \t]*[<\"][^>\"\r\n]+\\.cppm[>\"]"
+    _bioseq_highway_cppm_include
+    "${_bioseq_highway_candidate_contents}")
+  if(_bioseq_highway_cppm_include)
+    message(FATAL_ERROR
+      "DOC0398 production module units may not textually include another "
+      ".cppm: ${_bioseq_highway_candidate}")
+  endif()
   string(REGEX REPLACE "[ \t\r\n]+" ""
     _bioseq_highway_compact_contents
     "${_bioseq_highway_candidate_contents}")
@@ -889,6 +898,7 @@ unset(_bioseq_highway_unmarked_registered_modules)
 unset(_bioseq_highway_registered_modules)
 unset(_bioseq_highway_marked_modules)
 unset(_bioseq_highway_marker_offset)
+unset(_bioseq_highway_cppm_include)
 unset(_bioseq_highway_compact_contents)
 unset(_bioseq_highway_candidate_contents)
 unset(_bioseq_highway_relative_candidate)

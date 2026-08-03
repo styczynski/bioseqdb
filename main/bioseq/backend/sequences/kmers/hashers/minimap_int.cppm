@@ -1,10 +1,7 @@
-/** Static-target facade for the minimap integer hasher. */
+/** Target-neutral scalar minimap integer hasher. */
 module;
 
-#include <hwy/highway.h>
-
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
@@ -16,22 +13,65 @@ import bioseq.sequences.kmers.hashers.lexic;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 
-// The canonical attributed source owns both scalar and SIMD hasher bodies.
-// This facade fixes the static target before replay, avoiding a neutral vector
-// BMI while retaining the longstanding module and public type name.
-HWY_BEFORE_NAMESPACE();
-
-#define BIOSEQ_HASHER_MINIMAP_INT_STATIC_FACADE 1
-#define target HWY_NAMESPACE
-// Suppress only the canonical source's required leading global fragment.
-#define module
-#include "highway_minimap_int_kernel.cppm"
-#undef module
-#undef target
-#undef BIOSEQ_HASHER_MINIMAP_INT_STATIC_FACADE
-
-HWY_AFTER_NAMESPACE();
-
 export namespace bioseq::simd {
-using HWY_NAMESPACE::minimap_int_hasher;
+
+template<sequence_alphabet Alphabet>
+struct minimap_int_hasher {
+    using base_hasher_t = lexic_hasher<Alphabet>;
+
+    template<typename Input>
+    class scalar_hash
+        : public hasher_base<scalar_hash<Input>, Alphabet, Input> {
+    public:
+        using traits = scalar_hash<Input>::hasher_base::traits;
+
+        explicit scalar_hash(const std::size_t& kmer_length)
+            : base_hasher(kmer_length),
+              mask((static_cast<typename traits::input_t>(1)
+                    << (2u * kmer_length)) - 1u) {}
+
+        template<std::size_t Offset>
+        static constexpr std::size_t shift =
+            std::min(Offset, sizeof(Input) * 8u - 1u);
+
+        constexpr traits::hasher_return_t next(
+            traits::input_t incoming,
+            traits::input_t outgoing)
+        {
+            auto [key, base_strand] = base_hasher.next(
+                std::move(incoming), std::move(outgoing));
+            key = minimap_int_hasher::template scramble<Input>(key, mask);
+            return std::make_pair(key, base_strand);
+        }
+
+    private:
+        typename base_hasher_t::template scalar_hash<Input> base_hasher;
+        const typename traits::input_t mask;
+    };
+
+    template<typename Input>
+    [[nodiscard]] static constexpr Input scramble(
+        const Input& lex_kmer,
+        const Input& kmer_mask)
+    {
+        constexpr std::size_t storage_max_shift = sizeof(Input) * 8u - 1u;
+        constexpr auto clamp = [](std::size_t shift) constexpr {
+            return shift > storage_max_shift ? storage_max_shift : shift;
+        };
+        Input key = lex_kmer;
+        key = (~key + (key << clamp(21u))) & kmer_mask;
+        key = key ^ (key >> clamp(24u));
+        key = ((key + (key << clamp(3u)))
+                + (key << clamp(8u))) & kmer_mask;
+        key = key ^ (key >> clamp(14u));
+        key = ((key + (key << clamp(2u)))
+                + (key << clamp(4u))) & kmer_mask;
+        key = key ^ (key >> clamp(28u));
+        key = (key + (key << clamp(31u))) & kmer_mask;
+        return key;
+    }
+};
+
+static_assert(supports_scalar_hash<minimap_int_hasher, seq::dna4>);
+
 } // namespace bioseq::simd

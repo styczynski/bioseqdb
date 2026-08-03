@@ -28,7 +28,6 @@ import bioseq.storage.lazy;
 import bioseq.sequences.simd_iteration_geometry;
 
 import bioseq.simd.utils;
-export import bioseq.simd.vector_stream;
 
 export {
 
@@ -629,22 +628,6 @@ return detail::generate_array<T>(f, std::make_index_sequence<N>{});
 HWY_AFTER_NAMESPACE();
 
 }  // export
-
-// Compile the independent static facade from the same canonical target body.
-// This textual replay happens after HWY_TARGET is fixed and therefore does
-// not move vector-bearing templates or ABI across a module boundary.
-HWY_BEFORE_NAMESPACE();
-
-#define BIOSEQ_SEQUENCE_OPS_STATIC_FACADE 1
-#define target HWY_NAMESPACE
-// Suppress only the canonical source's required leading global fragment.
-#define module
-#include "highway_sequence_ops.cppm"
-#undef module
-#undef target
-#undef BIOSEQ_SEQUENCE_OPS_STATIC_FACADE
-
-HWY_AFTER_NAMESPACE();
 
 export {
 
