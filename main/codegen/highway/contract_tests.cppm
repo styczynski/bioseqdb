@@ -1064,14 +1064,15 @@ inline void verify_typed_minimizer_binder() {
     for (const slot_spec& slot : plan.source_inventory.slots) {
         topology_families[slot.family_field].push_back(&slot);
     }
-    const auto topology_identities = collect_alphabet_identities(
-        {}, collect_minimizer_cases(topology_families));
+    const auto topology_identities = detail::collect_alphabet_identities(
+        {}, detail::collect_minimizer_cases(topology_families));
     require(
         topology_identities.size() > 1u,
         "combined-consumer fixture exposes multiple topology alphabets");
 
     generation_plan combined = plan;
-    for (const alphabet_identity_binding& identity : topology_identities) {
+    for (const detail::alphabet_identity_binding& identity
+         : topology_identities) {
         append_alignment(
             combined, identity.alphabet_code, identity.alphabet_type);
     }
@@ -1089,7 +1090,7 @@ inline void verify_typed_minimizer_binder() {
                        "highway_alphabet_type_identity<::seq::dna5>()") == 1u,
             "alignment and minimizer families share one alphabet identity "
             "axis in each binder");
-        for (const alphabet_identity_binding& identity
+        for (const detail::alphabet_identity_binding& identity
              : topology_identities) {
             require(
                 artifact.content.contains(
@@ -1107,9 +1108,9 @@ inline void verify_typed_minimizer_binder() {
 
     generation_plan mismatched_consumers = plan;
     for (std::size_t index = 0u; index < topology_identities.size(); ++index) {
-        const alphabet_identity_binding& code_owner =
+        const detail::alphabet_identity_binding& code_owner =
             topology_identities[index];
-        const alphabet_identity_binding& wrong_type =
+        const detail::alphabet_identity_binding& wrong_type =
             topology_identities[(index + 1u) % topology_identities.size()];
         append_alignment(
             mismatched_consumers,
