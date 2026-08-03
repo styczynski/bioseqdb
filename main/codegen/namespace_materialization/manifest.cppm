@@ -2900,7 +2900,15 @@ read_configure_topology_provenance(
 /// Authenticates a prior artifacts manifest before it can authorize cleanup.
 /// An empty expected topology accepts any valid self-sealed v1 digest so a
 /// reconfigured axis inventory can retire artifacts from its predecessor.
-[[nodiscard]] inline previous_publication read_previous_publication(
+namespace detail {
+
+struct previous_publication_snapshot {
+    previous_publication publication;
+    std::string document;
+};
+
+[[nodiscard]] inline previous_publication_snapshot
+read_previous_publication_snapshot(
     const std::filesystem::path& manifest_path,
     const std::filesystem::path& expected_output_root,
     std::string_view expected_policy,
@@ -2913,17 +2921,54 @@ read_configure_topology_provenance(
     if (status.type() == std::filesystem::file_type::not_found) return {};
     detail::require_regular_or_missing(
         manifest_path, "previous publication manifest");
-    const std::string document = read_file(manifest_path);
+    std::string document = read_file(manifest_path);
     if (document.contains('\0')) {
         throw std::runtime_error(
             manifest_path.string() + ": artifacts manifest contains NUL");
     }
-    return detail::parse_publication_manifest(
-        document,
-        manifest_path.string(),
-        expected_output_root,
-        expected_policy,
+    previous_publication publication = detail::parse_publication_manifest(
+        document, manifest_path.string(), expected_output_root, expected_policy,
         expected_topology_digest);
+    return previous_publication_snapshot{
+        .publication = std::move(publication),
+        .document = std::move(document),
+    };
+}
+
+inline void require_unchanged_previous_publication_snapshot(
+    const std::filesystem::path& manifest_path,
+    const previous_publication_snapshot& snapshot) {
+    const std::filesystem::file_status status = symlink_status_or_missing(
+        manifest_path, "revalidated previous publication manifest");
+    if (!snapshot.publication.present) {
+        if (status.type() != std::filesystem::file_type::not_found) {
+            throw std::runtime_error(
+                "previous publication manifest appeared after authentication");
+        }
+        return;
+    }
+    require_regular_or_missing(
+        manifest_path, "revalidated previous publication manifest");
+    if (status.type() == std::filesystem::file_type::not_found
+        || read_file(manifest_path) != snapshot.document) {
+        throw std::runtime_error(
+            "previous publication manifest changed after authentication");
+    }
+}
+
+}  // namespace detail
+
+[[nodiscard]] inline previous_publication read_previous_publication(
+    const std::filesystem::path& manifest_path,
+    const std::filesystem::path& expected_output_root,
+    std::string_view expected_policy,
+    std::string_view expected_topology_digest) {
+    return detail::read_previous_publication_snapshot(
+               manifest_path,
+               expected_output_root,
+               expected_policy,
+               expected_topology_digest)
+        .publication;
 }
 
 /// Atomically publishes the complete desired set and removes only stale paths
@@ -2938,8 +2983,25 @@ inline void publish_artifacts(const publication_request& request) {
         throw std::runtime_error(
             "artifact manifest destination must use .json");
     }
-    static_cast<void>(detail::path_beneath_root(
-        request.stamp, request.output_root, "publication stamp destination"));
+    const std::filesystem::path stamp_relative = detail::path_beneath_root(
+        request.stamp, request.output_root, "publication stamp destination");
+    std::set<std::filesystem::path> publication_path_identities;
+    const auto reserve_publication_path =
+        [&publication_path_identities](
+            const std::filesystem::path& relative,
+            std::string_view owner) {
+            const std::filesystem::path temporary{
+                relative.string() + ".tmp"};
+            if (!publication_path_identities.insert(relative).second
+                || !publication_path_identities.insert(temporary).second) {
+                throw std::runtime_error(
+                    std::string{owner}
+                    + " aliases another publication destination or temporary path: "
+                    + relative.string());
+            }
+        };
+    reserve_publication_path(manifest_relative, "artifact manifest destination");
+    reserve_publication_path(stamp_relative, "publication stamp destination");
 
     const previous_publication desired_manifest =
         detail::parse_publication_manifest(
@@ -2949,14 +3011,16 @@ inline void publish_artifacts(const publication_request& request) {
             std::string_view{},
             std::string_view{});
 
-    const previous_publication previous = read_previous_publication(
+    const detail::previous_publication_snapshot previous_snapshot =
+        detail::read_previous_publication_snapshot(
         request.artifact_manifest,
         request.output_root,
         desired_manifest.policy,
         std::string_view{});
+    const previous_publication& previous = previous_snapshot.publication;
     const bool idempotent_republication = previous.present
         && detail::publication_noop_projection(
-               read_file(request.artifact_manifest),
+               previous_snapshot.document,
                "previous artifacts manifest")
             == detail::publication_noop_projection(
                 request.artifact_manifest_json,
@@ -2981,6 +3045,7 @@ inline void publish_artifacts(const publication_request& request) {
             throw std::runtime_error(
                 "artifacts.json must be published through its dedicated field");
         }
+        reserve_publication_path(relative, "desired publication artifact");
         const bool production = artifact.artifact_class
             == publication_artifact_class::production_cppm;
         if ((production && relative.extension() != ".cppm")
@@ -3063,6 +3128,9 @@ inline void publish_artifacts(const publication_request& request) {
                 "previous manifest recursively claims its own ownership path");
         }
         if (requested_paths.contains(artifact.relative_path)) continue;
+        reserve_publication_path(
+            artifact.relative_path,
+            "authenticated stale publication artifact");
         const std::filesystem::path stale =
             request.output_root / artifact.relative_path;
         detail::require_regular_or_missing(
@@ -3079,6 +3147,8 @@ inline void publish_artifacts(const publication_request& request) {
         stale_artifacts.push_back(artifact);
     }
 
+    detail::require_unchanged_previous_publication_snapshot(
+        request.artifact_manifest, previous_snapshot);
     for (const publication_artifact& artifact : request.artifacts) {
         write_if_different(
             request.output_root / artifact.relative_path, artifact.content);
@@ -3093,6 +3163,25 @@ inline void publish_artifacts(const publication_request& request) {
         if (!std::filesystem::is_regular_file(status)) {
             throw std::runtime_error(
                 "refusing non-regular stale publication artifact: "
+                + stale.string());
+        }
+        if (sha256_hex(read_file(stale)) != artifact.content_sha256) {
+            throw std::runtime_error(
+                "refusing to delete a stale publication artifact replaced "
+                "after preflight: "
+                + stale.string());
+        }
+        const std::filesystem::file_status revalidated_status =
+            detail::symlink_status_or_missing(
+                stale, "revalidated stale publication artifact");
+        if (!std::filesystem::is_regular_file(revalidated_status)) {
+            throw std::runtime_error(
+                "refusing stale publication artifact replaced during deletion: "
+                + stale.string());
+        }
+        if (sha256_hex(read_file(stale)) != artifact.content_sha256) {
+            throw std::runtime_error(
+                "refusing stale publication artifact changed during deletion: "
                 + stale.string());
         }
         std::error_code error;

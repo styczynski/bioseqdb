@@ -1261,7 +1261,9 @@ inline void verify_authenticated_incremental_publication() {
     const std::filesystem::path root = temporary.path();
     const std::filesystem::path manifest = root / "artifacts.json";
     const std::filesystem::path stamp = root / "publication.stamp";
-    const std::string topology_digest = sha256_hex("publisher topology");
+    const std::string topology_digest = sha256_hex("publisher topology A");
+    const std::string replacement_topology_digest =
+        sha256_hex("publisher topology B");
     const std::string keep_content =
         "module bioseq.codegen.publisher_contract.keep;\n";
     const std::string stale_content =
@@ -1278,28 +1280,40 @@ inline void verify_authenticated_incremental_publication() {
             .content_sha256 = sha256_hex(stale_content),
         },
     };
-    const auto render = [&](std::string prior,
-                            std::vector<publication_artifact> artifacts) {
+    const auto render_for_topology = [&root](
+                                         std::string prior,
+                                         std::vector<publication_artifact> artifacts,
+                                         std::string topology) {
         return render_publication_manifest(publication_manifest_request{
             .output_root = root,
             .policy = "template_flatten",
             .name = "incremental_contract",
-            .topology_digest = topology_digest,
+            .topology_digest = std::move(topology),
             .prior_manifest_identity = std::move(prior),
             .policy_evidence_json =
                 R"({"schema_version":1,"producer":"contract"})",
             .artifacts = std::move(artifacts),
         });
     };
-    const auto publish = [&](const rendered_publication_manifest& rendered,
-                             std::vector<publication_artifact> artifacts) {
+    const auto render = [&](std::string prior,
+                            std::vector<publication_artifact> artifacts) {
+        return render_for_topology(
+            std::move(prior), std::move(artifacts), topology_digest);
+    };
+    const auto publish_at = [&](const rendered_publication_manifest& rendered,
+                                std::vector<publication_artifact> artifacts,
+                                const std::filesystem::path& publication_stamp) {
         publish_artifacts(publication_request{
             .output_root = root,
             .artifact_manifest = manifest,
-            .stamp = stamp,
+            .stamp = publication_stamp,
             .artifact_manifest_json = rendered.json,
             .artifacts = std::move(artifacts),
         });
+    };
+    const auto publish = [&](const rendered_publication_manifest& rendered,
+                             std::vector<publication_artifact> artifacts) {
+        publish_at(rendered, std::move(artifacts), stamp);
     };
 
     const rendered_publication_manifest first = render({}, initial_artifacts);
@@ -1337,11 +1351,84 @@ inline void verify_authenticated_incremental_publication() {
     require_rejected(
         [&] { publish(unauthorized_repeat, initial_artifacts); },
         "semantic no-op publication still requires the authenticated predecessor");
+    rendered_publication_manifest tampered_repeat = repeat;
+    tampered_repeat.json = replace_once(
+        std::move(tampered_repeat.json),
+        "\"name\": \"incremental_contract\"",
+        "\"name\": \"tampered_contract\"");
+    require_rejected(
+        [&] { publish(tampered_repeat, initial_artifacts); },
+        "publication rejects a byte mutation not covered by its stale self-seal");
+    const detail::previous_publication_snapshot authenticated_snapshot =
+        detail::read_previous_publication_snapshot(
+            manifest, root, "template_flatten", topology_digest);
+    write_if_different(manifest, repeat.json);
+    require_rejected(
+        [&] {
+            detail::require_unchanged_previous_publication_snapshot(
+                manifest, authenticated_snapshot);
+        },
+        "publication rejects a newer manifest swapped after authentication");
+    write_if_different(manifest, first_manifest_bytes);
+    require_rejected(
+        [&] { publish_at(repeat, initial_artifacts, manifest); },
+        "publication stamp cannot alias the artifacts manifest");
+    require_rejected(
+        [&] {
+            publish_at(
+                repeat,
+                initial_artifacts,
+                std::filesystem::path{manifest.string() + ".tmp"});
+        },
+        "publication stamp cannot alias the artifacts manifest temporary path");
+    require_rejected(
+        [&] { publish_at(repeat, initial_artifacts, keep); },
+        "publication stamp cannot alias a desired artifact");
+    require_rejected(
+        [&] {
+            publish_at(
+                repeat,
+                initial_artifacts,
+                std::filesystem::path{keep.string() + ".tmp"});
+        },
+        "publication stamp cannot alias a desired artifact temporary path");
 
     const std::vector<publication_artifact> shrunk_artifacts{
         initial_artifacts.front()};
-    const rendered_publication_manifest shrunk = render(
-        previous.manifest_identity, shrunk_artifacts);
+    const rendered_publication_manifest shrunk = render_for_topology(
+        previous.manifest_identity,
+        shrunk_artifacts,
+        replacement_topology_digest);
+    const rendered_publication_manifest empty_cross_topology =
+        render_for_topology(
+            {}, shrunk_artifacts, replacement_topology_digest);
+    const rendered_publication_manifest unauthorized_cross_topology =
+        render_for_topology(
+            sha256_hex("unauthorized cross-topology predecessor"),
+            shrunk_artifacts,
+            replacement_topology_digest);
+    require_rejected(
+        [&] { publish(empty_cross_topology, shrunk_artifacts); },
+        "cross-topology cleanup requires a non-empty predecessor identity");
+    require_rejected(
+        [&] { publish(unauthorized_cross_topology, shrunk_artifacts); },
+        "cross-topology cleanup requires the exact predecessor identity");
+    require_rejected(
+        [&] { publish_at(shrunk, shrunk_artifacts, stale); },
+        "publication stamp cannot alias an authenticated stale artifact");
+    require_rejected(
+        [&] {
+            publish_at(
+                shrunk,
+                shrunk_artifacts,
+                std::filesystem::path{stale.string() + ".tmp"});
+        },
+        "publication stamp cannot alias an authenticated stale artifact "
+        "temporary path");
+    require(
+        read_file(manifest) == first_manifest_bytes
+            && read_file(stale) == stale_content,
+        "rejected cross-topology and stamp aliases preserve prior ownership");
     write_if_different(stale, "locally modified stale artifact\n");
     require_rejected(
         [&] { publish(shrunk, shrunk_artifacts); },
@@ -1351,11 +1438,20 @@ inline void verify_authenticated_incremental_publication() {
         "rejected stale cleanup must retain the modified file");
     write_if_different(stale, stale_content);
     publish(shrunk, shrunk_artifacts);
+    const previous_publication transitioned = read_previous_publication(
+        manifest,
+        root,
+        "template_flatten",
+        replacement_topology_digest);
     require(
         !std::filesystem::exists(stale)
             && std::filesystem::is_regular_file(keep)
-            && std::filesystem::is_regular_file(root / "unowned.cppm"),
-        "authenticated shrink removes only the formerly owned stale artifact");
+            && std::filesystem::is_regular_file(root / "unowned.cppm")
+            && transitioned.present
+            && transitioned.manifest_identity == shrunk.manifest_identity
+            && read_file(manifest) == shrunk.json,
+        "authenticated cross-topology shrink removes only the prior stale "
+        "artifact and publishes the new self-sealed ownership");
     require_rejected(
         [&] {
             static_cast<void>(render_publication_manifest(
