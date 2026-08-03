@@ -61,6 +61,18 @@ fixed_highway_kernels() {
     return &::bioseq::simd_dispatch::highway_test_kernel_table();
 }
 
+[[nodiscard]] ::bioseq::simd_dispatch::HighwayDispatchInfo
+fixed_highway_dispatch_info() {
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    return {
+        .compiled_targets = binding.target,
+        .cpu_supported_targets = binding.target,
+        .runnable_targets = binding.target,
+        .planned_target = binding.target,
+    };
+}
+
 void bind_fixed_highway(
         ::bioseq::simd::Minimap2Params& params,
         std::uint8_t alphabet_code = 0u) {
@@ -68,6 +80,7 @@ void bind_fixed_highway(
         ::bioseq::simd_dispatch::highway_test_target_binding();
     params.highway_kernels = binding.kernels;
     params.highway_executed_target = binding.target;
+    params.highway_dispatch = fixed_highway_dispatch_info();
     params.alphabet_code = alphabet_code;
 }
 
@@ -992,6 +1005,7 @@ using bioseq::pipeline_stats::ExecutionEngine;
 using bioseq::pipeline_stats::ExecutionEnvironmentProof;
 using bioseq::pipeline_stats::OptionalProofBool;
 using bioseq::pipeline_stats::PipelineCachePolicy;
+using bioseq::pipeline_stats::PipelineExecutionStats;
 using bioseq::pipeline_stats::PipelineJobExecutionStats;
 using bioseq::pipeline_stats::PipelineStage;
 using bioseq::pipeline_stats::SimdAlignmentAlgorithmIdentity;
@@ -1002,6 +1016,10 @@ using bioseq::pipeline_stats::TargetIndexSource;
     std::uint32_t workers = 2) {
     ExecutionEnvironmentProof environment{};
     environment.effective_cpu_workers = workers;
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    environment.record_highway_target(
+        fixed_highway_dispatch_info(), binding.target);
     return environment;
 }
 
@@ -1019,6 +1037,10 @@ using bioseq::pipeline_stats::TargetIndexSource;
     environment.gpu_pipeline_cache_seed_size = 64;
     environment.gpu_pipeline_cache_manifest_checksum = 0x1234;
     environment.gpu_pipeline_cache_hit = OptionalProofBool::true_value;
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    environment.record_highway_target(
+        fixed_highway_dispatch_info(), binding.target);
     return environment;
 }
 
@@ -1114,6 +1136,57 @@ TEST_CASE("DOC0371 canonical pipeline stages have stable ordinals and names",
     for (std::size_t i = 0; i < expected_names.size(); ++i) {
         REQUIRE(pipeline_stage_name(static_cast<PipelineStage>(i)) == expected_names[i]);
     }
+}
+
+TEST_CASE("unbound pipeline description owns exact Highway kernels by stage",
+          "[pipe][describe][highway][contract]") {
+    using bioseq::simd::BaseAlignmentAlgorithmType;
+    using bioseq::simd::ChainingAlgorithmType;
+    using bioseq::simd::Minimap2Params;
+    using bioseq::simd::MinimizerAlgorithmType;
+    using bioseq::simd::pipe::QuerySketchPlanRoute;
+    using bioseq::simd_dispatch::HighwayKernelId;
+    using bioseq::simd_dispatch::highway_kernel_set;
+
+    Minimap2Params params{};
+    params.alphabet_code =
+        bioseq::simd::pipe::minimizer_alphabet_code<::seq::dna4>();
+    params.minimizer_algorithm =
+        MinimizerAlgorithmType::PAPER_NTHASH_SIMD;
+    params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+    params.prefilter_enabled = true;
+    params.prefilter_backend =
+        bioseq::prefilter_stats::PrefilterBackendType::SIMD;
+    params.base_alignment_algorithm =
+        BaseAlignmentAlgorithmType::KSW2_BATCHED;
+    params.do_cigar = true;
+    REQUIRE(params.highway_kernels == nullptr);
+
+    const auto description = bioseq::simd::pipe::describe_pipeline_for(
+        params, params.alphabet_code,
+        QuerySketchPlanRoute::recompute_capable);
+    REQUIRE(bioseq::simd::pipe::query_sketch_stage_owner_count(
+                description) == 1u);
+
+    const auto stage_kernels = [&description](const std::string_view name) {
+        const auto found = std::ranges::find(
+            description.stages, name,
+            &bioseq::simd::pipe::StageDescription::stage_name);
+        REQUIRE(found != description.stages.end());
+        REQUIRE(found->algorithm.has_value());
+        return found->algorithm->highway_kernels;
+    };
+    REQUIRE(stage_kernels("QuerySketchStage") == highway_kernel_set(
+        HighwayKernelId::minimizer_paper_nthash));
+    REQUIRE(stage_kernels("ChainStage") == highway_kernel_set(
+        HighwayKernelId::chaining_chain_anchors_simd));
+    REQUIRE(stage_kernels("PrefilterStage") == highway_kernel_set(
+        HighwayKernelId::prefilter_sneaky_snake_simd_batch));
+    auto alignment_kernels = highway_kernel_set(
+        HighwayKernelId::alignment_ksw2_batched);
+    alignment_kernels |= highway_kernel_set(
+        HighwayKernelId::alignment_ksw2);
+    REQUIRE(stage_kernels("AlignStage") == alignment_kernels);
 }
 
 TEST_CASE("persisted Shape-V5 publication rejects burned fully-consumed proof",
@@ -1876,6 +1949,141 @@ TEST_CASE("DOC0371 stats merges saturate and identities fail closed",
     ExecutionEnvironmentProof missing{};
     missing.merge(ExecutionEnvironmentProof{});
     REQUIRE(missing.mixed_invalid);
+}
+
+TEST_CASE("DOC0398 Highway execution proof merges preserve exact target evidence",
+          "[highway][pipe][pipeline-stats][merge]") {
+    constexpr std::int64_t target_a = std::int64_t{1} << 20u;
+    constexpr std::int64_t target_b = std::int64_t{1} << 21u;
+    constexpr std::int64_t both_targets = target_a | target_b;
+
+    const auto make_plan = [](
+            const std::int64_t compiled,
+            const std::int64_t supported,
+            const std::int64_t planned) {
+        return ::bioseq::simd_dispatch::HighwayDispatchInfo{
+            .compiled_targets = compiled,
+            .cpu_supported_targets = supported,
+            .runnable_targets = compiled & supported,
+            .planned_target = planned,
+        };
+    };
+    const auto plan_a = make_plan(both_targets, both_targets, target_a);
+    const auto plan_b = make_plan(both_targets, both_targets, target_b);
+    const auto plan_a_only = make_plan(target_a, target_a, target_a);
+
+    const auto make_stats = [](
+            const ::bioseq::simd_dispatch::HighwayDispatchInfo& plan,
+            const std::int64_t executed_target,
+            const std::uint64_t target_row) {
+        auto job = make_attested_job(
+            ExecutedBackend::simd_cpu, TargetIndexSource::recomputed);
+        job.logical_target_row = target_row;
+        job.query_ordinal = 0;
+        job.environment = {};
+        job.environment.effective_cpu_workers = 2;
+        job.environment.record_highway_target(plan, executed_target);
+        PipelineExecutionStats stats{};
+        stats.merge_job(job);
+        return stats;
+    };
+
+    SECTION("the canonical empty aggregate is a two-sided identity") {
+        const auto proof = make_stats(plan_a, target_a, 1);
+        REQUIRE(PipelineExecutionStats::can_retain_full_attestation(proof));
+
+        PipelineExecutionStats empty_on_left{};
+        empty_on_left.merge(proof);
+        REQUIRE(empty_on_left.environment.highway_compiled_targets
+                == both_targets);
+        REQUIRE(empty_on_left.environment.highway_cpu_supported_targets
+                == both_targets);
+        REQUIRE(empty_on_left.environment.highway_runnable_targets
+                == both_targets);
+        REQUIRE(empty_on_left.environment.highway_executed_target
+                == target_a);
+        REQUIRE_FALSE(
+            empty_on_left.environment.highway_executed_target_mixed);
+        REQUIRE_FALSE(empty_on_left.environment.mixed_invalid);
+        REQUIRE(empty_on_left.attempted_alignment_jobs == 1);
+        REQUIRE(empty_on_left.fully_attested_alignment_jobs == 1);
+        REQUIRE(PipelineExecutionStats::can_retain_full_attestation(
+            empty_on_left));
+
+        auto empty_on_right = proof;
+        empty_on_right.merge(PipelineExecutionStats{});
+        REQUIRE(empty_on_right.environment.highway_compiled_targets
+                == both_targets);
+        REQUIRE(empty_on_right.environment.highway_executed_target
+                == target_a);
+        REQUIRE_FALSE(
+            empty_on_right.environment.highway_executed_target_mixed);
+        REQUIRE_FALSE(empty_on_right.environment.mixed_invalid);
+        REQUIRE(empty_on_right.attempted_alignment_jobs == 1);
+        REQUIRE(empty_on_right.fully_attested_alignment_jobs == 1);
+        REQUIRE(PipelineExecutionStats::can_retain_full_attestation(
+            empty_on_right));
+    }
+
+    SECTION("equal masks and executed targets remain singular") {
+        auto merged = make_stats(plan_a, target_a, 2);
+        merged.merge(make_stats(plan_a, target_a, 3));
+        REQUIRE(merged.environment.highway_compiled_targets == both_targets);
+        REQUIRE(merged.environment.highway_cpu_supported_targets
+                == both_targets);
+        REQUIRE(merged.environment.highway_runnable_targets == both_targets);
+        REQUIRE(merged.environment.highway_executed_target == target_a);
+        REQUIRE_FALSE(merged.environment.highway_executed_target_mixed);
+        REQUIRE_FALSE(merged.environment.mixed_invalid);
+        REQUIRE(merged.attempted_alignment_jobs == 2);
+        REQUIRE(merged.fully_attested_alignment_jobs == 2);
+        REQUIRE(merged.unattested_alignment_jobs == 0);
+        REQUIRE(PipelineExecutionStats::can_retain_full_attestation(merged));
+    }
+
+    SECTION("different targets become mixed and mixed is permanent") {
+        auto mixed = make_stats(plan_a, target_a, 4);
+        mixed.merge(make_stats(plan_b, target_b, 5));
+        REQUIRE(mixed.environment.highway_compiled_targets == both_targets);
+        REQUIRE(mixed.environment.highway_runnable_targets == both_targets);
+        REQUIRE(mixed.environment.highway_executed_target == 0);
+        REQUIRE(mixed.environment.highway_executed_target_mixed);
+        REQUIRE_FALSE(mixed.environment.mixed_invalid);
+        REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
+            mixed));
+
+        mixed.merge(make_stats(plan_a, target_a, 6));
+        REQUIRE(mixed.environment.highway_executed_target == 0);
+        REQUIRE(mixed.environment.highway_executed_target_mixed);
+        REQUIRE_FALSE(mixed.environment.mixed_invalid);
+        REQUIRE(mixed.attempted_alignment_jobs == 3);
+        REQUIRE(mixed.fully_attested_alignment_jobs == 0);
+        REQUIRE(mixed.unattested_alignment_jobs == 3);
+    }
+
+    SECTION("mask drift is an invariant failure") {
+        auto drift = make_stats(plan_a, target_a, 7);
+        drift.merge(make_stats(plan_a_only, target_a, 8));
+        REQUIRE(drift.environment.mixed_invalid);
+        REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
+            drift));
+        REQUIRE(drift.attempted_alignment_jobs == 2);
+        REQUIRE(drift.fully_attested_alignment_jobs == 0);
+        REQUIRE(drift.unattested_alignment_jobs == 2);
+    }
+
+    SECTION("a malformed recorded target is never attested") {
+        const auto malformed = make_stats(plan_a, target_b, 9);
+        REQUIRE(malformed.environment.mixed_invalid);
+        REQUIRE(malformed.environment.highway_executed_target == 0);
+        REQUIRE_FALSE(ExecutionEnvironmentProof::highway_fields_are_valid(
+            malformed.environment));
+        REQUIRE(malformed.attempted_alignment_jobs == 1);
+        REQUIRE(malformed.fully_attested_alignment_jobs == 0);
+        REQUIRE(malformed.unattested_alignment_jobs == 1);
+        REQUIRE_FALSE(PipelineExecutionStats::can_retain_full_attestation(
+            malformed));
+    }
 }
 
 TEST_CASE("DOC0372 pipeline stats retain policy identity and distinct vector activity",

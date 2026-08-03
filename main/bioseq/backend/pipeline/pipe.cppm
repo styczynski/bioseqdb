@@ -10842,14 +10842,19 @@ template <is_constexpr_aligner_params Cep,
     MinimizerHashmapFragmentIndex empty_index{};
     MatchResultCollection         ignored_out{};
     const auto& sm = thread_local_scoring_matrix<Alphabet>(params);
-    const auto& alignment_kernels =
-        detail::resolve_alignment_kernels<Alphabet>(params);
+    /* Description construction inspects selected stage traits and frozen
+     * parameters; it never executes a kernel. Keep the runtime Highway table
+     * out of this cold metadata path so plain EXPLAIN can describe an unbound
+     * GUC snapshot before BatchProcessor performs the one allowed dispatch. */
+    const ::bioseq::simd::AlignmentKernels<Alphabet>
+        description_alignment_kernels{};
 
     auto pipeline =
         make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet, MinimizerT,
                               MinimizerHashmapFragmentIndex>(
         query_seq, target_seq, empty_minimizers, empty_index, sm,
-        alignment_kernels, ignored_out, params, query_len, target_len);
+        description_alignment_kernels, ignored_out, params,
+        query_len, target_len);
     auto description = describe_with_params<Cep>(pipeline);
     auto query_sketch = describe_query_sketch_stage(
         params, query_sketch_route);

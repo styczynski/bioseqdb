@@ -593,6 +593,7 @@ struct BioseqBatchJoinRuntime {
 		bioseq::indexing::IndexReadRequirement::allow;
 	bioseq::simd::Minimap2Params aligner_params{};
 	bool aligner_params_captured = false;
+	std::optional<bioseq::simd::pipe::PipelineDescription> pipeline_desc{};
 	bool explain_only = false;
 	bioseq::pipeline_stats::PipelineExecutionStats aggregate_stats{};
 	MemoryContextCallback cleanup_callback{};
@@ -631,6 +632,7 @@ struct BioseqPerRowJoinRuntime {
 	Cost incumbent_cost_floor = 0;
 	bioseq::simd::Minimap2Params aligner_params{};
 	bool aligner_params_captured = false;
+	std::optional<bioseq::simd::pipe::PipelineDescription> pipeline_desc{};
 	bioseq::pipeline_stats::PipelineExecutionStats aggregate_stats{};
 	MemoryContextCallback cleanup_callback{};
 	bool cleanup_callback_registered = false;
@@ -3294,6 +3296,7 @@ static void ExplainPipelineExecutionStats(
 	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
 	ExplainState* es,
 	const bioseq::simd::Minimap2Params* aligner_params,
+	const bioseq::simd::pipe::PipelineDescription* pipeline_desc,
 	bioseq::simd::pipe::QuerySketchPlanRoute query_sketch_route,
 	bool highway_dispatch_already_rendered);
 
@@ -26392,6 +26395,9 @@ static void BioseqBatchJoin_BeginCustomScan(
 		 * releases the child's registration. */
 		runtime->aligner_params = params;
 		runtime->aligner_params_captured = true;
+		runtime->pipeline_desc = bioseq::simd::pipe::describe_pipeline_for(
+			params, runtime->alphabet_code,
+			QuerySketchPlanRouteFor(requirement));
 		runtime->buffer.configure_params(
 			params,
 			requirement,
@@ -26841,6 +26847,8 @@ static void BioseqBatchJoin_ExplainCustomScan(
 		runtime->aggregate_stats, es,
 		runtime->aligner_params_captured
 			? &runtime->aligner_params : nullptr,
+		runtime->pipeline_desc.has_value()
+			? &*runtime->pipeline_desc : nullptr,
 		QuerySketchPlanRouteFor(runtime->index_read_requirement),
 		/*highway_dispatch_already_rendered=*/false);
 }
@@ -27189,6 +27197,10 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	}
 	runtime->aligner_params = params;
 	runtime->aligner_params_captured = true;
+	runtime->pipeline_desc = bioseq::simd::pipe::describe_pipeline_for(
+		params, runtime->alphabet_code,
+		QuerySketchPlanRouteFor(
+			bioseq::indexing::IndexReadRequirement::require_absent));
 	runtime->buffer.configure_params(
 		params, bioseq::indexing::IndexReadRequirement::require_absent,
 		/*read_sequence_index=*/false, target_relation_oid,
@@ -27582,6 +27594,8 @@ static void BioseqPerRowJoin_ExplainCustomScan(
 		runtime->aggregate_stats, es,
 		runtime->aligner_params_captured
 			? &runtime->aligner_params : nullptr,
+		runtime->pipeline_desc.has_value()
+			? &*runtime->pipeline_desc : nullptr,
 		QuerySketchPlanRouteFor(
 			bioseq::indexing::IndexReadRequirement::require_absent),
 		/*highway_dispatch_already_rendered=*/false);
@@ -29623,11 +29637,43 @@ PlannedQueryMinimizerHighwayKernels(
 	return *resolved;
 }
 
+template <class Visitor>
+static void
+VisitPlannedHighwayFunctions(
+		const bioseq::simd_dispatch::HighwayKernelSet&
+			top_level_query_kernels,
+		const bioseq::simd::pipe::PipelineDescription* pipeline_desc,
+		Visitor&& visitor)
+{
+	const auto visit_kernel_set = [&visitor](
+			const bioseq::simd_dispatch::HighwayKernelSet& kernels,
+			const char* stage_name) {
+		for (std::size_t kernel_index = 0;
+			 kernel_index < bioseq::simd_dispatch::highway_kernel_count;
+			 ++kernel_index) {
+			if (!kernels[kernel_index]) continue;
+			visitor(
+				static_cast<bioseq::simd_dispatch::HighwayKernelId>(
+					kernel_index),
+				stage_name);
+		}
+	};
+
+	visit_kernel_set(top_level_query_kernels, "query sketch");
+	if (pipeline_desc == nullptr) return;
+	for (const auto& stage : pipeline_desc->stages) {
+		if (!stage.algorithm.has_value()) continue;
+		visit_kernel_set(
+			stage.algorithm->highway_kernels, stage.stage_name.c_str());
+	}
+}
+
 static void
 ExplainPipelineExecutionStats(
 	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
 	ExplainState* es,
 	const bioseq::simd::Minimap2Params* aligner_params,
+	const bioseq::simd::pipe::PipelineDescription* pipeline_desc,
 	const bioseq::simd::pipe::QuerySketchPlanRoute query_sketch_route,
 	const bool highway_dispatch_already_rendered)
 {
@@ -29650,13 +29696,43 @@ ExplainPipelineExecutionStats(
 			bioseq::pipeline_stats::PipelineStage::target_index_build)];
 
 	/*
-	 * BatchJoin and per-row owners do not have the ColumnScan pipeline tree,
-	 * so this helper owns their one combined plan/runtime dispatch group.
-	 * ColumnScan passes `highway_dispatch_already_rendered=true` because its
-	 * richer stage renderer owns the same group and merges runtime grouped32
-	 * evidence into SeedHitStage instead.
+	 * BatchJoin and per-row owners pass their frozen structured pipeline
+	 * descriptions here, so this combined group advertises the exact kernels
+	 * selected by every stage. ColumnScan passes
+	 * `highway_dispatch_already_rendered=true` because its richer pipeline-tree
+	 * renderer owns the same plan/runtime dispatch group.
 	 */
 	if (!highway_dispatch_already_rendered) {
+		const std::size_t query_sketch_stage_owners =
+			pipeline_desc == nullptr
+				? 0u
+				: bioseq::simd::pipe::query_sketch_stage_owner_count(
+					*pipeline_desc);
+		if (query_sketch_stage_owners > 1u) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Highway EXPLAIN has duplicate query-sketch stage owners"),
+				 errdetail("owners=%zu", query_sketch_stage_owners)));
+		}
+		const auto top_level_query_kernels =
+			query_sketch_stage_owners == 1u
+				? bioseq::simd_dispatch::HighwayKernelSet{}
+				: PlannedQueryMinimizerHighwayKernels(
+					aligner_params, query_sketch_route);
+		/* This union controls only whether the structured array is empty.
+		 * Rendering still visits every stage so a shared kernel keeps each of
+		 * its semantically distinct stage owners. */
+		auto all_planned_kernels = top_level_query_kernels;
+		if (pipeline_desc != nullptr) {
+			for (const auto& stage : pipeline_desc->stages) {
+				if (stage.algorithm.has_value()) {
+					all_planned_kernels |=
+						stage.algorithm->highway_kernels;
+				}
+			}
+		}
+		/* Complete every fail-closed plan check before constructing strings:
+		 * ereport(ERROR) longjmps and cannot unwind nontrivial C++ locals. */
 		const auto highway_plan =
 			bioseq::scheduler::highway_dispatch_info_for_plan();
 		const std::string planned =
@@ -29667,9 +29743,6 @@ ExplainPipelineExecutionStats(
 			HighwayTargetNames(highway_plan.compiled_targets);
 		const std::string runnable =
 			HighwayTargetNames(highway_plan.runnable_targets);
-		const auto planned_query_kernels =
-			PlannedQueryMinimizerHighwayKernels(
-				aligner_params, query_sketch_route);
 		const auto grouped32_kernel =
 			bioseq::simd_dispatch::HighwayKernelId::
 				indexing_grouped32_validate;
@@ -29687,21 +29760,20 @@ ExplainPipelineExecutionStats(
 				"Highway CPU-Supported Architectures", supported);
 			print_plan_property("Highway Compiled Architectures", compiled);
 			print_plan_property("Highway Runnable Architectures", runnable);
-			for (std::size_t kernel_index = 0;
-				 kernel_index < bioseq::simd_dispatch::highway_kernel_count;
-				 ++kernel_index) {
-				if (!planned_query_kernels[kernel_index]) continue;
-				const auto kernel = static_cast<
-					bioseq::simd_dispatch::HighwayKernelId>(kernel_index);
-				const std::string_view function =
-					bioseq::simd_dispatch::highway_kernel_name(kernel);
-				appendStringInfoSpaces(es->str, es->indent * 2);
-				appendStringInfo(es->str,
-					"Highway Function: %.*s [planned architecture: %s] "
-					"[stage: query sketch]\n",
-					static_cast<int>(function.size()), function.data(),
-					planned.c_str());
-			}
+			VisitPlannedHighwayFunctions(
+				top_level_query_kernels, pipeline_desc,
+				[es, &planned](
+						const bioseq::simd_dispatch::HighwayKernelId kernel,
+						const char* stage_name) {
+					const std::string_view function =
+						bioseq::simd_dispatch::highway_kernel_name(kernel);
+					appendStringInfoSpaces(es->str, es->indent * 2);
+					appendStringInfo(es->str,
+						"Highway Function: %.*s [planned architecture: %s] "
+						"[stage: %s]\n",
+						static_cast<int>(function.size()), function.data(),
+						planned.c_str(), stage_name);
+				});
 			if (stats.environment.highway_executed_target_mixed) {
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfoString(es->str,
@@ -29733,28 +29805,29 @@ ExplainPipelineExecutionStats(
 				"Compiled Architectures", compiled.c_str(), es);
 			ExplainPropertyText(
 				"Runnable Architectures", runnable.c_str(), es);
-			if (planned_query_kernels.any()) {
+			if (all_planned_kernels.any()) {
 				ExplainOpenGroup(
 					"Planned Highway Functions",
 					"Planned Highway Functions", false, es);
-				for (std::size_t kernel_index = 0;
-					 kernel_index
-						< bioseq::simd_dispatch::highway_kernel_count;
-					 ++kernel_index) {
-					if (!planned_query_kernels[kernel_index]) continue;
-					const auto kernel = static_cast<
-						bioseq::simd_dispatch::HighwayKernelId>(kernel_index);
-					const std::string_view function =
-						bioseq::simd_dispatch::highway_kernel_name(kernel);
-					const std::string function_text{function};
-					ExplainOpenGroup("Highway Function", nullptr, true, es);
-					ExplainPropertyText(
-						"Function", function_text.c_str(), es);
-					ExplainPropertyText(
-						"Planned Architecture", planned.c_str(), es);
-					ExplainPropertyText("Stage", "query sketch", es);
-					ExplainCloseGroup("Highway Function", nullptr, true, es);
-				}
+				VisitPlannedHighwayFunctions(
+					top_level_query_kernels, pipeline_desc,
+					[es, &planned](
+							const bioseq::simd_dispatch::HighwayKernelId kernel,
+							const char* stage_name) {
+						const std::string_view function =
+							bioseq::simd_dispatch::highway_kernel_name(kernel);
+						const std::string function_text{function};
+						ExplainOpenGroup(
+							"Highway Function", nullptr, true, es);
+						ExplainPropertyText(
+							"Function", function_text.c_str(), es);
+						ExplainPropertyText(
+							"Planned Architecture", planned.c_str(), es);
+						ExplainPropertyText(
+							"Stage", stage_name, es);
+						ExplainCloseGroup(
+							"Highway Function", nullptr, true, es);
+					});
 				ExplainCloseGroup(
 					"Planned Highway Functions",
 					"Planned Highway Functions", false, es);
@@ -30625,6 +30698,8 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				}
 				ExplainPipelineExecutionStats(
 					stats, es, &params,
+					aligner_snapshot->pipeline_desc.has_value()
+						? &*aligner_snapshot->pipeline_desc : nullptr,
 					QuerySketchPlanRouteFor(
 						explain_index_read_requirement),
 					/*highway_dispatch_already_rendered=*/true);
@@ -30808,6 +30883,8 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				const auto& stats = explain_runtime->buffer.execution_stats();
 				ExplainPipelineExecutionStats(
 					stats, es, &params,
+					aligner_snapshot->pipeline_desc.has_value()
+						? &*aligner_snapshot->pipeline_desc : nullptr,
 					QuerySketchPlanRouteFor(
 						explain_index_read_requirement),
 					/*highway_dispatch_already_rendered=*/true);
