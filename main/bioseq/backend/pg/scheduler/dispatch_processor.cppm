@@ -135,6 +135,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #include <unistd.h>
@@ -260,6 +261,89 @@ public:
 		std::vector<MinimapSketchData> minimizers{};
 		pipe::MinimizerRangeExecutionProof proof{};
 	};
+
+	enum class CpuPreparationStatus : std::uint8_t {
+		pending,
+		ready,
+		query_length_unsupported,
+		admission_unavailable,
+		collector_growth_failed,
+		capacity_mismatch,
+		proof_invalid,
+		unsupported_typmod,
+	};
+
+	template <class Destination>
+	using CpuAppendHeaderFn = void (*)(
+		const bioseq::pg_types::seq&,
+		std::uint64_t,
+		std::int32_t,
+		std::int32_t,
+		MinimizerSketchBackend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable*,
+		std::vector<Destination>&,
+		bioseq::parallelism::MemoryPermit&,
+		std::uint64_t&,
+		std::vector<CpuPreparedQuerySketch>*,
+		bioseq::parallelism::MemoryPermit*,
+		std::uint64_t*);
+
+	template <class Destination>
+	using CpuAppendRecipeFn = void (*)(
+		Datum,
+		const pg_sequence_descriptor&,
+		pg_sequence_read_session&,
+		const bioseq::storage::sequence_payload_allocation_observer*,
+		std::uint64_t,
+		std::int32_t,
+		std::int32_t,
+		MinimizerSketchBackend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable*,
+		std::vector<Destination>&,
+		bioseq::parallelism::MemoryPermit&,
+		std::uint64_t&,
+		std::vector<CpuPreparedQuerySketch>*,
+		bioseq::parallelism::MemoryPermit*,
+		std::uint64_t*);
+
+	using CpuPrepareIndependentFn = CpuPreparationStatus (*)(
+		const bioseq::pg_types::seq&,
+		std::uint64_t,
+		std::int32_t,
+		std::int32_t,
+		MinimizerSketchBackend,
+		const ::bioseq::simd_dispatch::HighwayKernelTable*,
+		CpuPreparedQuerySketch&);
+
+	struct CpuPreparationTypmodOps final {
+		std::uint8_t alphabet_code = 0;
+		std::uint8_t storage_unit_byte_width = 0;
+		CpuAppendHeaderFn<MinimapSketchData> append_header_sketch = nullptr;
+		CpuAppendHeaderFn<std::uint32_t> append_header_u32 = nullptr;
+		CpuAppendRecipeFn<MinimapSketchData> append_recipe_sketch = nullptr;
+		CpuAppendRecipeFn<std::uint32_t> append_recipe_u32 = nullptr;
+		CpuPrepareIndependentFn prepare_independent = nullptr;
+
+		[[nodiscard]] constexpr bool complete() const noexcept {
+			return std::has_single_bit(storage_unit_byte_width)
+				&& append_header_sketch != nullptr
+				&& append_header_u32 != nullptr
+				&& append_recipe_sketch != nullptr
+				&& append_recipe_u32 != nullptr
+				&& prepare_independent != nullptr;
+		}
+
+		[[nodiscard]] constexpr bool matches(
+			const std::uint8_t alphabet,
+			const std::uint8_t width) const noexcept {
+			return complete()
+				&& alphabet_code == alphabet
+				&& storage_unit_byte_width == width;
+		}
+	};
+
+	static_assert(std::is_standard_layout_v<CpuPreparationTypmodOps>);
+	static_assert(std::is_trivially_copyable_v<CpuPreparationTypmodOps>);
 
 	struct CpuPreparedIndexGroup {
 		std::int32_t kmer_size = 0;
@@ -811,9 +895,10 @@ public:
 		const Minimap2Params& base_params,
 		bool include_persisted_parameter_group,
 		CpuQueryUnionStorage union_storage,
+		const CpuPreparationTypmodOps& typmod_ops,
 		CpuPreparedTarget& prepared_target);
 
-		void prepare_cpu_persisted_native_target(
+	void prepare_cpu_persisted_native_target(
 		Oid database_oid,
 		Oid tablespace_oid,
 		Oid main_relfilenode,
@@ -834,7 +919,8 @@ public:
 		const Minimap2Params& base_params,
 		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
 			executor_read,
-			CpuPreparedTarget& prepared_target);
+		const CpuPreparationTypmodOps& typmod_ops,
+		CpuPreparedTarget& prepared_target);
 
 		[[nodiscard]] static bool publish_compact_direct_query_set_proof(
 			CpuPreparedTarget& prepared_target,
@@ -872,10 +958,12 @@ public:
 		 * consumes this record immediately after selecting dispatched_params and
 		 * before entering profiling or typed execution.  It is deliberately a
 		 * neutral callback: only the scheduler root may install it, and the
-		 * callback receives the already-selected immutable table. */
+		 * callback receives the already-selected immutable Highway table and
+		 * typmod operations. */
 		struct HighwayPreparationHook final {
 			using Function = void (*)(
-				void*, ScannerPgContext&, const Minimap2Params&);
+				void*, ScannerPgContext&, const Minimap2Params&,
+				const CpuPreparationTypmodOps&);
 
 			void* state = nullptr;
 			Function function = nullptr;

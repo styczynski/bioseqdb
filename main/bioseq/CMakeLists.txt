@@ -209,6 +209,7 @@ set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence_batch_processor.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_cpu_preparation.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm)
 file(GLOB_RECURSE BIOSEQ_LAZY_FACADE_INDEX_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.cpp
@@ -1756,6 +1757,7 @@ endif()
 unset(_bioseq_typed_expected_count)
 
 set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_cpu_preparation.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer_api_impl.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES

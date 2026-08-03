@@ -621,6 +621,10 @@ inline void render_selector_switch(
            << "module " << plan.topology.region.configured_output_module_name
            << ";\n\n";
     detail::render_imports(output, plan, false, true);
+    if (plan.topology.region.configured_output_module_name
+        == "bioseq.scheduler.dispatch_processor") {
+        output << "import :cpu_preparation_support;\n\n";
+    }
     output << "namespace " << coordinate.identity_namespace << " {\n"
            << body;
     if (!body.empty() && body.back() != '\n') output << '\n';

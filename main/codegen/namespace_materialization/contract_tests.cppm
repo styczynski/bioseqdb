@@ -926,6 +926,10 @@ inline void verify_production_declaration_heads_and_probes() {
                 == std::set<std::uint32_t>{
                     0u, 7u, 14u, 21u, 28u, 35u, 42u, 49u},
         "scheduler API/probe/implementation cardinalities drifted");
+    require(
+        !api->content.contains(":cpu_preparation_support")
+            && !selector->content.contains(":cpu_preparation_support"),
+        "scheduler preparation support must remain private to body-bearing units");
 
     const clang_structural::translation_unit api_unit =
         clang_structural::scan_token_slice(api->relative_path, api->content);
@@ -985,9 +989,12 @@ inline void verify_production_declaration_heads_and_probes() {
         require(
             occurrences(
                 implementation.content,
-                "namespace " + std::string{identity} + " {")
-                == 1u,
-            "each scheduler implementation must own its exact identity namespace");
+                "import :cpu_preparation_support;") == 1u
+                && occurrences(
+                    implementation.content,
+                    "namespace " + std::string{identity} + " {")
+                    == 1u,
+            "each scheduler implementation must import preparation support and own its exact identity namespace");
         const clang_structural::translation_unit implementation_unit =
             clang_structural::scan_token_slice(
                 implementation.relative_path, implementation.content);

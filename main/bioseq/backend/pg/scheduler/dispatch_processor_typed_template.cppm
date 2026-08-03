@@ -15,6 +15,7 @@ module;
 #include <optional>
 #include <queue>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -59,6 +60,14 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 import bioseq.scheduler.supervisor_pg;
+
+namespace bioseq::simd::cpu_preparation_detail {
+
+template <class Alphabet, std::size_t Width>
+[[nodiscard]] const BatchProcessor::CpuPreparationTypmodOps&
+typmod_ops() noexcept;
+
+} // namespace bioseq::simd::cpu_preparation_detail
 
 /*-------------------------------------------------------------------------
  *
@@ -8228,19 +8237,70 @@ process_sequences(
         bioseq::pg_types::seq,
         Alphabet,
         StorageWidth>;
-    return process_sequences_typed<S>(
-        batch_size,
-        alphabet_code,
-        storage_unit_byte_width,
-        query_hdr,
-        per_row_query_hdrs,
-        target_hdrs,
-        query_ids,
-        base_params,
-        invocation_role,
-        broadcast_query_ordinal,
-        stats,
-        scanner_pg_ctx);
+    const auto& typmod_operations =
+        cpu_preparation_detail::typmod_ops<Alphabet, StorageWidth>();
+    if (!typmod_operations.matches(
+            alphabet_code, storage_unit_byte_width)) {
+        throw std::logic_error{
+            "generated scheduler typmod operations disagree with the selected root"};
+    }
+    if (scanner_pg_ctx != nullptr
+        && scanner_pg_ctx->highway_preparation.valid()) {
+        auto preparation = std::exchange(
+            scanner_pg_ctx->highway_preparation,
+            BatchProcessor::ScannerPgContext::HighwayPreparationHook{});
+        preparation.function(
+            preparation.state,
+            *scanner_pg_ctx,
+            base_params,
+            typmod_operations);
+        if (scanner_pg_ctx->cpu_prepared_target == nullptr) {
+            throw std::logic_error{
+                "Highway preparation hook did not publish a CPU target"};
+        }
+    }
+    if (scanner_pg_ctx != nullptr
+        && scanner_pg_ctx->cpu_prepared_target != nullptr
+        && (!scanner_pg_ctx->cpu_prepared_target->unions_ready
+            || !scanner_pg_ctx->cpu_prepared_target
+                ->highway_binding_matches(base_params))) {
+        throw std::logic_error{
+            "prepared CPU target disagrees with the selected Highway binding"};
+    }
+
+    const auto run_pipeline = [&] {
+        return process_sequences_typed<S>(
+            batch_size,
+            alphabet_code,
+            storage_unit_byte_width,
+            query_hdr,
+            per_row_query_hdrs,
+            target_hdrs,
+            query_ids,
+            base_params,
+            invocation_role,
+            broadcast_query_ordinal,
+            stats,
+            scanner_pg_ctx);
+    };
+    if (!base_params.enable_profiling) {
+        return run_pipeline();
+    }
+
+    /* The one-shot summary still fires at scan end. Preparation remains
+     * outside this scope, matching the authored root's previous ordering. */
+    using Args = bioseq::instr::context_args_profiling_full;
+    using TimingArgs = bioseq::instr::context_args_profiling_timing_only;
+    auto& profiler_block = bioseq::instr::persistent_profiler_block<Args>();
+    auto& timing_profiler_block =
+        bioseq::instr::persistent_profiler_block<TimingArgs>();
+    bioseq::instr::installed_profiler_scope<Args> guard(profiler_block);
+    bioseq::instr::installed_profiler_scope<TimingArgs> timing_guard(
+        timing_profiler_block);
+    static const auto* batch_desc = bioseq::instr::register_region_static(
+        "BatchProcessor.process_sequences");
+    [[maybe_unused]] auto batch_scope = bioseq::instr::region<Args>(batch_desc);
+    return run_pipeline();
 }
 
 } // namespace typed_dispatch

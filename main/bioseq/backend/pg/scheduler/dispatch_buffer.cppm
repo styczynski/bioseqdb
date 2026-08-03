@@ -1848,19 +1848,23 @@ private:
 	static void prepare_join_cpu_after_highway_selection_thunk(
 			void* state,
 			::bioseq::simd::BatchProcessor::ScannerPgContext& scanner_pg_ctx,
-			const ::bioseq::simd::Minimap2Params& dispatched_params) {
+			const ::bioseq::simd::Minimap2Params& dispatched_params,
+			const ::bioseq::simd::BatchProcessor::CpuPreparationTypmodOps&
+				typmod_ops) {
 		auto* self = static_cast<TupleDispatchBuffer*>(state);
 		if (self == nullptr) {
 			throw std::logic_error{
 				"BioseqBatchJoin Highway preparation owner is null"};
 		}
 		self->prepare_join_cpu_after_highway_selection(
-			scanner_pg_ctx, dispatched_params);
+			scanner_pg_ctx, dispatched_params, typmod_ops);
 	}
 
 	void prepare_join_cpu_after_highway_selection(
 			::bioseq::simd::BatchProcessor::ScannerPgContext& scanner_pg_ctx,
-			const ::bioseq::simd::Minimap2Params& dispatched_params) {
+			const ::bioseq::simd::Minimap2Params& dispatched_params,
+			const ::bioseq::simd::BatchProcessor::CpuPreparationTypmodOps&
+				typmod_ops) {
 		if (!join_cpu_preparation_pending
 			|| join_pending_cpu_preparation_queries.empty()
 			|| !join_target_active
@@ -2050,6 +2054,7 @@ private:
 						join_cpu_preparation_scratch.query_ordinals,
 						dispatched_params,
 						*executor_read_context,
+						typmod_ops,
 						join_cpu_prepared_target);
 				} else {
 					processor.prepare_cpu_shared_query_unions(
@@ -2066,6 +2071,7 @@ private:
 						/*include_persisted_parameter_group=*/true,
 						::bioseq::simd::BatchProcessor::
 							CpuQueryUnionStorage::minimizer_sketch,
+						typmod_ops,
 						join_cpu_prepared_target);
 				}
 			} catch (...) {
