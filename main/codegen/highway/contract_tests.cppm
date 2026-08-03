@@ -178,6 +178,101 @@ namespace [[bioseq::similar]] decoy {}
         "the marked target body satisfies generator ownership constraints");
 }
 
+inline void verify_template_flatten_separation() {
+    const source_manifest inventory{
+        .contract_module = "bioseq.highway.dispatch_contract",
+        .dispatch_module = "bioseq.scheduler.dispatch_processor",
+        .sources = {
+            source_spec{
+                .key = "fixture",
+                .path = "fixture_highway_source.cppm",
+                .module_name = "bioseq.highway.sources.fixture",
+                .partition = "fixture",
+                .family = "fixture",
+            },
+        },
+    };
+    const auto scan = [](
+                          const std::string_view name,
+                          const std::string_view source) {
+        return clang_structural::scan_token_slice(
+            std::filesystem::path{std::string{name}}, source);
+    };
+
+    std::vector<clang_structural::translation_unit> neutral{
+        scan(
+            "fixture_highway_source.cppm",
+            "export module bioseq.highway.sources.fixture;\n"
+            "import bioseq.highway.dispatch_contract;\n"),
+        scan(
+            "highway_dispatch_contract.cppm",
+            "export module bioseq.highway.dispatch_contract;\n"),
+    };
+    validate_template_flatten_separation(inventory, neutral);
+
+    std::vector<clang_structural::translation_unit> direct_selector{
+        scan(
+            "fixture_highway_source.cppm",
+            "export module bioseq.highway.sources.fixture;\n"
+            "import bioseq.scheduler.dispatch_processor:typed_flat_selector;\n"),
+        scan(
+            "typed_flat_selector.cppm",
+            "module bioseq.scheduler.dispatch_processor:typed_flat_selector;\n"),
+    };
+    require_rejected(
+        [&] {
+            validate_template_flatten_separation(
+                inventory, direct_selector);
+        },
+        "a direct typed scheduler selector provider is rejected");
+
+    std::vector<clang_structural::translation_unit> transitive_api{
+        scan(
+            "fixture_highway_source.cppm",
+            "export module bioseq.highway.sources.fixture;\n"
+            "import fixture.neutral_bridge;\n"),
+        scan(
+            "neutral_bridge.cppm",
+            "export module fixture.neutral_bridge;\n"
+            "import bioseq.scheduler.dispatch_processor:typed_flat_api;\n"),
+        scan(
+            "typed_flat_api.cppm",
+            "module bioseq.scheduler.dispatch_processor:typed_flat_api;\n"),
+    };
+    require_rejected(
+        [&] {
+            validate_template_flatten_separation(inventory, transitive_api);
+        },
+        "a transitive typed scheduler API provider is rejected");
+
+    constexpr std::array policy_attributes{
+        std::string_view{"bioseq::template_flatten"},
+        std::string_view{"bioseq::template_flatten_when"},
+        std::string_view{"bioseq::template_flatten_entry"},
+        std::string_view{"bioseq::template_flatten_provenance"},
+    };
+    for (const std::string_view attribute : policy_attributes) {
+        const std::string marked_provider =
+            "export module fixture.marked_bridge;\n[["
+            + std::string{attribute}
+            + "(\"shape\", \"root\")]]\nint marked_value;\n";
+        require_rejected(
+            [&] {
+                std::vector<clang_structural::translation_unit>
+                    transitive_policy{
+                        scan(
+                            "fixture_highway_source.cppm",
+                            "export module bioseq.highway.sources.fixture;\n"
+                            "import fixture.marked_bridge;\n"),
+                        scan("marked_bridge.cppm", marked_provider),
+                    };
+                validate_template_flatten_separation(
+                    inventory, transitive_policy);
+            },
+            "a transitive template-flatten structural policy attribute is rejected");
+    }
+}
+
 /// Cover owner-scoped slot lookup, overload/template names, and misspellings.
 inline void verify_slot_callable_ownership() {
     generation_plan plan = two_target_plan();
@@ -1155,6 +1250,7 @@ inline void verify_typed_minimizer_binder() {
 
 void run_highway_contract_self_tests() {
     contract_detail::verify_exact_structural_marker();
+    contract_detail::verify_template_flatten_separation();
     contract_detail::verify_slot_callable_ownership();
     contract_detail::verify_complete_table_target_policy();
     contract_detail::verify_external_domain_topology_contract();

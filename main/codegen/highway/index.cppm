@@ -361,6 +361,21 @@ parse_domain_topology_arguments(const std::vector<std::string>& values) {
             command.compiler_module_inventory_sha256,
             compiler_profile,
             "core");
+    std::vector<clang_structural::translation_unit> separation_providers;
+    separation_providers.reserve(prepared.modules.size());
+    for (const clang_structural::preparation_module_identity& provider
+         : prepared.modules) {
+        clang_structural::translation_unit unit =
+            clang_structural::scan_token_slice(provider.source_path);
+        if (unit.source_module.provided_module != provider.module_name
+            || unit.source_sha256 != provider.source_sha256) {
+            throw std::runtime_error(
+                "Highway separation provider changed after PREPARE validation: "
+                + provider.module_name);
+        }
+        separation_providers.push_back(std::move(unit));
+    }
+    validate_template_flatten_separation(sources, separation_providers);
     const clang_structural::structural_index structural =
         clang_structural::scan_translation_units_from_database(
             source_paths,

@@ -896,7 +896,6 @@ unset(_bioseq_highway_extra_text)
 unset(_bioseq_highway_missing_text)
 unset(_bioseq_highway_unregistered_marked_modules)
 unset(_bioseq_highway_unmarked_registered_modules)
-unset(_bioseq_highway_registered_modules)
 unset(_bioseq_highway_marked_modules)
 unset(_bioseq_highway_marker_offset)
 unset(_bioseq_highway_cppm_include)
@@ -992,6 +991,18 @@ endforeach()
 list(REMOVE_DUPLICATES _bioseq_template_flatten_registered_modules)
 list(SORT _bioseq_template_flatten_registered_modules)
 
+foreach(_bioseq_template_flatten_registered IN LISTS
+    _bioseq_template_flatten_registered_modules)
+  list(FIND _bioseq_highway_registered_modules
+    "${_bioseq_template_flatten_registered}"
+    _bioseq_cross_codegen_source_index)
+  if(NOT _bioseq_cross_codegen_source_index EQUAL -1)
+    message(FATAL_ERROR
+      "DOC0398 Highway and template-flatten generator source sets must be "
+      "disjoint: ${_bioseq_template_flatten_registered}")
+  endif()
+endforeach()
+
 set(_bioseq_template_flatten_unregistered_marked_modules
   ${_bioseq_template_flatten_marked_modules})
 list(REMOVE_ITEM _bioseq_template_flatten_unregistered_marked_modules
@@ -1015,6 +1026,8 @@ unset(_bioseq_template_flatten_missing_text)
 unset(_bioseq_template_flatten_unregistered_marked_modules)
 unset(_bioseq_template_flatten_unmarked_registered_modules)
 unset(_bioseq_template_flatten_registered_modules)
+unset(_bioseq_highway_registered_modules)
+unset(_bioseq_cross_codegen_source_index)
 unset(_bioseq_template_flatten_marked_modules)
 unset(_bioseq_template_flatten_marker_offset)
 unset(_bioseq_template_flatten_compact_contents)
@@ -1308,6 +1321,21 @@ set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_template.cppm")
 set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT
   "${CMAKE_CURRENT_BINARY_DIR}/generated/template_flatten/dispatch_processor_typed")
+cmake_path(IS_PREFIX BIOSEQ_HIGHWAY_GENERATED_ROOT
+  "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}" NORMALIZE
+  _bioseq_template_flatten_root_inside_highway_root)
+cmake_path(IS_PREFIX BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT
+  "${BIOSEQ_HIGHWAY_GENERATED_ROOT}" NORMALIZE
+  _bioseq_highway_root_inside_template_flatten_root)
+if(_bioseq_template_flatten_root_inside_highway_root
+    OR _bioseq_highway_root_inside_template_flatten_root)
+  message(FATAL_ERROR
+    "DOC0398 Highway and template-flatten generated roots must be disjoint; "
+    "highway='${BIOSEQ_HIGHWAY_GENERATED_ROOT}', "
+    "template_flatten='${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}'")
+endif()
+unset(_bioseq_highway_root_inside_template_flatten_root)
+unset(_bioseq_template_flatten_root_inside_highway_root)
 bioseq_template_flatten_probe(
   NAME dispatch_processor_typed
   SOURCE "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"

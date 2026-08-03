@@ -572,6 +572,125 @@ inline void validate_domain_topology_authority(
     }
 }
 
+namespace detail {
+
+[[nodiscard]] inline std::string normalized_module_import(
+    const std::string_view imported,
+    const std::string_view provider) {
+    if (!imported.starts_with(':')) return std::string{imported};
+    const std::size_t partition = provider.find(':');
+    return std::string{provider.substr(0u, partition)}
+        + std::string{imported};
+}
+
+[[nodiscard]] inline bool template_flatten_policy_attribute(
+    const clang_structural::attribute_record& attribute) noexcept {
+    static constexpr std::array<std::string_view, 4> forbidden{
+        "bioseq::template_flatten",
+        "bioseq::template_flatten_when",
+        "bioseq::template_flatten_entry",
+        "bioseq::template_flatten_provenance",
+    };
+    return std::ranges::contains(forbidden, attribute.qualified_name);
+}
+
+[[nodiscard]] inline const clang_structural::attribute_record*
+find_template_flatten_policy_attribute(
+    const clang_structural::translation_unit& unit) noexcept {
+    const auto find_in = [](const auto& attributes) {
+        const auto found = std::ranges::find_if(
+            attributes, template_flatten_policy_attribute);
+        return found == attributes.end() ? nullptr : &*found;
+    };
+    for (const clang_structural::declaration_record& declaration
+         : unit.declarations) {
+        if (const auto* found = find_in(declaration.attributes)) return found;
+        for (const clang_structural::parameter_record& parameter
+             : declaration.parameters) {
+            if (const auto* found = find_in(parameter.attributes)) return found;
+        }
+    }
+    for (const clang_structural::namespace_record& name_space
+         : unit.namespaces) {
+        if (const auto* found = find_in(name_space.attributes)) return found;
+    }
+    for (const clang_structural::aggregate_record& aggregate
+         : unit.aggregate_records) {
+        for (const clang_structural::aggregate_field_record& field
+             : aggregate.fields) {
+            if (const auto* found = find_in(field.attributes)) return found;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace detail
+
+/// Prove that every registered Highway source remains transitively separated
+/// from the typed scheduler materialization domain. The provider set comes
+/// from the authenticated PREPARE closure, so an absent named import is an
+/// incomplete proof rather than an external edge that may be ignored.
+inline void validate_template_flatten_separation(
+    const source_manifest& inventory,
+    const std::vector<clang_structural::translation_unit>& provider_units) {
+    std::map<
+        std::string,
+        const clang_structural::translation_unit*,
+        std::less<>> providers;
+    for (const clang_structural::translation_unit& unit : provider_units) {
+        const std::string& module = unit.source_module.provided_module;
+        if (module.empty() || !providers.emplace(module, &unit).second) {
+            throw std::runtime_error(
+                "Highway separation proof received an unnamed or duplicate "
+                "module provider");
+        }
+    }
+
+    const std::array forbidden_providers{
+        inventory.dispatch_module + ":typed_flat_api",
+        inventory.dispatch_module + ":typed_flat_selector",
+    };
+    std::set<std::string, std::less<>> visited;
+    std::function<void(const std::string&, const std::string&)> visit =
+        [&](const std::string& module, const std::string& root) {
+            if (std::ranges::contains(forbidden_providers, module)) {
+                throw std::runtime_error(
+                    "Highway source module '" + root
+                    + "' reaches forbidden typed scheduler provider '"
+                    + module + "'");
+            }
+            if (!visited.insert(module).second) return;
+
+            const auto provider = providers.find(module);
+            if (provider == providers.end()) {
+                throw std::runtime_error(
+                    "Highway source module '" + root
+                    + "' has no authenticated provider for transitive import '"
+                    + module + "'");
+            }
+            const clang_structural::translation_unit& unit =
+                *provider->second;
+            if (const auto* policy =
+                    detail::find_template_flatten_policy_attribute(unit)) {
+                throw std::runtime_error(
+                    "Highway source module '" + root
+                    + "' reaches template-flatten policy attribute '"
+                    + policy->qualified_name + "' in provider '" + module
+                    + "'");
+            }
+            for (const std::string& imported
+                 : unit.source_module.imported_modules) {
+                visit(
+                    detail::normalized_module_import(imported, module),
+                    root);
+            }
+        };
+
+    for (const source_spec& source : inventory.sources) {
+        visit(source.module_name, source.module_name);
+    }
+}
+
 inline void validate_command_line(command_line& command) {
     command.target_manifest_path = detail::path_identity(command.target_manifest_path);
     command.source_manifest_path = detail::path_identity(command.source_manifest_path);
