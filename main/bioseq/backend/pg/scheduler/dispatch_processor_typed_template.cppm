@@ -42,7 +42,6 @@ import bioseq.storage.indexing_pg.sorted_runs;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.vulkan;
-import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.chaining.vulkan;
 import bioseq.sequences.cigar;
 import bioseq.sequences.minimap_port;

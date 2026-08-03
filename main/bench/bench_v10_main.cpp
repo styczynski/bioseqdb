@@ -51,7 +51,6 @@ import bioseq.common.mlogging;
 import bioseq.common.context;
 import bioseq.common.sequan_compat;
 import bioseq.simd.utils;
-import bioseq.simd.vector_stream;
 import bioseq.sequences;
 import bioseq.sequences.edit_distance_threshold;
 import bioseq.sequences.kmers.two_stacks;

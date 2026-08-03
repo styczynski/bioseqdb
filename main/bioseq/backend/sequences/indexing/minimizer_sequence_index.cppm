@@ -40,7 +40,6 @@ import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch E — coll
 import bioseq.gpu.vulkan.phase_b_abi;                // VulkanRankLut
 import bioseq.gpu.vulkan.phase_c_abi;                // Phase C sketch memory planner
 import bioseq.gpu.vulkan.runtime;                    // VulkanRuntimeError
-import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
 import bioseq.storage.lazy;                          // lazy_compact_sequence
 import bioseq.storage.size;                          // sequence_size_t
 import bioseq.parallelism.mode;
@@ -58,7 +57,6 @@ extern "C" void bioseq_sort_pair_run_u128_keys(
 
 export namespace bioseq::indexing {
 using bioseq::minimizers::MinimapSketchData;
-using bioseq::simd::minimap_int_hasher;
 using bioseq::simd::collect_minimizers_view;
 using bioseq::minimizers::sketch_collector;
 using bioseq::minimizers::MinimizerSketchBackend;

@@ -47,7 +47,6 @@ import bioseq.sequences;                             // sequence_custom_alphabet
 import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
 export import bioseq.sequences.kmers.highway_contract; // selected target's neutral minimizer table and packed-view ABI
 import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch F — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
-import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
 import bioseq.storage.scanner;                       // access-requirement policy
 import bioseq.storage.lazy;                          // canonical basic_lazy_sequence_view
 import bioseq.storage.size;                          // sequence_size_t
@@ -66,7 +65,6 @@ struct MinimizerHashmapFragmentIndexTable;
 
 export namespace bioseq::indexing {
 using bioseq::minimizers::MinimapSketchData;
-using bioseq::simd::minimap_int_hasher;
 using bioseq::simd::collect_minimizers_view;
 using bioseq::minimizers::sketch_collector;
 using bioseq::minimizers::MinimizerSketchBackend;

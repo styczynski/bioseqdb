@@ -169,7 +169,6 @@ import bioseq.storage.indexing_pg.sorted_runs;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.vulkan;   // DOC0345 Patch J — GPU sorted-pair segment seam (GPU emit + host sort; real no_index mps)
-import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.chaining.vulkan;
 import bioseq.sequences.cigar;
 import bioseq.sequences.minimap_port;

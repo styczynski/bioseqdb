@@ -56,7 +56,6 @@ import bioseq.sql_guc_settings;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
