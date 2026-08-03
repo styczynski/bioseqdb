@@ -6261,7 +6261,8 @@ structural_arguments_adjuster() {
             "--serialize-diagnostics",
         };
         static const std::set<std::string> drop_flags{
-            "-c", "-MD", "-MMD", "-MG", "-MP", "-M", "-MM",
+            "-c", "--precompile", "-MD", "-MMD", "-MG", "-MP",
+            "-M", "-MM",
         };
         clang::tooling::CommandLineArguments expanded;
         for (const std::string& argument : arguments) {
@@ -6850,7 +6851,8 @@ void validate_owned_compile_database(
 
 [[nodiscard]] bool drop_normalized_argument(
     std::string_view argument) {
-    return argument == "-c" || argument == "-MD"
+    return argument == "-c" || argument == "--precompile"
+        || argument == "-MD"
         || argument == "-MMD" || argument == "-MP"
         || argument == "-M" || argument == "-MM"
         || argument == "-fsyntax-only"
@@ -7059,7 +7061,7 @@ struct relocation_context {
 }
 
 inline constexpr std::string_view MODULE_PREPARATION_POLICY_VERSION =
-    "bioseq_clang_module_preparation/v4";
+    "bioseq_clang_module_preparation/v5";
 
 struct module_build_record {
     std::string module_name;
@@ -8152,7 +8154,9 @@ derive_active_import_artifact_paths(
     direct_arguments.push_back(
         "-fmodule-output=" + artifacts.pcm.string());
     direct_arguments.emplace_back("-fmodules-reduced-bmi");
-    direct_arguments.emplace_back("-c");
+    // The driver writes the reduced BMI above and a transient full BMI to
+    // `-o`; unlike `-c`, this performs no discarded object/backend action.
+    direct_arguments.emplace_back("--precompile");
     direct_arguments.push_back(source_spelling.string());
     direct_arguments.emplace_back("-o");
     direct_arguments.push_back(artifacts.object.string());
