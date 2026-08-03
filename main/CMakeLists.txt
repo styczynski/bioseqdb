@@ -33,6 +33,17 @@ option(BIOSEQ_BUILD_WEBSITE
   "Build versioned static documentation website" OFF)
 option(BIOSEQ_PACKAGE_BUILD
   "Build relocatable native distribution packages with a static C++ runtime" OFF)
+option(BIOSEQ_HIGHWAY_GCC_CANARY
+  "Build the local Darwin Clang-generator/Homebrew-GCC module boundary canary" OFF)
+if(BIOSEQ_HIGHWAY_GCC_CANARY
+    AND NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+  message(FATAL_ERROR
+    "BIOSEQ_HIGHWAY_GCC_CANARY is an opt-in local Darwin build-only proof")
+endif()
+if(BIOSEQ_HIGHWAY_GCC_CANARY AND NOT BIOSEQ_BUILD_CORE)
+  message(FATAL_ERROR
+    "BIOSEQ_HIGHWAY_GCC_CANARY requires BIOSEQ_BUILD_CORE=ON")
+endif()
 set(BIOSEQ_WEBSITE_VERSION "" CACHE STRING
   "Website source version directory, for example v0.1")
 set(BIOSEQ_WEBSITE_BASE_PATH "" CACHE STRING
