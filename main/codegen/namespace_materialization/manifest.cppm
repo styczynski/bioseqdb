@@ -3047,6 +3047,41 @@ struct publication_protocol_paths {
     std::filesystem::path ready_relative;
 };
 
+[[nodiscard]] inline bool publication_paths_overlap(
+    const std::filesystem::path& left,
+    const std::filesystem::path& right) noexcept {
+    auto left_component = left.begin();
+    auto right_component = right.begin();
+    while (left_component != left.end() && right_component != right.end()
+           && *left_component == *right_component) {
+        ++left_component;
+        ++right_component;
+    }
+    return left_component == left.end() || right_component == right.end();
+}
+
+inline void reserve_publication_path(
+    std::set<std::filesystem::path>& identities,
+    const std::filesystem::path& relative,
+    std::string_view owner) {
+    for (const std::filesystem::path& candidate : std::array{
+             relative,
+             std::filesystem::path{relative.string() + ".tmp"},
+         }) {
+        if (std::ranges::any_of(
+                identities,
+                [&candidate](const std::filesystem::path& existing) {
+                    return publication_paths_overlap(existing, candidate);
+                })) {
+            throw std::runtime_error(
+                std::string{owner}
+                + " aliases or nests beneath another publication path: "
+                + relative.string());
+        }
+        identities.insert(candidate);
+    }
+}
+
 [[nodiscard]] inline publication_protocol_paths publication_protocol(
     const std::filesystem::path& output_root,
     const std::filesystem::path& manifest,
@@ -3079,22 +3114,16 @@ struct publication_protocol_paths {
             ready, output_root, "publication READY intent"),
     };
     std::set<std::filesystem::path> identities;
-    const auto reserve = [&identities](
-                             const std::filesystem::path& relative,
-                             std::string_view owner) {
-        const std::filesystem::path temporary{relative.string() + ".tmp"};
-        if (!identities.insert(relative).second
-            || !identities.insert(temporary).second) {
-            throw std::runtime_error(
-                std::string{owner}
-                + " aliases another publication protocol path: "
-                + relative.string());
-        }
-    };
-    reserve(result.manifest_relative, "artifact manifest destination");
-    reserve(result.stamp_relative, "publication stamp destination");
-    reserve(result.transaction_relative, "publication PREPARING intent");
-    reserve(result.ready_relative, "publication READY intent");
+    reserve_publication_path(
+        identities, result.manifest_relative, "artifact manifest destination");
+    reserve_publication_path(
+        identities, result.stamp_relative, "publication stamp destination");
+    reserve_publication_path(
+        identities,
+        result.transaction_relative,
+        "publication PREPARING intent");
+    reserve_publication_path(
+        identities, result.ready_relative, "publication READY intent");
     return result;
 }
 
@@ -3164,30 +3193,26 @@ inline void validate_protocol_ownership_paths(
     const previous_publication& desired,
     const previous_publication& previous) {
     std::set<std::filesystem::path> identities;
-    const auto reserve = [&identities](
-                             const std::filesystem::path& relative,
-                             std::string_view owner) {
-        const std::filesystem::path temporary{relative.string() + ".tmp"};
-        if (!identities.insert(relative).second
-            || !identities.insert(temporary).second) {
-            throw std::runtime_error(
-                std::string{owner}
-                + " aliases a publication destination or protocol path: "
-                + relative.string());
-        }
-    };
-    reserve(protocol.manifest_relative, "artifact manifest destination");
-    reserve(protocol.stamp_relative, "publication stamp destination");
-    reserve(protocol.transaction_relative, "publication PREPARING intent");
-    reserve(protocol.ready_relative, "publication READY intent");
+    reserve_publication_path(
+        identities, protocol.manifest_relative, "artifact manifest destination");
+    reserve_publication_path(
+        identities, protocol.stamp_relative, "publication stamp destination");
+    reserve_publication_path(
+        identities,
+        protocol.transaction_relative,
+        "publication PREPARING intent");
+    reserve_publication_path(
+        identities, protocol.ready_relative, "publication READY intent");
     std::set<std::filesystem::path> desired_paths;
     for (const owned_publication_artifact& artifact : desired.artifacts) {
-        reserve(artifact.relative_path, "desired publication artifact");
+        reserve_publication_path(
+            identities, artifact.relative_path, "desired publication artifact");
         desired_paths.insert(artifact.relative_path);
     }
     for (const owned_publication_artifact& artifact : previous.artifacts) {
         if (desired_paths.contains(artifact.relative_path)) continue;
-        reserve(
+        reserve_publication_path(
+            identities,
             artifact.relative_path,
             "authenticated stale publication artifact");
     }
@@ -3332,8 +3357,6 @@ inline void abort_preparing_publication(
         const std::filesystem::path staging = std::filesystem::path{
             (protocol.output_root / artifact.relative_path).string() + ".tmp"};
         remove_regular_file(staging, "aborted publication staging artifact");
-        prune_empty_publication_directories(
-            staging.parent_path(), protocol.output_root);
     }
     require_pending_document_unchanged(pending);
     require_unchanged_previous_publication_snapshot(

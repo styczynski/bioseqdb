@@ -7,6 +7,7 @@ module;
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <set>
 #include <sstream>
@@ -1402,6 +1403,15 @@ inline void verify_authenticated_incremental_publication() {
                 std::filesystem::path{manifest.string() + ".tmp"});
         },
         "publication stamp cannot alias the artifacts manifest temporary path");
+    require_rejected(
+        [&] {
+            publish_at(
+                repeat,
+                initial_artifacts,
+                std::filesystem::path{manifest.string()
+                                      + ".transaction/publication.stamp"});
+        },
+        "publication stamp cannot nest beneath a protocol-owned file path");
     require_rejected(
         [&] { publish_at(repeat, initial_artifacts, keep); },
         "publication stamp cannot alias a desired artifact");
