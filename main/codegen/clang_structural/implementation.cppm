@@ -6034,9 +6034,20 @@ class structural_factory final
 class module_edges_visitor final
     : public clang::RecursiveASTVisitor<module_edges_visitor> {
   public:
+    explicit module_edges_visitor(
+        const clang::SourceManager& sources) noexcept
+        : sources_(sources) {
+    }
+
     module_graph_unit* output{};
 
     bool VisitImportDecl(clang::ImportDecl* declaration) {
+        const clang::SourceLocation location =
+            sources_.getExpansionLoc(declaration->getLocation());
+        if (location.isInvalid()
+            || !sources_.isWrittenInMainFile(location)) {
+            return true;
+        }
         const clang::Module* imported =
             declaration->getImportedModule();
         if (imported == nullptr) {
@@ -6050,6 +6061,9 @@ class module_edges_visitor final
         }
         return true;
     }
+
+  private:
+    const clang::SourceManager& sources_;
 };
 
 class module_edges_consumer final : public clang::ASTConsumer {
@@ -6072,7 +6086,7 @@ class module_edges_consumer final : public clang::ASTConsumer {
                 context.getCurrentNamedModule()) {
             unit.provided_module = module->getFullModuleName();
         }
-        module_edges_visitor visitor;
+        module_edges_visitor visitor{sources};
         visitor.output = &unit;
         visitor.TraverseDecl(context.getTranslationUnitDecl());
         std::ranges::sort(unit.exported_imports);

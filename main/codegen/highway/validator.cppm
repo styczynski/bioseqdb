@@ -1066,9 +1066,20 @@ inline void validate_inventories(
         const std::set<std::string, std::less<>> declared_dependencies{
             source.dependencies.begin(), source.dependencies.end()};
         if (actual_target_dependencies != declared_dependencies) {
+            const auto describe = [](const auto& values) {
+                std::string result{"["};
+                for (const std::string& value : values) {
+                    if (result.size() != 1u) result += ",";
+                    result += value;
+                }
+                result += "]";
+                return result;
+            };
             throw std::runtime_error(
                 source.path.string()
-                + ": target imports do not exactly match registered DEPENDS keys");
+                + ": target imports do not exactly match registered DEPENDS keys"
+                + " (declared=" + describe(declared_dependencies)
+                + ", observed=" + describe(actual_target_dependencies) + ")");
         }
         extracted.neutral_imports.assign(
             neutral_imports.begin(), neutral_imports.end());
