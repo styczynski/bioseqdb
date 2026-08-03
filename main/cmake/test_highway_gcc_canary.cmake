@@ -10,12 +10,17 @@ file(REMOVE_RECURSE "${TEST_ROOT}")
 file(MAKE_DIRECTORY "${TEST_ROOT}")
 
 set(_canary_module "${SOURCE_ROOT}/cmake/BioseqHighwayGccCanary.cmake")
+set(_imported_binder_helper
+  "${SOURCE_ROOT}/cmake/BioseqHighwayImportedBinderCanary.cmake")
 set(_toolchain_helper "${SOURCE_ROOT}/cmake/BioseqGccToolchain.cmake")
 set(_runner "${SOURCE_ROOT}/cmake/RunBioseqHighwayGccCanary.cmake")
+set(_outer_canary_project
+  "${SOURCE_ROOT}/codegen/namespace_materialization/tests/module_canary/CMakeLists.txt")
 set(_nested_project
   "${SOURCE_ROOT}/codegen/namespace_materialization/tests/module_canary/gcc_canary/CMakeLists.txt")
 foreach(_checked IN ITEMS
-    _canary_module _toolchain_helper _runner _nested_project)
+    _canary_module _imported_binder_helper _toolchain_helper _runner
+    _outer_canary_project _nested_project)
   if(NOT EXISTS "${${_checked}}")
     message(FATAL_ERROR "missing Highway GCC canary contract file: ${${_checked}}")
   endif()
@@ -231,42 +236,96 @@ foreach(_required_text IN ITEMS
     "CXX_MODULE_STD OFF"
     "BIOSEQ_GCC_CANARY_HIGHWAY_INCLUDE_ROOT"
     "BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST"
-    "HWY_NEON_WITHOUT_AES"
-    "HWY_NEON"
-    "HWY_SSE2"
-    "HWY_SSE4"
-    "HWY_EMU128"
-    "target_attribute_shapes.cppm.in"
-    "attribute_shapes.cppm"
+    "BioseqHighwayImportedBinderCanary.cmake"
+    "bioseq_add_highway_imported_binder_canary"
+    "TARGET bioseq_highway_gcc_module_canary"
     "typed_flat_api.cppm"
     "instance_3.cppm"
     "bioseq_namespace_materialization_gcc_module_canary"
-    "bioseq_gcc_canary_closure"
-    "highway_registry.cppm"
-    "runtime.cpp"
-    "BASE_DIRS"
-    "CXX_SCAN_FOR_MODULES ON")
+    "bioseq_gcc_canary_closure")
   string(FIND "${_nested}" "${_required_text}" _required_offset)
   if(_required_offset EQUAL -1)
     message(FATAL_ERROR
       "nested GCC canary lost required closure text: ${_required_text}")
   endif()
 endforeach()
+
+file(READ "${_imported_binder_helper}" _imported_binder_helper_source)
+foreach(_required_text IN ITEMS
+    "bioseq_add_highway_imported_binder_canary"
+    "HWY_NEON_WITHOUT_AES"
+    "HWY_NEON"
+    "HWY_NEON_BF16"
+    "HWY_SSE2"
+    "HWY_SSE4"
+    "HWY_EMU128"
+    "CMAKE_OSX_ARCHITECTURES"
+    "multi-architecture"
+    "no fail-closed native target pair"
+    "PLATFORM_HEADER_OVERRIDES"
+    "TARGET_DISTINGUISHING_PROBE_KIND 2"
+    "CMAKE_SYSTEM_NAME STREQUAL \"Darwin\""
+    "CMAKE_SYSTEM_NAME STREQUAL \"Linux\""
+    "target_attribute_shapes.cppm.in"
+    "attribute_shapes.cppm"
+    "highway_registry.cppm"
+    "runtime.cpp"
+    "BASE_DIRS"
+    "CXX_SCAN_FOR_MODULES ON")
+  string(FIND "${_imported_binder_helper_source}" "${_required_text}"
+    _required_offset)
+  if(_required_offset EQUAL -1)
+    message(FATAL_ERROR
+      "shared imported-binder canary lost required closure text: "
+      "${_required_text}")
+  endif()
+endforeach()
 foreach(_target_policy IN ITEMS
     [=["${SIMD_TARGET_TOKEN} | HWY_EMU128"]=]
     [=["${SIMD_TARGET_TOKEN} | ${ATTRIBUTED_TARGET_TOKEN} | HWY_EMU128"]=])
-  string(FIND "${_nested}" "${_target_policy}" _target_policy_offset)
+  string(FIND "${_imported_binder_helper_source}" "${_target_policy}"
+    _target_policy_offset)
   if(_target_policy_offset EQUAL -1)
     message(FATAL_ERROR
-      "nested GCC canary lost exact target policy ${_target_policy}")
+      "shared imported-binder canary lost exact target policy "
+      "${_target_policy}")
   endif()
 endforeach()
 string(FIND "${_nested}" "find_package(" _find_package_offset)
 string(FIND "${_nested}" "target_link_libraries(" _link_libraries_offset)
+string(FIND "${_imported_binder_helper_source}" "find_package("
+  _helper_find_package_offset)
+string(FIND "${_imported_binder_helper_source}" "target_link_libraries("
+  _helper_link_libraries_offset)
 if(NOT _find_package_offset EQUAL -1
-    OR NOT _link_libraries_offset EQUAL -1)
+    OR NOT _link_libraries_offset EQUAL -1
+    OR NOT _helper_find_package_offset EQUAL -1
+    OR NOT _helper_link_libraries_offset EQUAL -1)
   message(FATAL_ERROR
-    "nested GCC canary must have no package discovery or explicit libraries")
+    "shared/nested canary must have no package discovery or explicit libraries")
+endif()
+
+file(READ "${_outer_canary_project}" _outer_canary_source)
+foreach(_native_canary_contract IN ITEMS
+    [=[CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$"]=]
+    "include(BioseqHighwayImportedBinderCanary)"
+    "TARGET bioseq_highway_clang_imported_binder_canary"
+    "highway-clang-canary/generated"
+    "highway_canary")
+  string(FIND "${_outer_canary_source}" "${_native_canary_contract}"
+    _native_canary_offset)
+  if(_native_canary_offset EQUAL -1)
+    message(FATAL_ERROR
+      "ordinary Clang build lost imported-binder canary contract "
+      "${_native_canary_contract}")
+  endif()
+endforeach()
+string(FIND "${_root_cmake}"
+  "bioseq_highway_clang_imported_binder_canary"
+  _native_consumer_dependency_offset)
+if(_native_consumer_dependency_offset EQUAL -1)
+  message(FATAL_ERROR
+    "normal build-only consumers lost the Clang imported-binder dependency")
 endif()
 
 set(_canary_source_root
@@ -296,11 +355,17 @@ string(FIND "${_registry_source}"
   "#define HWY_DISABLED_TARGETS (~(@SIMD_TARGET_TOKEN@ | HWY_EMU128))"
   _registry_runtime_mask)
 string(FIND "${_registry_source}"
+  "static_assert(HWY_STATIC_TARGET == @SIMD_TARGET_TOKEN@);"
+  _registry_static_target_assertion)
+string(FIND "${_registry_source}"
   "&@ATTRIBUTED_TARGET_NAMESPACE@::BindHighwayTarget"
   _attributed_link_anchor)
-if(_registry_runtime_mask EQUAL -1 OR _attributed_link_anchor EQUAL -1)
+if(_registry_runtime_mask EQUAL -1
+    OR _registry_static_target_assertion EQUAL -1
+    OR _attributed_link_anchor EQUAL -1)
   message(FATAL_ERROR
-    "Highway GCC registry must exclude but link-anchor the attributed target")
+    "Highway registry must exactly match the static target and exclude but "
+    "link-anchor the attributed target")
 endif()
 string(FIND "${_registry_source}" "@ATTRIBUTED_TARGET_TOKEN@"
   _attributed_registry_token)
@@ -321,6 +386,8 @@ file(READ "${_canary_source_root}/target_attribute_shapes.cppm.in"
 foreach(_attribute_contract IN ITEMS
     "sizeof(HWY_TARGET_STR) > 1"
     "hn::AESRound"
+    "hn::SumOfMulQuadAccumulate"
+    "AttributeTargetOnlyBF16DotProduct"
     "AttributeFunctionTemplate"
     "AttributeWorker(const std::uint32_t input)"
     "operator()() const"
@@ -339,10 +406,14 @@ foreach(_attribute_contract IN ITEMS
 endforeach()
 string(REGEX MATCHALL "AttributeTargetOnlyAES"
   _attribute_aes_matches "${_attribute_source}")
+string(REGEX MATCHALL "AttributeTargetOnlyBF16DotProduct"
+  _attribute_bf16_matches "${_attribute_source}")
 list(LENGTH _attribute_aes_matches _attribute_aes_count)
-if(NOT _attribute_aes_count EQUAL 1)
+list(LENGTH _attribute_bf16_matches _attribute_bf16_count)
+if(NOT _attribute_aes_count EQUAL 1
+    OR NOT _attribute_bf16_count EQUAL 1)
   message(FATAL_ERROR
-    "Highway GCC target-only AES probe must remain defined and uncalled")
+    "Highway target-only AES/BF16 probes must remain defined and uncalled")
 endif()
 file(GLOB _canary_sources LIST_DIRECTORIES FALSE
   "${_canary_source_root}/*")
@@ -355,12 +426,28 @@ foreach(_canary_source IN LISTS _canary_sources)
       "Highway GCC canary must prove fixed target units without foreach_target")
   endif()
 endforeach()
+foreach(_platform_template IN ITEMS
+    registry.cppm.in
+    runtime.cpp.in
+    target_attribute_shapes.cppm.in
+    target_binder.cppm.in
+    target_kernel.cppm.in)
+  file(READ "${_canary_source_root}/${_platform_template}"
+    _platform_template_source)
+  string(FIND "${_platform_template_source}"
+    "@PLATFORM_HEADER_OVERRIDES@" _platform_override_offset)
+  if(_platform_override_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway canary template lost platform-authenticated header policy: "
+      "${_platform_template}")
+  endif()
+endforeach()
 file(READ "${_canary_source_root}/runtime.cpp.in" _runtime_source)
 foreach(_runtime_contract IN ITEMS
     "HWY_HEADER_ONLY"
     "SupportedTargets()"
     "GetChosenTarget()"
-    "does not link the outer Clang/libc++ libhwy.a")
+    "does not link libhwy")
   string(FIND "${_runtime_source}" "${_runtime_contract}" _runtime_offset)
   if(_runtime_offset EQUAL -1)
     message(FATAL_ERROR
@@ -421,7 +508,10 @@ foreach(_forbidden_runner_text IN ITEMS
   endif()
 endforeach()
 string(FIND "${_nested}" "-fpermissive" _permissive_offset)
-if(NOT _permissive_offset EQUAL -1)
+string(FIND "${_imported_binder_helper_source}" "-fpermissive"
+  _helper_permissive_offset)
+if(NOT _permissive_offset EQUAL -1
+    OR NOT _helper_permissive_offset EQUAL -1)
   message(FATAL_ERROR
     "Highway GCC canary must not downgrade generated module diagnostics")
 endif()

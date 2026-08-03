@@ -6,8 +6,7 @@ module;
 #define HWY_DISABLED_TARGETS (~(@TARGET_POLICY_MASK@))
 #define HWY_HEADER_ONLY 1
 #define HWY_STATIC_DEFINE 1
-#define TOOLCHAIN_MISS_SYS_AUXV_H 1
-#define TOOLCHAIN_MISS_ASM_HWCAP_H 1
+@PLATFORM_HEADER_OVERRIDES@
 #include <hwy/detect_targets.h>
 #undef HWY_TARGET
 #define HWY_TARGET @TARGET_TOKEN@
@@ -21,7 +20,7 @@ module @TARGET_MODULE@:attribute_shapes;
 #error "compile-only Highway target must publish a target attribute string"
 #endif
 #if !HWY_HAS_ATTRIBUTE(target)
-#error "authenticated GCC must support the target function attribute"
+#error "selected compiler must support the target function attribute"
 #endif
 static_assert(sizeof(HWY_TARGET_STR) > 1,
               "compile-only Highway target string must be nonempty");
@@ -31,7 +30,8 @@ namespace bioseq::highway_gcc_canary::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 // Deliberately uncalled: parsing and code generation must accept an operation
-// that distinguishes NEON(+aes)/SSE4(+aes) from the runtime baseline target.
+// that distinguishes the attributed target from the runtime baseline target.
+#if @TARGET_DISTINGUISHING_PROBE_KIND@ == 1
 HWY_ATTR void AttributeTargetOnlyAES(
     const std::uint8_t* input,
     std::uint8_t* output) noexcept {
@@ -40,6 +40,23 @@ HWY_ATTR void AttributeTargetOnlyAES(
   const auto key = hn::Set(d, std::uint8_t{0x5a});
   hn::StoreU(hn::AESRound(state, key), d, output);
 }
+#elif @TARGET_DISTINGUISHING_PROBE_KIND@ == 2
+HWY_ATTR void AttributeTargetOnlyBF16DotProduct(
+    const std::int8_t* left,
+    const std::int8_t* right,
+    std::int32_t* output) noexcept {
+  using D32 = hn::ScalableTag<std::int32_t>;
+  const D32 d32;
+  const hn::Repartition<std::int8_t, D32> d8;
+  const auto left_values = hn::LoadU(d8, left);
+  const auto right_values = hn::LoadU(d8, right);
+  const auto accumulated = hn::SumOfMulQuadAccumulate(
+      d32, left_values, right_values, hn::Zero(d32));
+  hn::StoreU(accumulated, d32, output);
+}
+#else
+#error "unknown target-distinguishing Highway probe"
+#endif
 
 template <class Value>
 HWY_ATTR Value AttributeFunctionTemplate(const Value value) noexcept {

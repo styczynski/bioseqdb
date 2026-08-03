@@ -6,8 +6,7 @@ module;
 #define HWY_DISABLED_TARGETS (~(@SIMD_TARGET_TOKEN@ | HWY_EMU128))
 #define HWY_HEADER_ONLY 1
 #define HWY_STATIC_DEFINE 1
-#define TOOLCHAIN_MISS_SYS_AUXV_H 1
-#define TOOLCHAIN_MISS_ASM_HWCAP_H 1
+@PLATFORM_HEADER_OVERRIDES@
 #include <hwy/highway.h>
 
 #include <cstdint>

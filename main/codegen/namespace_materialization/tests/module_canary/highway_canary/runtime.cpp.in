@@ -1,9 +1,9 @@
-// The canary intentionally does not link the outer Clang/libc++ libhwy.a into
-// the authenticated GCC/libstdc++ executable. The outer CMake project resolves
-// Highway 1.3.0 EXACT, hashes every installed hwy/*.h, and the nested project
-// re-authenticates that closure before compiling this file. In that exact ABI,
-// hwy/targets.h leaves SupportedTargets() and GetChosenTarget() out of line.
-// This file supplies only those hooks. The real ChosenTarget type and indexing,
+// The canary intentionally does not link libhwy into either the ordinary
+// Clang executable or the separately authenticated GCC executable. Both use
+// this same header-only source closure; the GCC orchestration additionally
+// authenticates every installed hwy/*.h before compiling it. In Highway 1.3.0,
+// hwy/targets.h leaves SupportedTargets() and GetChosenTarget() out of line, so
+// this file supplies only those hooks. The real ChosenTarget type and indexing,
 // HWY_EXPORT table, dispatch macros, and vector operations remain the installed
 // Highway definitions; no dispatch table is simulated here. HWY_HEADER_ONLY
 // supplies Highway's unrelated Warn/Abort helpers inline.
@@ -11,8 +11,7 @@
 #define HWY_DISABLED_TARGETS (~(@SIMD_TARGET_TOKEN@ | HWY_EMU128))
 #define HWY_HEADER_ONLY 1
 #define HWY_STATIC_DEFINE 1
-#define TOOLCHAIN_MISS_SYS_AUXV_H 1
-#define TOOLCHAIN_MISS_ASM_HWCAP_H 1
+@PLATFORM_HEADER_OVERRIDES@
 #include <hwy/highway.h>
 
 #include <cstdint>
@@ -20,7 +19,7 @@
 namespace hwy {
 
 HWY_DLLEXPORT std::int64_t SupportedTargets() {
-  // Both entries are portable on the authenticated native-Darwin host: the
+  // Both entries are portable on the selected native arm64/x86_64 host: its
   // mandatory baseline SIMD target and Highway's software EMU128 fallback.
   // The nonempty-HWY_TARGET_STR probe is compiled and link-anchored elsewhere
   // but intentionally excluded from this runtime/export policy.

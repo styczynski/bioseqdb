@@ -90,37 +90,54 @@ set_target_properties(bioseq_namespace_materialization_module_canary PROPERTIES
   CXX_SCAN_FOR_MODULES ON
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
-if(BIOSEQ_HIGHWAY_GCC_CANARY)
+set(_bioseq_add_native_highway_canary FALSE)
+if(CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$")
+  set(_bioseq_add_native_highway_canary TRUE)
+endif()
+if(_bioseq_add_native_highway_canary OR BIOSEQ_HIGHWAY_GCC_CANARY)
   if(NOT TARGET hwy::hwy)
     find_package(HWY 1.3.0 EXACT REQUIRED NO_MODULE)
   endif()
   _bioseq_highway_collect_target_usage(
-    _bioseq_gcc_canary_highway_include_dirs
-    _bioseq_gcc_canary_highway_definitions
-    _bioseq_gcc_canary_highway_compile_options)
-  set(_bioseq_gcc_canary_highway_include_root "")
-  foreach(_bioseq_gcc_canary_include_dir
-      IN LISTS _bioseq_gcc_canary_highway_include_dirs)
-    if(EXISTS "${_bioseq_gcc_canary_include_dir}/hwy/highway.h")
-      if(NOT _bioseq_gcc_canary_highway_include_root STREQUAL "")
+    _bioseq_canary_highway_include_dirs
+    _bioseq_canary_highway_definitions
+    _bioseq_canary_highway_compile_options)
+  set(_bioseq_canary_highway_include_root "")
+  foreach(_bioseq_canary_include_dir IN LISTS _bioseq_canary_highway_include_dirs)
+    if(EXISTS "${_bioseq_canary_include_dir}/hwy/highway.h")
+      if(NOT _bioseq_canary_highway_include_root STREQUAL "")
         message(FATAL_ERROR
-          "Highway GCC canary requires one unambiguous Highway header root")
+          "Highway canaries require one unambiguous Highway header root")
       endif()
-      set(_bioseq_gcc_canary_highway_include_root
-        "${_bioseq_gcc_canary_include_dir}")
+      set(_bioseq_canary_highway_include_root
+        "${_bioseq_canary_include_dir}")
     endif()
   endforeach()
-  if(_bioseq_gcc_canary_highway_include_root STREQUAL "")
+  if(_bioseq_canary_highway_include_root STREQUAL "")
     message(FATAL_ERROR
-      "Highway GCC canary could not resolve hwy/highway.h from hwy::hwy")
+      "Highway canaries could not resolve hwy/highway.h from hwy::hwy")
   endif()
+endif()
+
+if(_bioseq_add_native_highway_canary)
+  include(BioseqHighwayImportedBinderCanary)
+  bioseq_add_highway_imported_binder_canary(
+    TARGET bioseq_highway_clang_imported_binder_canary
+    SOURCE_ROOT
+      "${_bioseq_namespace_materialization_canary_dir}/highway_canary"
+    HIGHWAY_INCLUDE_ROOT "${_bioseq_canary_highway_include_root}"
+    GENERATED_ROOT
+      "${CMAKE_CURRENT_BINARY_DIR}/highway-clang-canary/generated")
+endif()
+
+if(BIOSEQ_HIGHWAY_GCC_CANARY)
   include(BioseqHighwayGccCanary)
   bioseq_add_highway_gcc_canary(
     TARGET bioseq_highway_gcc_canary
     SOURCE_ROOT
       "${_bioseq_namespace_materialization_canary_dir}/highway_canary"
     HIGHWAY_INCLUDE_ROOT
-      "${_bioseq_gcc_canary_highway_include_root}"
+      "${_bioseq_canary_highway_include_root}"
     GENERATION_TARGET
       "${_bioseq_namespace_materialization_canary_codegen}"
     GENERATED_ROOT
