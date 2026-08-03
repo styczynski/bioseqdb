@@ -382,6 +382,55 @@ struct module_graph {
     std::string compilation_signature;
 };
 
+/// Stable source identity used to join dependency-only PREPARE observations
+/// to the canonical token authority and the authenticated PCM manifest.
+struct preparation_module_identity {
+    std::string module_name;
+    std::filesystem::path source_path;
+    std::string source_sha256;
+};
+
+/// The closed set of frontend actions whose execution or validated cache hit
+/// is observed by PREPARE. The canonical source may only produce the first.
+enum class preparation_action_kind : std::uint8_t {
+    canonical_token_slice,
+    p1689_dependency_discovery,
+    make_dependency_scan,
+    pcm_compilation,
+};
+
+enum class preparation_input_class : std::uint8_t {
+    canonical_scan_only,
+    signature_donor,
+    prepared_dependency,
+};
+
+enum class preparation_action_disposition : std::uint8_t {
+    executed,
+    validated_cache_hit,
+};
+
+struct preparation_action_record {
+    preparation_action_kind kind{
+        preparation_action_kind::canonical_token_slice};
+    preparation_input_class input_class{
+        preparation_input_class::canonical_scan_only};
+    preparation_action_disposition disposition{
+        preparation_action_disposition::executed};
+    std::string module_name;
+    std::string source_sha256;
+};
+
+struct preparation_action_summary {
+    std::uint32_t canonical_token_slice_actions{};
+    std::uint32_t canonical_semantic_frontend_actions{};
+};
+
+struct preparation_action_trace_validation {
+    std::string trace_identity;
+    preparation_action_summary summary;
+};
+
 struct prepared_compilation_environment {
     std::string compile_database_json;
     std::string pcm_manifest_json;
@@ -393,6 +442,13 @@ struct prepared_compilation_environment {
     std::vector<std::filesystem::path> dependencies;
     std::vector<std::filesystem::path> dependency_root_sources;
     std::string canonical_token_import_sha256;
+    std::string compiler_profile;
+    std::string authority;
+    std::string clang_binary_sha256;
+    std::string clang_scan_deps_sha256;
+    std::string llvm_config_sha256;
+    std::string compiler_module_inventory_sha256;
+    std::vector<preparation_action_record> observed_actions;
 };
 
 /// Canonical raw-token authority for dependency-only preparation. Root paths
@@ -400,13 +456,23 @@ struct prepared_compilation_environment {
 /// canonical body-bearing sources themselves are never roots.
 struct dependency_compilation_authority {
     std::vector<std::filesystem::path> root_source_paths;
+    preparation_module_identity signature_donor;
+    std::vector<preparation_module_identity> canonical_inputs;
     std::string canonical_token_import_sha256;
 };
 
 struct prepared_compilation_validation {
     std::string manifest_sha256;
+    std::string owned_compile_database_sha256;
     std::string compilation_signature;
     std::string relocatable_compilation_signature;
+    std::string compiler_profile;
+    std::string authority;
+    std::string clang_binary_sha256;
+    std::string clang_scan_deps_sha256;
+    std::string llvm_config_sha256;
+    std::string compiler_module_inventory_sha256;
+    std::vector<preparation_module_identity> modules;
 };
 
 [[nodiscard]] inline constexpr const char* kind_name(

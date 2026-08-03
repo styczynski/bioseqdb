@@ -222,6 +222,7 @@ struct prepare_command_line {
     std::filesystem::path pcm_root;
     std::filesystem::path compile_database_output;
     std::filesystem::path pcm_manifest;
+    std::filesystem::path action_trace;
     std::filesystem::path depfile;
     std::filesystem::path stamp;
 };
@@ -238,6 +239,8 @@ struct command_line {
     std::filesystem::path signature_source;
     std::filesystem::path compile_database;
     std::filesystem::path pcm_manifest;
+    std::filesystem::path prepare_action_trace;
+    std::filesystem::path prepare_stamp;
     std::filesystem::path pcm_root;
     std::filesystem::path clang_binary;
     std::filesystem::path clang_scan_deps;

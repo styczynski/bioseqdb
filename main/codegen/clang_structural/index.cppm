@@ -188,6 +188,22 @@ void validate_dependency_compilation_authority_seal(
     const dependency_compilation_authority& authority,
     const std::filesystem::path& compile_database);
 
+/// Renders the deterministic, self-sealed record of every raw-token,
+/// discovery, dependency-syntax, and PCM action observed by PREPARE. The
+/// document is evidence only and is deliberately absent from compilation,
+/// topology, and generated-artifact identities.
+[[nodiscard]] std::string render_preparation_action_trace(
+    const prepared_compilation_environment& prepared);
+
+/// Authenticates a PREPARE action trace and joins every semantic action to the
+/// validated PCM closure. Canonical inputs must have exactly one token-slice
+/// action and no semantic frontend action.
+[[nodiscard]] preparation_action_trace_validation
+validate_preparation_action_trace(
+    const std::filesystem::path& action_trace,
+    const dependency_compilation_authority& dependency_authority,
+    const prepared_compilation_validation& prepared);
+
 /// Verifies that an owned compile database and every mapped PCM still match
 /// the PREPARE manifest, selected profile, authority, toolchain, and source
 /// dependency closure before structural collection begins.

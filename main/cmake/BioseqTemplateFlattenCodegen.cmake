@@ -964,6 +964,7 @@ function(bioseq_add_template_flatten_codegen)
   set(_prepared_compile_database
     "${_metadata_dir}/prepare_compile_commands.json")
   set(_pcm_manifest "${_metadata_dir}/pcm_manifest.json")
+  set(_prepare_action_trace "${_metadata_dir}/prepare_actions.json")
   set(_prepare_depfile "${_metadata_dir}/prepare.d")
   set(_prepare_stamp "${_metadata_dir}/prepare.stamp")
   set(_topology_manifest "${_output_root}/topology.json")
@@ -993,6 +994,7 @@ function(bioseq_add_template_flatten_codegen)
     OUTPUT
       "${_prepared_compile_database}"
       "${_pcm_manifest}"
+      "${_prepare_action_trace}"
       "${_prepare_stamp}"
     BYPRODUCTS "${_prepare_depfile}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory
@@ -1016,6 +1018,7 @@ function(bioseq_add_template_flatten_codegen)
       --pcm-root "${_pcm_root}"
       --compile-database-output "${_prepared_compile_database}"
       --pcm-manifest "${_pcm_manifest}"
+      --action-trace "${_prepare_action_trace}"
       --depfile "${_prepare_depfile}"
       --stamp "${_prepare_stamp}"
     DEPENDS
@@ -1036,6 +1039,7 @@ function(bioseq_add_template_flatten_codegen)
     DEPENDS
       "${_prepared_compile_database}"
       "${_pcm_manifest}"
+      "${_prepare_action_trace}"
       "${_prepare_stamp}")
   add_dependencies("${_prepare_target}" bioseq_codegen_project)
 
@@ -1063,6 +1067,8 @@ function(bioseq_add_template_flatten_codegen)
       --signature-source "${_signature_source}"
       --compile-database "${_prepared_compile_database}"
       --pcm-manifest "${_pcm_manifest}"
+      --prepare-action-trace "${_prepare_action_trace}"
+      --prepare-stamp "${_prepare_stamp}"
       --pcm-root "${_pcm_root}"
       --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
       --clang-scan-deps "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
@@ -1089,6 +1095,7 @@ function(bioseq_add_template_flatten_codegen)
       "${_prepare_stamp}"
       "${_prepared_compile_database}"
       "${_pcm_manifest}"
+      "${_prepare_action_trace}"
       "${BIOSEQ_CODEGEN_CLANG_BINARY}"
       "${BIOSEQ_CODEGEN_CLANG_SCAN_DEPS}"
       "${BIOSEQ_CODEGEN_LLVM_CONFIG}"

@@ -1716,9 +1716,46 @@ inline void verify_interrupted_publication_recovery() {
         "rejected READY recovery preserves the authenticated live publication");
 }
 
+inline void verify_preparation_action_trace_stamp_binding() {
+    const std::string action_trace{
+        "{\"schema\":\"fixture.prepare_actions/v1\"}\n"};
+    const std::string stamp =
+        "bioseq_template_flatten_prepare_stamp/v1\n"
+        "profile=production\n"
+        "prepare_action_trace_sha256="
+        + sha256_hex(action_trace) + "\n";
+    validate_preparation_action_trace_stamp_binding(
+        stamp, action_trace);
+    require_rejected(
+        [&] {
+            validate_preparation_action_trace_stamp_binding(
+                stamp, action_trace + " ");
+        },
+        "PREPARE stamp accepts independently substituted action-trace bytes");
+    require_rejected(
+        [&] {
+            validate_preparation_action_trace_stamp_binding(
+                replace_once(
+                    stamp,
+                    sha256_hex(action_trace),
+                    std::string(64u, '0')),
+                action_trace);
+        },
+        "PREPARE stamp accepts a stale action-trace digest");
+    require_rejected(
+        [&] {
+            validate_preparation_action_trace_stamp_binding(
+                stamp + "prepare_action_trace_sha256="
+                    + sha256_hex(action_trace) + "\n",
+                action_trace);
+        },
+        "PREPARE stamp accepts duplicate action-trace bindings");
+}
+
 }  // namespace detail
 
 inline void run_namespace_materialization_contract_tests() {
+    detail::verify_preparation_action_trace_stamp_binding();
     detail::verify_closed_grammar();
     detail::verify_malformed_materialization_sources();
     detail::verify_zip_product_and_digest();

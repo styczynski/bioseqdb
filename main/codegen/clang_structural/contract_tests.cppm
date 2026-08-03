@@ -1268,6 +1268,249 @@ inline int invoke() {
         "canonical source and signature donor must be distinct",
         "vector dependency-only donor classification");
 
+    // This canonical module is syntactically valid but cannot pass Sema. A
+    // successful dependency-only cold/warm PREPARE therefore proves that the
+    // canonical body never entered a compiler frontend. The authenticated
+    // action trace then makes that proof independent of fixture filenames.
+    const std::filesystem::path guard_root =
+        root / "dependency-only-positive";
+    const std::filesystem::path guard_canonical =
+        guard_root / "canonical.cppm";
+    const std::filesystem::path guard_donor =
+        guard_root / "donor.cppm";
+    const std::filesystem::path guard_provider =
+        guard_root / "provider.cppm";
+    const std::filesystem::path guard_raw_database =
+        guard_root / "compile_commands.json";
+    const std::filesystem::path guard_pcm_root =
+        guard_root / "pcm";
+    const std::filesystem::path guard_owned_database =
+        guard_root / "owned_compile_commands.json";
+    const std::filesystem::path guard_pcm_manifest =
+        guard_root / "pcm_manifest.json";
+    const std::filesystem::path guard_action_trace =
+        guard_root / "prepare_actions.json";
+    write_file(
+        guard_canonical,
+        "export module fixture.dependency_guard.canonical;\n"
+        "import fixture.dependency_guard.provider;\n"
+        "namespace fixture::dependency_guard {\n"
+        "[[maybe_unused]] inline int canonical_body_must_not_reach_sema() {\n"
+        "  static_assert(false, \"canonical body reached Sema\");\n"
+        "  return 0;\n"
+        "}\n"
+        "}\n");
+    write_file(
+        guard_donor,
+        "export module fixture.dependency_guard.donor;\n"
+        "export int dependency_guard_donor();\n");
+    write_file(
+        guard_provider,
+        "export module fixture.dependency_guard.provider;\n"
+        "export int dependency_guard_provider();\n");
+    write_file(
+        guard_raw_database,
+        render_compile_database({
+            make_command(toolchain, guard_root, guard_canonical),
+            make_command(toolchain, guard_root, guard_donor),
+            make_command(toolchain, guard_root, guard_provider),
+        }));
+    const auto prepare_guard = [&] {
+        return prepare_dependency_compilation_environment(
+            guard_canonical,
+            guard_donor,
+            guard_raw_database,
+            toolchain.clang_binary,
+            toolchain.clang_scan_deps,
+            toolchain.llvm_config,
+            toolchain.compiler_inventory,
+            toolchain.clang_sha256,
+            toolchain.clang_scan_deps_sha256,
+            toolchain.llvm_config_sha256,
+            toolchain.compiler_inventory_sha256,
+            guard_pcm_root,
+            "production",
+            "support");
+    };
+    const dependency_compilation_authority guard_authority =
+        derive_dependency_compilation_authority(
+            {guard_canonical},
+            guard_donor,
+            guard_raw_database,
+            "production");
+    require(
+        guard_authority.root_source_paths.size() == 2u
+            && guard_authority.canonical_inputs.size() == 1u
+            && guard_authority.signature_donor.module_name
+                == "fixture.dependency_guard.donor",
+        "dependency-only positive guard derived the wrong canonical, "
+        "donor, or provider authority");
+    const std::string guard_manifest_authority =
+        dependency_compilation_manifest_authority(
+            "support", guard_authority);
+    const auto validate_guard_environment =
+        [&](const prepared_compilation_environment& prepared) {
+            publish_prepared(
+                prepared,
+                guard_owned_database,
+                guard_pcm_manifest);
+            validate_dependency_compilation_authority_seal(
+                guard_authority, guard_owned_database);
+            return validate_prepared_compilation_environment(
+                guard_authority.root_source_paths,
+                guard_owned_database,
+                guard_pcm_root,
+                guard_pcm_manifest,
+                toolchain.clang_binary,
+                toolchain.clang_scan_deps,
+                toolchain.llvm_config,
+                toolchain.compiler_inventory,
+                toolchain.clang_sha256,
+                toolchain.clang_scan_deps_sha256,
+                toolchain.llvm_config_sha256,
+                toolchain.compiler_inventory_sha256,
+                "production",
+                guard_manifest_authority);
+        };
+    const auto count_actions =
+        [](const prepared_compilation_environment& prepared,
+           const preparation_action_kind kind,
+           const preparation_action_disposition disposition) {
+            return std::ranges::count_if(
+                prepared.observed_actions,
+                [&](const preparation_action_record& action) {
+                    return action.kind == kind
+                        && action.disposition == disposition;
+                });
+        };
+
+    const prepared_compilation_environment cold_guard =
+        prepare_guard();
+    require(
+        cold_guard.observed_actions.size() == 7u
+            && count_actions(
+                   cold_guard,
+                   preparation_action_kind::canonical_token_slice,
+                   preparation_action_disposition::executed) == 1u
+            && count_actions(
+                   cold_guard,
+                   preparation_action_kind::p1689_dependency_discovery,
+                   preparation_action_disposition::executed) == 2u
+            && count_actions(
+                   cold_guard,
+                   preparation_action_kind::make_dependency_scan,
+                   preparation_action_disposition::executed) == 2u
+            && count_actions(
+                   cold_guard,
+                   preparation_action_kind::pcm_compilation,
+                   preparation_action_disposition::executed) == 2u,
+        "cold dependency-only PREPARE did not observe the exact token, "
+        "P1689, make-dependency, and PCM action set");
+    const prepared_compilation_validation cold_guard_validation =
+        validate_guard_environment(cold_guard);
+    const std::string cold_guard_trace =
+        render_preparation_action_trace(cold_guard);
+    write_file(guard_action_trace, cold_guard_trace);
+    const preparation_action_trace_validation cold_trace_validation =
+        validate_preparation_action_trace(
+            guard_action_trace,
+            guard_authority,
+            cold_guard_validation);
+    require(
+        cold_trace_validation.summary.canonical_token_slice_actions
+                == 1u
+            && cold_trace_validation.summary
+                    .canonical_semantic_frontend_actions
+                == 0u,
+        "cold dependency-only action trace did not prove one canonical "
+        "token scan and zero canonical semantic actions");
+
+    write_file(
+        guard_action_trace,
+        replace_json_string_field(
+            cold_guard_trace,
+            "trace_identity",
+            std::string(64u, '0')));
+    require_failure(
+        [&] {
+            static_cast<void>(validate_preparation_action_trace(
+                guard_action_trace,
+                guard_authority,
+                cold_guard_validation));
+        },
+        "self-seal is invalid",
+        "dependency-only action trace byte tamper");
+
+    prepared_compilation_environment semantic_tamper = cold_guard;
+    semantic_tamper.observed_actions.front().input_class =
+        preparation_input_class::signature_donor;
+    write_file(
+        guard_action_trace,
+        render_preparation_action_trace(semantic_tamper));
+    require_failure(
+        [&] {
+            static_cast<void>(validate_preparation_action_trace(
+                guard_action_trace,
+                guard_authority,
+                cold_guard_validation));
+        },
+        "canonical token-slice action has invalid",
+        "dependency-only re-sealed semantic trace tamper");
+
+    prepared_compilation_environment closure_tamper = cold_guard;
+    closure_tamper.compile_database_json.push_back(' ');
+    write_file(
+        guard_action_trace,
+        render_preparation_action_trace(closure_tamper));
+    require_failure(
+        [&] {
+            static_cast<void>(validate_preparation_action_trace(
+                guard_action_trace,
+                guard_authority,
+                cold_guard_validation));
+        },
+        "metadata differs from the validated",
+        "dependency-only re-sealed closure trace tamper");
+
+    const prepared_compilation_environment warm_guard =
+        prepare_guard();
+    require(
+        warm_guard.observed_actions.size() == 7u
+            && count_actions(
+                   warm_guard,
+                   preparation_action_kind::p1689_dependency_discovery,
+                   preparation_action_disposition::executed) == 2u
+            && count_actions(
+                   warm_guard,
+                   preparation_action_kind::make_dependency_scan,
+                   preparation_action_disposition::validated_cache_hit)
+                == 2u
+            && count_actions(
+                   warm_guard,
+                   preparation_action_kind::pcm_compilation,
+                   preparation_action_disposition::validated_cache_hit)
+                == 2u,
+        "warm dependency-only PREPARE did not authenticate exact scanner "
+        "and PCM cache-hit actions");
+    const prepared_compilation_validation warm_guard_validation =
+        validate_guard_environment(warm_guard);
+    write_file(
+        guard_action_trace,
+        render_preparation_action_trace(warm_guard));
+    const preparation_action_trace_validation warm_trace_validation =
+        validate_preparation_action_trace(
+            guard_action_trace,
+            guard_authority,
+            warm_guard_validation);
+    require(
+        warm_trace_validation.summary.canonical_token_slice_actions
+                == 1u
+            && warm_trace_validation.summary
+                    .canonical_semantic_frontend_actions
+                == 0u,
+        "warm dependency-only action trace did not preserve the "
+        "canonical Sema exclusion proof");
+
     const std::filesystem::path source_root = root / "sources";
     const std::filesystem::path conditional_root =
         source_root / "conditional_root.cppm";

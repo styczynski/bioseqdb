@@ -29,6 +29,7 @@ module;
 #include <clang/Lex/Preprocessor.h>
 #include <clang/Tooling/ArgumentsAdjusters.h>
 #include <clang/Tooling/CompilationDatabase.h>
+#include <clang/Tooling/DependencyScanningTool.h>
 #include <clang/Tooling/JSONCompilationDatabase.h>
 #include <clang/Tooling/Tooling.h>
 #include <llvm/ADT/SmallString.h>
@@ -8185,7 +8186,8 @@ void scan_active_module_imports(
     const std::string& clang_binary_sha256,
     const std::string& clang_scan_deps_sha256,
     const std::filesystem::path& scan_root,
-    const relocation_context& relocation) {
+    const relocation_context& relocation,
+    std::vector<preparation_action_record>& observed_actions) {
     std::string key_material =
         record.module_name + "\n"
         + relocatable_path_spelling(
@@ -8283,6 +8285,161 @@ void scan_active_module_imports(
         record.module_name,
         record.source_path,
         record.command.Directory);
+    observed_actions.push_back(preparation_action_record{
+        .kind = preparation_action_kind::p1689_dependency_discovery,
+        .input_class =
+            preparation_input_class::prepared_dependency,
+        .disposition =
+            preparation_action_disposition::executed,
+        .module_name = record.module_name,
+        .source_sha256 = record.source_sha256,
+    });
+}
+
+/// Uses the codegen-linked Clang dependency scanner to obtain the exact make
+/// dependency bytes for the already-authenticated module command. This is a
+/// preprocessing action: unlike `clang -fsyntax-only -MD`, it cannot enter
+/// the body-bearing Sema path.
+void scan_make_dependencies(module_build_record& record) {
+    if (record.direct_arguments.empty()
+        || record.depfile_path.empty()) {
+        throw std::runtime_error(
+            "linked-Clang make dependency scan has incomplete inputs for '"
+            + record.module_name + "'");
+    }
+    if (std::filesystem::is_symlink(record.depfile_path)
+        || (std::filesystem::exists(record.depfile_path)
+            && !std::filesystem::is_regular_file(
+                record.depfile_path))) {
+        throw std::runtime_error(
+            "linked-Clang make dependency path is not a regular file for '"
+            + record.module_name + "'");
+    }
+    std::filesystem::create_directories(
+        record.depfile_path.parent_path());
+    const std::filesystem::path scan_object =
+        record.depfile_path.string() + ".scan.o";
+    std::vector<std::string> arguments = record.direct_arguments;
+    arguments.emplace_back("-c");
+    arguments.push_back(record.source_path.string());
+    arguments.emplace_back("-o");
+    arguments.push_back(scan_object.string());
+    arguments.emplace_back("-MD");
+    arguments.emplace_back("-MF");
+    arguments.push_back(record.depfile_path.string());
+    arguments.emplace_back("-MT");
+    arguments.push_back(record.depfile_path.string());
+    const clang::tooling::CompileCommand command{
+        record.command.Directory,
+        record.source_path.string(),
+        std::move(arguments),
+        scan_object.string(),
+    };
+    clang::dependencies::DependencyScanningService service{
+        clang::dependencies::ScanningMode::DependencyDirectivesScan,
+        clang::dependencies::ScanningOutputFormat::P1689,
+    };
+    clang::tooling::DependencyScanningTool scanner{service};
+    clang::IgnoringDiagConsumer diagnostics;
+    std::string make_output;
+    std::string make_output_path;
+    const std::optional<clang::tooling::P1689Rule> rule =
+        scanner.getP1689ModuleDependencyFile(
+            command,
+            record.command.Directory,
+            make_output,
+            make_output_path,
+            diagnostics);
+    if (!rule || make_output.empty()
+        || make_output_path.empty()) {
+        throw std::runtime_error(
+            "linked-Clang make dependency scan failed for module '"
+            + record.module_name + "'");
+    }
+    std::filesystem::path reported_output{make_output_path};
+    if (reported_output.is_relative()) {
+        reported_output =
+            std::filesystem::path{record.command.Directory}
+            / reported_output;
+    }
+    if (weakly_canonical_path(reported_output)
+        != weakly_canonical_path(record.depfile_path)) {
+        throw std::runtime_error(
+            "linked-Clang make dependency output path differs from "
+            "the content-keyed authority for module '"
+            + record.module_name + "'");
+    }
+    if (!rule->Provides
+        || rule->Provides->ModuleName != record.module_name
+        || rule->Provides->SourcePath.empty()) {
+        throw std::runtime_error(
+            "linked-Clang make dependency scan returned the wrong "
+            "module provider for '" + record.module_name + "'");
+    }
+    std::filesystem::path provided_source{
+        rule->Provides->SourcePath};
+    if (provided_source.is_relative()) {
+        provided_source =
+            std::filesystem::path{record.command.Directory}
+            / provided_source;
+    }
+    if (weakly_canonical_path(provided_source)
+        != weakly_canonical_path(record.source_path)) {
+        throw std::runtime_error(
+            "linked-Clang make dependency scan returned a foreign "
+            "provider source for '" + record.module_name + "'");
+    }
+    std::vector<std::string> imports;
+    imports.reserve(rule->Requires.size());
+    for (const clang::dependencies::P1689ModuleInfo& required :
+         rule->Requires) {
+        std::string imported = required.ModuleName;
+        if (imported.starts_with(':')) {
+            const std::size_t partition =
+                record.module_name.find(':');
+            imported = std::string{record.module_name.substr(
+                0u, partition)} + imported;
+        }
+        imports.push_back(std::move(imported));
+    }
+    std::ranges::sort(imports);
+    imports.erase(
+        std::ranges::unique(imports).begin(), imports.end());
+    if (imports != record.description.imports) {
+        throw std::runtime_error(
+            "linked-Clang make dependency scan import graph differs "
+            "from authenticated P1689 discovery for module '"
+            + record.module_name + "'");
+    }
+    write_if_different(record.depfile_path, make_output);
+    if (std::filesystem::is_symlink(record.depfile_path)
+        || !std::filesystem::is_regular_file(
+            record.depfile_path)) {
+        throw std::runtime_error(
+            "linked-Clang make dependency scan did not publish a "
+            "regular depfile for module '" + record.module_name + "'");
+    }
+    // `write_if_different` intentionally preserves mtimes. A dependency-only
+    // miss caused by a newer input must nevertheless become a validated warm
+    // cache hit after this successful scan, even when the dependency bytes are
+    // unchanged.
+    touch_stamp(record.depfile_path);
+    record.discovered_dependencies = parse_make_depfile(
+        record.depfile_path,
+        record.command.Directory);
+    const std::filesystem::path canonical_source =
+        weakly_canonical_path(record.source_path);
+    if (record.discovered_dependencies.empty()
+        || !std::ranges::any_of(
+            record.discovered_dependencies,
+            [&](const std::filesystem::path& dependency) {
+                return weakly_canonical_path(dependency)
+                    == canonical_source;
+            })) {
+        throw std::runtime_error(
+            "linked-Clang make dependency scan omitted its canonical "
+            "source for module '" + record.module_name + "'");
+    }
 }
 
 [[nodiscard]] std::unique_ptr<clang::tooling::CompilationDatabase>
@@ -9201,6 +9358,7 @@ prepare_compilation_environment(
         toolchain.linked_clang_cpp,
         toolchain.linked_llvm_library,
     };
+    std::vector<preparation_action_record> observed_actions;
     const std::string resource_directory_sha256 =
         clang_backend::directory_content_hash(
             toolchain.resource_dir, dependencies);
@@ -9317,7 +9475,8 @@ prepare_compilation_environment(
                     clang_binary_sha256,
                     clang_scan_deps_sha256,
                     import_scan_root,
-                    relocation);
+                    relocation,
+                    observed_actions);
             }
             for (const std::string& imported :
                  record.description.imports) {
@@ -9446,35 +9605,33 @@ prepare_compilation_environment(
                 "-fmodule-file=" + imported + "="
                 + dependency.pcm_path.string());
         }
-        if (!clang_backend::depfile_is_current(
+        const bool dependency_scan_cache_hit =
+            clang_backend::depfile_is_current(
                 record.depfile_path,
-                record.command.Directory)) {
-            std::vector<std::string> scan_arguments =
-                record.direct_arguments;
-            scan_arguments.emplace_back("-fsyntax-only");
-            scan_arguments.push_back(
-                record.source_path.string());
-            scan_arguments.emplace_back("-MD");
-            scan_arguments.emplace_back("-MF");
-            scan_arguments.push_back(
-                record.depfile_path.string());
-            scan_arguments.emplace_back("-MT");
-            scan_arguments.push_back(
-                record.depfile_path.string());
-            clang_backend::execute_clang(
-                clang_binary,
-                scan_arguments,
-                record.command.Directory,
-                module_name,
-                "dependency scan");
+                record.command.Directory);
+        if (!dependency_scan_cache_hit) {
+            clang_backend::scan_make_dependencies(record);
         }
         record.discovered_dependencies =
             clang_backend::parse_make_depfile(
                 record.depfile_path,
                 record.command.Directory);
-        if (record.discovered_dependencies.empty()) {
+        const std::filesystem::path canonical_record_source =
+            clang_backend::weakly_canonical_path(
+                record.source_path);
+        if (std::filesystem::is_symlink(record.depfile_path)
+            || !std::filesystem::is_regular_file(
+                record.depfile_path)
+            || record.discovered_dependencies.empty()
+            || !std::ranges::any_of(
+                record.discovered_dependencies,
+                [&](const std::filesystem::path& dependency) {
+                    return clang_backend::weakly_canonical_path(
+                        dependency) == canonical_record_source;
+                })) {
             throw std::runtime_error(
-                "Clang dependency scan returned an empty closure for '"
+                "Clang make dependency scan returned an invalid or "
+                "source-free closure for '"
                 + module_name + "'");
         }
         record.dependency_sha256 =
@@ -9494,6 +9651,16 @@ prepare_compilation_environment(
             clang_backend::relocatable_document_hash(
                 read_file(record.depfile_path),
                 relocation);
+        observed_actions.push_back(preparation_action_record{
+            .kind = preparation_action_kind::make_dependency_scan,
+            .input_class =
+                preparation_input_class::prepared_dependency,
+            .disposition = dependency_scan_cache_hit
+                ? preparation_action_disposition::validated_cache_hit
+                : preparation_action_disposition::executed,
+            .module_name = record.module_name,
+            .source_sha256 = record.source_sha256,
+        });
         record.content_key = sha256_hex(
             content_material + "\ndependencies="
             + record.dependency_sha256);
@@ -9538,7 +9705,9 @@ prepare_compilation_environment(
         const std::uintmax_t existing_size =
             std::filesystem::file_size(
                 record.pcm_path, size_error);
-        if (size_error || existing_size == 0) {
+        const bool pcm_cache_hit =
+            !size_error && existing_size != 0;
+        if (!pcm_cache_hit) {
             clang_backend::execute_clang(
                 clang_binary,
                 record.owned_arguments,
@@ -9622,6 +9791,16 @@ prepare_compilation_environment(
             record.pcm_provenance_sha256 =
                 sha256_hex(persisted_provenance);
         }
+        observed_actions.push_back(preparation_action_record{
+            .kind = preparation_action_kind::pcm_compilation,
+            .input_class =
+                preparation_input_class::prepared_dependency,
+            .disposition = pcm_cache_hit
+                ? preparation_action_disposition::validated_cache_hit
+                : preparation_action_disposition::executed,
+            .module_name = record.module_name,
+            .source_sha256 = record.source_sha256,
+        });
         dependencies.push_back(
             record.pcm_provenance_path);
         dependencies.push_back(record.pcm_path);
@@ -9991,6 +10170,15 @@ prepare_compilation_environment(
                 + relocatable_compilation_signature + "\n"
                 + relocatable_owned_compile_database_sha256 + "\n"),
         .dependencies = std::move(dependencies),
+        .compiler_profile = std::string{compiler_profile},
+        .authority = std::string{authority},
+        .clang_binary_sha256 = clang_binary_sha256,
+        .clang_scan_deps_sha256 = clang_scan_deps_sha256,
+        .llvm_config_sha256 = toolchain.llvm_config_sha256,
+        .compiler_module_inventory_sha256 = compiler_modules
+            ? compiler_modules->metadata_sha256
+            : std::string{},
+        .observed_actions = std::move(observed_actions),
     };
 }
 
@@ -10463,10 +10651,29 @@ derive_dependency_compilation_authority(
         }
         canonical_material += "--\n";
     }
+    std::vector<preparation_module_identity>
+        canonical_source_identities;
+    canonical_source_identities.reserve(canonical_inputs.size());
+    for (const canonical_input& input : canonical_inputs) {
+        canonical_source_identities.push_back(
+            preparation_module_identity{
+                .module_name = input.provided_module,
+                .source_path = input.source,
+                .source_sha256 = input.source_sha256,
+            });
+    }
     return dependency_compilation_authority{
         .root_source_paths =
             std::vector<std::filesystem::path>(
                 roots.begin(), roots.end()),
+        .signature_donor = preparation_module_identity{
+            .module_name =
+                signature.source_module.provided_module,
+            .source_path = signature_source,
+            .source_sha256 = signature.source_sha256,
+        },
+        .canonical_inputs =
+            std::move(canonical_source_identities),
         .canonical_token_import_sha256 =
             sha256_hex(canonical_material),
     };
@@ -10490,6 +10697,20 @@ void validate_dependency_compilation_authority_seal(
     const dependency_compilation_authority& authority,
     const std::filesystem::path& compile_database) {
     if (authority.root_source_paths.empty()
+        || authority.signature_donor.module_name.empty()
+        || !std::filesystem::is_regular_file(
+            authority.signature_donor.source_path)
+        || !lowercase_sha256(
+            authority.signature_donor.source_sha256)
+        || authority.canonical_inputs.empty()
+        || std::ranges::any_of(
+            authority.canonical_inputs,
+            [](const preparation_module_identity& input) {
+                return input.module_name.empty()
+                    || !std::filesystem::is_regular_file(
+                        input.source_path)
+                    || !lowercase_sha256(input.source_sha256);
+            })
         || !lowercase_sha256(
             authority.canonical_token_import_sha256)) {
         throw std::runtime_error(
@@ -10698,6 +10919,51 @@ prepare_dependency_compilation_environment(
             pcm_root,
             compiler_profile,
             manifest_authority);
+    const auto matches_identity =
+        [](const preparation_action_record& action,
+           const preparation_module_identity& identity) {
+            return action.module_name == identity.module_name
+                && action.source_sha256 == identity.source_sha256;
+        };
+    for (preparation_action_record& action :
+         prepared.observed_actions) {
+        if (std::ranges::any_of(
+                dependency_authority.canonical_inputs,
+                [&](const preparation_module_identity& canonical) {
+                    return matches_identity(action, canonical);
+                })) {
+            throw std::runtime_error(
+                "canonical dependency-only input reached a PREPARE "
+                "semantic frontend action: " + action.module_name);
+        }
+        action.input_class = matches_identity(
+                action, dependency_authority.signature_donor)
+            ? preparation_input_class::signature_donor
+            : preparation_input_class::prepared_dependency;
+    }
+    std::vector<preparation_action_record> canonical_actions;
+    canonical_actions.reserve(
+        dependency_authority.canonical_inputs.size()
+        + prepared.observed_actions.size());
+    for (const preparation_module_identity& canonical :
+         dependency_authority.canonical_inputs) {
+        canonical_actions.push_back(preparation_action_record{
+            .kind = preparation_action_kind::canonical_token_slice,
+            .input_class =
+                preparation_input_class::canonical_scan_only,
+            .disposition =
+                preparation_action_disposition::executed,
+            .module_name = canonical.module_name,
+            .source_sha256 = canonical.source_sha256,
+        });
+    }
+    canonical_actions.insert(
+        canonical_actions.end(),
+        std::make_move_iterator(
+            prepared.observed_actions.begin()),
+        std::make_move_iterator(
+            prepared.observed_actions.end()));
+    prepared.observed_actions = std::move(canonical_actions);
     prepared.dependencies.push_back(
         clang_backend::absolute_normalized_path(
             raw_compile_database));
@@ -11881,11 +12147,662 @@ validate_prepared_compilation_environment(
         throw std::runtime_error(
             "PREPARE relocatable compilation signature is stale");
     }
+    std::vector<preparation_module_identity> module_identities;
+    module_identities.reserve(modules.size());
+    for (const auto& [name, module] : modules) {
+        module_identities.push_back(preparation_module_identity{
+            .module_name = name,
+            .source_path = module.source,
+            .source_sha256 = module.source_sha256,
+        });
+    }
     return {
         .manifest_sha256 = sha256_hex(document),
+        .owned_compile_database_sha256 =
+            compile_database_sha256,
         .compilation_signature = signature,
         .relocatable_compilation_signature =
             relocatable_signature,
+        .compiler_profile = std::string{compiler_profile},
+        .authority = std::string{authority},
+        .clang_binary_sha256 = clang_binary_sha256,
+        .clang_scan_deps_sha256 = clang_scan_deps_sha256,
+        .llvm_config_sha256 = toolchain.llvm_config_sha256,
+        .compiler_module_inventory_sha256 =
+            compiler_inventory_sha256,
+        .modules = std::move(module_identities),
+    };
+}
+
+namespace {
+
+inline constexpr std::string_view preparation_action_trace_schema{
+    "bioseq_clang_preparation_action_trace/v1"};
+
+struct preparation_action_trace_payload {
+    std::string compiler_profile;
+    std::string authority;
+    std::string canonical_token_import_sha256;
+    std::string owned_compile_database_sha256;
+    std::string pcm_manifest_sha256;
+    std::string clang_binary_sha256;
+    std::string clang_scan_deps_sha256;
+    std::string llvm_config_sha256;
+    std::string compiler_module_inventory_sha256;
+    std::vector<preparation_module_identity> canonical_inputs;
+    std::vector<preparation_action_record> actions;
+    preparation_action_summary summary;
+    std::string trace_identity;
+};
+
+[[nodiscard]] constexpr std::string_view preparation_action_kind_spelling(
+    const preparation_action_kind kind) noexcept {
+    switch (kind) {
+        case preparation_action_kind::canonical_token_slice:
+            return "canonical_token_slice";
+        case preparation_action_kind::p1689_dependency_discovery:
+            return "p1689_dependency_discovery";
+        case preparation_action_kind::make_dependency_scan:
+            return "make_dependency_scan";
+        case preparation_action_kind::pcm_compilation:
+            return "pcm_compilation";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view preparation_input_class_spelling(
+    const preparation_input_class input_class) noexcept {
+    switch (input_class) {
+        case preparation_input_class::canonical_scan_only:
+            return "canonical_scan_only";
+        case preparation_input_class::signature_donor:
+            return "signature_donor";
+        case preparation_input_class::prepared_dependency:
+            return "prepared_dependency";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr std::string_view
+preparation_action_disposition_spelling(
+    const preparation_action_disposition disposition) noexcept {
+    switch (disposition) {
+        case preparation_action_disposition::executed:
+            return "executed";
+        case preparation_action_disposition::validated_cache_hit:
+            return "validated_cache_hit";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] preparation_action_kind parse_preparation_action_kind(
+    const std::string_view value) {
+    if (value == "canonical_token_slice") {
+        return preparation_action_kind::canonical_token_slice;
+    }
+    if (value == "p1689_dependency_discovery") {
+        return preparation_action_kind::p1689_dependency_discovery;
+    }
+    if (value == "make_dependency_scan") {
+        return preparation_action_kind::make_dependency_scan;
+    }
+    if (value == "pcm_compilation") {
+        return preparation_action_kind::pcm_compilation;
+    }
+    throw std::runtime_error(
+        "PREPARE action trace contains an unknown action kind");
+}
+
+[[nodiscard]] preparation_input_class parse_preparation_input_class(
+    const std::string_view value) {
+    if (value == "canonical_scan_only") {
+        return preparation_input_class::canonical_scan_only;
+    }
+    if (value == "signature_donor") {
+        return preparation_input_class::signature_donor;
+    }
+    if (value == "prepared_dependency") {
+        return preparation_input_class::prepared_dependency;
+    }
+    throw std::runtime_error(
+        "PREPARE action trace contains an unknown input class");
+}
+
+[[nodiscard]] preparation_action_disposition
+parse_preparation_action_disposition(const std::string_view value) {
+    if (value == "executed") {
+        return preparation_action_disposition::executed;
+    }
+    if (value == "validated_cache_hit") {
+        return preparation_action_disposition::validated_cache_hit;
+    }
+    throw std::runtime_error(
+        "PREPARE action trace contains an unknown disposition");
+}
+
+[[nodiscard]] std::string render_preparation_action_trace_payload(
+    const preparation_action_trace_payload& payload,
+    const std::string_view trace_identity) {
+    std::ostringstream output;
+    output
+        << "{\n  \"schema\": \""
+        << preparation_action_trace_schema
+        << "\",\n  \"compiler_profile\": \""
+        << clang_backend::json_escape(payload.compiler_profile)
+        << "\",\n  \"authority\": \""
+        << clang_backend::json_escape(payload.authority)
+        << "\",\n  \"canonical_token_import_sha256\": \""
+        << payload.canonical_token_import_sha256
+        << "\",\n  \"owned_compile_database_sha256\": \""
+        << payload.owned_compile_database_sha256
+        << "\",\n  \"pcm_manifest_sha256\": \""
+        << payload.pcm_manifest_sha256
+        << "\",\n  \"toolchain\": {"
+        << "\"clang_binary_sha256\":\""
+        << payload.clang_binary_sha256
+        << "\",\"clang_scan_deps_sha256\":\""
+        << payload.clang_scan_deps_sha256
+        << "\",\"llvm_config_sha256\":\""
+        << payload.llvm_config_sha256
+        << "\",\"compiler_module_inventory_sha256\":\""
+        << payload.compiler_module_inventory_sha256
+        << "\"},\n  \"canonical_inputs\": [";
+    for (std::size_t index = 0;
+         index < payload.canonical_inputs.size();
+         ++index) {
+        const preparation_module_identity& input =
+            payload.canonical_inputs[index];
+        output << (index == 0u ? "\n" : ",\n")
+            << "    {\"module\":\""
+            << clang_backend::json_escape(input.module_name)
+            << "\",\"source_sha256\":\""
+            << input.source_sha256 << "\"}";
+    }
+    output << (payload.canonical_inputs.empty() ? "" : "\n  ")
+           << "],\n  \"actions\": [";
+    for (std::size_t index = 0;
+         index < payload.actions.size();
+         ++index) {
+        const preparation_action_record& action =
+            payload.actions[index];
+        output << (index == 0u ? "\n" : ",\n")
+            << "    {\"ordinal\":" << index
+            << ",\"kind\":\""
+            << preparation_action_kind_spelling(action.kind)
+            << "\",\"input_class\":\""
+            << preparation_input_class_spelling(
+                   action.input_class)
+            << "\",\"module\":\""
+            << clang_backend::json_escape(action.module_name)
+            << "\",\"source_sha256\":\""
+            << action.source_sha256
+            << "\",\"disposition\":\""
+            << preparation_action_disposition_spelling(
+                   action.disposition)
+            << "\"}";
+    }
+    output << (payload.actions.empty() ? "" : "\n  ")
+           << "],\n  \"summary\": {"
+           << "\"canonical_token_slice_actions\":"
+           << payload.summary.canonical_token_slice_actions
+           << ",\"canonical_semantic_frontend_actions\":"
+           << payload.summary.canonical_semantic_frontend_actions
+           << "},\n  \"trace_identity\": \""
+           << trace_identity << "\"\n}\n";
+    return output.str();
+}
+
+[[nodiscard]] std::string preparation_action_trace_identity(
+    const preparation_action_trace_payload& payload) {
+    return sha256_hex(
+        "bioseq_clang_preparation_action_trace_identity/v1\n"
+        + render_preparation_action_trace_payload(payload, ""));
+}
+
+[[nodiscard]] preparation_action_trace_payload
+parse_preparation_action_trace_document(const std::string_view document) {
+    llvm::Expected<llvm::json::Value> parsed =
+        llvm::json::parse(document);
+    if (!parsed) {
+        throw std::runtime_error(
+            "cannot parse PREPARE action trace: "
+            + llvm::toString(parsed.takeError()));
+    }
+    const llvm::json::Object* root = parsed->getAsObject();
+    if (root == nullptr) {
+        throw std::runtime_error(
+            "PREPARE action trace root is not an object");
+    }
+    const auto require_exact_fields =
+        [](const llvm::json::Object& object,
+           std::initializer_list<std::string_view> fields,
+           const std::string_view role) {
+            for (const std::string_view field : fields) {
+                if (object.get(field) == nullptr) {
+                    throw std::runtime_error(
+                        "PREPARE action trace " + std::string{role}
+                        + " is missing field '" + std::string{field}
+                        + "'");
+                }
+            }
+            if (object.size() != fields.size()) {
+                throw std::runtime_error(
+                    "PREPARE action trace " + std::string{role}
+                    + " contains an unknown or duplicate field");
+            }
+        };
+    const auto required_string =
+        [](const llvm::json::Object& object,
+           const std::string_view field) {
+            const std::optional<llvm::StringRef> value =
+                object.getString(field);
+            if (!value) {
+                throw std::runtime_error(
+                    "PREPARE action trace has no string field '"
+                    + std::string{field} + "'");
+            }
+            return value->str();
+        };
+    require_exact_fields(
+        *root,
+        {
+            "schema",
+            "compiler_profile",
+            "authority",
+            "canonical_token_import_sha256",
+            "owned_compile_database_sha256",
+            "pcm_manifest_sha256",
+            "toolchain",
+            "canonical_inputs",
+            "actions",
+            "summary",
+            "trace_identity",
+        },
+        "root");
+    if (required_string(*root, "schema")
+        != preparation_action_trace_schema) {
+        throw std::runtime_error(
+            "PREPARE action trace schema is unsupported");
+    }
+    preparation_action_trace_payload payload{
+        .compiler_profile =
+            required_string(*root, "compiler_profile"),
+        .authority = required_string(*root, "authority"),
+        .canonical_token_import_sha256 = required_string(
+            *root, "canonical_token_import_sha256"),
+        .owned_compile_database_sha256 = required_string(
+            *root, "owned_compile_database_sha256"),
+        .pcm_manifest_sha256 = required_string(
+            *root, "pcm_manifest_sha256"),
+        .trace_identity =
+            required_string(*root, "trace_identity"),
+    };
+    const llvm::json::Object* toolchain =
+        root->getObject("toolchain");
+    if (toolchain == nullptr) {
+        throw std::runtime_error(
+            "PREPARE action trace toolchain is not an object");
+    }
+    require_exact_fields(
+        *toolchain,
+        {
+            "clang_binary_sha256",
+            "clang_scan_deps_sha256",
+            "llvm_config_sha256",
+            "compiler_module_inventory_sha256",
+        },
+        "toolchain");
+    payload.clang_binary_sha256 =
+        required_string(*toolchain, "clang_binary_sha256");
+    payload.clang_scan_deps_sha256 =
+        required_string(*toolchain, "clang_scan_deps_sha256");
+    payload.llvm_config_sha256 =
+        required_string(*toolchain, "llvm_config_sha256");
+    payload.compiler_module_inventory_sha256 = required_string(
+        *toolchain, "compiler_module_inventory_sha256");
+
+    const llvm::json::Array* canonical_inputs =
+        root->getArray("canonical_inputs");
+    if (canonical_inputs == nullptr) {
+        throw std::runtime_error(
+            "PREPARE action trace canonical_inputs is not an array");
+    }
+    for (const llvm::json::Value& value : *canonical_inputs) {
+        const llvm::json::Object* input = value.getAsObject();
+        if (input == nullptr) {
+            throw std::runtime_error(
+                "PREPARE action trace canonical input is not an object");
+        }
+        require_exact_fields(
+            *input, {"module", "source_sha256"},
+            "canonical input");
+        payload.canonical_inputs.push_back(
+            preparation_module_identity{
+                .module_name = required_string(*input, "module"),
+                .source_sha256 =
+                    required_string(*input, "source_sha256"),
+            });
+    }
+
+    const llvm::json::Array* actions = root->getArray("actions");
+    if (actions == nullptr) {
+        throw std::runtime_error(
+            "PREPARE action trace actions is not an array");
+    }
+    for (std::size_t index = 0; index < actions->size(); ++index) {
+        const llvm::json::Object* action =
+            (*actions)[index].getAsObject();
+        if (action == nullptr) {
+            throw std::runtime_error(
+                "PREPARE action trace action is not an object");
+        }
+        require_exact_fields(
+            *action,
+            {
+                "ordinal",
+                "kind",
+                "input_class",
+                "module",
+                "source_sha256",
+                "disposition",
+            },
+            "action");
+        const std::optional<std::int64_t> ordinal =
+            action->getInteger("ordinal");
+        if (!ordinal || *ordinal < 0
+            || static_cast<std::uint64_t>(*ordinal) != index) {
+            throw std::runtime_error(
+                "PREPARE action trace ordinals are not canonical");
+        }
+        payload.actions.push_back(preparation_action_record{
+            .kind = parse_preparation_action_kind(
+                required_string(*action, "kind")),
+            .input_class = parse_preparation_input_class(
+                required_string(*action, "input_class")),
+            .disposition = parse_preparation_action_disposition(
+                required_string(*action, "disposition")),
+            .module_name = required_string(*action, "module"),
+            .source_sha256 =
+                required_string(*action, "source_sha256"),
+        });
+    }
+
+    const llvm::json::Object* summary = root->getObject("summary");
+    if (summary == nullptr) {
+        throw std::runtime_error(
+            "PREPARE action trace summary is not an object");
+    }
+    require_exact_fields(
+        *summary,
+        {
+            "canonical_token_slice_actions",
+            "canonical_semantic_frontend_actions",
+        },
+        "summary");
+    const auto required_count =
+        [](const llvm::json::Object& object,
+           const std::string_view field) -> std::uint32_t {
+            const std::optional<std::int64_t> value =
+                object.getInteger(field);
+            if (!value || *value < 0
+                || static_cast<std::uint64_t>(*value)
+                    > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error(
+                    "PREPARE action trace has an invalid count field '"
+                    + std::string{field} + "'");
+            }
+            return static_cast<std::uint32_t>(*value);
+        };
+    payload.summary = preparation_action_summary{
+        .canonical_token_slice_actions = required_count(
+            *summary, "canonical_token_slice_actions"),
+        .canonical_semantic_frontend_actions = required_count(
+            *summary, "canonical_semantic_frontend_actions"),
+    };
+    const std::string expected_identity =
+        preparation_action_trace_identity(payload);
+    if (!lowercase_sha256(payload.trace_identity)
+        || payload.trace_identity != expected_identity) {
+        throw std::runtime_error(
+            "PREPARE action trace self-seal is invalid");
+    }
+    if (document != render_preparation_action_trace_payload(
+            payload, expected_identity)) {
+        throw std::runtime_error(
+            "PREPARE action trace is not in canonical encoding");
+    }
+    return payload;
+}
+
+[[nodiscard]] std::pair<std::string, std::string>
+preparation_identity_key(
+    const preparation_module_identity& identity) {
+    return {identity.module_name, identity.source_sha256};
+}
+
+[[nodiscard]] std::pair<std::string, std::string>
+preparation_identity_key(const preparation_action_record& action) {
+    return {action.module_name, action.source_sha256};
+}
+
+}  // namespace
+
+[[nodiscard]] std::string render_preparation_action_trace(
+    const prepared_compilation_environment& prepared) {
+    preparation_action_trace_payload payload{
+        .compiler_profile = prepared.compiler_profile,
+        .authority = prepared.authority,
+        .canonical_token_import_sha256 =
+            prepared.canonical_token_import_sha256,
+        .owned_compile_database_sha256 =
+            sha256_hex(prepared.compile_database_json),
+        .pcm_manifest_sha256 =
+            sha256_hex(prepared.pcm_manifest_json),
+        .clang_binary_sha256 = prepared.clang_binary_sha256,
+        .clang_scan_deps_sha256 =
+            prepared.clang_scan_deps_sha256,
+        .llvm_config_sha256 = prepared.llvm_config_sha256,
+        .compiler_module_inventory_sha256 =
+            prepared.compiler_module_inventory_sha256,
+        .actions = prepared.observed_actions,
+    };
+    for (const preparation_action_record& action :
+         payload.actions) {
+        if (action.kind
+            == preparation_action_kind::canonical_token_slice) {
+            payload.canonical_inputs.push_back(
+                preparation_module_identity{
+                    .module_name = action.module_name,
+                    .source_sha256 = action.source_sha256,
+                });
+            ++payload.summary.canonical_token_slice_actions;
+        } else if (action.input_class
+                   == preparation_input_class::canonical_scan_only) {
+            ++payload.summary.canonical_semantic_frontend_actions;
+        }
+    }
+    std::ranges::sort(
+        payload.canonical_inputs,
+        [](const preparation_module_identity& left,
+           const preparation_module_identity& right) {
+            return preparation_identity_key(left)
+                < preparation_identity_key(right);
+        });
+    payload.trace_identity =
+        preparation_action_trace_identity(payload);
+    return render_preparation_action_trace_payload(
+        payload, payload.trace_identity);
+}
+
+[[nodiscard]] preparation_action_trace_validation
+validate_preparation_action_trace(
+    const std::filesystem::path& action_trace,
+    const dependency_compilation_authority& dependency_authority,
+    const prepared_compilation_validation& prepared) {
+    const preparation_action_trace_payload payload =
+        parse_preparation_action_trace_document(
+            read_file(action_trace));
+    if (payload.compiler_profile != prepared.compiler_profile
+        || payload.authority != prepared.authority
+        || payload.canonical_token_import_sha256
+            != dependency_authority.canonical_token_import_sha256
+        || payload.owned_compile_database_sha256
+            != prepared.owned_compile_database_sha256
+        || payload.pcm_manifest_sha256
+            != prepared.manifest_sha256
+        || payload.clang_binary_sha256
+            != prepared.clang_binary_sha256
+        || payload.clang_scan_deps_sha256
+            != prepared.clang_scan_deps_sha256
+        || payload.llvm_config_sha256
+            != prepared.llvm_config_sha256
+        || payload.compiler_module_inventory_sha256
+            != prepared.compiler_module_inventory_sha256) {
+        throw std::runtime_error(
+            "PREPARE action trace metadata differs from the validated "
+            "compile database, PCM manifest, or toolchain");
+    }
+
+    using identity_key = std::pair<std::string, std::string>;
+    std::vector<identity_key> expected_canonical;
+    expected_canonical.reserve(
+        dependency_authority.canonical_inputs.size());
+    for (const preparation_module_identity& identity :
+         dependency_authority.canonical_inputs) {
+        expected_canonical.push_back(
+            preparation_identity_key(identity));
+    }
+    std::ranges::sort(expected_canonical);
+    std::vector<identity_key> traced_canonical;
+    traced_canonical.reserve(payload.canonical_inputs.size());
+    for (const preparation_module_identity& identity :
+         payload.canonical_inputs) {
+        traced_canonical.push_back(
+            preparation_identity_key(identity));
+    }
+    if (!std::ranges::is_sorted(traced_canonical)
+        || std::ranges::adjacent_find(traced_canonical)
+            != traced_canonical.end()
+        || traced_canonical != expected_canonical) {
+        throw std::runtime_error(
+            "PREPARE action trace canonical input authority differs "
+            "from the raw-token dependency authority");
+    }
+
+    std::set<identity_key> canonical_keys{
+        expected_canonical.begin(), expected_canonical.end()};
+    std::set<identity_key> prepared_keys;
+    for (const preparation_module_identity& identity :
+         prepared.modules) {
+        if (!prepared_keys.insert(
+                preparation_identity_key(identity)).second) {
+            throw std::runtime_error(
+                "validated PREPARE module identities are not unique");
+        }
+    }
+    const identity_key donor_key = preparation_identity_key(
+        dependency_authority.signature_donor);
+    if (!prepared_keys.contains(donor_key)
+        || std::ranges::any_of(
+            canonical_keys,
+            [&](const identity_key& key) {
+                return prepared_keys.contains(key);
+            })) {
+        throw std::runtime_error(
+            "PREPARE action trace authority overlaps or omits its "
+            "signature donor");
+    }
+
+    std::set<identity_key> observed_canonical_tokens;
+    std::set<std::tuple<
+        preparation_action_kind,
+        std::string,
+        std::string>> observed_semantic_actions;
+    preparation_action_summary recomputed;
+    for (const preparation_action_record& action : payload.actions) {
+        const identity_key key = preparation_identity_key(action);
+        if (action.module_name.empty()
+            || !lowercase_sha256(action.source_sha256)) {
+            throw std::runtime_error(
+                "PREPARE action trace contains an invalid source identity");
+        }
+        if (action.kind
+            == preparation_action_kind::canonical_token_slice) {
+            ++recomputed.canonical_token_slice_actions;
+            if (action.input_class
+                    != preparation_input_class::canonical_scan_only
+                || action.disposition
+                    != preparation_action_disposition::executed
+                || !canonical_keys.contains(key)
+                || !observed_canonical_tokens.insert(key).second) {
+                throw std::runtime_error(
+                    "PREPARE canonical token-slice action has invalid "
+                    "classification, disposition, or identity");
+            }
+            continue;
+        }
+        if (canonical_keys.contains(key)) {
+            ++recomputed.canonical_semantic_frontend_actions;
+            throw std::runtime_error(
+                "PREPARE action trace proves a canonical input reached "
+                "a semantic frontend action");
+        }
+        if (!prepared_keys.contains(key)) {
+            throw std::runtime_error(
+                "PREPARE semantic action has no authenticated PCM "
+                "manifest identity");
+        }
+        const preparation_input_class expected_class = key == donor_key
+            ? preparation_input_class::signature_donor
+            : preparation_input_class::prepared_dependency;
+        if (action.input_class != expected_class) {
+            throw std::runtime_error(
+                "PREPARE semantic action input classification is stale");
+        }
+        if (action.kind
+                == preparation_action_kind::p1689_dependency_discovery
+            && action.disposition
+                != preparation_action_disposition::executed) {
+            throw std::runtime_error(
+                "PREPARE P1689 discovery cannot claim a cache hit");
+        }
+        if (!observed_semantic_actions.emplace(
+                action.kind,
+                action.module_name,
+                action.source_sha256).second) {
+            throw std::runtime_error(
+                "PREPARE action trace duplicates a semantic action");
+        }
+    }
+    if (observed_canonical_tokens != canonical_keys) {
+        throw std::runtime_error(
+            "PREPARE action trace omits a canonical token-slice action");
+    }
+    for (const identity_key& key : prepared_keys) {
+        for (const preparation_action_kind kind : {
+                 preparation_action_kind::p1689_dependency_discovery,
+                 preparation_action_kind::make_dependency_scan,
+                 preparation_action_kind::pcm_compilation,
+             }) {
+            if (!observed_semantic_actions.contains(
+                    {kind, key.first, key.second})) {
+                throw std::runtime_error(
+                    "PREPARE action trace omits a required authenticated "
+                    "module action");
+            }
+        }
+    }
+    if (payload.summary.canonical_token_slice_actions
+            != recomputed.canonical_token_slice_actions
+        || payload.summary.canonical_semantic_frontend_actions
+            != recomputed.canonical_semantic_frontend_actions
+        || recomputed.canonical_semantic_frontend_actions != 0u) {
+        throw std::runtime_error(
+            "PREPARE action trace summary differs from observed actions");
+    }
+    return preparation_action_trace_validation{
+        .trace_identity = payload.trace_identity,
+        .summary = recomputed,
     };
 }
 

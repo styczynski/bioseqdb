@@ -115,6 +115,7 @@ parse_options(
         "--llvm-config-sha256",
         "--pcm-manifest",
         "--pcm-root",
+        "--action-trace",
         "--raw-compile-database",
         "--signature-source",
         "--source",
@@ -139,6 +140,7 @@ parse_options(
         .pcm_root = options.at("--pcm-root"),
         .compile_database_output = options.at("--compile-database-output"),
         .pcm_manifest = options.at("--pcm-manifest"),
+        .action_trace = options.at("--action-trace"),
         .depfile = options.at("--depfile"),
         .stamp = options.at("--stamp"),
     };
@@ -166,6 +168,8 @@ parse_options(
         "--output-root",
         "--pcm-manifest",
         "--pcm-root",
+        "--prepare-action-trace",
+        "--prepare-stamp",
         "--profile",
         "--repository-root",
         "--signature-source",
@@ -189,6 +193,9 @@ parse_options(
         .signature_source = options.at("--signature-source"),
         .compile_database = options.at("--compile-database"),
         .pcm_manifest = options.at("--pcm-manifest"),
+        .prepare_action_trace =
+            options.at("--prepare-action-trace"),
+        .prepare_stamp = options.at("--prepare-stamp"),
         .pcm_root = options.at("--pcm-root"),
         .clang_binary = options.at("--clang-binary"),
         .clang_scan_deps = options.at("--clang-scan-deps"),
@@ -296,6 +303,16 @@ inline void validate_fixed_output_paths(const command_line& command) {
         throw std::runtime_error(
             "--pcm-root must be the fixed pcm directory beneath --output-root");
     }
+    if (path_identity(command.prepare_action_trace)
+        != root / "pcm/metadata/prepare_actions.json") {
+        throw std::runtime_error(
+            "--prepare-action-trace must be the fixed PREPARE metadata file");
+    }
+    if (path_identity(command.prepare_stamp)
+        != root / "pcm/metadata/prepare.stamp") {
+        throw std::runtime_error(
+            "--prepare-stamp must be the fixed PREPARE metadata file");
+    }
     const std::filesystem::path stamp = path_identity(command.stamp);
     const std::filesystem::path depfile = path_identity(command.depfile);
     if (stamp.parent_path() != root || depfile.parent_path() != root) {
@@ -310,6 +327,12 @@ inline void validate_fixed_output_paths(const command_line& command) {
     if (path_identity(command.source) == path_identity(command.signature_source)) {
         throw std::runtime_error(
             "scan-only canonical source cannot be its own compilation-signature donor");
+    }
+    if (path_identity(command.action_trace)
+        != path_identity(command.pcm_root)
+            / "metadata/prepare_actions.json") {
+        throw std::runtime_error(
+            "--action-trace must be the fixed PREPARE metadata file");
     }
     std::filesystem::create_directories(command.pcm_root);
     clang_structural::prepared_compilation_environment prepared =
@@ -328,11 +351,14 @@ inline void validate_fixed_output_paths(const command_line& command) {
             command.pcm_root,
             "production",
             "core");
+    const std::string action_trace =
+        clang_structural::render_preparation_action_trace(prepared);
     prepared.dependencies.push_back(command.source);
     prepared.dependencies.push_back(command.signature_source);
     write_if_different(
         command.compile_database_output, prepared.compile_database_json);
     write_if_different(command.pcm_manifest, prepared.pcm_manifest_json);
+    write_if_different(command.action_trace, action_trace);
     write_if_different(
         command.depfile,
         render_depfile(command.stamp, std::move(prepared.dependencies)));
@@ -349,6 +375,8 @@ inline void validate_fixed_output_paths(const command_line& command) {
         "compile_database_sha256="
             + sha256_hex(prepared.compile_database_json) + "\n"
         "pcm_manifest_sha256=" + sha256_hex(prepared.pcm_manifest_json)
+            + "\nprepare_action_trace_sha256="
+            + sha256_hex(action_trace)
             + "\n");
     touch_stamp(command.stamp);
     return 0;
@@ -385,6 +413,14 @@ inline void validate_configure_handshake(
     require_regular_file(command.signature_source, "signature source");
     require_regular_file(
         command.configure_topology_manifest, "configure topology manifest");
+    require_regular_file(
+        command.prepare_action_trace, "PREPARE action trace");
+    require_regular_file(command.prepare_stamp, "PREPARE stamp");
+    const std::string preparation_action_trace_document =
+        read_file(command.prepare_action_trace);
+    validate_preparation_action_trace_stamp_binding(
+        read_file(command.prepare_stamp),
+        preparation_action_trace_document);
     const std::string source = read_file(command.source);
     const std::string source_sha256 = sha256_hex(source);
     const configure_topology_provenance configure =
@@ -427,6 +463,12 @@ inline void validate_configure_handshake(
             "production",
             clang_structural::dependency_compilation_manifest_authority(
                 "core", dependency_authority));
+    const clang_structural::preparation_action_trace_validation
+        preparation_actions =
+            clang_structural::validate_preparation_action_trace(
+                command.prepare_action_trace,
+                dependency_authority,
+                prepared);
     recover_interrupted_publication(
         command.output_root,
         command.artifact_manifest,
@@ -490,7 +532,9 @@ inline void validate_configure_handshake(
         .body_free_declaration_probe_scans =
             static_cast<std::uint32_t>(plan.declaration_probes.size()),
         .artifact_render_passes = artifact_render_passes + 1u,
-        .body_bearing_compiler_invocations = 0u,
+        .body_bearing_compiler_invocations =
+            preparation_actions.summary
+                .canonical_semantic_frontend_actions,
     };
     plan.compilation_obligations = cmake_compilation_obligations{
         .api_partition_units = 1u,
@@ -528,6 +572,8 @@ inline void validate_configure_handshake(
                 command.configure_topology_manifest,
                 command.compile_database,
                 command.pcm_manifest,
+                command.prepare_action_trace,
+                command.prepare_stamp,
                 command.compiler_module_inventory,
             }));
     publish_artifacts(publication_request{

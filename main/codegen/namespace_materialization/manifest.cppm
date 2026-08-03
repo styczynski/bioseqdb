@@ -74,6 +74,57 @@ struct configure_topology_provenance {
     std::size_t coordinate_count{};
 };
 
+/// Verifies the cross-output binding from the PREPARE completion stamp to the
+/// exact authenticated action-trace bytes. The trace also has its own semantic
+/// self-seal; this digest prevents independently substituting the extra custom
+/// command output before GENERATE validates that seal and its PCM joins.
+inline void validate_preparation_action_trace_stamp_binding(
+    const std::string_view stamp_document,
+    const std::string_view action_trace_document) {
+    constexpr std::string_view schema{
+        "bioseq_template_flatten_prepare_stamp/v1\n"};
+    constexpr std::string_view prefix{
+        "prepare_action_trace_sha256="};
+    if (!stamp_document.starts_with(schema)) {
+        throw std::runtime_error(
+            "PREPARE stamp action-trace binding has the wrong schema");
+    }
+    std::string sealed_digest;
+    std::size_t binding_count = 0u;
+    std::size_t line_begin = 0u;
+    while (line_begin < stamp_document.size()) {
+        const std::size_t line_end = stamp_document.find(
+            '\n', line_begin);
+        const std::string_view line = stamp_document.substr(
+            line_begin,
+            line_end == std::string_view::npos
+                ? stamp_document.size() - line_begin
+                : line_end - line_begin);
+        if (line.starts_with(prefix)) {
+            ++binding_count;
+            sealed_digest = line.substr(prefix.size());
+        }
+        if (line_end == std::string_view::npos) break;
+        line_begin = line_end + 1u;
+    }
+    const auto lowercase_sha256 = [](const std::string_view digest) {
+        return digest.size() == 64u
+            && std::ranges::all_of(
+                digest,
+                [](const char value) {
+                    return (value >= '0' && value <= '9')
+                        || (value >= 'a' && value <= 'f');
+                });
+    };
+    if (binding_count != 1u
+        || !lowercase_sha256(sealed_digest)
+        || sealed_digest != sha256_hex(action_trace_document)) {
+        throw std::runtime_error(
+            "PREPARE stamp action-trace SHA-256 binding is missing, "
+            "duplicated, malformed, or stale");
+    }
+}
+
 /// Returns the source spelling used for an axis role in manifests.
 [[nodiscard]] inline constexpr std::string_view axis_role_name(
     axis_role role) noexcept {

@@ -49,3 +49,16 @@ namespace {
 
 }  // namespace typed
 }  // namespace bioseq::codegen::namespace_materialization::canary
+
+// This declaration deliberately lives outside the materialization boundary.
+// Raw-token extraction must ignore it and generated units must never contain
+// it. Any accidental ordinary PREPARE/Sema compilation of this canonical
+// input fails immediately, making the dependency-only boundary executable.
+namespace bioseq::codegen::namespace_materialization::canary_prepare_guard {
+
+[[maybe_unused]] inline int canonical_body_must_not_reach_sema() {
+    static_assert(false, "canonical materialization input reached Sema");
+    return 0;
+}
+
+}  // namespace bioseq::codegen::namespace_materialization::canary_prepare_guard
