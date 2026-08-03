@@ -1661,6 +1661,237 @@ def _compile_standard(arguments: Sequence[str]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _validate_owned_bmi_compile_database_payload(
+    database_value: object,
+    manifest: Mapping[str, object],
+    expected_sources: Iterable[str],
+    label: str,
+) -> None:
+    modules_value = manifest.get("modules")
+    pcm_root_value = manifest.get("pcm_root")
+    if (
+        not isinstance(database_value, list)
+        or not database_value
+        or not isinstance(modules_value, list)
+        or not modules_value
+        or not isinstance(pcm_root_value, str)
+        or not pcm_root_value
+    ):
+        raise DeterminismError(
+            f"{label} has no owned command/module/PCM-root closure"
+        )
+    pcm_root = Path(os.path.normpath(pcm_root_value))
+    modules_by_name: dict[str, Mapping[str, object]] = {}
+    modules_by_source: dict[str, Mapping[str, object]] = {}
+    for index, module_value in enumerate(modules_value):
+        if not isinstance(module_value, dict):
+            raise DeterminismError(
+                f"{label} manifest module {index} is not an object"
+            )
+        name = module_value.get("name")
+        source = module_value.get("source")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(source, str)
+            or not source
+            or name in modules_by_name
+            or source in modules_by_source
+        ):
+            raise DeterminismError(
+                f"{label} manifest module inventory is ambiguous"
+            )
+        modules_by_name[name] = module_value
+        modules_by_source[source] = module_value
+
+    def mapping_order(module: Mapping[str, object]) -> list[str]:
+        direct = module.get("direct_imports")
+        if not isinstance(direct, list) or any(
+            not isinstance(item, str) or not item for item in direct
+        ):
+            raise DeterminismError(
+                f"{label} manifest direct-import closure is malformed"
+            )
+        reached: set[str] = set()
+        active: set[str] = set()
+        ordered: list[str] = []
+
+        def visit(name: str) -> None:
+            if name in reached:
+                return
+            if name in active or name not in modules_by_name:
+                raise DeterminismError(
+                    f"{label} manifest import closure is cyclic or foreign"
+                )
+            active.add(name)
+            dependency = modules_by_name[name]
+            dependency_imports = dependency.get("direct_imports")
+            if not isinstance(dependency_imports, list) or any(
+                not isinstance(item, str) or not item
+                for item in dependency_imports
+            ):
+                raise DeterminismError(
+                    f"{label} manifest import closure is malformed"
+                )
+            for imported in dependency_imports:
+                visit(imported)
+            active.remove(name)
+            reached.add(name)
+            ordered.append(name)
+
+        for imported in direct:
+            visit(imported)
+        return ordered
+
+    expected_source_set = set(expected_sources)
+    if not expected_source_set or not expected_source_set.issubset(
+        modules_by_source
+    ):
+        raise DeterminismError(
+            f"{label} stage-root authority is empty or foreign"
+        )
+    seen_sources: set[str] = set()
+    for row_number, row_value in enumerate(database_value, start=1):
+        if not isinstance(row_value, dict) or set(row_value) != {
+            "arguments",
+            "directory",
+            "file",
+        }:
+            raise DeterminismError(
+                f"{label} row {row_number} is not one exact owned command"
+            )
+        source = row_value["file"]
+        directory = row_value["directory"]
+        arguments = row_value["arguments"]
+        if (
+            not isinstance(source, str)
+            or source not in modules_by_source
+            or source in seen_sources
+            or not isinstance(directory, str)
+            or not isinstance(arguments, list)
+            or not arguments
+            or any(not isinstance(item, str) for item in arguments)
+        ):
+            raise DeterminismError(
+                f"{label} row {row_number} has an ambiguous owner"
+            )
+        seen_sources.add(source)
+        module = modules_by_source[source]
+        pcm = module.get("pcm")
+        base_arguments = module.get("base_arguments")
+        module_directory = module.get("directory")
+        if (
+            not isinstance(pcm, str)
+            or not pcm
+            or not isinstance(base_arguments, list)
+            or not base_arguments
+            or any(not isinstance(item, str) for item in base_arguments)
+            or directory != module_directory
+        ):
+            raise DeterminismError(
+                f"{label} row {row_number} differs from its manifest owner"
+            )
+        reduced_outputs = [
+            argument.removeprefix("-fmodule-output=")
+            for argument in arguments
+            if argument.startswith("-fmodule-output=")
+        ]
+        if len(reduced_outputs) != 1:
+            raise DeterminismError(
+                f"{label} row {row_number} has an ambiguous reduced "
+                "BMI output"
+            )
+        reduced_output = reduced_outputs[0]
+        if (
+            reduced_output != pcm
+            or not _path_within(
+                Path(os.path.normpath(reduced_output)), pcm_root
+            )
+        ):
+            raise DeterminismError(
+                f"{label} row {row_number} has a foreign reduced BMI output"
+            )
+        full_pcm = str(
+            Path(os.path.normpath(pcm)).with_suffix(".full.pcm")
+        )
+        output_indices = [
+            index for index, argument in enumerate(arguments)
+            if argument == "-o"
+        ]
+        if len(output_indices) != 1:
+            raise DeterminismError(
+                f"{label} row {row_number} has an ambiguous full BMI output"
+            )
+        output_index = output_indices[0]
+        if output_index + 1 >= len(arguments):
+            raise DeterminismError(
+                f"{label} row {row_number} has a value-less BMI output"
+            )
+        output = arguments[output_index + 1]
+        if (
+            output != full_pcm
+            or not _path_within(
+                Path(os.path.normpath(output)), pcm_root
+            )
+        ):
+            raise DeterminismError(
+                f"{label} row {row_number} has a foreign full BMI output"
+            )
+        expected_mappings = [
+            "-fmodule-file=" + imported + "="
+            + str(modules_by_name[imported]["pcm"])
+            for imported in mapping_order(module)
+        ]
+        expected_suffix = [
+            "--precompile",
+            "-fmodules-reduced-bmi",
+            "-fmodule-output=" + pcm,
+            source,
+            "-o",
+            full_pcm,
+            "-MD",
+            "-MF",
+            pcm + ".d",
+            "-MT",
+            pcm,
+        ]
+        expected = [*base_arguments, *expected_mappings, *expected_suffix]
+        if arguments != expected:
+            raise DeterminismError(
+                f"{label} row {row_number} is not the exact BMI-only "
+                "--precompile command"
+            )
+    if seen_sources != expected_source_set:
+        raise DeterminismError(
+            f"{label} does not own every authenticated stage root "
+            "exactly once"
+        )
+
+
+def _validate_owned_bmi_compile_database(
+    compile_database: Path,
+    pcm_manifest: Path,
+    expected_sources: Iterable[str],
+    label: str,
+) -> None:
+    try:
+        database_value = json.loads(
+            compile_database.read_text(encoding="utf-8")
+        )
+        manifest_value = json.loads(
+            pcm_manifest.read_text(encoding="utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DeterminismError(
+            f"{label} is not valid UTF-8 JSON: {error}"
+        ) from error
+    if not isinstance(manifest_value, dict):
+        raise DeterminismError(f"{label} manifest is not an object")
+    _validate_owned_bmi_compile_database_payload(
+        database_value, manifest_value, expected_sources, label
+    )
+
+
 def _top_level_response_paths(
     arguments: Sequence[str],
     directory: Path,
@@ -3102,6 +3333,12 @@ def _run_prepare(
         _require_regular_file(
             path, f"{variant}/{stage} PREPARE {label}"
         )
+    _validate_owned_bmi_compile_database(
+        context.compile_database,
+        context.pcm_manifest,
+        _read_source_inventory(source_list, stage),
+        f"{variant}/{stage} {profile} PREPARE owned compile database",
+    )
 
 
 def _run_pipeline(
@@ -4300,6 +4537,118 @@ def self_test() -> int:
             "unknown-command-input-key PREPARE fixture",
         ),
         "unknown=['unexpected_command_input_key']",
+    )
+
+    bmi_manifest = _load_strict_json_object(
+        prepare_a[support_manifest].content,
+        "BMI-only owned-command fixture manifest",
+    )
+    bmi_modules = bmi_manifest["modules"]
+    if not isinstance(bmi_modules, list) or len(bmi_modules) != 1:
+        raise AssertionError("BMI-only fixture lost its single module")
+    bmi_module = bmi_modules[0]
+    if not isinstance(bmi_module, dict):
+        raise AssertionError("BMI-only fixture module is not an object")
+    bmi_source = str(bmi_module["source"])
+    bmi_pcm = str(bmi_module["pcm"])
+    bmi_full_pcm = str(Path(bmi_pcm).with_suffix(".full.pcm"))
+    bmi_arguments = [
+        *list(bmi_module["base_arguments"]),
+        "--precompile",
+        "-fmodules-reduced-bmi",
+        "-fmodule-output=" + bmi_pcm,
+        bmi_source,
+        "-o",
+        bmi_full_pcm,
+        "-MD",
+        "-MF",
+        bmi_pcm + ".d",
+        "-MT",
+        bmi_pcm,
+    ]
+    bmi_database: list[dict[str, object]] = [
+        {
+            "arguments": bmi_arguments,
+            "directory": bmi_module["directory"],
+            "file": bmi_source,
+        }
+    ]
+    _validate_owned_bmi_compile_database_payload(
+        bmi_database,
+        bmi_manifest,
+        [bmi_source],
+        "valid BMI-only fixture",
+    )
+    duplicate_bmi_database = json.loads(json.dumps(bmi_database))
+    duplicate_arguments = duplicate_bmi_database[0]["arguments"]
+    duplicate_output = duplicate_arguments.index("-o")
+    duplicate_arguments[duplicate_output:duplicate_output] = [
+        "-o",
+        bmi_full_pcm,
+    ]
+    _expect_failure(
+        lambda: _validate_owned_bmi_compile_database_payload(
+            duplicate_bmi_database,
+            bmi_manifest,
+            [bmi_source],
+            "duplicate BMI-only fixture",
+        ),
+        "ambiguous full BMI output",
+    )
+    foreign_bmi_database = json.loads(json.dumps(bmi_database))
+    foreign_arguments = foreign_bmi_database[0]["arguments"]
+    foreign_output = foreign_arguments.index("-o")
+    foreign_arguments[foreign_output + 1] = "/foreign/output.full.pcm"
+    _expect_failure(
+        lambda: _validate_owned_bmi_compile_database_payload(
+            foreign_bmi_database,
+            bmi_manifest,
+            [bmi_source],
+            "foreign BMI-only fixture",
+        ),
+        "foreign full BMI output",
+    )
+    duplicate_reduced_database = json.loads(json.dumps(bmi_database))
+    duplicate_reduced_arguments = duplicate_reduced_database[0]["arguments"]
+    reduced_argument = "-fmodule-output=" + bmi_pcm
+    reduced_index = duplicate_reduced_arguments.index(reduced_argument)
+    duplicate_reduced_arguments.insert(reduced_index, reduced_argument)
+    _expect_failure(
+        lambda: _validate_owned_bmi_compile_database_payload(
+            duplicate_reduced_database,
+            bmi_manifest,
+            [bmi_source],
+            "duplicate reduced-BMI fixture",
+        ),
+        "ambiguous reduced BMI output",
+    )
+    foreign_reduced_database = json.loads(json.dumps(bmi_database))
+    foreign_reduced_arguments = foreign_reduced_database[0]["arguments"]
+    foreign_reduced_arguments[
+        foreign_reduced_arguments.index(reduced_argument)
+    ] = "-fmodule-output=/foreign/output.pcm"
+    _expect_failure(
+        lambda: _validate_owned_bmi_compile_database_payload(
+            foreign_reduced_database,
+            bmi_manifest,
+            [bmi_source],
+            "foreign reduced-BMI fixture",
+        ),
+        "foreign reduced BMI output",
+    )
+    object_codegen_database = json.loads(json.dumps(bmi_database))
+    object_codegen_arguments = object_codegen_database[0]["arguments"]
+    object_codegen_arguments[
+        object_codegen_arguments.index("--precompile")
+    ] = "-c"
+    _expect_failure(
+        lambda: _validate_owned_bmi_compile_database_payload(
+            object_codegen_database,
+            bmi_manifest,
+            [bmi_source],
+            "object-codegen fixture",
+        ),
+        "not the exact BMI-only --precompile command",
     )
 
     replacements = PathRewriter(
