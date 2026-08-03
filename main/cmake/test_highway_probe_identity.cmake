@@ -96,6 +96,18 @@ elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "opaque-clang-config")
     CONFIGURED_FLAGS "--config=${TEST_ROOT}/clang.cfg"
     DEFINITIONS HWY_TEST_POLICY=1)
   message(FATAL_ERROR "opaque Clang config unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "opaque-clang-system-config-dir")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS
+      "--config-system-dir=${TEST_ROOT}/clang-system-configs"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "opaque Clang system config directory unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "opaque-clang-user-config-dir")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS
+      --config-user-dir "${TEST_ROOT}/clang-user-configs"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "opaque Clang user config directory unexpectedly succeeded")
 elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "opaque-gcc-specs")
   _bioseq_highway_prepare_direct_probe_policy(_arguments
     COMPILER_ARGUMENTS -specs "${TEST_ROOT}/compiler.specs"
@@ -116,6 +128,47 @@ elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "multi-config")
   set(CMAKE_CONFIGURATION_TYPES "Debug;Release")
   _bioseq_highway_require_single_config_probe()
   message(FATAL_ERROR "multi-config target probe unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "machine-option")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS -march=armv8-a
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "target-shaping machine option unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "machine-option-shell")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS "SHELL:-mcpu cortex-a76"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "SHELL target machine option unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "undef-builtins")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS -undef
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "compiler builtin undefinition unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-search-paired")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS -I "${TEST_ROOT}/shadow-include"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "paired header-search override unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-search-joined")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILER_ARGUMENTS "-isystem${TEST_ROOT}/shadow-system"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "joined header-search override unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "header-vfs-shell")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    COMPILE_OPTIONS
+      "SHELL:-ivfsoverlay ${TEST_ROOT}/shadow-overlay.yaml"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "SHELL VFS overlay unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "framework-search")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS "-F${TEST_ROOT}/shadow-frameworks"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "framework search override unexpectedly succeeded")
+elseif(PROBE_IDENTITY_CONTRACT_CASE STREQUAL "forced-pth")
+  _bioseq_highway_prepare_direct_probe_policy(_arguments
+    CONFIGURED_FLAGS -include-pth "${TEST_ROOT}/forced.pth"
+    DEFINITIONS HWY_TEST_POLICY=1)
+  message(FATAL_ERROR "forced PTH input unexpectedly succeeded")
 endif()
 
 set(APPLE FALSE)
@@ -346,6 +399,10 @@ _contract_expect_child_failure(
 _contract_expect_child_failure(
   opaque-clang-config "opaque compiler configuration option")
 _contract_expect_child_failure(
+  opaque-clang-system-config-dir "opaque compiler configuration option")
+_contract_expect_child_failure(
+  opaque-clang-user-config-dir "opaque compiler configuration option")
+_contract_expect_child_failure(
   opaque-gcc-specs "opaque compiler configuration option")
 _contract_expect_child_failure(
   lowlevel-target-forwarding "unauthenticated compiler forwarding option")
@@ -353,5 +410,21 @@ _contract_expect_child_failure(
   wp-identity-forwarding "unauthenticated compiler forwarding option")
 _contract_expect_child_failure(
   multi-config "does not support multi-config generators")
+_contract_expect_child_failure(
+  machine-option "unauthenticated target-shaping machine option")
+_contract_expect_child_failure(
+  machine-option-shell "unauthenticated target-shaping machine option")
+_contract_expect_child_failure(
+  undef-builtins "suppresses authenticated compiler predefined macros")
+_contract_expect_child_failure(
+  header-search-paired "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-search-joined "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  header-vfs-shell "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  framework-search "unauthenticated header-search/VFS option")
+_contract_expect_child_failure(
+  forced-pth "unauthenticated forced preprocessor input")
 
 message(STATUS "Highway probe-identity script contract passed")

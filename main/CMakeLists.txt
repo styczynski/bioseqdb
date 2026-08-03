@@ -386,25 +386,17 @@ if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
-# Prefer the Command Line Tools SDK on the home Apple toolchain, but publish it
-# through CMake's authoritative sysroot input before project() enables C/C++.
-# This keeps ordinary compile rules and direct configure probes byte-for-byte
-# aligned and respects an explicit user/toolchain SDK choice.
-if(NOT APPLE
-    AND DEFINED CACHE{CMAKE_OSX_DEPLOYMENT_TARGET}
-    AND CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "14.0")
-  get_property(_bioseq_legacy_deployment_help CACHE
-    CMAKE_OSX_DEPLOYMENT_TARGET PROPERTY HELPSTRING)
-  if(_bioseq_legacy_deployment_help STREQUAL "")
-    # Migrate only the empty-help cache entry created by the former
-    # unconditional FORCE assignment. Explicit command-line/toolchain cache
-    # entries retain their help marker and remain fail-closed below.
-    unset(CMAKE_OSX_DEPLOYMENT_TARGET CACHE)
-    unset(CMAKE_OSX_DEPLOYMENT_TARGET)
-  endif()
-  unset(_bioseq_legacy_deployment_help)
+# Prefer the Command Line Tools SDK on a native macOS configuration, but
+# publish it through CMake's authoritative sysroot input before project()
+# enables C/C++. Cross configurations must provide their own Apple SDK and
+# deployment identity instead of inheriting host defaults.
+set(_bioseq_native_apple_intent FALSE)
+if(CMAKE_HOST_APPLE
+    AND (NOT DEFINED CMAKE_SYSTEM_NAME
+      OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+  set(_bioseq_native_apple_intent TRUE)
 endif()
-if(APPLE AND NOT CMAKE_OSX_SYSROOT)
+if(_bioseq_native_apple_intent AND NOT CMAKE_OSX_SYSROOT)
   set(_bioseq_default_apple_sdk
     "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
   if(IS_DIRECTORY "${_bioseq_default_apple_sdk}")
@@ -413,10 +405,12 @@ if(APPLE AND NOT CMAKE_OSX_SYSROOT)
   endif()
   unset(_bioseq_default_apple_sdk)
 endif()
-if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+if(_bioseq_native_apple_intent
+    AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING
     "Minimum Apple deployment target used by Bioseq compilation")
 endif()
+unset(_bioseq_native_apple_intent)
 
 # NOTE: do not append `-isysroot` manually to CMAKE_<LANG>_FLAGS here. CMake
 # emits the selected CMAKE_OSX_SYSROOT for each enabled language itself.
@@ -439,6 +433,22 @@ project(
   VERSION 4.2.3
   LANGUAGES C CXX
 )
+
+# `APPLE` now reflects the configured target rather than only pre-project host
+# state. Migrate only the empty-help cache entry created by the former
+# unconditional FORCE assignment; explicit command-line/toolchain entries
+# retain their help marker and remain fail-closed in Highway probe validation.
+if(NOT APPLE
+    AND DEFINED CACHE{CMAKE_OSX_DEPLOYMENT_TARGET}
+    AND CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "14.0")
+  get_property(_bioseq_legacy_deployment_help CACHE
+    CMAKE_OSX_DEPLOYMENT_TARGET PROPERTY HELPSTRING)
+  if(_bioseq_legacy_deployment_help STREQUAL "")
+    unset(CMAKE_OSX_DEPLOYMENT_TARGET CACHE)
+    unset(CMAKE_OSX_DEPLOYMENT_TARGET)
+  endif()
+  unset(_bioseq_legacy_deployment_help)
+endif()
 
 # CMake's import-std support creates this static helper during project().  Its
 # objects are folded into static libraries that are subsequently linked into

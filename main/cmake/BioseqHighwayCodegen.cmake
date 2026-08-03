@@ -337,6 +337,10 @@ function(_bioseq_highway_reject_ambient_driver_identity label)
         "use CMAKE_CXX_COMPILER_TARGET, CMAKE_SYSROOT_COMPILE/CMAKE_SYSROOT, "
         "CMAKE_OSX_SYSROOT/CMAKE_OSX_ARCHITECTURES, or "
         "CMAKE_OSX_DEPLOYMENT_TARGET/CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN")
+    elseif(_option MATCHES "(^|[ :])-m[A-Za-z0-9_.+-]")
+      _bioseq_highway_fail(
+        "${label} contains unauthenticated target-shaping machine option "
+        "'${_option}'")
     endif()
   endforeach()
 endfunction()
@@ -350,13 +354,23 @@ function(_bioseq_highway_reject_opaque_preprocessor_inputs label)
       _bioseq_highway_fail(
         "${label} contains unauthenticated compiler forwarding option "
         "'${_option}'")
-    elseif(_option MATCHES "(^|[ :])--config(=|[ ]|$)"
+    elseif(_option MATCHES
+        "(^|[ :])--config(-system-dir|-user-dir)?(=|[ ]|$)"
         OR _option MATCHES "(^|[ :])--?specs(=|[ ]|$)")
       _bioseq_highway_fail(
         "${label} contains opaque compiler configuration option "
         "'${_option}'")
+    elseif(_option MATCHES "(^|[ :])-undef(=|[ ]|$)")
+      _bioseq_highway_fail(
+        "${label} suppresses authenticated compiler predefined macros with "
+        "'${_option}'")
     elseif(_option MATCHES
-        "(^|[ :,=])(-include-pch|-include|-imacros)")
+        "(^|[ :])(-I|-F|-isystem|-iquote|-idirafter|-iprefix|-iwithprefixbefore|-iwithprefix|-iframework|-ivfsoverlay)")
+      _bioseq_highway_fail(
+        "${label} contains unauthenticated header-search/VFS option "
+        "'${_option}'")
+    elseif(_option MATCHES
+        "(^|[ :,=])(-include-pch|-include-pth|-include|-imacros)")
       _bioseq_highway_fail(
         "${label} contains unauthenticated forced preprocessor input "
         "'${_option}'")
