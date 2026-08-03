@@ -49,6 +49,7 @@ extern "C" {
 #include <numeric>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -975,6 +976,11 @@ private:
     AttrNumber join_target_slot_rowno_resno = InvalidAttrNumber;
     AttrNumber join_query_slot_seq_resno = InvalidAttrNumber;
     std::vector<JoinQueryRef> join_queries{};
+	/* Stable query-slot references for CPU preparation.  Keeping only these
+	 * scalar descriptors before dispatch ensures that every Highway-sensitive
+	 * sketch/reader action runs below process_sequences' one selector. */
+	std::vector<JoinQueryRef> join_pending_cpu_preparation_queries{};
+	bool join_cpu_preparation_pending = false;
     std::map<std::uint64_t,
         std::vector<::bioseq::simd::MatchResult>>
         join_match_map{};
@@ -1787,6 +1793,8 @@ public:
         buffered_entries.front().sequence_rowno = rowno;
         join_target_active = true;
         join_target_prepared = false;
+		join_pending_cpu_preparation_queries.clear();
+		join_cpu_preparation_pending = false;
         join_target_outcomes_recorded = false;
 		join_prepared_union_outcomes_recorded = false;
 		join_prepared_build_checksum_recorded = false;
@@ -1799,12 +1807,274 @@ public:
 		join_gpu_prepared_shape_v5_target.target_rowno = rowno;
     }
 
+private:
+	static void prepare_join_cpu_after_highway_selection_thunk(
+			void* state,
+			::bioseq::simd::BatchProcessor::ScannerPgContext& scanner_pg_ctx,
+			const ::bioseq::simd::Minimap2Params& dispatched_params) {
+		auto* self = static_cast<TupleDispatchBuffer*>(state);
+		if (self == nullptr) {
+			throw std::logic_error{
+				"BioseqBatchJoin Highway preparation owner is null"};
+		}
+		self->prepare_join_cpu_after_highway_selection(
+			scanner_pg_ctx, dispatched_params);
+	}
+
+	void prepare_join_cpu_after_highway_selection(
+			::bioseq::simd::BatchProcessor::ScannerPgContext& scanner_pg_ctx,
+			const ::bioseq::simd::Minimap2Params& dispatched_params) {
+		if (!join_cpu_preparation_pending
+			|| join_pending_cpu_preparation_queries.empty()
+			|| !join_target_active
+			|| !join_target_prepared
+			|| !read_sequence_index_active
+			|| !join_active_read_policy.has_value()
+			|| ::bioseq::simd::pipe::vulkan_components_requested(base_params)) {
+			throw std::logic_error{
+				"BioseqBatchJoin deferred CPU preparation state is invalid"};
+		}
+		if (scanner_pg_ctx.cpu_prepared_target != nullptr
+			|| scanner_pg_ctx.read_session == nullptr
+			|| scanner_pg_ctx.read_session != active_wave_read_session) {
+			throw std::logic_error{
+				"BioseqBatchJoin deferred CPU preparation has no wave session"};
+		}
+
+		std::vector<const bioseq::pg_types::seq*> query_headers;
+		std::vector<Datum> query_recipe_datums;
+		std::vector<pg_sequence_descriptor> query_recipe_descriptors;
+		std::vector<std::uint64_t> query_ordinals;
+		std::vector<bioseq::pg_types::seq*> detoast_copies;
+		std::vector<std::vector<char>> rewidthed_query_varlenas(
+			join_pending_cpu_preparation_queries.size());
+		query_headers.reserve(join_pending_cpu_preparation_queries.size());
+		query_recipe_datums.reserve(
+			join_pending_cpu_preparation_queries.size());
+		query_recipe_descriptors.reserve(
+			join_pending_cpu_preparation_queries.size());
+		query_ordinals.reserve(join_pending_cpu_preparation_queries.size());
+		detoast_copies.reserve(join_pending_cpu_preparation_queries.size());
+
+		MemoryContext saved_context = CurrentMemoryContext;
+		ErrorData* volatile pg_error = nullptr;
+		std::exception_ptr cpp_error;
+		PG_TRY();
+		{
+			try {
+				std::uint64_t previous_ordinal = 0;
+				bool first = true;
+				for (const JoinQueryRef& query
+						: join_pending_cpu_preparation_queries) {
+					if (query.query_slot == nullptr
+						|| query.ordinal > static_cast<std::uint64_t>(
+							(std::numeric_limits<std::int32_t>::max)())
+						|| (!first && query.ordinal <= previous_ordinal)) {
+						ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("BioseqBatchJoin query references are invalid or unordered")));
+					}
+					bool query_is_null = true;
+					const Datum query_datum = slot_getattr(
+						query.query_slot,
+						join_query_slot_seq_resno,
+						&query_is_null);
+					if (query_is_null) {
+						ereport(ERROR,
+							(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+							 errmsg("BioseqBatchJoin query sequence is NULL")));
+					}
+					if (VARATT_IS_EXTERNAL_EXPANDED(
+							DatumGetPointer(query_datum))) {
+						const pg_sequence_descriptor descriptor =
+							classify_and_describe_sequence(query_datum);
+						require_recipe_descriptor_(
+							descriptor,
+							mmsearch_context.query_alphabet_code,
+							mmsearch_context.query_storage_unit_byte_width,
+							"query");
+						query_headers.push_back(nullptr);
+						query_recipe_datums.push_back(query_datum);
+						query_recipe_descriptors.push_back(descriptor);
+						query_ordinals.push_back(query.ordinal);
+						previous_ordinal = query.ordinal;
+						first = false;
+						continue;
+					}
+					bioseq::pg_types::seq* query_header =
+						reinterpret_cast<bioseq::pg_types::seq*>(
+							PG_DETOAST_DATUM(query_datum));
+					if (bioseq::storage::is_locator_stub(query_header)) {
+						if (reinterpret_cast<void*>(query_header)
+							!= reinterpret_cast<void*>(
+								DatumGetPointer(query_datum))) {
+							pfree(query_header);
+						}
+						ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("BioseqBatchJoin query preparation received a locator stub")));
+					}
+					if (query_header->alphabet_code
+							!= mmsearch_context.query_alphabet_code
+						|| query_header->storage_unit_byte_width
+							!= mmsearch_context.query_storage_unit_byte_width) {
+						if (reinterpret_cast<void*>(query_header)
+							!= reinterpret_cast<void*>(
+								DatumGetPointer(query_datum))) {
+							pfree(query_header);
+						}
+						ereport(ERROR,
+							(errcode(ERRCODE_DATATYPE_MISMATCH),
+							 errmsg("BioseqBatchJoin query typmod changed during preparation")));
+					}
+					const bioseq::pg_types::seq* preparation_query_header =
+						query_header;
+					if (query_header->storage_unit_byte_width
+							!= mmsearch_context.storage_unit_byte_width) {
+						bioseq::pg_types::seq* rewidthed =
+							::bioseq::simd::stdc_rewidth_to_type_params(
+								*query_header,
+								compact_sequence_stdc_type_params{
+									mmsearch_context.alphabet_code,
+									mmsearch_context.storage_unit_byte_width},
+								pg_alloc);
+						if (rewidthed == nullptr) {
+							if (reinterpret_cast<void*>(query_header)
+								!= reinterpret_cast<void*>(
+									DatumGetPointer(query_datum))) {
+								pfree(query_header);
+							}
+							ereport(ERROR,
+								(errcode(ERRCODE_DATATYPE_MISMATCH),
+								 errmsg("BioseqBatchJoin query preparation rewidth rejected an incompatible alphabet")));
+						}
+						const std::size_t rewidthed_bytes =
+							static_cast<std::size_t>(VARSIZE(rewidthed));
+						auto& owned =
+							rewidthed_query_varlenas[query_headers.size()];
+						owned.assign(
+							reinterpret_cast<const char*>(rewidthed),
+							reinterpret_cast<const char*>(rewidthed)
+								+ rewidthed_bytes);
+						pfree(rewidthed);
+						preparation_query_header =
+							reinterpret_cast<const bioseq::pg_types::seq*>(
+								owned.data());
+					}
+					query_headers.push_back(preparation_query_header);
+					query_recipe_datums.push_back(Datum{0});
+					query_recipe_descriptors.push_back(
+						pg_sequence_descriptor{});
+					query_ordinals.push_back(query.ordinal);
+					if (reinterpret_cast<void*>(query_header)
+						!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
+						detoast_copies.push_back(query_header);
+					}
+					previous_ordinal = query.ordinal;
+					first = false;
+				}
+
+				if (!join_cpu_prepared_target.bind_highway_dispatch_once(
+						dispatched_params)) {
+					throw std::logic_error{
+						"BioseqBatchJoin rejected its selected Highway binding"};
+				}
+				if (index_read_requirement
+						== bioseq::indexing::IndexReadRequirement::
+							require_compatible_persisted) {
+					processor.prepare_cpu_persisted_native_target(
+						user_main_database_oid,
+						user_main_tablespace_oid,
+						user_main_relfilenode,
+						user_relid,
+						static_cast<std::int16_t>(
+							join_target_storage_seq_attno),
+						join_active_read_policy->index_name,
+						static_cast<std::uint64_t>(
+							join_cpu_prepared_target.target_rowno),
+						join_cpu_prepared_target.target_bp_size,
+						mmsearch_context.alphabet_code,
+						mmsearch_context.storage_unit_byte_width,
+						query_headers,
+						query_recipe_datums,
+						query_recipe_descriptors,
+						scanner_pg_ctx.read_session,
+						std::addressof(mmsearch_query_payload_observer),
+						query_ordinals,
+						dispatched_params,
+						*executor_read_context,
+						join_cpu_prepared_target);
+				} else {
+					processor.prepare_cpu_shared_query_unions(
+						mmsearch_context.alphabet_code,
+						mmsearch_context.storage_unit_byte_width,
+						join_cpu_prepared_target.target_bp_size,
+						query_headers,
+						query_recipe_datums,
+						query_recipe_descriptors,
+						scanner_pg_ctx.read_session,
+						std::addressof(mmsearch_query_payload_observer),
+						query_ordinals,
+						dispatched_params,
+						/*include_persisted_parameter_group=*/true,
+						::bioseq::simd::BatchProcessor::
+							CpuQueryUnionStorage::minimizer_sketch,
+						join_cpu_prepared_target);
+				}
+			} catch (...) {
+				cpp_error = std::current_exception();
+			}
+		}
+		PG_CATCH();
+		{
+			MemoryContextSwitchTo(saved_context);
+			pg_error = CopyErrorData();
+			FlushErrorState();
+		}
+		PG_END_TRY();
+
+		if (pg_error != nullptr) {
+			query_headers.clear();
+			detoast_copies.clear();
+			ErrorData* exact_error = pg_error;
+			throw bioseq::pg_utils::PostgresErrorAsCpp{exact_error};
+		}
+		if (cpp_error != nullptr) {
+			for (bioseq::pg_types::seq* copy : detoast_copies) {
+				bioseq::pg_utils::invoke_pg_as_cpp(
+					[copy] { pfree(copy); });
+			}
+			std::rethrow_exception(cpp_error);
+		}
+		for (bioseq::pg_types::seq* copy : detoast_copies) {
+			bioseq::pg_utils::invoke_pg_as_cpp([copy] { pfree(copy); });
+		}
+		if (!join_cpu_prepared_target.unions_ready
+			|| !join_cpu_prepared_target.highway_binding_matches(
+				dispatched_params)) {
+			throw std::logic_error{
+				"BioseqBatchJoin CPU preparation did not retain its Highway binding"};
+		}
+
+		join_pending_cpu_preparation_queries.clear();
+		join_cpu_preparation_pending = false;
+		scanner_pg_ctx.cpu_prepared_target = &join_cpu_prepared_target;
+	}
+
+public:
+
     void prepare_join_target_queries(std::span<const JoinQueryRef> all_queries) {
         if (!join_target_active || join_target_prepared) {
             ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("BioseqBatchJoin target preparation is out of order")));
         }
+		if (join_cpu_preparation_pending
+			|| !join_pending_cpu_preparation_queries.empty()) {
+			ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("BioseqBatchJoin retained stale CPU preparation inputs")));
+		}
 		if (join_active_read_policy.has_value()) {
 			ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -1833,6 +2103,33 @@ public:
 		const bool vulkan_requested =
 			::bioseq::simd::pipe::vulkan_components_requested(
 				base_params);
+		if (read_sequence_index_active && !vulkan_requested) {
+			std::uint64_t previous_ordinal = 0;
+			bool first = true;
+			for (const JoinQueryRef& query : all_queries) {
+				if (query.query_slot == nullptr
+					|| query.ordinal > static_cast<std::uint64_t>(
+						(std::numeric_limits<std::int32_t>::max)())
+					|| (!first && query.ordinal <= previous_ordinal)) {
+					ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("BioseqBatchJoin query references are invalid or unordered")));
+				}
+				previous_ordinal = query.ordinal;
+				first = false;
+			}
+			const std::uint64_t target_bp_size =
+				buffered_entries.front().seq_bp_size();
+			join_cpu_prepared_target.target_bp_size = target_bp_size;
+			join_cpu_prepared_target.query_count = all_queries.size();
+			join_cpu_prepared_target.unions_ready = false;
+			join_pending_cpu_preparation_queries.assign(
+				all_queries.begin(), all_queries.end());
+			join_cpu_preparation_pending =
+				!join_pending_cpu_preparation_queries.empty();
+			join_target_prepared = true;
+			return;
+		}
 		std::vector<const bioseq::pg_types::seq*> query_headers;
 		std::vector<Datum> query_recipe_datums;
 		std::vector<pg_sequence_descriptor> query_recipe_descriptors;
@@ -1955,90 +2252,27 @@ public:
 			PG_TRY();
 			{
 				try {
-					if (!vulkan_requested
-						&& std::ranges::any_of(
-							query_recipe_datums,
-							[](Datum datum) noexcept {
-								return datum != Datum{0};
-							})) {
-						if (active_wave_read_session != nullptr) {
-							ereport(ERROR,
-								(errcode(ERRCODE_INTERNAL_ERROR),
-								 errmsg("BioseqBatchJoin retained a stale preparation session")));
-						}
-						active_wave_read_session =
-							::begin_pg_sequence_read_session(
-								batch_payload_ctx);
+					if (!vulkan_requested) {
+						throw std::logic_error{
+							"BioseqBatchJoin CPU preparation escaped deferred dispatch"};
 					}
-					if (vulkan_requested) {
-						processor.prepare_gpu_persisted_shape_v5_target(
-							user_main_database_oid,
-							user_main_tablespace_oid,
-							user_main_relfilenode,
-							user_relid,
-							static_cast<std::int16_t>(
-								join_target_storage_seq_attno),
-							join_active_read_policy->index_name,
-							static_cast<std::uint64_t>(
-								join_gpu_prepared_shape_v5_target.target_rowno),
-							target_bp_size,
-							query_headers.size(),
-							mmsearch_context.alphabet_code,
-							mmsearch_context.storage_unit_byte_width,
-							base_params,
-							*executor_read_context,
-							join_gpu_prepared_shape_v5_target);
-					} else {
-						if (index_read_requirement
-								== bioseq::indexing::IndexReadRequirement::
-									require_compatible_persisted) {
-							processor.prepare_cpu_persisted_native_target(
-								user_main_database_oid,
-								user_main_tablespace_oid,
-								user_main_relfilenode,
-								user_relid,
-								static_cast<std::int16_t>(
-									join_target_storage_seq_attno),
-								join_active_read_policy->index_name,
-								static_cast<std::uint64_t>(
-									join_cpu_prepared_target.target_rowno),
-								target_bp_size,
-								mmsearch_context.alphabet_code,
-								mmsearch_context.storage_unit_byte_width,
-								query_headers,
-								query_recipe_datums,
-								query_recipe_descriptors,
-								active_wave_read_session,
-								std::addressof(
-									mmsearch_query_payload_observer),
-								query_ordinals,
-								base_params,
-								*executor_read_context,
-								join_cpu_prepared_target);
-						} else {
-							processor.prepare_cpu_shared_query_unions(
-								mmsearch_context.alphabet_code,
-								mmsearch_context.storage_unit_byte_width,
-								target_bp_size,
-								query_headers,
-								query_recipe_datums,
-								query_recipe_descriptors,
-								active_wave_read_session,
-								std::addressof(
-									mmsearch_query_payload_observer),
-								query_ordinals,
-								base_params,
-								/*include_persisted_parameter_group=*/true,
-								::bioseq::simd::BatchProcessor::
-									CpuQueryUnionStorage::minimizer_sketch,
-								join_cpu_prepared_target);
-						}
-					}
-					if (active_wave_read_session != nullptr) {
-						::finish_pg_sequence_read_session(
-							active_wave_read_session, true);
-						active_wave_read_session = nullptr;
-					}
+					processor.prepare_gpu_persisted_shape_v5_target(
+						user_main_database_oid,
+						user_main_tablespace_oid,
+						user_main_relfilenode,
+						user_relid,
+						static_cast<std::int16_t>(
+							join_target_storage_seq_attno),
+						join_active_read_policy->index_name,
+						static_cast<std::uint64_t>(
+							join_gpu_prepared_shape_v5_target.target_rowno),
+						target_bp_size,
+						query_headers.size(),
+						mmsearch_context.alphabet_code,
+						mmsearch_context.storage_unit_byte_width,
+						base_params,
+						*executor_read_context,
+						join_gpu_prepared_shape_v5_target);
 				} catch (...) {
 					cpp_error = std::current_exception();
 				}
@@ -2051,16 +2285,12 @@ public:
 			}
 			PG_END_TRY();
 			if (pg_error != nullptr) {
-				::abort_pg_sequence_read_session_noexcept(
-					std::exchange(active_wave_read_session, nullptr));
 				query_headers.clear();
 				detoast_copies.clear();
 				ErrorData* exact_error = pg_error;
 				throw bioseq::pg_utils::PostgresErrorAsCpp{exact_error};
 			}
 			if (cpp_error != nullptr) {
-				::abort_pg_sequence_read_session_noexcept(
-					std::exchange(active_wave_read_session, nullptr));
 				for (bioseq::pg_types::seq* copy : detoast_copies) {
 					bioseq::pg_utils::invoke_pg_as_cpp(
 						[copy] { pfree(copy); });
@@ -2939,9 +3169,24 @@ public:
 			 * alone decides whether this wave publishes the physical target. */
             scanner_pg_ctx.shared_target_batch = false;
             scanner_pg_ctx.record_target_operational_outcomes = true;
-			scanner_pg_ctx.cpu_prepared_target =
-				join_cpu_prepared_target.unions_ready
-					? &join_cpu_prepared_target : nullptr;
+			if (join_cpu_preparation_pending) {
+				if (join_pending_cpu_preparation_queries.empty()
+					|| join_cpu_prepared_target.unions_ready) {
+					ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("BioseqBatchJoin deferred CPU preparation state is inconsistent")));
+				}
+				scanner_pg_ctx.highway_preparation = {
+					.state = this,
+					.function =
+						&TupleDispatchBuffer::
+							prepare_join_cpu_after_highway_selection_thunk,
+				};
+			} else {
+				scanner_pg_ctx.cpu_prepared_target =
+					join_cpu_prepared_target.unions_ready
+						? &join_cpu_prepared_target : nullptr;
+			}
 			scanner_pg_ctx.gpu_prepared_shape_v5_target =
 				join_gpu_prepared_shape_v5_target.ready()
 					? &join_gpu_prepared_shape_v5_target : nullptr;
@@ -2951,7 +3196,8 @@ public:
                 scanner_pg_ctx.query_ordinals[i] = join_queries[i].ordinal;
             }
 			const bool wave_has_recipe_or_locator =
-				target.seq_loc.has_value() || target.has_seq_recipe()
+				join_cpu_preparation_pending
+				|| target.seq_loc.has_value() || target.has_seq_recipe()
 				|| std::ranges::any_of(
 					scanner_pg_ctx.query_recipe_datums.begin(),
 					scanner_pg_ctx.query_recipe_datums.begin() + batch_size,
@@ -3209,7 +3455,8 @@ public:
 								(std::numeric_limits<std::uint64_t>::max)();
 							const std::uint64_t expected_hwy_target =
 								static_cast<std::uint64_t>(
-									base_params.highway_executed_target);
+									join_cpu_prepared_target
+										.highway_executed_target);
 							const bool accepted_rejected_overflow =
 								evidence.rejected_spans
 									> counter_max - evidence.accepted_spans;
@@ -3475,6 +3722,8 @@ public:
         join_output_position = 0;
         join_target_active = false;
         join_target_prepared = false;
+		join_pending_cpu_preparation_queries.clear();
+		join_cpu_preparation_pending = false;
         join_target_outcomes_recorded = false;
 		join_prepared_union_outcomes_recorded = false;
 		join_prepared_build_checksum_recorded = false;
@@ -3521,6 +3770,8 @@ public:
         join_query_ids.fill(0);
         join_target_active = false;
         join_target_prepared = false;
+		join_pending_cpu_preparation_queries.clear();
+		join_cpu_preparation_pending = false;
         join_target_outcomes_recorded = false;
         join_prepared_union_outcomes_recorded = false;
         join_prepared_build_checksum_recorded = false;
@@ -3561,6 +3812,8 @@ public:
         join_output_position = 0;
         join_target_active = false;
         join_target_prepared = false;
+		join_pending_cpu_preparation_queries.clear();
+		join_cpu_preparation_pending = false;
         join_target_outcomes_recorded = false;
 		join_prepared_union_outcomes_recorded = false;
 		join_prepared_build_checksum_recorded = false;

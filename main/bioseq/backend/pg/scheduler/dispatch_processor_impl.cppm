@@ -210,16 +210,22 @@ namespace bioseq::simd {
         bioseq_log<DBG>("[bioseq] pg: BatchProcessor::process_sequences received null query_hdr; returning empty map");
         return results;
     }
-    if (!per_row_query_mode
-        && (query_hdr->alphabet_code != alphabet_code
+	if (!per_row_query_mode
+		&& (query_hdr->alphabet_code != alphabet_code
             || query_hdr->storage_unit_byte_width != storage_unit_byte_width)) {
         bioseq_log<DBG>("[bioseq] pg: BatchProcessor::process_sequences query_hdr typmod ({},{}) disagrees with context ({},{}); refusing to dispatch",
                 static_cast<unsigned>(query_hdr->alphabet_code),
                 static_cast<unsigned>(query_hdr->storage_unit_byte_width),
                 static_cast<unsigned>(alphabet_code),
                 static_cast<unsigned>(storage_unit_byte_width));
-        return results;
-    }
+		return results;
+	}
+	if (scanner_pg_ctx != nullptr
+		&& !scanner_pg_ctx->highway_preparation.empty()
+		&& !scanner_pg_ctx->highway_preparation.valid()) {
+		throw std::logic_error{
+			"Highway preparation hook is only partially configured"};
+	}
 
     const auto highway_plan =
         ::bioseq::simd_dispatch::registered_highway_dispatch_info();
@@ -264,11 +270,32 @@ namespace bioseq::simd {
             && scanner_pg_ctx->async_job_observer
         ? scanner_pg_ctx->async_job_observer
         : inherited_observer;
-    const auto previous_observer =
-        bioseq::parallelism::exchange_tracked_job_observer(
-            requested_observer);
-    try {
-        if (base_params.enable_profiling) {
+	const auto previous_observer =
+		bioseq::parallelism::exchange_tracked_job_observer(
+			requested_observer);
+	try {
+		const bool had_highway_preparation = scanner_pg_ctx != nullptr
+			&& scanner_pg_ctx->highway_preparation.valid();
+		if (had_highway_preparation) {
+			auto preparation = std::exchange(
+				scanner_pg_ctx->highway_preparation,
+				ScannerPgContext::HighwayPreparationHook{});
+			preparation.function(
+				preparation.state, *scanner_pg_ctx, dispatched_params);
+			if (scanner_pg_ctx->cpu_prepared_target == nullptr) {
+				throw std::logic_error{
+					"Highway preparation hook did not publish a CPU target"};
+			}
+		}
+		if (scanner_pg_ctx != nullptr
+			&& scanner_pg_ctx->cpu_prepared_target != nullptr
+			&& (!scanner_pg_ctx->cpu_prepared_target->unions_ready
+				|| !scanner_pg_ctx->cpu_prepared_target
+					->highway_binding_matches(dispatched_params))) {
+			throw std::logic_error{
+				"prepared CPU target disagrees with the selected Highway binding"};
+		}
+		if (base_params.enable_profiling) {
             /*
              * Profiling pipeline. The ProfilerBlock is the persistent
              * process-wide singleton (see global_state.cppm); aggregates

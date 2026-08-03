@@ -370,6 +370,15 @@ public:
 		std::int64_t target_rowno = -1;
 		std::uint64_t target_bp_size = 0;
 		std::uint64_t query_count = 0;
+		/* CPU preparation runs beneath the same public Highway selection
+		 * boundary as ordinary batch execution.  The selected table has static
+		 * storage duration; retaining its neutral pointer and exact plan here
+		 * lets every later query wave prove that it is reusing, rather than
+		 * reconstructing, that target binding. */
+		const ::bioseq::simd_dispatch::HighwayKernelTable* highway_kernels =
+			nullptr;
+		::bioseq::simd_dispatch::HighwayDispatchInfo highway_dispatch{};
+		std::int64_t highway_executed_target = 0;
 		std::vector<CpuPreparedIndexGroup> groups{};
 		std::uint64_t physical_target_index_reads = 0;
 		std::uint64_t total_unique_keys = 0;
@@ -394,6 +403,58 @@ public:
 		CpuPreparedTarget& operator=(const CpuPreparedTarget&) = delete;
 		CpuPreparedTarget(CpuPreparedTarget&&) noexcept = default;
 		CpuPreparedTarget& operator=(CpuPreparedTarget&&) noexcept = default;
+
+		[[nodiscard]] static constexpr bool same_highway_dispatch_identity(
+				const ::bioseq::simd_dispatch::HighwayDispatchInfo& lhs,
+				const std::int64_t lhs_target,
+				const ::bioseq::simd_dispatch::HighwayDispatchInfo& rhs,
+				const std::int64_t rhs_target) noexcept {
+			return lhs.compiled_targets == rhs.compiled_targets
+				&& lhs.cpu_supported_targets == rhs.cpu_supported_targets
+				&& lhs.runnable_targets == rhs.runnable_targets
+				&& lhs.planned_target == rhs.planned_target
+				&& lhs_target == rhs_target;
+		}
+
+		[[nodiscard]] bool highway_binding_matches(
+				const Minimap2Params& params) const noexcept {
+			return highway_kernels != nullptr
+				&& highway_kernels == params.highway_kernels
+				&& same_highway_dispatch_identity(
+					highway_dispatch,
+					highway_executed_target,
+					params.highway_dispatch,
+					params.highway_executed_target);
+		}
+
+		[[nodiscard]] bool bind_highway_dispatch_once(
+				const Minimap2Params& params) noexcept {
+			const auto& plan = params.highway_dispatch;
+			if (params.highway_kernels == nullptr
+				|| plan.compiled_targets == 0
+				|| plan.cpu_supported_targets == 0
+				|| plan.runnable_targets
+					!= (plan.compiled_targets & plan.cpu_supported_targets)
+				|| params.highway_executed_target <= 0
+				|| !std::has_single_bit(static_cast<std::uint64_t>(
+					params.highway_executed_target))
+				|| (plan.runnable_targets & params.highway_executed_target) == 0
+				|| plan.planned_target != params.highway_executed_target) {
+				return false;
+			}
+			const bool empty = highway_kernels == nullptr
+				&& highway_dispatch.compiled_targets == 0
+				&& highway_dispatch.cpu_supported_targets == 0
+				&& highway_dispatch.runnable_targets == 0
+				&& highway_dispatch.planned_target == 0
+				&& highway_executed_target == 0;
+			if (!empty) return highway_binding_matches(params);
+			highway_kernels = params.highway_kernels;
+			highway_dispatch = params.highway_dispatch;
+			highway_executed_target = params.highway_executed_target;
+			return true;
+		}
+
 		void release_query_union_state_noexcept() noexcept {
 			std::vector<CpuPreparedIndexGroup>{}.swap(groups);
 			query_union_admission_bytes = 0;
@@ -428,20 +489,30 @@ public:
 			release_query_union_state_noexcept();
 		}
 
-			[[nodiscard]] CpuPreparedIndexGroup* find_group(
-					std::int32_t kmer_size,
-				std::int32_t window_size,
-				std::int32_t max_occ,
-					MinimizerSketchBackend sketch_backend) noexcept;
+		[[nodiscard]] CpuPreparedIndexGroup* find_group(
+			std::int32_t kmer_size,
+			std::int32_t window_size,
+			std::int32_t max_occ,
+			MinimizerSketchBackend sketch_backend) noexcept;
 
-			[[nodiscard]] bool query_set_proof_ready() const noexcept {
-				return std::ranges::none_of(
-					groups,
-					[](const CpuPreparedIndexGroup& group) noexcept {
-						return group.compact_direct_query_set_proof_pending;
-					});
-			}
-		};
+		[[nodiscard]] bool query_set_proof_ready() const noexcept {
+			return std::ranges::none_of(
+				groups,
+				[](const CpuPreparedIndexGroup& group) noexcept {
+					return group.compact_direct_query_set_proof_pending;
+				});
+		}
+	};
+	static_assert(CpuPreparedTarget::same_highway_dispatch_identity(
+		::bioseq::simd_dispatch::HighwayDispatchInfo{3, 3, 3, 1},
+		1,
+		::bioseq::simd_dispatch::HighwayDispatchInfo{3, 3, 3, 1},
+		1));
+	static_assert(!CpuPreparedTarget::same_highway_dispatch_identity(
+		::bioseq::simd_dispatch::HighwayDispatchInfo{3, 3, 3, 1},
+		1,
+		::bioseq::simd_dispatch::HighwayDispatchInfo{3, 3, 3, 2},
+		2));
 
 	/* One restart-cold, PostgreSQL-authenticated Format-5 generation retained
 	 * for the complete BatchJoin target lifecycle.  The resident owns the three
@@ -797,8 +868,30 @@ public:
      * targets stay source-backed while query literals use resident facades.
      * When null, the loop uses the Phase B in-memory baseline.
      */
-    struct ScannerPgContext {
-        /* Optional statement-root async ownership observer.  It is generic at
+	struct ScannerPgContext {
+		/* Optional synchronous, one-shot cold preparation.  process_sequences
+		 * consumes this record immediately after selecting dispatched_params and
+		 * before entering profiling or typed execution.  It is deliberately a
+		 * neutral callback: only the scheduler root may install it, and the
+		 * callback receives the already-selected immutable table. */
+		struct HighwayPreparationHook final {
+			using Function = void (*)(
+				void*, ScannerPgContext&, const Minimap2Params&);
+
+			void* state = nullptr;
+			Function function = nullptr;
+
+			[[nodiscard]] constexpr bool empty() const noexcept {
+				return state == nullptr && function == nullptr;
+			}
+
+			[[nodiscard]] constexpr bool valid() const noexcept {
+				return state != nullptr && function != nullptr;
+			}
+		};
+
+		HighwayPreparationHook highway_preparation{};
+		/* Optional statement-root async ownership observer.  It is generic at
          * the pipeline boundary; the PostgreSQL trace owner supplies the
          * concrete enrollment/state-machine adapter. */
         bioseq::parallelism::tracked_job_observer async_job_observer{};
@@ -883,6 +976,8 @@ public:
 			active_index_policy_source = bioseq::storage::indexing::
 				ActiveReadPolicyResolutionSource::unresolved;
     };
+	static_assert(ScannerPgContext::HighwayPreparationHook{}.empty());
+	static_assert(!ScannerPgContext::HighwayPreparationHook{}.valid());
 
     /*
      * Run the minimap2 pipeline across a batch. DOC0279 §11.3 — per target
