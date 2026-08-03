@@ -1390,9 +1390,9 @@ bioseq_add_highway_codegen(
     "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils,alignment_lanes"
     "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|simd_utils,alignment_utils,alignment_lanes"
     "ksw2_batched|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils,alignment_lanes"
-    "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm|bioseq.highway.sources.prefilter|prefilter|common|"
+    "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm|bioseq.highway.sources.sneaky_snake|prefilter|common|simd_utils"
     "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|simd_utils"
-    "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|"
+    "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|simd_utils"
   SLOT_RECORDS
     "minimizer_reference|minimizers|reference_minimap_int|&::bioseq::simd::{target_namespace}::reference_minimap_int"
     "minimizer_two_stack|minimizers|two_stack_nthash|&::bioseq::simd::{target_namespace}::two_stack_nthash"

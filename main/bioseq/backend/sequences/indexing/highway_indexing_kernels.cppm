@@ -21,6 +21,7 @@ export module bioseq.highway.sources.indexing;
 
 import std;
 import bioseq.indexing.grouped32_contract;
+import bioseq.highway.sources.simd_utils;
 
 export namespace bioseq::indexing {
 namespace [[bioseq::simd]] target {

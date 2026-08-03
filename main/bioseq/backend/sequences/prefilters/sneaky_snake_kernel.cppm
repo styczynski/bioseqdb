@@ -17,10 +17,11 @@ module;
 #include <span>
 #include <vector>
 
-export module bioseq.highway.sources.prefilter;
+export module bioseq.highway.sources.sneaky_snake;
 
 import std;
 import bioseq.sequences.prefilters.sneaky_snake;
+import bioseq.highway.sources.simd_utils;
 
 export namespace bioseq::sequences::prefilters {
 namespace [[bioseq::simd]] target {
