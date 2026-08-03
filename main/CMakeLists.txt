@@ -680,6 +680,13 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
   set_tests_properties(
     bioseq_highway_header_closure_contract
     PROPERTIES LABELS "core;unit;cmake;highway")
+  add_test(
+    NAME bioseq_highway_target_order_contract
+    COMMAND "${CMAKE_COMMAND}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_highway_target_order.cmake")
+  set_tests_properties(
+    bioseq_highway_target_order_contract
+    PROPERTIES LABELS "core;unit;cmake;highway")
 endif()
 set(_bioseq_codegen_components)
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)

@@ -430,6 +430,48 @@ function(_bioseq_highway_header_closure
   set(${output_digest} "${_closure_digest}" PARENT_SCOPE)
 endfunction()
 
+function(_bioseq_highway_finalize_target_inventory
+    output_records output_order output_mask output_static_record
+    platform static_target_bit)
+  set(_target_records)
+  set(_target_order)
+  set(_compiled_mask 0)
+  set(_static_target_record)
+  foreach(_record IN LISTS ARGN)
+    if(NOT _record MATCHES "^([^|]+)\\|([^|]+)\\|([0-9]+)$")
+      _bioseq_highway_fail("internal malformed target record '${_record}'")
+    endif()
+    set(_token "${CMAKE_MATCH_1}")
+    set(_target_namespace "${CMAKE_MATCH_2}")
+    set(_numeric_bit "${CMAKE_MATCH_3}")
+    if(_token STREQUAL "HWY_STATIC_TARGET")
+      _bioseq_highway_fail(
+        "could not canonicalize the HWY_VISIT_FALLBACK static target alias")
+    endif()
+    if(NOT _token MATCHES "^HWY_([A-Z0-9_]+)$")
+      _bioseq_highway_fail("invalid Highway target token '${_token}'")
+    endif()
+    string(TOLOWER "${CMAKE_MATCH_1}" _slug)
+    set(_normalized_record
+      "${platform}|${_slug}|${_token}|${_target_namespace}|${_numeric_bit}")
+    list(APPEND _target_records "${_normalized_record}")
+    list(APPEND _target_order "${_token}")
+    math(EXPR _compiled_mask "${_compiled_mask} | ${_numeric_bit}")
+    if(_numeric_bit STREQUAL "${static_target_bit}")
+      set(_static_target_record "${_normalized_record}")
+    endif()
+  endforeach()
+  if(NOT _static_target_record)
+    _bioseq_highway_fail(
+      "HWY_STATIC_TARGET is absent from the canonical target inventory")
+  endif()
+
+  set(${output_records} "${_target_records}" PARENT_SCOPE)
+  set(${output_order} "${_target_order}" PARENT_SCOPE)
+  set(${output_mask} "${_compiled_mask}" PARENT_SCOPE)
+  set(${output_static_record} "${_static_target_record}" PARENT_SCOPE)
+endfunction()
+
 function(_bioseq_highway_probe_targets)
   set(_one_value_arguments
     PROBE_DIR
@@ -675,45 +717,12 @@ function(_bioseq_highway_probe_targets)
     endif()
   endforeach()
 
-  set(_target_records)
-  foreach(_record IN LISTS _records_by_bit)
-    if(NOT _record MATCHES "^([^|]+)\\|([^|]+)\\|([0-9]+)$")
-      _bioseq_highway_fail("internal malformed target record '${_record}'")
-    endif()
-    set(_token "${CMAKE_MATCH_1}")
-    set(_target_namespace "${CMAKE_MATCH_2}")
-    set(_numeric_bit "${CMAKE_MATCH_3}")
-    if(_token STREQUAL "HWY_STATIC_TARGET")
-      _bioseq_highway_fail(
-        "could not canonicalize the HWY_VISIT_FALLBACK static target alias")
-    endif()
-    if(NOT _token MATCHES "^HWY_([A-Z0-9_]+)$")
-      _bioseq_highway_fail("invalid Highway target token '${_token}'")
-    endif()
-    string(TOLOWER "${CMAKE_MATCH_1}" _slug)
-    list(APPEND _target_records
-      "${ARG_PLATFORM}|${_slug}|${_token}|${_target_namespace}|${_numeric_bit}")
-  endforeach()
-  list(SORT _target_records)
-
-  set(_target_order)
-  set(_compiled_mask 0)
-  set(_static_target_record)
-  foreach(_record IN LISTS _target_records)
-    if(NOT _record MATCHES
-        "^([^|]+)\\|([^|]+)\\|([^|]+)\\|([^|]+)\\|([0-9]+)$")
-      _bioseq_highway_fail("internal malformed normalized record '${_record}'")
-    endif()
-    list(APPEND _target_order "${CMAKE_MATCH_3}")
-    math(EXPR _compiled_mask "${_compiled_mask} | ${CMAKE_MATCH_5}")
-    if(CMAKE_MATCH_5 STREQUAL "${_static_target_bit}")
-      set(_static_target_record "${_record}")
-    endif()
-  endforeach()
-  if(NOT _static_target_record)
-    _bioseq_highway_fail(
-      "HWY_STATIC_TARGET is absent from the canonical target inventory")
-  endif()
+  # _records_by_bit is already deduplicated and canonicalized in first-seen
+  # HWY_VISIT_TARGETS order. Preserve that order: it is Highway's dispatch
+  # precedence, not a presentation detail that may be sorted by target slug.
+  _bioseq_highway_finalize_target_inventory(
+    _target_records _target_order _compiled_mask _static_target_record
+    "${ARG_PLATFORM}" "${_static_target_bit}" ${_records_by_bit})
 
   # This exact, sorted block is also rendered by the generator ahead of every
   # Highway include. A bare -DNAME has the preprocessor value 1, so record that
