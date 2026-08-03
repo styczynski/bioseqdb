@@ -2897,13 +2897,12 @@ inline void publish_artifacts(const publication_request& request) {
             == detail::publication_noop_projection(
                 request.artifact_manifest_json,
                 "desired artifacts manifest");
-    if (!idempotent_republication
-        && ((!previous.present
+    if ((!previous.present
          && !desired_manifest.prior_manifest_identity.empty())
         || (previous.present
             && previous.manifest_identity
                 != desired_manifest.prior_manifest_identity)
-        || (previous.present && previous.name != desired_manifest.name))) {
+        || (previous.present && previous.name != desired_manifest.name)) {
         throw std::runtime_error(
             "prior manifest identity does not authorize stale cleanup");
     }

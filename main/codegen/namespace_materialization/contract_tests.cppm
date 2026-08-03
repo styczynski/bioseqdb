@@ -1137,6 +1137,11 @@ inline void verify_authenticated_incremental_publication() {
             && std::filesystem::last_write_time(stale) == stale_mtime
             && std::filesystem::last_write_time(manifest) == manifest_mtime,
         "semantic no-op publication must preserve artifact/manifest bytes and mtimes");
+    const rendered_publication_manifest unauthorized_repeat = render(
+        sha256_hex("unauthorized predecessor"), initial_artifacts);
+    require_rejected(
+        [&] { publish(unauthorized_repeat, initial_artifacts); },
+        "semantic no-op publication still requires the authenticated predecessor");
 
     const std::vector<publication_artifact> shrunk_artifacts{
         initial_artifacts.front()};
