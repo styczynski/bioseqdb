@@ -280,45 +280,114 @@ public:
     // can prevent SROA on the caller's side. The pack-expansion form
     // gives the optimizer a single point of construction.
 
-#define BIOSEQ_VS_HIDDEN_FRIEND_OP(OPSYM, HNNAME)                                  \
-    [[nodiscard]] friend HWY_INLINE auto operator OPSYM(                            \
-        vec_stream a, vec_stream b) noexcept {                                      \
-        return op_pack_impl_##HNNAME(a, b, std::make_index_sequence<W>{});          \
-    }                                                                               \
-    template <size_t... S>                                                          \
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE                             \
-    vec_stream op_pack_impl_##HNNAME(                                               \
-        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {           \
-        return pack(hn::HNNAME(a[S], b[S])...);                                     \
+    [[nodiscard]] friend HWY_INLINE auto operator+(
+        vec_stream a, vec_stream b) noexcept {
+        return op_pack_impl_Add(a, b, std::make_index_sequence<W>{});
     }
 
-    BIOSEQ_VS_HIDDEN_FRIEND_OP(+,  Add)
-    BIOSEQ_VS_HIDDEN_FRIEND_OP(-,  Sub)
-    BIOSEQ_VS_HIDDEN_FRIEND_OP(*,  Mul)
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    vec_stream op_pack_impl_Add(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return pack(hn::Add(a[S], b[S])...);
+    }
 
-#undef BIOSEQ_VS_HIDDEN_FRIEND_OP
+    [[nodiscard]] friend HWY_INLINE auto operator-(
+        vec_stream a, vec_stream b) noexcept {
+        return op_pack_impl_Sub(a, b, std::make_index_sequence<W>{});
+    }
+
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    vec_stream op_pack_impl_Sub(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return pack(hn::Sub(a[S], b[S])...);
+    }
+
+    [[nodiscard]] friend HWY_INLINE auto operator*(
+        vec_stream a, vec_stream b) noexcept {
+        return op_pack_impl_Mul(a, b, std::make_index_sequence<W>{});
+    }
+
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    vec_stream op_pack_impl_Mul(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return pack(hn::Mul(a[S], b[S])...);
+    }
 
     // Comparison operators return a mask_stream<tag_t, W>.
-#define BIOSEQ_VS_HIDDEN_FRIEND_CMP(OPSYM, HNNAME)                                 \
-    [[nodiscard]] friend HWY_INLINE auto operator OPSYM(                            \
-        vec_stream a, vec_stream b) noexcept {                                      \
-        return cmp_pack_impl_##HNNAME(a, b, std::make_index_sequence<W>{});         \
-    }                                                                               \
-    template <size_t... S>                                                          \
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE                             \
-    mask_stream<tag_t, W> cmp_pack_impl_##HNNAME(                                   \
-        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {           \
-        return mask_stream<tag_t, W>::pack(hn::HNNAME(a[S], b[S])...);              \
+    [[nodiscard]] friend HWY_INLINE auto operator==(
+        vec_stream a, vec_stream b) noexcept {
+        return cmp_pack_impl_Eq(a, b, std::make_index_sequence<W>{});
     }
 
-    BIOSEQ_VS_HIDDEN_FRIEND_CMP(==, Eq)
-    BIOSEQ_VS_HIDDEN_FRIEND_CMP(!=, Ne)
-    BIOSEQ_VS_HIDDEN_FRIEND_CMP(<,  Lt)
-    BIOSEQ_VS_HIDDEN_FRIEND_CMP(>,  Gt)
-    BIOSEQ_VS_HIDDEN_FRIEND_CMP(<=, Le)
-    BIOSEQ_VS_HIDDEN_FRIEND_CMP(>=, Ge)
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    mask_stream<tag_t, W> cmp_pack_impl_Eq(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return mask_stream<tag_t, W>::pack(hn::Eq(a[S], b[S])...);
+    }
 
-#undef BIOSEQ_VS_HIDDEN_FRIEND_CMP
+    [[nodiscard]] friend HWY_INLINE auto operator!=(
+        vec_stream a, vec_stream b) noexcept {
+        return cmp_pack_impl_Ne(a, b, std::make_index_sequence<W>{});
+    }
+
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    mask_stream<tag_t, W> cmp_pack_impl_Ne(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return mask_stream<tag_t, W>::pack(hn::Ne(a[S], b[S])...);
+    }
+
+    [[nodiscard]] friend HWY_INLINE auto operator<(
+        vec_stream a, vec_stream b) noexcept {
+        return cmp_pack_impl_Lt(a, b, std::make_index_sequence<W>{});
+    }
+
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    mask_stream<tag_t, W> cmp_pack_impl_Lt(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return mask_stream<tag_t, W>::pack(hn::Lt(a[S], b[S])...);
+    }
+
+    [[nodiscard]] friend HWY_INLINE auto operator>(
+        vec_stream a, vec_stream b) noexcept {
+        return cmp_pack_impl_Gt(a, b, std::make_index_sequence<W>{});
+    }
+
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    mask_stream<tag_t, W> cmp_pack_impl_Gt(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return mask_stream<tag_t, W>::pack(hn::Gt(a[S], b[S])...);
+    }
+
+    [[nodiscard]] friend HWY_INLINE auto operator<=(
+        vec_stream a, vec_stream b) noexcept {
+        return cmp_pack_impl_Le(a, b, std::make_index_sequence<W>{});
+    }
+
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    mask_stream<tag_t, W> cmp_pack_impl_Le(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return mask_stream<tag_t, W>::pack(hn::Le(a[S], b[S])...);
+    }
+
+    [[nodiscard]] friend HWY_INLINE auto operator>=(
+        vec_stream a, vec_stream b) noexcept {
+        return cmp_pack_impl_Ge(a, b, std::make_index_sequence<W>{});
+    }
+
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE
+    mask_stream<tag_t, W> cmp_pack_impl_Ge(
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {
+        return mask_stream<tag_t, W>::pack(hn::Ge(a[S], b[S])...);
+    }
 
 };
 
