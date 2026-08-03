@@ -6350,34 +6350,48 @@ struct PipelineDescription {
 inline constexpr std::string_view query_sketch_stage_name =
     "QuerySketchStage";
 
+/** Cold EXPLAIN-only query-sketch route; never a dispatch-chain dimension. */
+enum class QuerySketchPlanRoute : std::uint8_t {
+    recompute_capable,
+    compatible_persisted_only,
+};
+
 /**
  * Resolve the query-sketch Highway function without adding the minimizer
  * algorithm as another describe-template dimension.  Scalar and Vulkan
  * sketching are concrete non-Highway routes and therefore map to an empty
- * set.  The slow reference selector is alphabet-sensitive: DNA4 can reach
- * its Highway entry on a raw, non-segmented recompute, whereas DNA5 is
- * deliberately scalar.  Unknown algorithm/alphabet values are ambiguous and
- * must be rejected by the plan renderer rather than silently advertised as
- * scalar.
+ * set.  The slow reference selector is alphabet- and route-sensitive: DNA4
+ * can reach its Highway entry on a raw, non-segmented recompute, whereas DNA5
+ * and compatible-persisted query preparation are deliberately scalar.  Paper
+ * ntHash is executable only for its checked DNA4/W10/K15 domain.  Unknown or
+ * unsupported values are ambiguous and must be rejected by the plan renderer
+ * rather than silently advertised as scalar.
  */
 [[nodiscard]] constexpr std::optional<
     ::bioseq::simd_dispatch::HighwayKernelSet>
 planned_query_minimizer_highway_kernels(
-        const ::bioseq::simd::MinimizerAlgorithmType algorithm,
-        const std::uint8_t alphabet_code) noexcept {
+        const ::bioseq::simd::Minimap2Params& params,
+        const QuerySketchPlanRoute route) noexcept {
     using Algorithm = ::bioseq::simd::MinimizerAlgorithmType;
     using Kernel = ::bioseq::simd_dispatch::HighwayKernelId;
     constexpr std::uint8_t dna4_code = minimizer_alphabet_code<::seq::dna4>();
     constexpr std::uint8_t dna5_code = minimizer_alphabet_code<::seq::dna5>();
+    const std::uint8_t alphabet_code = params.alphabet_code;
     if (alphabet_code != dna4_code && alphabet_code != dna5_code) {
         return std::nullopt;
     }
-    switch (algorithm) {
+    if (route != QuerySketchPlanRoute::recompute_capable
+        && route != QuerySketchPlanRoute::compatible_persisted_only) {
+        return std::nullopt;
+    }
+    switch (params.minimizer_algorithm) {
         case Algorithm::SCALAR:
         case Algorithm::VULKAN_MINIMAP_INT:
             return ::bioseq::simd_dispatch::HighwayKernelSet{};
         case Algorithm::SIMD_MINIMAP2_SLOW:
-            if (alphabet_code == dna5_code) {
+            if (alphabet_code == dna5_code
+                || route
+                    == QuerySketchPlanRoute::compatible_persisted_only) {
                 return ::bioseq::simd_dispatch::HighwayKernelSet{};
             }
             return ::bioseq::simd_dispatch::highway_kernel_set(
@@ -6386,6 +6400,11 @@ planned_query_minimizer_highway_kernels(
             return ::bioseq::simd_dispatch::highway_kernel_set(
                 Kernel::minimizer_two_stack_nthash);
         case Algorithm::PAPER_NTHASH_SIMD:
+            if (alphabet_code != dna4_code
+                || params.window_size != 10
+                || params.kmer_size != 15) {
+                return std::nullopt;
+            }
             return ::bioseq::simd_dispatch::highway_kernel_set(
                 Kernel::minimizer_paper_nthash);
     }
@@ -6395,24 +6414,57 @@ planned_query_minimizer_highway_kernels(
 static_assert([]() consteval {
     using Algorithm = ::bioseq::simd::MinimizerAlgorithmType;
     using Kernel = ::bioseq::simd_dispatch::HighwayKernelId;
+    using Route = QuerySketchPlanRoute;
     constexpr std::uint8_t dna4_code = minimizer_alphabet_code<::seq::dna4>();
     constexpr std::uint8_t dna5_code = minimizer_alphabet_code<::seq::dna5>();
+    const auto make_params = [](const Algorithm algorithm,
+                                const std::uint8_t alphabet_code,
+                                const std::int32_t window_size = 10,
+                                const std::int32_t kmer_size = 15) consteval {
+        ::bioseq::simd::Minimap2Params params{};
+        params.minimizer_algorithm = algorithm;
+        params.alphabet_code = alphabet_code;
+        params.window_size = window_size;
+        params.kmer_size = kmer_size;
+        return params;
+    };
     const auto slow_dna4 = planned_query_minimizer_highway_kernels(
-        Algorithm::SIMD_MINIMAP2_SLOW, dna4_code);
+        make_params(Algorithm::SIMD_MINIMAP2_SLOW, dna4_code),
+        Route::recompute_capable);
+    const auto slow_dna4_persisted =
+        planned_query_minimizer_highway_kernels(
+            make_params(Algorithm::SIMD_MINIMAP2_SLOW, dna4_code),
+            Route::compatible_persisted_only);
     const auto slow_dna5 = planned_query_minimizer_highway_kernels(
-        Algorithm::SIMD_MINIMAP2_SLOW, dna5_code);
+        make_params(Algorithm::SIMD_MINIMAP2_SLOW, dna5_code),
+        Route::recompute_capable);
     const auto exact_dna5 = planned_query_minimizer_highway_kernels(
-        Algorithm::TWO_STACK_NTHASH, dna5_code);
+        make_params(Algorithm::TWO_STACK_NTHASH, dna5_code),
+        Route::compatible_persisted_only);
     const auto paper_dna4 = planned_query_minimizer_highway_kernels(
-        Algorithm::PAPER_NTHASH_SIMD, dna4_code);
+        make_params(Algorithm::PAPER_NTHASH_SIMD, dna4_code),
+        Route::recompute_capable);
+    const auto paper_dna5 = planned_query_minimizer_highway_kernels(
+        make_params(Algorithm::PAPER_NTHASH_SIMD, dna5_code),
+        Route::recompute_capable);
+    const auto paper_wrong_window = planned_query_minimizer_highway_kernels(
+        make_params(Algorithm::PAPER_NTHASH_SIMD, dna4_code, 9, 15),
+        Route::recompute_capable);
+    const auto paper_wrong_kmer = planned_query_minimizer_highway_kernels(
+        make_params(Algorithm::PAPER_NTHASH_SIMD, dna4_code, 10, 14),
+        Route::compatible_persisted_only);
     const auto scalar_dna4 = planned_query_minimizer_highway_kernels(
-        Algorithm::SCALAR, dna4_code);
+        make_params(Algorithm::SCALAR, dna4_code),
+        Route::recompute_capable);
     const auto vulkan_dna5 = planned_query_minimizer_highway_kernels(
-        Algorithm::VULKAN_MINIMAP_INT, dna5_code);
+        make_params(Algorithm::VULKAN_MINIMAP_INT, dna5_code),
+        Route::compatible_persisted_only);
     return dna4_code != dna5_code
         && slow_dna4.has_value()
         && *slow_dna4 == ::bioseq::simd_dispatch::highway_kernel_set(
             Kernel::minimizer_reference_minimap_int)
+        && slow_dna4_persisted.has_value()
+        && slow_dna4_persisted->none()
         && slow_dna5.has_value() && slow_dna5->none()
         && exact_dna5.has_value()
         && *exact_dna5 == ::bioseq::simd_dispatch::highway_kernel_set(
@@ -6420,11 +6472,18 @@ static_assert([]() consteval {
         && paper_dna4.has_value()
         && *paper_dna4 == ::bioseq::simd_dispatch::highway_kernel_set(
             Kernel::minimizer_paper_nthash)
+        && !paper_dna5.has_value()
+        && !paper_wrong_window.has_value()
+        && !paper_wrong_kmer.has_value()
         && scalar_dna4.has_value() && scalar_dna4->none()
         && vulkan_dna5.has_value() && vulkan_dna5->none()
         && !planned_query_minimizer_highway_kernels(
-            Algorithm::SIMD_MINIMAP2_SLOW, 0xffu).has_value();
-}(), "query-sketch Highway planning must remain alphabet-exact");
+            make_params(Algorithm::SIMD_MINIMAP2_SLOW, 0xffu),
+            Route::recompute_capable).has_value()
+        && !planned_query_minimizer_highway_kernels(
+            make_params(Algorithm::SIMD_MINIMAP2_SLOW, dna4_code),
+            static_cast<Route>(0xffu)).has_value();
+}(), "query-sketch Highway planning must remain route- and alphabet-exact");
 
 /**
  * The describe cascade intentionally pins the executable pipeline at the
@@ -6436,9 +6495,9 @@ static_assert([]() consteval {
 [[nodiscard]] inline std::optional<StageDescription>
 describe_query_sketch_stage(
         const ::bioseq::simd::Minimap2Params& params,
-        const std::uint8_t alphabet_code) {
+        const QuerySketchPlanRoute route) {
     const auto kernels = planned_query_minimizer_highway_kernels(
-        params.minimizer_algorithm, alphabet_code);
+        params, route);
     if (!kernels.has_value()) return std::nullopt;
 
     StageDescription stage;
@@ -10775,7 +10834,8 @@ template <is_constexpr_aligner_params Cep,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const ::bioseq::simd::Minimap2Params& params,
-    sequence_size_t query_len, sequence_size_t target_len)
+    sequence_size_t query_len, sequence_size_t target_len,
+    const QuerySketchPlanRoute query_sketch_route)
 {
     using MinimizerT = typename Cep::minimizer_repr_t;
     const std::vector<MinimizerT> empty_minimizers{};
@@ -10792,7 +10852,7 @@ template <is_constexpr_aligner_params Cep,
         alignment_kernels, ignored_out, params, query_len, target_len);
     auto description = describe_with_params<Cep>(pipeline);
     auto query_sketch = describe_query_sketch_stage(
-        params, minimizer_alphabet_code<Alphabet>());
+        params, query_sketch_route);
     if (!query_sketch.has_value()) {
         throw std::invalid_argument{
             "query-sketch description received an unsupported algorithm or "
@@ -10829,7 +10889,8 @@ struct describe_leaf {
         bioseq::storage::basic_lazy_sequence_view<Alphabet> q,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> t,
         const int32_t& query_len,
-        const int32_t& target_len)
+        const int32_t& target_len,
+        const QuerySketchPlanRoute& query_sketch_route)
     {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
         #if BIOSEQ_OPTTIMIZATION_LEVEL <= 2
@@ -10852,12 +10913,14 @@ struct describe_leaf {
         {
             return describe_pipeline_leaf<SpecCep, BAA, CA,
                 MA_describe, EP_describe, Alphabet>(
-                    q, t, params, query_len, target_len);
+                    q, t, params, query_len, target_len,
+                    query_sketch_route);
         }
         #endif
         return describe_pipeline_leaf<FallbackCep, BAA, CA,
             MA_describe, EP_describe, Alphabet>(
-                q, t, params, query_len, target_len);
+                q, t, params, query_len, target_len,
+                query_sketch_route);
     }
 };
 
@@ -10928,7 +10991,9 @@ BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 PipelineDescription describe_pipeline_for(
     const ::bioseq::simd::Minimap2Params& params,
     bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_proto,
-    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_proto)
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_proto,
+    const QuerySketchPlanRoute query_sketch_route =
+        QuerySketchPlanRoute::recompute_capable)
 {
     const sequence_size_t query_len  = query_seq_proto.bp_size();
     const sequence_size_t target_len = target_seq_proto.bp_size();
@@ -10943,7 +11008,8 @@ PipelineDescription describe_pipeline_for(
         detail::baa_step,
         detail::ca_step
     >::template run<>(
-        params, query_seq_proto, target_seq_proto, query_len, target_len);
+        params, query_seq_proto, target_seq_proto, query_len, target_len,
+        query_sketch_route);
 }
 
 /**
@@ -10953,9 +11019,12 @@ PipelineDescription describe_pipeline_for(
  */
 [[nodiscard]] inline PipelineDescription describe_pipeline_for(
     const ::bioseq::simd::Minimap2Params& params,
-    const std::uint8_t alphabet_code)
+    const std::uint8_t alphabet_code,
+    const QuerySketchPlanRoute query_sketch_route =
+        QuerySketchPlanRoute::recompute_capable)
 {
-    auto describe_empty = [&params, alphabet_code]<sequence_alphabet Alphabet>() {
+    auto describe_empty = [&params, alphabet_code, query_sketch_route]
+        <sequence_alphabet Alphabet>() {
         using Proto = sequence_custom_alphabet<Alphabet, std::uint64_t>;
         compact_sequence_range<Proto> empty_query_proto{};
         compact_sequence_range<Proto> empty_target_proto{};
@@ -10968,7 +11037,8 @@ PipelineDescription describe_pipeline_for(
         return describe_pipeline_for(
             typed_params,
             bioseq::storage::as_lazy_sequence_view(empty_query_owner),
-            bioseq::storage::as_lazy_sequence_view(empty_target_owner));
+            bioseq::storage::as_lazy_sequence_view(empty_target_owner),
+            query_sketch_route);
     };
 
     if (alphabet_code == minimizer_alphabet_code<::seq::dna4>()) {

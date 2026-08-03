@@ -3280,11 +3280,22 @@ static void BioseqPerRowJoin_EndCustomScan(CustomScanState* node);
 static void BioseqPerRowJoin_ReScanCustomScan(CustomScanState* node);
 static void BioseqPerRowJoin_ExplainCustomScan(
 	CustomScanState* node, List* ancestors, ExplainState* es);
+[[nodiscard]] static constexpr bioseq::simd::pipe::QuerySketchPlanRoute
+QuerySketchPlanRouteFor(
+		const bioseq::indexing::IndexReadRequirement requirement) noexcept {
+	return requirement
+			== bioseq::indexing::IndexReadRequirement::
+				require_compatible_persisted
+		? bioseq::simd::pipe::QuerySketchPlanRoute::
+			compatible_persisted_only
+		: bioseq::simd::pipe::QuerySketchPlanRoute::recompute_capable;
+}
 static void ExplainPipelineExecutionStats(
 	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
 	ExplainState* es,
-	const bioseq::simd::Minimap2Params* aligner_params = nullptr,
-	bool highway_dispatch_already_rendered = false);
+	const bioseq::simd::Minimap2Params* aligner_params,
+	bioseq::simd::pipe::QuerySketchPlanRoute query_sketch_route,
+	bool highway_dispatch_already_rendered);
 
 /* helper functions to build strings for EXPLAIN */
 static const char * BioseqColumnPushdownClausesStr(List *context, List *clauses);
@@ -24159,7 +24170,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	if (features.has_mmsearch) {
 		runtime.aligner_state.pipeline_desc =
 			bioseq::simd::pipe::describe_pipeline_for(
-				aligner_params, aligner_params.alphabet_code);
+				aligner_params, aligner_params.alphabet_code,
+				QuerySketchPlanRouteFor(index_read_requirement));
 	}
 
 	/*
@@ -26828,7 +26840,9 @@ static void BioseqBatchJoin_ExplainCustomScan(
 	ExplainPipelineExecutionStats(
 		runtime->aggregate_stats, es,
 		runtime->aligner_params_captured
-			? &runtime->aligner_params : nullptr);
+			? &runtime->aligner_params : nullptr,
+		QuerySketchPlanRouteFor(runtime->index_read_requirement),
+		/*highway_dispatch_already_rendered=*/false);
 }
 
 [[nodiscard]] static BioseqPerRowJoinRuntime* per_row_join_runtime(
@@ -27567,7 +27581,10 @@ static void BioseqPerRowJoin_ExplainCustomScan(
 	ExplainPipelineExecutionStats(
 		runtime->aggregate_stats, es,
 		runtime->aligner_params_captured
-			? &runtime->aligner_params : nullptr);
+			? &runtime->aligner_params : nullptr,
+		QuerySketchPlanRouteFor(
+			bioseq::indexing::IndexReadRequirement::require_absent),
+		/*highway_dispatch_already_rendered=*/false);
 }
 
 /*
@@ -29579,7 +29596,8 @@ HighwayTargetName(const std::int64_t target)
 
 [[nodiscard]] static bioseq::simd_dispatch::HighwayKernelSet
 PlannedQueryMinimizerHighwayKernels(
-		const bioseq::simd::Minimap2Params* params)
+		const bioseq::simd::Minimap2Params* params,
+		const bioseq::simd::pipe::QuerySketchPlanRoute query_sketch_route)
 {
 	if (params == nullptr) {
 		ereport(ERROR,
@@ -29588,14 +29606,19 @@ PlannedQueryMinimizerHighwayKernels(
 	}
 	const auto resolved =
 		bioseq::simd::pipe::planned_query_minimizer_highway_kernels(
-			params->minimizer_algorithm, params->alphabet_code);
+			*params, query_sketch_route);
 	if (!resolved.has_value()) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("Highway EXPLAIN cannot resolve the query minimizer route"),
-			 errdetail("minimizer_algorithm=%u alphabet_code=%u",
+			 errdetail(
+				"minimizer_algorithm=%u alphabet_code=%u window_size=%d "
+				"kmer_size=%d query_sketch_route=%u",
 				static_cast<unsigned>(params->minimizer_algorithm),
-				static_cast<unsigned>(params->alphabet_code))));
+				static_cast<unsigned>(params->alphabet_code),
+				params->window_size,
+				params->kmer_size,
+				static_cast<unsigned>(query_sketch_route))));
 	}
 	return *resolved;
 }
@@ -29605,6 +29628,7 @@ ExplainPipelineExecutionStats(
 	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
 	ExplainState* es,
 	const bioseq::simd::Minimap2Params* aligner_params,
+	const bioseq::simd::pipe::QuerySketchPlanRoute query_sketch_route,
 	const bool highway_dispatch_already_rendered)
 {
 	const auto requested_backend =
@@ -29644,7 +29668,8 @@ ExplainPipelineExecutionStats(
 		const std::string runnable =
 			HighwayTargetNames(highway_plan.runnable_targets);
 		const auto planned_query_kernels =
-			PlannedQueryMinimizerHighwayKernels(aligner_params);
+			PlannedQueryMinimizerHighwayKernels(
+				aligner_params, query_sketch_route);
 		const auto grouped32_kernel =
 			bioseq::simd_dispatch::HighwayKernelId::
 				indexing_grouped32_validate;
@@ -30597,6 +30622,8 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				}
 				ExplainPipelineExecutionStats(
 					stats, es, &params,
+					QuerySketchPlanRouteFor(
+						explain_index_read_requirement),
 					/*highway_dispatch_already_rendered=*/true);
 			} else {
 				print_submit("Submit results");
@@ -30778,6 +30805,8 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				const auto& stats = explain_runtime->buffer.execution_stats();
 				ExplainPipelineExecutionStats(
 					stats, es, &params,
+					QuerySketchPlanRouteFor(
+						explain_index_read_requirement),
 					/*highway_dispatch_already_rendered=*/true);
 			}
 		}
