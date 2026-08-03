@@ -791,107 +791,157 @@ auto lift_op(Op&& op, Args&&... args) {
 }
 
 // ============================================================================
-// Operation tags for Highway's regular forwarding operations. The operation
-// kind is data, not a source-generating macro, so every callable retains a
-// compiler-proven body boundary for target materialization.
+// Operation tags for Highway's regular forwarding operations. These retain
+// their original distinct class and member identities while spelling every
+// callable body directly for target materialization.
 // ============================================================================
 
-enum class regular_op {
-    add,
-    sub,
-    mul,
-    min,
-    max,
-    and_,
-    or_,
-    xor_,
-    and_not,
-    not_,
-    neg,
-    abs,
-    eq,
-    ne,
-    lt,
-    gt,
-    le,
-    ge,
-    shift_left_same,
-    shift_right_same,
-    mask_from_vec,
-};
-
-template <regular_op Operation>
-struct regular_op_tag {
+struct op_Add {
     template <typename... Xs>
     [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
-        if constexpr (Operation == regular_op::add) {
-            return hn::Add(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::sub) {
-            return hn::Sub(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::mul) {
-            return hn::Mul(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::min) {
-            return hn::Min(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::max) {
-            return hn::Max(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::and_) {
-            return hn::And(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::or_) {
-            return hn::Or(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::xor_) {
-            return hn::Xor(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::and_not) {
-            return hn::AndNot(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::not_) {
-            return hn::Not(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::neg) {
-            return hn::Neg(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::abs) {
-            return hn::Abs(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::eq) {
-            return hn::Eq(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::ne) {
-            return hn::Ne(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::lt) {
-            return hn::Lt(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::gt) {
-            return hn::Gt(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::le) {
-            return hn::Le(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::ge) {
-            return hn::Ge(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::shift_left_same) {
-            return hn::ShiftLeftSame(std::forward<Xs>(xs)...);
-        } else if constexpr (Operation == regular_op::shift_right_same) {
-            return hn::ShiftRightSame(std::forward<Xs>(xs)...);
-        } else {
-            static_assert(Operation == regular_op::mask_from_vec);
-            return hn::MaskFromVec(std::forward<Xs>(xs)...);
-        }
+        return hn::Add(std::forward<Xs>(xs)...);
     }
 };
 
-using op_Add = regular_op_tag<regular_op::add>;
-using op_Sub = regular_op_tag<regular_op::sub>;
-using op_Mul = regular_op_tag<regular_op::mul>;
-using op_Min = regular_op_tag<regular_op::min>;
-using op_Max = regular_op_tag<regular_op::max>;
-using op_And = regular_op_tag<regular_op::and_>;
-using op_Or = regular_op_tag<regular_op::or_>;
-using op_Xor = regular_op_tag<regular_op::xor_>;
-using op_AndNot = regular_op_tag<regular_op::and_not>;
-using op_Not = regular_op_tag<regular_op::not_>;
-using op_Neg = regular_op_tag<regular_op::neg>;
-using op_Abs = regular_op_tag<regular_op::abs>;
-using op_Eq = regular_op_tag<regular_op::eq>;
-using op_Ne = regular_op_tag<regular_op::ne>;
-using op_Lt = regular_op_tag<regular_op::lt>;
-using op_Gt = regular_op_tag<regular_op::gt>;
-using op_Le = regular_op_tag<regular_op::le>;
-using op_Ge = regular_op_tag<regular_op::ge>;
-using op_ShiftLeftSame = regular_op_tag<regular_op::shift_left_same>;
-using op_ShiftRightSame = regular_op_tag<regular_op::shift_right_same>;
-using op_MaskFromVec = regular_op_tag<regular_op::mask_from_vec>;
+struct op_Sub {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Sub(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Mul {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Mul(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Min {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Min(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Max {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Max(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_And {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::And(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Or {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Or(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Xor {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Xor(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_AndNot {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::AndNot(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Not {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Not(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Neg {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Neg(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Abs {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Abs(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Eq {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Eq(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Ne {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Ne(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Lt {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Lt(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Gt {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Gt(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Le {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Le(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_Ge {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::Ge(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_ShiftLeftSame {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::ShiftLeftSame(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_ShiftRightSame {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::ShiftRightSame(std::forward<Xs>(xs)...);
+    }
+};
+
+struct op_MaskFromVec {
+    template <typename... Xs>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(Xs&&... xs) {
+        return hn::MaskFromVec(std::forward<Xs>(xs)...);
+    }
+};
 
 template <typename M>
 [[gnu::always_inline]] HWY_INLINE decltype(auto)
