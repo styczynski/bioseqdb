@@ -5560,6 +5560,14 @@ class structural_visitor final
             // record the body twice.
             return;
         }
+        if (function->isDefaulted() || function->isDeleted()) {
+            // Defaulted and deleted declarations have no authored compound
+            // body whose code generation can benefit from a target attribute.
+            // Clang may nevertheless report an explicitly defaulted special
+            // member as a definition, so exclude both forms before the body
+            // test rather than manufacturing an insertion point at `=`.
+            return;
+        }
         if (!function->doesThisDeclarationHaveABody()) {
             return;
         }

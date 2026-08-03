@@ -969,6 +969,10 @@ FIXTURE_INLINE Value macro_map_value(Value value) { return value; }
 
 struct worker {
     worker() {}
+    worker(const worker&) = default;
+    worker(worker&&) = delete;
+    worker& operator=(const worker&) = default;
+    ~worker() = default;
     int operator()() const { return 1; }
     int member() { return 2; }
 };
@@ -1048,8 +1052,9 @@ namespace [[bioseq::similar]] decoy {}
             + clang_callable_inventory);
     require(
         clang_namespace.callables.size() == 9,
-        "Clang structural scan expected exactly nine source callable "
-        "definitions; " + clang_callable_inventory);
+        "Clang structural scan expected exactly nine authored compound-body "
+        "callables and must omit defaulted/deleted declarations; "
+            + clang_callable_inventory);
     require(
         std::ranges::all_of(
             clang_namespace.callables,
