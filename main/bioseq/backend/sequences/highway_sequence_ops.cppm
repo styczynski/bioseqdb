@@ -1,5 +1,6 @@
 /** Canonical generator input for exact minimizer sequence iteration. */
 module;
+#include <hwy/aligned_allocator.h>
 #include <hwy/highway.h>
 
 export module bioseq.highway.sources.sequence_ops;
