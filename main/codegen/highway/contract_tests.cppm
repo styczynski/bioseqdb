@@ -208,17 +208,21 @@ inline void verify_template_flatten_separation() {
     };
     for (const std::string_view attribute : policy_attributes) {
         const std::string marked_source =
-            "export module bioseq.highway.sources.fixture;\n[["
+            "export module bioseq.highway.sources.fixture;\n"
+              "namespace fixture {\n[["
             + std::string{attribute}
-            + "(\"shape\", \"root\")]]\nint marked_value;\n";
+            + "(\"shape\", \"root\")]]\n"
+              "int marked_value;\n}\n";
+        const std::string message =
+            "a registered Highway source rejects policy attribute "
+            + std::string{attribute};
         require_rejected(
             [&] {
                 validate_highway_source_policy(
                     clang_structural::scan_token_slice(
                         "fixture_highway_source.cppm", marked_source));
             },
-            "a registered Highway source rejects template-flatten policy "
-            "attributes");
+            message);
     }
 
     const std::array forbidden_providers{

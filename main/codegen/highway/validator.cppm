@@ -587,10 +587,10 @@ inline void validate_highway_source_policy(
         "bioseq::template_flatten_when",
         "bioseq::template_flatten_entry",
     };
-    for (const clang_structural::declaration_record& declaration
-         : unit.declarations) {
+    const auto reject_policy_attributes =
+        [&unit](const auto& attributes) {
         for (const clang_structural::attribute_record& attribute
-             : declaration.attributes) {
+             : attributes) {
             if (std::ranges::contains(
                     forbidden_attributes, attribute.qualified_name)) {
                 throw std::runtime_error(
@@ -599,6 +599,25 @@ inline void validate_highway_source_policy(
                       "attribute '"
                     + attribute.qualified_name + "'");
             }
+        }
+    };
+    for (const clang_structural::declaration_record& declaration
+         : unit.declarations) {
+        reject_policy_attributes(declaration.attributes);
+        for (const clang_structural::parameter_record& parameter
+             : declaration.parameters) {
+            reject_policy_attributes(parameter.attributes);
+        }
+    }
+    for (const clang_structural::namespace_record& name_space
+         : unit.namespaces) {
+        reject_policy_attributes(name_space.attributes);
+    }
+    for (const clang_structural::aggregate_record& aggregate
+         : unit.aggregate_records) {
+        for (const clang_structural::aggregate_field_record& field
+             : aggregate.fields) {
+            reject_policy_attributes(field.attributes);
         }
     }
 }
