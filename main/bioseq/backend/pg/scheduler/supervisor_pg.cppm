@@ -6,8 +6,14 @@ module;
 
 #include "common.h"
 
+extern "C" {
+#include "storage/dsm_impl.h"
+#include "utils/snapshot.h"
+}
+
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -177,5 +183,72 @@ async_mps_worker_boundary_stats_snapshot() noexcept;
 void disarm_async_mps_worker_pg_failure() noexcept;
 [[nodiscard]] const char* async_mps_worker_failure_point_name(
     AsyncMpsWorkerPgFailure point) noexcept;
+
+} // namespace bioseq::parallelism::pg
+
+// Module-internal worker seam shared by the ordinary implementation units.
+// These declarations are intentionally not exported to importers.
+namespace bioseq::parallelism::pg {
+
+enum class PersistPayloadKind : std::uint32_t {
+    none = 0,
+    prohibited_legacy_dsm = 1,
+    prohibited_legacy_file = 2,
+    mps_build_identity = 3,
+};
+
+struct MpsBuildMetadata {
+    std::string index_name{};
+    bioseq::storage::seq_locator locator{};
+    std::uint8_t alphabet_code = 0;
+    std::uint8_t storage_unit_byte_width = 0;
+    std::uint16_t last_fragment_padding = 0;
+    std::int32_t pair_sort_impl = 0;
+    std::int32_t pipeline_mode = 0;
+    std::int32_t max_concurrency = 0;
+    std::int32_t index_memory_cap_mb = 0;
+    std::int32_t index_sketch_backend = 0;
+    IndexPayloadStorageBackend requested_provider =
+        IndexPayloadStorageBackend::postgres_relation;
+};
+
+struct PersistClaim {
+    std::size_t slot_index = 0;
+    std::uint32_t generation = 0;
+    PersistTarget target{};
+    dsm_handle dsm = DSM_HANDLE_INVALID;
+    std::uint64_t payload_bytes = 0;
+    PersistPayloadKind payload_kind = PersistPayloadKind::none;
+    IndexPayloadStorageBackend requested_provider =
+        IndexPayloadStorageBackend::postgres_relation;
+};
+
+[[nodiscard]] unsigned effective_max_concurrency(unsigned configured);
+[[nodiscard]] std::optional<MpsBuildMetadata>
+parse_mps_build_metadata(const char* base, Size mapped);
+[[nodiscard]] bool worker_target_accepts_index_persist(
+    const PersistTarget& target,
+    std::string_view index_name);
+void publish_async_mps_build_stats(
+    const bioseq::storage::indexing::LastMpsBuildStats& stats,
+    std::uint64_t worker_build_ns,
+    std::uint64_t pipeline_mode,
+    std::uint64_t max_concurrency,
+    std::uint64_t index_memory_cap_mb,
+    bool lazy_worker_shareable) noexcept;
+void record_async_mps_worker_pg_leaf_call(
+    AsyncMpsWorkerPgFailure point) noexcept;
+void record_async_mps_worker_pg_leaf_failure(
+    AsyncMpsWorkerPgFailure point) noexcept;
+void inject_async_mps_worker_pg_failure_leaf(
+    AsyncMpsWorkerPgFailure point);
+void record_async_mps_materialize_admission() noexcept;
+void record_async_mps_materialize_failure_unwind(
+    bool admission_restored) noexcept;
+void process_mps_build_claim(
+    const PersistClaim& claim,
+    const char* base,
+    Size mapped,
+    Snapshot registered_snapshot);
 
 } // namespace bioseq::parallelism::pg
