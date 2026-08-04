@@ -11,7 +11,7 @@ module;
 
 export module bioseq.prefilter.execution_contract;
 
-import bioseq.pipeline.runtime_contract;
+export import bioseq.pipeline.runtime_contract;
 
 export {
 
