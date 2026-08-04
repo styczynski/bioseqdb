@@ -1788,6 +1788,7 @@ endif()
 unset(_bioseq_typed_expected_count)
 
 set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_cpu_preparation.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer_api_impl.cppm"
@@ -4266,7 +4267,7 @@ AddCommonTargetX(
     bioseq_format6_parallel_scan_probe_worker_main
   ${_bioseq_sql_completion_target_option}
   PG_ENTRYPOINT_SOURCES
-    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod.cppm"
+    "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
   BOOST
     program_options regex serialization iterator integer
   HWY 1.3.0
