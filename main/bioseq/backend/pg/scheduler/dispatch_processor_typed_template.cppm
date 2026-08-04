@@ -60,6 +60,7 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 import bioseq.scheduler.supervisor_pg;
+import bioseq.scheduler.supervisor_pg_vulkan;
 
 namespace bioseq::simd::cpu_preparation_detail {
 

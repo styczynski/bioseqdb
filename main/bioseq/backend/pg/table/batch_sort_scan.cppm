@@ -67,6 +67,7 @@ import bioseq.sql_guc_settings;
 import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
 import bioseq.gpu.vulkan.runtime;       // Runtime counters for EXPLAIN proof
 import bioseq.scheduler.supervisor_pg;  // readiness-first PG Runtime entry
+import bioseq.scheduler.supervisor_pg_vulkan;
 import bioseq.pg_utils;                 // PostgresErrorAsCpp at the PG callback seam
 import bioseq.storage.scanner_pg;       // source-route leases + locator promotion
 import bioseq.parallelism.memory_admission; // resident admission before workers

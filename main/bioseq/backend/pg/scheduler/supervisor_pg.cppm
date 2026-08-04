@@ -14,7 +14,6 @@ module;
 
 export module bioseq.scheduler.supervisor_pg;
 
-import bioseq.gpu.vulkan.runtime;
 import bioseq.indexing.type;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
@@ -49,6 +48,16 @@ struct SchedulerSnapshot {
     double uptime_secs = 0.0;
     std::uint64_t async_persist_jobs_waiting = 0;
     std::uint64_t index_memory_reserved_bytes = 0;
+};
+
+struct VulkanRuntimeStatusSnapshot {
+    bool available = false;
+    std::string device_name{};
+    std::int32_t max_workgroup_count_x = 0;
+    bool scalar_block_layout = false;
+    std::string initialization_error{};
+    std::int64_t device_local_bytes = 0;
+    bool software_device = false;
 };
 
 struct AsyncMpsBuildStatsSnapshot {
@@ -150,8 +159,8 @@ void register_scheduler_supervisor();
 
 [[nodiscard]] std::string warmup_backend_local_shader_cache_report();
 void install_pg_shader_provider_if_available() noexcept;
-[[nodiscard]] bioseq::gpu::vulkan::Runtime&
-ensure_pg_vulkan_runtime_ready();
+void prepare_pg_vulkan_runtime_ready();
+[[nodiscard]] VulkanRuntimeStatusSnapshot vulkan_runtime_status_snapshot();
 
 [[nodiscard]] bool supervisor_available() noexcept;
 void backend_sync();

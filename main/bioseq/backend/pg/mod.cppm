@@ -97,7 +97,6 @@ import bioseq.storage.indexing_pg.admin;
 import bioseq.storage.indexing_pg.chunked_storage;
 import bioseq.storage.indexing_pg.handles;
 import bioseq.scheduler.supervisor_pg;
-import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.mode;
 import bioseq.common.sequan_compat;
 import bioseq.column.tam;
@@ -3361,26 +3360,17 @@ std::string gpu_warmup_shader_cache() {
 bioseq::pg_utils::named_out<
     bioseq::pg::sql_rows::vulkan_runtime_status_row>
 vulkan_runtime_status() {
-    auto& runtime =
-        bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
-    const auto& features = runtime.features();
+    const auto status =
+        bioseq::parallelism::pg::vulkan_runtime_status_snapshot();
     return bioseq::pg_utils::named_out{
         bioseq::pg::sql_rows::vulkan_runtime_status_row{
-            .available = features.available,
-            .device_name = std::string{features.device_name.data()},
-            .max_workgroup_count_x = static_cast<std::int32_t>(
-                std::min<std::uint32_t>(
-                    features.max_workgroup_count_x,
-                    static_cast<std::uint32_t>(
-                        std::numeric_limits<std::int32_t>::max()))),
-            .scalar_block_layout = features.scalar_block_layout,
-            .initialization_error = runtime.initialization_error(),
-            .device_local_bytes = static_cast<std::int64_t>(
-                std::min<std::uint64_t>(
-                    features.device_local_bytes,
-                    static_cast<std::uint64_t>(
-                        std::numeric_limits<std::int64_t>::max()))),
-            .software_device = features.software_device,
+            .available = status.available,
+            .device_name = status.device_name,
+            .max_workgroup_count_x = status.max_workgroup_count_x,
+            .scalar_block_layout = status.scalar_block_layout,
+            .initialization_error = status.initialization_error,
+            .device_local_bytes = status.device_local_bytes,
+            .software_device = status.software_device,
         }};
 }
 

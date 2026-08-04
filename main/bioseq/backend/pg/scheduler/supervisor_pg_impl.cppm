@@ -2328,7 +2328,7 @@ void install_pg_shader_provider_if_available() noexcept {
 }
 
 /**
- * The only supported PostgreSQL entry point for constructing/accessing the
+ * Prepare PostgreSQL process state before constructing/accessing the
  * process-local Vulkan Runtime singleton.
  *
  * MoltenVK consumes the command-metallib and binary-archive environment when
@@ -2342,11 +2342,32 @@ void install_pg_shader_provider_if_available() noexcept {
  * leaf has completed PG_END_TRY.  Callers must be ordinary C++ orchestration or
  * catch at a PostgreSQL callback/UDF boundary after abandoning their C++ state.
  */
-[[nodiscard]] bioseq::gpu::vulkan::Runtime&
-ensure_pg_vulkan_runtime_ready() {
+void prepare_pg_vulkan_runtime_ready() {
     install_pg_shader_provider_if_available();
     wait_for_runtime_ready();
-    return bioseq::gpu::vulkan::Runtime::instance();
+}
+
+VulkanRuntimeStatusSnapshot vulkan_runtime_status_snapshot() {
+    prepare_pg_vulkan_runtime_ready();
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    const auto& features = runtime.features();
+    return VulkanRuntimeStatusSnapshot{
+        .available = features.available,
+        .device_name = std::string{features.device_name.data()},
+        .max_workgroup_count_x = static_cast<std::int32_t>(
+            std::min<std::uint32_t>(
+                features.max_workgroup_count_x,
+                static_cast<std::uint32_t>(
+                    std::numeric_limits<std::int32_t>::max()))),
+        .scalar_block_layout = features.scalar_block_layout,
+        .initialization_error = runtime.initialization_error(),
+        .device_local_bytes = static_cast<std::int64_t>(
+            std::min<std::uint64_t>(
+                features.device_local_bytes,
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max()))),
+        .software_device = features.software_device,
+    };
 }
 
 void service_pending_shader_compiles() {

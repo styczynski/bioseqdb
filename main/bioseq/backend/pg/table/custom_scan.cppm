@@ -86,6 +86,7 @@ import bioseq.pg_utils;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.scheduler.dispatch_buffer_api;
 import bioseq.scheduler.supervisor_pg;
+import bioseq.scheduler.supervisor_pg_vulkan;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.memory_admission;
 import bioseq.gpu.vulkan.runtime;
