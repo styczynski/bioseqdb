@@ -23,8 +23,8 @@ export namespace bioseq::codegen::safety {
     std::vector<std::string> legacy_macro_symbols,
     bool require_complete_codegen = true) {
     return {
-        .expected_main_identity_count = 270,
-        .expected_main_symbol_count = 268,
+        .expected_main_identity_count = 272,
+        .expected_main_symbol_count = 270,
         .expected_external_symbol_count = 1,
         .expected_retired_symbol_count = 117,
         .expected_shared_symbols = {
@@ -238,7 +238,7 @@ inline void validate_dso_closure(
     if (actual_fmgr_symbols != expected_fmgr_symbols) {
         detail::safety_failure(
             "DSO",
-            "fmgr/finfo exports are not exactly 268 bioseq symbols plus "
+            "fmgr/finfo exports are not exactly 270 bioseq symbols plus "
             "the bioseq_external handler");
     }
     for (const std::string& symbol : expected_fmgr_symbols) {

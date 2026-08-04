@@ -487,3 +487,7 @@ P484	primary	sql:function:bioseq.inspect_locator(bioseq.seq)
 P485	primary	sql:function:bioseq.create_query_target_sample_table(text,integer,bigint,double precision,bigint,double precision,double precision,double precision,double precision,double precision,double precision,bigint)
 P486	catalog_comment	sql:function:bioseq.create_query_target_sample_table(text,integer,bigint,double precision,bigint,double precision,double precision,double precision,double precision,double precision,double precision,bigint)
 P487	catalog_comment	sql:function:bioseq.inspect_locator(bioseq.seq)
+P488	primary	sql:function:bioseq_internal.highway_baseline_runnable_targets_for_test()
+P489	primary	sql:revoke:function:bioseq_internal.highway_baseline_runnable_targets_for_test():execute:public:ordinary
+P490	primary	sql:function:bioseq_internal.set_highway_target_for_test(bigint)
+P491	primary	sql:revoke:function:bioseq_internal.set_highway_target_for_test(bigint):execute:public:ordinary

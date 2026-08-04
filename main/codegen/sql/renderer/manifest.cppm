@@ -588,7 +588,7 @@ build_fmgr_ownership_inventory(
             "generated plus legacy fmgr ownership does not exactly cover "
             + std::string{
                 validate_reviewed_target
-                    ? "the reviewed 268-symbol main-extension closure"
+                    ? "the reviewed 270-symbol main-extension closure"
                     : "the normalized C-routine closure"});
     }
 

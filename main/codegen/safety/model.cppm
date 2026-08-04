@@ -547,8 +547,8 @@ struct dso_inventory {
 };
 
 struct dso_contract {
-    std::size_t expected_main_identity_count{270};
-    std::size_t expected_main_symbol_count{268};
+    std::size_t expected_main_identity_count{272};
+    std::size_t expected_main_symbol_count{270};
     std::size_t expected_external_symbol_count{1};
     std::size_t expected_retired_symbol_count{117};
     std::vector<std::string> expected_shared_symbols;

@@ -442,15 +442,15 @@ def _verify_enabled_manifest(manifest: dict[str, Any]) -> None:
         and statement.get("source_path") in EXTERNAL_SOURCE_PATHS
     ]
     expected_statement_ids = [
-        f"P{ordinal:03d}" for ordinal in range(488, 501)
+        f"P{ordinal:03d}" for ordinal in range(492, 505)
     ]
     if external_statement_ids != expected_statement_ids:
         raise RuntimeError(
-            "external physical ledger projection is not exactly P488-P500"
+            "external physical ledger projection is not exactly P492-P504"
         )
-    if manifest.get("physical_statement_count") != 500:
+    if manifest.get("physical_statement_count") != 504:
         raise RuntimeError(
-            "enabled package does not close over all 500 physical statements"
+            "enabled package does not close over all 504 physical statements"
         )
 
 
@@ -495,7 +495,7 @@ def verify(args: argparse.Namespace) -> str:
         expected_base_prefix = base_golden_bytes[:-1] + b"\n\n"
         if not sql_bytes.startswith(expected_base_prefix):
             raise RuntimeError(
-                "enabled external package changed the checked P001-P487 "
+                "enabled external package changed the checked P001-P491 "
                 "base SQL projection"
             )
         _verify_enabled_sql(sql)
@@ -504,7 +504,7 @@ def verify(args: argparse.Namespace) -> str:
         if sql_bytes != base_golden_bytes:
             raise RuntimeError(
                 "disabled external package differs from the checked "
-                "P001-P487 base SQL golden"
+                "P001-P491 base SQL golden"
             )
         if "bioseq_external" in sql:
             raise RuntimeError(
@@ -514,9 +514,9 @@ def verify(args: argparse.Namespace) -> str:
             raise RuntimeError(
                 "disabled SQL profile manifest contains external entities"
             )
-        if manifest.get("physical_statement_count") != 487:
+        if manifest.get("physical_statement_count") != 491:
             raise RuntimeError(
-                "disabled package changed the 487-statement base closure"
+                "disabled package changed the 491-statement base closure"
             )
     return digest
 

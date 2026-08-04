@@ -1508,7 +1508,7 @@ inline void run_safety_contract_self_tests() {
                 validate_dso_closure(
                     dso_ledger, bad, dso_policy);
             },
-            "268 bioseq symbols plus the bioseq_external handler");
+            "270 bioseq symbols plus the bioseq_external handler");
     }
     {
         safety_ledger bad = dso_ledger;

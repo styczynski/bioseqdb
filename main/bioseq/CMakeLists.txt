@@ -1987,10 +1987,10 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
     _bioseq_sql_external_physical_first)
   list(GET _bioseq_sql_external_physical_rows -1
     _bioseq_sql_external_physical_last)
-  if(NOT _bioseq_sql_external_physical_first MATCHES "^P488\t"
-      OR NOT _bioseq_sql_external_physical_last MATCHES "^P500\t")
+  if(NOT _bioseq_sql_external_physical_first MATCHES "^P492\t"
+      OR NOT _bioseq_sql_external_physical_last MATCHES "^P504\t")
     message(FATAL_ERROR
-      "External SQL physical ledger overlay must span P488 through P500")
+      "External SQL physical ledger overlay must span P492 through P504")
   endif()
   string(JOIN "\n" _bioseq_sql_external_physical_body
     ${_bioseq_sql_external_physical_rows})
@@ -4042,13 +4042,13 @@ if(TARGET bioseq_doc0388_ledgers)
     bioseq_doc0388_ledgers)
 endif()
 
-# The checked golden is the feature-disabled P001-P487 base package.  An
-# external-enabled configuration may verify its generated P488-P500 overlay,
+# The checked golden is the feature-disabled P001-P491 base package.  An
+# external-enabled configuration may verify its generated P492-P504 overlay,
 # but must never publish that optional package into the base source golden.
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
 add_custom_target(bioseq_sql_update_golden
   COMMAND "${CMAKE_COMMAND}" -E echo
-    "bioseq_sql_update_golden is disabled when BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON; configure the base profile to update the P001-P487 golden"
+    "bioseq_sql_update_golden is disabled when BIOSEQ_BUILD_EXTERNAL_API_CLIENTS=ON; configure the base profile to update the P001-P491 golden"
   COMMAND "${CMAKE_COMMAND}" -E false
   VERBATIM)
 else()

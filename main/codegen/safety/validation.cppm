@@ -21,8 +21,8 @@ import :model;
 export namespace bioseq::codegen::safety {
 
 struct ledger_policy {
-    std::size_t expected_parent_count{270};
-    std::size_t expected_symbol_count{268};
+    std::size_t expected_parent_count{272};
+    std::size_t expected_symbol_count{270};
     std::string expected_postgresql_tag{"REL_17_10"};
     std::string expected_postgresql_revision{
         "25c49f3a4a742ba283f5cc43cc7f1d361552e917"};

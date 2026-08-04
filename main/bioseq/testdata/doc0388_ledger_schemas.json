@@ -26,7 +26,7 @@
       "exact_counts": {
         "legacy_physical_declarations": 268,
         "legacy_effective_owners": 266,
-        "target_owners": 270
+        "target_owners": 272
       },
       "target_owner_fields": [
         "sql_identity", "legacy_source_id", "cpp_declaration", "source",

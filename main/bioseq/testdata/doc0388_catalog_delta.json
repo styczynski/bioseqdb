@@ -7,9 +7,9 @@
   },
   "catalog_contract": {
     "postgresql_major": 17,
-    "candidate_c_routine_identity_count": 270,
-    "candidate_c_link_symbol_count": 268,
-    "candidate_c_finfo_symbol_count": 268,
+    "candidate_c_routine_identity_count": 272,
+    "candidate_c_link_symbol_count": 270,
+    "candidate_c_finfo_symbol_count": 270,
     "legacy_to_candidate_prosrc_change_count": 124,
     "derived_routine_symbol_change_count": 118,
     "derived_input_name_routine_count": 169,

@@ -36,7 +36,7 @@ doc0388_external_fmgr_symbols{
     "bioseq_external_handler",
 };
 
-inline constexpr std::array<fmgr_migration_entry, 270>
+inline constexpr std::array<fmgr_migration_entry, 272>
 doc0388_fmgr_migration_ledger{{
     {"bioseq.bioseq_handler(internal)", "bioseq_handler", "bioseq_handler", fmgr_migration_disposition::unchanged},
     {"pg_catalog.alter_bioseq_table_set(regclass,int,int,name,int)", "alter_bioseq_table_set", "alter_bioseq_table_set", fmgr_migration_disposition::unchanged},
@@ -308,6 +308,8 @@ doc0388_fmgr_migration_ledger{{
     {"bioseq.create_sample_table(text,integer,bigint,text,bigint)", "create_sample_table", "bioseq_create_sample_table", fmgr_migration_disposition::retired_symbol},
     {"bioseq.inspect_locator(bioseq.seq)", "inspect_locator", "bioseq_locator_inspect", fmgr_migration_disposition::retired_symbol},
     {"bioseq.create_query_target_sample_table(text,integer,bigint,double precision,bigint,double precision,double precision,double precision,double precision,double precision,double precision,bigint)", "create_query_target_sample_table", "bioseq_create_query_target_sample_table", fmgr_migration_disposition::retired_symbol},
+    {"bioseq_internal.highway_baseline_runnable_targets_for_test()", "highway_baseline_runnable_targets_for_test", "", fmgr_migration_disposition::native_cpp_replacement},
+    {"bioseq_internal.set_highway_target_for_test(bigint)", "set_highway_target_for_test", "", fmgr_migration_disposition::native_cpp_replacement},
  }};
 
 namespace detail {
@@ -476,8 +478,8 @@ inline void validate_doc0388_fmgr_migration_ledger() {
             return !target_counts.contains(symbol);
         });
 
-    if (identities.size() != 270
-        || target_counts.size() != 268
+    if (identities.size() != 272
+        || target_counts.size() != 270
         || shared != expected_shared
         || external_symbols != expected_external_symbols
         || retired_symbol_reused
@@ -486,7 +488,7 @@ inline void validate_doc0388_fmgr_migration_ledger() {
         || unchanged != 144
         || shared_splits != 1
         || repaired != 6
-        || native != 2
+        || native != 4
         || retired_classes["bioseq"] != 37
         || retired_classes["internal"] != 33
         || retired_classes["stub"] != 21

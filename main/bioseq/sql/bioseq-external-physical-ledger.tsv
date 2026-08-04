@@ -1,15 +1,15 @@
 # bioseq external SQL physical ledger overlay v1
 # baseline_physical_id\tfacet\tnatural_owner_identity
-P488	primary	sql:function:bioseq.bioseq_external_handler(internal)
-P489	catalog_comment	sql:function:bioseq.bioseq_external_handler(internal)
-P490	primary	sql:access_method:$extension.bioseq::external::sql_routines.bioseq_external
-P491	primary	sql:schema:bioseq_external
-P492	primary	sql:table:bioseq_external.taxonomy
-P493	primary	sql:table:bioseq_external.catalog
-P494	primary	sql:table:bioseq_external.record_genes
-P495	primary	sql:table:bioseq_external.record_locations
-P496	primary	sql:table:bioseq_external.sequences
-P497	primary	sql:table:bioseq_external.sequence_chunks
-P498	primary	sql:revoke:schema:bioseq_external:all:public:ordinary
-P499	primary	sql:revoke:all tables in schema:bioseq_external:all:public:ordinary
-P500	primary	sql:revoke:function:bioseq.bioseq_external_handler(internal):execute:public:ordinary
+P492	primary	sql:function:bioseq.bioseq_external_handler(internal)
+P493	catalog_comment	sql:function:bioseq.bioseq_external_handler(internal)
+P494	primary	sql:access_method:$extension.bioseq::external::sql_routines.bioseq_external
+P495	primary	sql:schema:bioseq_external
+P496	primary	sql:table:bioseq_external.taxonomy
+P497	primary	sql:table:bioseq_external.catalog
+P498	primary	sql:table:bioseq_external.record_genes
+P499	primary	sql:table:bioseq_external.record_locations
+P500	primary	sql:table:bioseq_external.sequences
+P501	primary	sql:table:bioseq_external.sequence_chunks
+P502	primary	sql:revoke:schema:bioseq_external:all:public:ordinary
+P503	primary	sql:revoke:all tables in schema:bioseq_external:all:public:ordinary
+P504	primary	sql:revoke:function:bioseq.bioseq_external_handler(internal):execute:public:ordinary

@@ -47,8 +47,8 @@ struct safety_manifest {
 };
 
 struct manifest_closure_policy {
-    std::size_t expected_parent_count{270};
-    std::size_t expected_symbol_count{268};
+    std::size_t expected_parent_count{272};
+    std::size_t expected_symbol_count{270};
     std::set<std::string, std::less<>> shared_symbols{
         "from_array",
         "mmsearch",

@@ -1209,8 +1209,8 @@ class EvidenceError(ValueError):
 
 @dataclass(frozen=True)
 class LedgerPolicy:
-    expected_parent_count: int = 270
-    expected_symbol_count: int = 268
+    expected_parent_count: int = 272
+    expected_symbol_count: int = 270
     shared_symbols: frozenset[str] = field(
         default_factory=lambda: frozenset({"from_array", "mmsearch"})
     )
@@ -9724,8 +9724,8 @@ def validate_dso_closure(
     *,
     contract: str = "bioseq",
     allowed_dso_exports: tuple[str, ...] = (),
-    expected_main_identity_count: int = 270,
-    expected_main_symbol_count: int = 268,
+    expected_main_identity_count: int = 272,
+    expected_main_symbol_count: int = 270,
     expected_retired_symbol_count: int = 117,
     expected_shared_symbols: frozenset[str] = frozenset(
         {"from_array", "mmsearch"}
@@ -9929,7 +9929,7 @@ def validate_dso_closure(
             (
                 "routine identities do not close over symbol owners"
                 if manifest_contract
-                else "270 identities do not close over the exact 268 owners"
+                else "272 identities do not close over the exact 270 owners"
             ),
         )
     expected_sharing_group_count = (

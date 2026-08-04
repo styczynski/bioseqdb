@@ -215,7 +215,7 @@ EXPECTED_TABLES: dict[str, tuple[tuple[str, str, str, bool], ...]] = {
 }
 EXPECTED_COLUMN_COUNT = sum(len(columns) for columns in EXPECTED_TABLES.values())
 EXPECTED_EXTERNAL_STATEMENT_IDS = tuple(
-    f"P{ordinal:03d}" for ordinal in range(488, 501)
+    f"P{ordinal:03d}" for ordinal in range(492, 505)
 )
 POSTGRESQL_TOOLS = frozenset({
     "postgres",
@@ -622,9 +622,9 @@ def _validate_generated_manifest(
         raise ExternalAcceptanceError(
             "generated manifest does not bind the install SQL bytes"
         )
-    if manifest.get("physical_statement_count") != 500:
+    if manifest.get("physical_statement_count") != 504:
         raise ExternalAcceptanceError(
-            "external-enabled manifest does not contain exactly 500 "
+            "external-enabled manifest does not contain exactly 504 "
             "physical statements"
         )
     entities = manifest.get("entities")
@@ -739,7 +739,7 @@ def _validate_generated_manifest(
     )
     if external_statement_ids != EXPECTED_EXTERNAL_STATEMENT_IDS:
         raise ExternalAcceptanceError(
-            "external physical overlay is not exactly ordered P488-P500"
+            "external physical overlay is not exactly ordered P492-P504"
         )
     if manifest.get("external_legacy_macro_symbols") != [
         "bioseq_external_handler"
@@ -759,7 +759,7 @@ def _validate_generated_manifest(
         "install_sql_sha256": install_hash,
         "manifest_script_sha256": manifest["script_sha256"],
         "manifest_entity_count": len(entities),
-        "manifest_physical_statement_count": 500,
+        "manifest_physical_statement_count": 504,
         "external_top_level_identity_count": len(external_top_level),
         "external_column_identity_count": external_column_count,
         "external_statement_ids": list(external_statement_ids),
@@ -786,7 +786,7 @@ def _validate_external_ledger(
         rows.append((fields[0], fields[1], fields[2]))
     if tuple(row[0] for row in rows) != EXPECTED_EXTERNAL_STATEMENT_IDS:
         raise ExternalAcceptanceError(
-            "external ledger IDs are not exactly P488-P500"
+            "external ledger IDs are not exactly P492-P504"
         )
     statements = manifest.get("physical_statements")
     if not isinstance(statements, list):
@@ -3144,7 +3144,7 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "migration_install_action_count": 0,
         "transitional_install_owner_entity_count": 0,
         "script_sha256": _sha256(install_sql),
-        "physical_statement_count": 500,
+        "physical_statement_count": 504,
         "entity_count": len(entities),
         "entities": entities,
         "physical_statements": physical_statements,
@@ -3544,7 +3544,7 @@ def run_self_tests() -> None:
                 "generated_package", "install_sql_sha256", "2" * 64,
             ),
             "generated package physical count": (
-                "generated_package", "manifest_physical_statement_count", 499,
+                "generated_package", "manifest_physical_statement_count", 503,
             ),
             "generated package source join": (
                 "generated_package", "external_source_provenance",

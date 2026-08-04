@@ -2800,12 +2800,12 @@ def _validate_symbol_closure(
     c_symbols = _exact_string_inventory(
         c_symbols_raw,
         label="candidate manifest C link symbols",
-        expected_count=268,
+        expected_count=270,
     )
     finfo_symbols = _exact_string_inventory(
         finfo_raw,
         label="candidate manifest finfo symbols",
-        expected_count=268,
+        expected_count=270,
     )
     retired = _exact_string_inventory(
         retired_raw,
@@ -2988,9 +2988,9 @@ def _validate_symbol_closure(
         catalog_identity_to_symbol=actual_identity_to_symbol,
         exported_symbols=exports,
         external_legacy_symbols=external_symbols,
-        expected_identity_count=270,
-        expected_c_symbol_count=268,
-        expected_finfo_symbol_count=268,
+        expected_identity_count=272,
+        expected_c_symbol_count=270,
+        expected_finfo_symbol_count=270,
     )
     expected_exported_finfo = finfo_symbols | frozenset(
         f"pg_finfo_{symbol}" for symbol in external_symbols)
