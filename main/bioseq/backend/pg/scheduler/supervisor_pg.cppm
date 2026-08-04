@@ -23,6 +23,7 @@ export module bioseq.scheduler.supervisor_pg;
 import bioseq.indexing.type;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
+import bioseq.sql_guc_settings;
 import bioseq.storage.bucket_math;
 import bioseq.storage.indexing_pg.chunked_storage;
 
