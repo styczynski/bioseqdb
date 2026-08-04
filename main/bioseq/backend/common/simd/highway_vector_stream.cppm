@@ -217,7 +217,7 @@ private:
         : _data(d) {}
 
 public:
-    HWY_INLINE constexpr vec_stream() noexcept = default;
+    HWY_INLINE constexpr vec_stream() noexcept : _data{} {}
 
     [[nodiscard]] constexpr vec_t&       operator[](size_t s)       noexcept { return _data[s]; }
     [[nodiscard]] constexpr const vec_t& operator[](size_t s) const noexcept { return _data[s]; }
@@ -414,7 +414,7 @@ private:
         : _data(d) {}
 
 public:
-    HWY_INLINE constexpr mask_stream() noexcept = default;
+    HWY_INLINE constexpr mask_stream() noexcept : _data{} {}
 
     [[nodiscard]] constexpr mask_t&       operator[](size_t s)       noexcept { return _data[s]; }
     [[nodiscard]] constexpr const mask_t& operator[](size_t s) const noexcept { return _data[s]; }

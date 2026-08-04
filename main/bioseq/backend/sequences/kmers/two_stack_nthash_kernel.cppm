@@ -1497,10 +1497,10 @@ template<class D>
         const std::size_t half_lanes = lanes / 2;
         if (hn::Lanes(dh) != half_lanes) return false;
 
-        HWY_ALIGN std::array<half_vec_t, half_capacity> lower_left;
-        HWY_ALIGN std::array<half_vec_t, half_capacity> lower_right;
-        HWY_ALIGN std::array<half_vec_t, half_capacity> upper_left;
-        HWY_ALIGN std::array<half_vec_t, half_capacity> upper_right;
+        HWY_ALIGN std::array<half_vec_t, half_capacity> lower_left{};
+        HWY_ALIGN std::array<half_vec_t, half_capacity> lower_right{};
+        HWY_ALIGN std::array<half_vec_t, half_capacity> upper_left{};
+        HWY_ALIGN std::array<half_vec_t, half_capacity> upper_right{};
         for (std::size_t column = 0; column < half_lanes; ++column) {
             lower_left[column] = hn::LowerHalf(dh, matrix[column]);
             upper_left[column] = hn::UpperHalf(dh, matrix[column]);
@@ -2176,8 +2176,8 @@ process_exact_k15_w10_u32_group(
         add_proof_counter(state.proof.stable_compress_batches, 2);
         add_proof_counter(state.proof.direct_event_compress_batches, 1);
     } else {
-        std::array<v64_t, row_stride> event_lower;
-        std::array<v64_t, row_stride> event_upper;
+        std::array<v64_t, row_stride> event_lower{};
+        std::array<v64_t, row_stride> event_upper{};
         const v64_t max_raw_v = hn::Set(d64, maximum_raw);
         const auto emit_halves = split_u32_mask(d32, d64, emit_old);
         event_lower[0] = hn::IfThenElse(
@@ -2954,7 +2954,7 @@ process_chronological_candidate_block(
     // The slow tie path overwrites every row/column slot it reads.  Avoid a
     // fourth per-block zero-fill of the maximum-capacity matrix.
     HWY_ALIGN std::array<std::uint64_t, event_capacity> event_raw;
-    HWY_ALIGN std::array<vec_t, max_lanes> event_columns;
+    HWY_ALIGN std::array<vec_t, max_lanes> event_columns{};
     std::uint64_t first_window_tie_events = 0;
     std::uint64_t expiry_tie_events = 0;
     const vec_t v_max_raw = hn::Set(d, max_raw);
