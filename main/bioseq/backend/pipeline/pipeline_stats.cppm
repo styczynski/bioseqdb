@@ -23,10 +23,10 @@ module;
 export module bioseq.pipeline.stats;
 
 import bioseq.gpu.vulkan.runtime;
-import bioseq.highway.dispatch_contract;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.parallelism.memory_admission;
-import bioseq.sequences.minimap_port;
+import bioseq.pipeline.runtime_contract;
+import bioseq.prefilter.execution_contract;
 
 export namespace bioseq::pipeline_stats {
 

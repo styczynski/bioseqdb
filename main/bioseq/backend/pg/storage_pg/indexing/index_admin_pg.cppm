@@ -57,7 +57,7 @@ import bioseq.indexing.registry;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_hashmap_format6;
 import bioseq.indexing.minimizer_sequence;
-import bioseq.sequences.minimap_port;   // DOC0345 Patch I — MinimizerAlgorithmType (spec's bioseq.pipeline.minimap_port name does not exist)
+import bioseq.pipeline.runtime_contract;   // MinimizerAlgorithmType
 import bioseq.sequences.kmers;          // Legacy minimizer/index APIs
 import bioseq.sequences.kmers.highway_contract;  // Target-neutral minimizer model
 import bioseq.indexing.symbol_counts;
