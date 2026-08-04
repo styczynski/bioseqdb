@@ -2843,11 +2843,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "${_bioseq_sql_support_registry}"
       "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
       ${_bioseq_sql_support_sources}
-    # Each profile generation can precompile the full bioseq.mod closure.
-    # Keep production and test_indexes out of memory-pressure contention;
-    # otherwise two multi-gigabyte Clang processes can make no useful progress
-    # before the build worker's hard timeout.
-    JOB_POOL sql_codegen_ast_proof
     COMMENT
       "Generating ${_bioseq_sql_profile} SQL support modules"
     VERBATIM)
@@ -3037,6 +3032,9 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       ${BIOSEQ_SQL_${_bioseq_sql_profile_key}_SUPPORT_VECTOR_REGISTRY_MODULES}
       "${BIOSEQ_SQL_CORE_GENERATED_STAMP}"
       ${_bioseq_sql_final_sources}
+    # FINAL preparation precompiles the full bioseq.mod closure. Keep the
+    # production and test_indexes variants out of memory-pressure contention.
+    JOB_POOL sql_codegen_ast_proof
     COMMENT
       "Preparing ${_bioseq_sql_profile} Clang SQL final closure"
     DEPFILE "${_bioseq_sql_final_prepare_depfile}"
