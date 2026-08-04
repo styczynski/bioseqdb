@@ -2276,6 +2276,8 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     "${BIOSEQ_SQL_PROFILE_MODULE_ROOT}/${_bioseq_sql_profile}")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_MOD
     "${_bioseq_sql_fmgr_entrypoints_dir}/mod.entrypoints.cppm")
+  set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_HIGHWAY_TARGET_TEST_SUPPORT
+    "${_bioseq_sql_fmgr_entrypoints_dir}/highway_target_test_support.entrypoints.cppm")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_STORAGE_MANAGER
     "${_bioseq_sql_fmgr_entrypoints_dir}/storage_manager_sequence_storage_manager.entrypoints.cppm")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_TABLE_ACCESS_HOOKS
@@ -2298,6 +2300,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     "${_bioseq_sql_fmgr_entrypoints_dir}/vector_aggregate_registry.cppm")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINT_MODULES
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_MOD}"
+    "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_HIGHWAY_TARGET_TEST_SUPPORT}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_STORAGE_MANAGER}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_TABLE_ACCESS_HOOKS}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_STORAGE_LOAD_PG}"
@@ -2313,6 +2316,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_AGGREGATE_REGISTRY}")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FINAL_FMGR_ENTRYPOINT_MODULES
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_MOD}"
+    "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_HIGHWAY_TARGET_TEST_SUPPORT}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_STORAGE_MANAGER}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_TABLE_ACCESS_HOOKS}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_STORAGE_LOAD_PG}"
@@ -2342,6 +2346,7 @@ foreach(_bioseq_sql_output_name IN ITEMS
     ROW_CODECS_STORAGE_MANAGER
     ROW_CODECS_TABLE
     FMGR_ENTRYPOINTS_MOD
+    FMGR_ENTRYPOINTS_HIGHWAY_TARGET_TEST_SUPPORT
     FMGR_ENTRYPOINTS_STORAGE_MANAGER
     FMGR_ENTRYPOINTS_TABLE_ACCESS_HOOKS
     FMGR_ENTRYPOINTS_STORAGE_LOAD_PG
@@ -2539,6 +2544,13 @@ bioseq_register_sql_owner(
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS mod)
 bioseq_register_sql_owner(
+  OWNER_KEY highway_target_test_support
+  MODULE bioseq.highway_target_test_support
+  SOURCES backend/pg/highway_target_test_support.cppm
+  PROFILES production test_indexes
+  AUTHORITIES FINAL
+  FMGR_ENTRYPOINTS highway_target_test_support)
+bioseq_register_sql_owner(
   OWNER_KEY sequences_sample_table_udf
   MODULE bioseq.sequences.sample_table_udf
   SOURCES backend/pg/sequences_pg/sample_table_udf.cppm
@@ -2663,6 +2675,7 @@ bioseq_finalize_sql_owner_registry(
     storage_manager_sequence_storage_manager
   EXPECTED_FMGR_ENTRYPOINTS
     mod
+    highway_target_test_support
     storage_manager_sequence_storage_manager
     table_access_hooks
     storage_load_pg
@@ -3127,6 +3140,8 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       --fmgr-entrypoints-output
         "mod=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_MOD}"
       --fmgr-entrypoints-output
+        "highway_target_test_support=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_HIGHWAY_TARGET_TEST_SUPPORT}"
+      --fmgr-entrypoints-output
         "storage_manager_sequence_storage_manager=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_STORAGE_MANAGER}"
       --fmgr-entrypoints-output
         "table_access_hooks=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_TABLE_ACCESS_HOOKS}"
@@ -3409,6 +3424,8 @@ add_custom_command(
       "artifacts/handles/storage_manager_sequence_storage_manager.entity_handles.cppm=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_MANAGER_SEQUENCE}"
     --ordinary-output
       "artifacts/fmgr/mod.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_MOD}"
+    --ordinary-output
+      "artifacts/fmgr/highway_target_test_support.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_HIGHWAY_TARGET_TEST_SUPPORT}"
     --ordinary-output
       "artifacts/fmgr/storage_manager_sequence_storage_manager.entrypoints.cppm=${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_STORAGE_MANAGER}"
     --ordinary-output
@@ -4046,6 +4063,8 @@ set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR
   "${BIOSEQ_SQL_UPDATE_GOLDEN_DIR}/fmgr")
 set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_MOD
   "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/mod.entrypoints.cppm")
+set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_HIGHWAY_TARGET_TEST_SUPPORT
+  "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/highway_target_test_support.entrypoints.cppm")
 set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_MANAGER
   "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_DIR}/storage_manager_sequence_storage_manager.entrypoints.cppm")
 set(BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_TABLE_ACCESS_HOOKS
@@ -4068,6 +4087,7 @@ add_custom_target(bioseq_sql_update_golden
     "${BIOSEQ_SQL_UPDATE_GOLDEN_MANIFEST}"
     "${BIOSEQ_SQL_UPDATE_GOLDEN_STAMP}"
     "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_MOD}"
+    "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_HIGHWAY_TARGET_TEST_SUPPORT}"
     "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_MANAGER}"
     "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_TABLE_ACCESS_HOOKS}"
     "${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_LOAD_PG}"
@@ -4131,6 +4151,8 @@ add_custom_target(bioseq_sql_update_golden
       "table=${BIOSEQ_SQL_PRODUCTION_ROW_CODECS_TABLE}"
     --fmgr-entrypoints-output
       "mod=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_MOD}"
+    --fmgr-entrypoints-output
+      "highway_target_test_support=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_HIGHWAY_TARGET_TEST_SUPPORT}"
     --fmgr-entrypoints-output
       "storage_manager_sequence_storage_manager=${BIOSEQ_SQL_UPDATE_GOLDEN_FMGR_STORAGE_MANAGER}"
     --fmgr-entrypoints-output
