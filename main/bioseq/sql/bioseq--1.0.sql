@@ -3502,3 +3502,24 @@ SECURITY INVOKER;
 COMMENT ON FUNCTION bioseq.create_query_target_sample_table(text, integer, bigint, double precision, bigint, double precision, double precision, double precision, double precision, double precision, double precision, bigint) IS 'Creates synthetic query-target pairs with ground-truth coordinates.';
 
 COMMENT ON FUNCTION bioseq.inspect_locator(bioseq.seq) IS 'Decodes locator version, shard, fragment range, source epoch, and padding fields from a sequence value.';
+
+CREATE OR REPLACE FUNCTION bioseq_internal.highway_baseline_runnable_targets_for_test()
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'highway_baseline_runnable_targets_for_test'
+LANGUAGE C
+VOLATILE
+PARALLEL UNSAFE
+SECURITY INVOKER;
+
+REVOKE ALL ON FUNCTION bioseq_internal.highway_baseline_runnable_targets_for_test() FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION bioseq_internal.set_highway_target_for_test(target bigint)
+RETURNS text
+AS 'MODULE_PATHNAME', 'set_highway_target_for_test'
+LANGUAGE C
+VOLATILE
+PARALLEL UNSAFE
+SECURITY INVOKER
+STRICT;
+
+REVOKE ALL ON FUNCTION bioseq_internal.set_highway_target_for_test(bigint) FROM PUBLIC;
