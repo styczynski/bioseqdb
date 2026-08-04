@@ -103,10 +103,13 @@ file(GLOB_RECURSE BIOSEQ_PG_RUNTIME_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.h
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/*.hpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.hpp)
-set(BIOSEQ_PG_RUNTIME_OWNER
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_impl.cppm)
+set(BIOSEQ_PG_RUNTIME_OWNER_ALLOWLIST
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_impl.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_vulkan.cppm)
 foreach(_bioseq_pg_source IN LISTS BIOSEQ_PG_RUNTIME_GUARD_SOURCES)
-  if("${_bioseq_pg_source}" STREQUAL "${BIOSEQ_PG_RUNTIME_OWNER}")
+  list(FIND BIOSEQ_PG_RUNTIME_OWNER_ALLOWLIST
+    "${_bioseq_pg_source}" _bioseq_pg_runtime_owner_index)
+  if(NOT _bioseq_pg_runtime_owner_index EQUAL -1)
     continue()
   endif()
   file(READ "${_bioseq_pg_source}" _bioseq_pg_source_contents)
