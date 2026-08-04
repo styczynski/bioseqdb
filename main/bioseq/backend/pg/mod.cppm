@@ -97,7 +97,6 @@ import bioseq.storage.indexing_pg.admin;
 import bioseq.storage.indexing_pg.chunked_storage;
 import bioseq.storage.indexing_pg.handles;
 import bioseq.scheduler.supervisor_pg;
-import bioseq.scheduler.dispatch_processor;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.mode;
 import bioseq.common.sequan_compat;
@@ -106,7 +105,6 @@ import bioseq.pg_utils.nodes;
 import bioseq.table.scan_state;
 import bioseq.table;
 import bioseq.table.sql_rows;
-import bioseq.sequences.pipe;
 
 using namespace bioseq::pg_utils;
 
@@ -4454,19 +4452,6 @@ scheduler_stats() {
 	});
 	return bioseq::pg_utils::returns_table<
 		bioseq::pg::sql_rows::scheduler_stats_row>{std::move(rows)};
-}
-
-[[bioseq_sql::function({
-    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
-    .create = bioseq::sql::create_mode::or_replace,
-})]]
-[[bioseq_sql::revoke({
-    .privileges = bioseq::sql::privileges::all,
-    .from = bioseq::sql::public_role,
-})]]
-bool cpu_prepared_target_same_object_reprepare_probe() {
-	return bioseq::simd::BatchProcessor::
-		cpu_prepared_target_same_object_reprepare_probe();
 }
 
 [[bioseq_sql::function({

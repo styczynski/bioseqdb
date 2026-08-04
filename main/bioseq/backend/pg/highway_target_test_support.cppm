@@ -22,6 +22,7 @@ export module bioseq.highway_target_test_support;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.highway.dispatch_contract;
 import bioseq.pg_utils;
+import bioseq.scheduler.dispatch_processor;
 
 namespace {
 
@@ -65,6 +66,19 @@ struct HighwayTargetTestState {
 }  // namespace
 
 export namespace bioseq::pg::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .create = bioseq::sql::create_mode::or_replace,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::all,
+    .from = bioseq::sql::public_role,
+})]]
+bool cpu_prepared_target_same_object_reprepare_probe() {
+	return bioseq::simd::BatchProcessor::
+		cpu_prepared_target_same_object_reprepare_probe();
+}
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
