@@ -23,7 +23,7 @@ export module bioseq.mod;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.mod.alignment.sql_rows;
 import bioseq.mod.sql_rows;
-import bioseq.pg_utils.sql_boundary;
+import bioseq.pg_utils;
 import bioseq.table.sql_rows;
 
 export namespace bioseq::pg::sql_routines {
