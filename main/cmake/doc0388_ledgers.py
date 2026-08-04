@@ -34,6 +34,10 @@ _RESULT_SCHEMA = "bioseq_doc0388_result_identity_ledger/v1"
 _ROW_SCHEMA = "bioseq_doc0388_row_authority_migration_ledger/v1"
 _DISPOSITIONS = frozenset({"retain", "fold", "replace", "remove"})
 _ROUTINE_KINDS = frozenset({"create_function", "create_procedure"})
+_FMGR_TARGET_ONLY_IDENTITIES = frozenset({
+    "function:bioseq_internal.highway_baseline_runnable_targets_for_test()",
+    "function:bioseq_internal.set_highway_target_for_test(bigint)",
+})
 _ID_RE = re.compile(r"^([PS])(\d{3})$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _INDEX_TABLE_SHARD_IDENTITY = "table:bioseq_internal.index_table_shard"
@@ -150,7 +154,7 @@ _EXPECTED_SCHEMA_REGISTRY: dict[str, Any] = {
             "exact_counts": {
                 "legacy_physical_declarations": 268,
                 "legacy_effective_owners": 266,
-                "target_owners": 270,
+                "target_owners": 272,
             },
             "target_owner_fields": [
                 "sql_identity",
@@ -976,17 +980,17 @@ def _statement_manifest_index(
         raise LedgerError("candidate manifest lacks entities/physical_statements")
     if manifest.get("entity_count") != len(entities):
         raise LedgerError("candidate manifest entity_count is stale")
-    if len(entities) != 721:
+    if len(entities) != 725:
         raise LedgerError(
-            "production candidate manifest must contain exactly 721 entities")
+            "production candidate manifest must contain exactly 725 entities")
     if manifest.get("physical_statement_count") != len(physical):
         raise LedgerError("candidate manifest physical_statement_count is stale")
     if manifest.get("baseline_physical_statement_count") != len(physical):
         raise LedgerError(
             "candidate manifest baseline physical statement count is stale")
-    if len(physical) != 487:
+    if len(physical) != 491:
         raise LedgerError(
-            "candidate manifest must contain exactly 487 physical statements")
+            "candidate manifest must contain exactly 491 physical statements")
 
     by_identity: dict[str, Mapping[str, Any]] = {}
     for ordinal, entity in enumerate(entities):
@@ -1054,7 +1058,7 @@ def _statement_manifest_index(
         actual_statement_ids_by_owner.setdefault(owner_identity, []).append(
             str(statement_id))
 
-    if len(by_physical_id) != 487 or len(by_statement_id) != 487:
+    if len(by_physical_id) != 491 or len(by_statement_id) != 491:
         raise LedgerError(
             "candidate manifest physical/statement IDs are not unique")
     for identity, entity in by_identity.items():
@@ -2806,9 +2810,9 @@ def _fmgr_inventory(
     target_entities.sort(key=lambda entity: str(entity.get("identity")))
     boundary_contracts = manifest.get("routine_boundary_contracts")
     boundary_count = manifest.get("routine_boundary_contract_count")
-    if not isinstance(boundary_contracts, list) or boundary_count != 270:
+    if not isinstance(boundary_contracts, list) or boundary_count != 272:
         raise LedgerError(
-            "candidate manifest must expose exactly 270 structured "
+            "candidate manifest must expose exactly 272 structured "
             "routine-boundary contracts")
     boundary_by_identity: dict[str, Mapping[str, Any]] = {}
     for contract in boundary_contracts:
@@ -2855,8 +2859,11 @@ def _fmgr_inventory(
         sql_identity = str(entity.get("identity")).removeprefix("sql:")
         target.append({
             "sql_identity": sql_identity,
-            "legacy_source_id": _source_id_for_identity(
-                sql_identity, statements, renames),
+            "legacy_source_id": (
+                None
+                if sql_identity in _FMGR_TARGET_ONLY_IDENTITIES
+                else _source_id_for_identity(sql_identity, statements, renames)
+            ),
             "cpp_declaration": entity.get("cpp_declaration"),
             "source": {
                 "module": entity.get("source_module"),
@@ -2916,7 +2923,7 @@ def _fmgr_inventory(
     if result["counts"] != {
         "legacy_physical_declarations": 268,
         "legacy_effective_owners": 266,
-        "target_owners": 270,
+        "target_owners": 272,
     }:
         raise LedgerError(f"fmgr inventory count mismatch: {result['counts']}")
     return result
@@ -4078,7 +4085,7 @@ def _validate_projection_shape(value: Mapping[str, Any], schema: str) -> None:
         _FMGR_SCHEMA: {
             "legacy_physical_declarations": 268,
             "legacy_effective_owners": 266,
-            "target_owners": 270,
+            "target_owners": 272,
         },
         _RESULT_SCHEMA: {
             "returns_table": 18,
@@ -4773,7 +4780,7 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "production candidate manifest; required because the 118/six/309, "
-            "270-owner, 25-result and 14-row projections are manifest joins"
+            "272-owner, 25-result and 14-row projections are manifest joins"
         ),
     )
     parser.add_argument("--git", default="git")

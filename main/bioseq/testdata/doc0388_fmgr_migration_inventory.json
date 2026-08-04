@@ -3,7 +3,7 @@
   "counts": {
     "legacy_effective_owners": 266,
     "legacy_physical_declarations": 268,
-    "target_owners": 270
+    "target_owners": 272
   },
   "data_gaps": [],
   "legacy_effective_owners": [
@@ -6188,14 +6188,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 143908,
-          "byte_end": 144459,
+          "byte_begin": 13968,
+          "byte_end": 14124,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3661,
-          "line_end": 3675
+          "column_end": 29,
+          "line_begin": 442,
+          "line_end": 446
         }
       },
       "sql_identity": "function:$extension.bioseq_placeholder_support(internal)",
@@ -6227,14 +6227,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 139789,
-          "byte_end": 141008,
+          "byte_begin": 13245,
+          "byte_end": 13402,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3562,
-          "line_end": 3591
+          "column_end": 29,
+          "line_begin": 416,
+          "line_end": 420
         }
       },
       "sql_identity": "function:$extension.bioseq_symbol_count_support(internal)",
@@ -6275,14 +6275,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 116938,
-          "byte_end": 117779,
+          "byte_begin": 1128,
+          "byte_end": 1395,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 2888,
-          "line_end": 2912
+          "column_end": 21,
+          "line_begin": 41,
+          "line_end": 49
         }
       },
       "sql_identity": "function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
@@ -6295,7 +6295,7 @@
         {
           "converter_key": "argument.datum.opaque[bioseq.seq].nullable",
           "cpp_identifier": "el",
-          "cpp_type": "std::optional<Datum>",
+          "cpp_type": "std::__1::optional<Datum>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "el",
@@ -6304,7 +6304,7 @@
         {
           "converter_key": "argument.datum.opaque[bioseq.seq].nullable",
           "cpp_identifier": "query",
-          "cpp_type": "std::optional<Datum>",
+          "cpp_type": "std::__1::optional<Datum>",
           "nullable": true,
           "ordinal": 2,
           "sql_name": "query",
@@ -6313,7 +6313,7 @@
         {
           "converter_key": "argument.datum.opaque[bioseq_aligner_options].nullable",
           "cpp_identifier": "opts",
-          "cpp_type": "std::optional<Datum>",
+          "cpp_type": "std::__1::optional<Datum>",
           "nullable": true,
           "ordinal": 3,
           "sql_name": "opts",
@@ -6323,7 +6323,7 @@
       "legacy_source_id": "S390",
       "result": {
         "converter_key": "result.bool.by_value.nullable",
-        "cpp_type": "std::optional<bool>",
+        "cpp_type": "std::__1::optional<bool>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -6332,14 +6332,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 118124,
-          "byte_end": 119262,
+          "byte_begin": 1741,
+          "byte_end": 2249,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 2924,
-          "line_end": 2955
+          "column_end": 35,
+          "line_begin": 61,
+          "line_end": 74
         }
       },
       "sql_identity": "function:$extension.mmsearch(bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)",
@@ -6371,14 +6371,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 141410,
-          "byte_end": 142521,
+          "byte_begin": 13612,
+          "byte_end": 13758,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3605,
-          "line_end": 3632
+          "column_end": 29,
+          "line_begin": 429,
+          "line_end": 433
         }
       },
       "sql_identity": "function:$extension.mmsearch_support(internal)",
@@ -11315,7 +11315,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "dimension",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 2,
           "sql_name": "dimension",
@@ -11325,7 +11325,7 @@
       "legacy_source_id": "S315",
       "result": {
         "converter_key": "result.int64.by_value.nullable",
-        "cpp_type": "std::__1::optional<std::int64_t>",
+        "cpp_type": "std::__1::optional<std::__1::int64_t>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -11354,7 +11354,7 @@
         {
           "converter_key": "argument.table_am_handler.context.nullable",
           "cpp_identifier": "handler_context",
-          "cpp_type": "std::optional<bioseq::pg_utils::table_am_handler_context>",
+          "cpp_type": "std::__1::optional<bioseq::pg_utils::table_am_handler_context>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "handler_context",
@@ -11412,14 +11412,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 124991,
-          "byte_end": 125252,
+          "byte_begin": 6856,
+          "byte_end": 6996,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3135,
-          "line_end": 3143
+          "column_end": 18,
+          "line_begin": 216,
+          "line_end": 220
         }
       },
       "sql_identity": "function:bioseq.block_length(anyelement)",
@@ -11442,7 +11442,7 @@
       "legacy_source_id": "S316",
       "result": {
         "converter_key": "result.int64.by_value",
-        "cpp_type": "std::int64_t",
+        "cpp_type": "std::__1::int64_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -11490,14 +11490,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 126889,
-          "byte_end": 127148,
+          "byte_begin": 8165,
+          "byte_end": 8304,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3195,
-          "line_end": 3203
+          "column_end": 18,
+          "line_begin": 257,
+          "line_end": 261
         }
       },
       "sql_identity": "function:bioseq.chain_score(anyelement)",
@@ -11529,14 +11529,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 131357,
-          "byte_end": 131615,
+          "byte_begin": 11655,
+          "byte_end": 11787,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3336,
-          "line_end": 3344
+          "column_end": 18,
+          "line_begin": 365,
+          "line_end": 369
         }
       },
       "sql_identity": "function:bioseq.cigar(anyelement)",
@@ -11577,14 +11577,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 217537,
-          "byte_end": 218123,
+          "byte_begin": 32076,
+          "byte_end": 32285,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5709,
-          "line_end": 5729
+          "column_end": 33,
+          "line_begin": 1058,
+          "line_end": 1066
         }
       },
       "sql_identity": "function:bioseq.column_row_number(regclass,tid)",
@@ -11597,7 +11597,7 @@
         {
           "converter_key": "argument.text.owning.nullable",
           "cpp_identifier": "table_name",
-          "cpp_type": "std::optional<std::string>",
+          "cpp_type": "std::__1::optional<std::__1::string>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "table_name",
@@ -11606,7 +11606,7 @@
         {
           "converter_key": "argument.int32.by_value.nullable",
           "cpp_identifier": "fragment_count",
-          "cpp_type": "std::optional<std::int32_t>",
+          "cpp_type": "std::__1::optional<std::__1::int32_t>",
           "nullable": true,
           "ordinal": 2,
           "sql_name": "fragment_count",
@@ -11615,7 +11615,7 @@
         {
           "converter_key": "argument.int64.by_value.nullable",
           "cpp_identifier": "fragment_length_mean",
-          "cpp_type": "std::optional<std::int64_t>",
+          "cpp_type": "std::__1::optional<std::__1::int64_t>",
           "nullable": true,
           "ordinal": 3,
           "sql_name": "fragment_length_mean",
@@ -11624,7 +11624,7 @@
         {
           "converter_key": "argument.float64.by_value.nullable",
           "cpp_identifier": "fragment_length_stddev",
-          "cpp_type": "std::optional<double>",
+          "cpp_type": "std::__1::optional<double>",
           "nullable": true,
           "ordinal": 4,
           "sql_name": "fragment_length_stddev",
@@ -11633,7 +11633,7 @@
         {
           "converter_key": "argument.int64.by_value.nullable",
           "cpp_identifier": "reference_length",
-          "cpp_type": "std::optional<std::int64_t>",
+          "cpp_type": "std::__1::optional<std::__1::int64_t>",
           "nullable": true,
           "ordinal": 5,
           "sql_name": "reference_length",
@@ -11642,7 +11642,7 @@
         {
           "converter_key": "argument.float64.by_value.nullable",
           "cpp_identifier": "substitution_rate",
-          "cpp_type": "std::optional<double>",
+          "cpp_type": "std::__1::optional<double>",
           "nullable": true,
           "ordinal": 6,
           "sql_name": "substitution_rate",
@@ -11651,7 +11651,7 @@
         {
           "converter_key": "argument.float64.by_value.nullable",
           "cpp_identifier": "insertion_rate",
-          "cpp_type": "std::optional<double>",
+          "cpp_type": "std::__1::optional<double>",
           "nullable": true,
           "ordinal": 7,
           "sql_name": "insertion_rate",
@@ -11660,7 +11660,7 @@
         {
           "converter_key": "argument.float64.by_value.nullable",
           "cpp_identifier": "deletion_rate",
-          "cpp_type": "std::optional<double>",
+          "cpp_type": "std::__1::optional<double>",
           "nullable": true,
           "ordinal": 8,
           "sql_name": "deletion_rate",
@@ -11669,7 +11669,7 @@
         {
           "converter_key": "argument.float64.by_value.nullable",
           "cpp_identifier": "insertion_length_mean",
-          "cpp_type": "std::optional<double>",
+          "cpp_type": "std::__1::optional<double>",
           "nullable": true,
           "ordinal": 9,
           "sql_name": "insertion_length_mean",
@@ -11678,7 +11678,7 @@
         {
           "converter_key": "argument.float64.by_value.nullable",
           "cpp_identifier": "deletion_length_mean",
-          "cpp_type": "std::optional<double>",
+          "cpp_type": "std::__1::optional<double>",
           "nullable": true,
           "ordinal": 10,
           "sql_name": "deletion_length_mean",
@@ -11687,7 +11687,7 @@
         {
           "converter_key": "argument.float64.by_value.nullable",
           "cpp_identifier": "reverse_complement_rate",
-          "cpp_type": "std::optional<double>",
+          "cpp_type": "std::__1::optional<double>",
           "nullable": true,
           "ordinal": 11,
           "sql_name": "reverse_complement_rate",
@@ -11696,7 +11696,7 @@
         {
           "converter_key": "argument.int64.by_value.nullable",
           "cpp_identifier": "seed",
-          "cpp_type": "std::optional<std::int64_t>",
+          "cpp_type": "std::__1::optional<std::__1::int64_t>",
           "nullable": true,
           "ordinal": 12,
           "sql_name": "seed",
@@ -11735,7 +11735,7 @@
         {
           "converter_key": "argument.text.owning.nullable",
           "cpp_identifier": "table_name",
-          "cpp_type": "std::optional<std::string>",
+          "cpp_type": "std::__1::optional<std::__1::string>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "table_name",
@@ -11744,7 +11744,7 @@
         {
           "converter_key": "argument.int32.by_value.nullable",
           "cpp_identifier": "n_sequences",
-          "cpp_type": "std::optional<std::int32_t>",
+          "cpp_type": "std::__1::optional<std::__1::int32_t>",
           "nullable": true,
           "ordinal": 2,
           "sql_name": "n_sequences",
@@ -11753,7 +11753,7 @@
         {
           "converter_key": "argument.int64.by_value.nullable",
           "cpp_identifier": "sequence_bp_size",
-          "cpp_type": "std::optional<std::int64_t>",
+          "cpp_type": "std::__1::optional<std::__1::int64_t>",
           "nullable": true,
           "ordinal": 3,
           "sql_name": "sequence_bp_size",
@@ -11762,7 +11762,7 @@
         {
           "converter_key": "argument.text.owning.nullable",
           "cpp_identifier": "alphabet",
-          "cpp_type": "std::optional<std::string>",
+          "cpp_type": "std::__1::optional<std::__1::string>",
           "nullable": true,
           "ordinal": 4,
           "sql_name": "alphabet",
@@ -11771,7 +11771,7 @@
         {
           "converter_key": "argument.int64.by_value.nullable",
           "cpp_identifier": "seed",
-          "cpp_type": "std::optional<std::int64_t>",
+          "cpp_type": "std::__1::optional<std::__1::int64_t>",
           "nullable": true,
           "ordinal": 5,
           "sql_name": "seed",
@@ -11829,14 +11829,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 130710,
-          "byte_end": 130963,
+          "byte_begin": 11129,
+          "byte_end": 11260,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3315,
-          "line_end": 3323
+          "column_end": 18,
+          "line_begin": 348,
+          "line_end": 352
         }
       },
       "sql_identity": "function:bioseq.divergence(anyelement)",
@@ -11868,14 +11868,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 127434,
-          "byte_end": 127695,
+          "byte_begin": 8591,
+          "byte_end": 8731,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3212,
-          "line_end": 3220
+          "column_end": 18,
+          "line_begin": 270,
+          "line_end": 274
         }
       },
       "sql_identity": "function:bioseq.dp_max_score(anyelement)",
@@ -11907,14 +11907,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 120147,
-          "byte_end": 120400,
+          "byte_begin": 2956,
+          "byte_end": 3092,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 2983,
-          "line_end": 2991
+          "column_end": 18,
+          "line_begin": 96,
+          "line_end": 100
         }
       },
       "sql_identity": "function:bioseq.dp_score(anyelement)",
@@ -11936,14 +11936,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 215899,
-          "byte_end": 215989,
+          "byte_begin": 31372,
+          "byte_end": 31400,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5650,
-          "line_end": 5652
+          "column_end": 29,
+          "line_begin": 1029,
+          "line_end": 1029
         }
       },
       "sql_identity": "function:bioseq.drop_all_index_tables()",
@@ -11975,14 +11975,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 125582,
-          "byte_end": 126072,
+          "byte_begin": 7327,
+          "byte_end": 7459,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3154,
-          "line_end": 3169
+          "column_end": 18,
+          "line_begin": 231,
+          "line_end": 235
         }
       },
       "sql_identity": "function:bioseq.edit(anyelement)",
@@ -12004,7 +12004,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "width_bits",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 2,
           "sql_name": "width_bits",
@@ -12052,7 +12052,7 @@
         {
           "converter_key": "argument.text.owning",
           "cpp_identifier": "alphabet_name",
-          "cpp_type": "const std::string &",
+          "cpp_type": "const std::__1::string &",
           "nullable": false,
           "ordinal": 2,
           "sql_name": "alphabet_name",
@@ -12061,7 +12061,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "width_bits",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 3,
           "sql_name": "width_bits",
@@ -12110,7 +12110,7 @@
       "legacy_source_id": "S086",
       "result": {
         "converter_key": "result.int64.by_value",
-        "cpp_type": "std::int64_t",
+        "cpp_type": "std::__1::int64_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12148,14 +12148,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 131836,
-          "byte_end": 131966,
+          "byte_begin": 11923,
+          "byte_end": 11960,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3354,
-          "line_end": 3357
+          "column_end": 38,
+          "line_begin": 375,
+          "line_end": 375
         }
       },
       "sql_identity": "function:bioseq.gpu_warmup_shader_cache()",
@@ -12187,14 +12187,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 130174,
-          "byte_end": 130424,
+          "byte_begin": 10713,
+          "byte_end": 10842,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3298,
-          "line_end": 3306
+          "column_end": 18,
+          "line_begin": 335,
+          "line_end": 339
         }
       },
       "sql_identity": "function:bioseq.has_cigar(anyelement)",
@@ -12244,14 +12244,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 215509,
-          "byte_end": 215764,
+          "byte_begin": 31075,
+          "byte_end": 31236,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5635,
-          "line_end": 5644
+          "column_end": 25,
+          "line_begin": 1017,
+          "line_end": 1023
         }
       },
       "sql_identity": "function:bioseq.index_distinct_sub_keys(regclass,text,bigint)",
@@ -12292,14 +12292,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 175228,
-          "byte_end": 175443,
+          "byte_begin": 21165,
+          "byte_end": 21299,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4478,
-          "line_end": 4486
+          "column_end": 19,
+          "line_begin": 679,
+          "line_end": 684
         }
       },
       "sql_identity": "function:bioseq.index_table_row_count(regclass,text)",
@@ -12340,14 +12340,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 175578,
-          "byte_end": 176719,
+          "byte_begin": 21435,
+          "byte_end": 21651,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4492,
-          "line_end": 4524
+          "column_end": 19,
+          "line_begin": 690,
+          "line_end": 697
         }
       },
       "sql_identity": "function:bioseq.inspect_cold_no_index_absence(regclass,text)",
@@ -12436,14 +12436,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 181441,
-          "byte_end": 182073,
+          "byte_begin": 22987,
+          "byte_end": 23188,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4655,
-          "line_end": 4674
+          "column_end": 25,
+          "line_begin": 740,
+          "line_end": 747
         }
       },
       "sql_identity": "function:bioseq.inspect_ready_minimizer_format6_generation(regclass,text,bigint)",
@@ -12493,14 +12493,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 177220,
-          "byte_end": 180870,
+          "byte_begin": 22154,
+          "byte_end": 22415,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4539,
-          "line_end": 4636
+          "column_end": 25,
+          "line_begin": 713,
+          "line_end": 721
         }
       },
       "sql_identity": "function:bioseq.inspect_ready_minimizer_generation(regclass,text,bigint)",
@@ -12532,14 +12532,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 129636,
-          "byte_end": 129888,
+          "byte_begin": 10296,
+          "byte_end": 10426,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3281,
-          "line_end": 3289
+          "column_end": 18,
+          "line_begin": 322,
+          "line_end": 326
         }
       },
       "sql_identity": "function:bioseq.is_primary(anyelement)",
@@ -12571,14 +12571,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 129098,
-          "byte_end": 129350,
+          "byte_begin": 9879,
+          "byte_end": 10009,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3264,
-          "line_end": 3272
+          "column_end": 18,
+          "line_begin": 309,
+          "line_end": 313
         }
       },
       "sql_identity": "function:bioseq.is_reverse(anyelement)",
@@ -12600,14 +12600,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 153742,
-          "byte_end": 154610,
+          "byte_begin": 14779,
+          "byte_end": 14898,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3897,
-          "line_end": 3921
+          "column_end": 33,
+          "line_begin": 467,
+          "line_end": 469
         }
       },
       "sql_identity": "function:bioseq.last_alignment_execution_stats()",
@@ -12629,14 +12629,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 154745,
-          "byte_end": 155625,
+          "byte_begin": 15034,
+          "byte_end": 15159,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3927,
-          "line_end": 3951
+          "column_end": 36,
+          "line_begin": 475,
+          "line_end": 477
         }
       },
       "sql_identity": "function:bioseq.last_alignment_execution_stats_v2()",
@@ -12649,7 +12649,7 @@
       "legacy_source_id": "S402",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12658,14 +12658,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 155828,
-          "byte_end": 156248,
+          "byte_begin": 15363,
+          "byte_end": 15453,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3960,
-          "line_end": 3970
+          "column_end": 48,
+          "line_begin": 486,
+          "line_end": 487
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence()",
@@ -12678,7 +12678,7 @@
       "legacy_source_id": "S403",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12687,14 +12687,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 156451,
-          "byte_end": 156877,
+          "byte_begin": 15657,
+          "byte_end": 15750,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3979,
-          "line_end": 3989
+          "column_end": 51,
+          "line_begin": 496,
+          "line_end": 497
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v2()",
@@ -12707,7 +12707,7 @@
       "legacy_source_id": "S404",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12716,14 +12716,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 157080,
-          "byte_end": 157506,
+          "byte_begin": 15954,
+          "byte_end": 16047,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3998,
-          "line_end": 4008
+          "column_end": 51,
+          "line_begin": 506,
+          "line_end": 507
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v3()",
@@ -12736,7 +12736,7 @@
       "legacy_source_id": "S405",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12745,14 +12745,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 157709,
-          "byte_end": 158135,
+          "byte_begin": 16251,
+          "byte_end": 16344,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4017,
-          "line_end": 4027
+          "column_end": 51,
+          "line_begin": 516,
+          "line_end": 517
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v4()",
@@ -12765,7 +12765,7 @@
       "legacy_source_id": "S406",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12774,14 +12774,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 158338,
-          "byte_end": 158797,
+          "byte_begin": 16548,
+          "byte_end": 16641,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4036,
-          "line_end": 4046
+          "column_end": 51,
+          "line_begin": 526,
+          "line_end": 527
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v5()",
@@ -12794,7 +12794,7 @@
       "legacy_source_id": "S407",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12803,14 +12803,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 159000,
-          "byte_end": 159459,
+          "byte_begin": 16845,
+          "byte_end": 16938,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4055,
-          "line_end": 4065
+          "column_end": 51,
+          "line_begin": 536,
+          "line_end": 537
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v6()",
@@ -12823,7 +12823,7 @@
       "legacy_source_id": "S408",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12832,14 +12832,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 159662,
-          "byte_end": 160068,
+          "byte_begin": 17142,
+          "byte_end": 17225,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4074,
-          "line_end": 4084
+          "column_end": 41,
+          "line_begin": 546,
+          "line_end": 547
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format6_reader_evidence()",
@@ -12852,7 +12852,7 @@
       "legacy_source_id": "S409",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12861,14 +12861,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 160329,
-          "byte_end": 160781,
+          "byte_begin": 17487,
+          "byte_end": 17582,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4094,
-          "line_end": 4104
+          "column_end": 53,
+          "line_begin": 557,
+          "line_end": 558
         }
       },
       "sql_identity": "function:bioseq.last_alignment_persisted_gpu_operation_evidence_v1()",
@@ -12881,7 +12881,7 @@
       "legacy_source_id": "S410",
       "result": {
         "converter_key": "result.jsonb.owning.nullable",
-        "cpp_type": "std::optional<bioseq::pg_utils::sql_jsonb>",
+        "cpp_type": "std::__1::optional<bioseq::pg_utils::sql_jsonb>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -12890,14 +12890,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 161042,
-          "byte_end": 161493,
+          "byte_begin": 17844,
+          "byte_end": 17939,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4114,
-          "line_end": 4124
+          "column_end": 53,
+          "line_begin": 568,
+          "line_end": 569
         }
       },
       "sql_identity": "function:bioseq.last_alignment_persisted_gpu_operation_evidence_v2()",
@@ -12919,14 +12919,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 162087,
-          "byte_end": 162233,
+          "byte_begin": 18431,
+          "byte_end": 18472,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4147,
-          "line_end": 4150
+          "column_end": 42,
+          "line_begin": 589,
+          "line_end": 589
         }
       },
       "sql_identity": "function:bioseq.last_index_merge_run_count()",
@@ -12948,14 +12948,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 164881,
-          "byte_end": 166315,
+          "byte_begin": 19278,
+          "byte_end": 19385,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4217,
-          "line_end": 4245
+          "column_end": 23,
+          "line_begin": 617,
+          "line_end": 619
         }
       },
       "sql_identity": "function:bioseq.last_mps_build_stats()",
@@ -12978,7 +12978,7 @@
       "legacy_source_id": "S379",
       "result": {
         "converter_key": "result.int64.by_value",
-        "cpp_type": "std::int64_t",
+        "cpp_type": "std::__1::int64_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -13016,7 +13016,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "target_typmod",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 2,
           "sql_name": "target_typmod",
@@ -13131,7 +13131,7 @@
       "legacy_source_id": "S273",
       "result": {
         "converter_key": "result.int32.by_value",
-        "cpp_type": "std::int32_t",
+        "cpp_type": "std::__1::int32_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -13314,7 +13314,7 @@
       "legacy_source_id": "S274",
       "result": {
         "converter_key": "result.int32.by_value",
-        "cpp_type": "std::int32_t",
+        "cpp_type": "std::__1::int32_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -13352,7 +13352,7 @@
         {
           "converter_key": "argument.int64.by_value",
           "cpp_identifier": "seed",
-          "cpp_type": "std::int64_t",
+          "cpp_type": "std::__1::int64_t",
           "nullable": false,
           "ordinal": 2,
           "sql_name": "seed",
@@ -13362,7 +13362,7 @@
       "legacy_source_id": "S275",
       "result": {
         "converter_key": "result.int64.by_value",
-        "cpp_type": "std::int64_t",
+        "cpp_type": "std::__1::int64_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -13409,7 +13409,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "typmod",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 3,
           "sql_name": "typmod",
@@ -13649,7 +13649,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "typmod",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 3,
           "sql_name": "typmod",
@@ -13776,7 +13776,7 @@
       "legacy_source_id": "S260",
       "result": {
         "converter_key": "result.int32.by_value",
-        "cpp_type": "std::int32_t",
+        "cpp_type": "std::__1::int32_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -13805,7 +13805,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "typmod",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 1,
           "sql_name": "typmod",
@@ -13853,14 +13853,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 144884,
-          "byte_end": 153607,
+          "byte_begin": 14550,
+          "byte_end": 14643,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3688,
-          "line_end": 3891
+          "column_end": 16,
+          "line_begin": 459,
+          "line_end": 461
         }
       },
       "sql_identity": "function:bioseq.list_metadata()",
@@ -13873,7 +13873,7 @@
         {
           "converter_key": "argument.oid.by_value[regclass].nullable",
           "cpp_identifier": "target_table",
-          "cpp_type": "std::optional<Oid>",
+          "cpp_type": "std::__1::optional<Oid>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "target_table",
@@ -13882,7 +13882,7 @@
         {
           "converter_key": "argument.text.owning.nullable",
           "cpp_identifier": "file_path",
-          "cpp_type": "std::optional<std::string>",
+          "cpp_type": "std::__1::optional<std::__1::string>",
           "nullable": true,
           "ordinal": 2,
           "sql_name": "file_path",
@@ -13891,7 +13891,7 @@
         {
           "converter_key": "argument.text.owning.nullable",
           "cpp_identifier": "header_format",
-          "cpp_type": "std::optional<std::string>",
+          "cpp_type": "std::__1::optional<std::__1::string>",
           "nullable": true,
           "ordinal": 3,
           "sql_name": "header_format",
@@ -13900,7 +13900,7 @@
         {
           "converter_key": "argument.array.detoasted[bioseq.column_mapping[]].nullable",
           "cpp_identifier": "columns",
-          "cpp_type": "std::optional<ArrayType *>",
+          "cpp_type": "std::__1::optional<ArrayType *>",
           "nullable": true,
           "ordinal": 4,
           "sql_name": "columns",
@@ -13910,7 +13910,7 @@
       "legacy_source_id": "S397",
       "result": {
         "converter_key": "result.int64.by_value",
-        "cpp_type": "std::int64_t",
+        "cpp_type": "std::__1::int64_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -13958,14 +13958,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 126358,
-          "byte_end": 126603,
+          "byte_begin": 7746,
+          "byte_end": 7878,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3178,
-          "line_end": 3186
+          "column_end": 18,
+          "line_begin": 244,
+          "line_end": 248
         }
       },
       "sql_identity": "function:bioseq.mapq(anyelement)",
@@ -13997,14 +13997,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 124446,
-          "byte_end": 124705,
+          "byte_begin": 6430,
+          "byte_end": 6569,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3118,
-          "line_end": 3126
+          "column_end": 18,
+          "line_begin": 203,
+          "line_end": 207
         }
       },
       "sql_identity": "function:bioseq.num_matches(anyelement)",
@@ -14036,14 +14036,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 122014,
-          "byte_end": 122269,
+          "byte_begin": 4471,
+          "byte_end": 4608,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3042,
-          "line_end": 3050
+          "column_end": 18,
+          "line_begin": 143,
+          "line_end": 147
         }
       },
       "sql_identity": "function:bioseq.query_end(anyelement)",
@@ -14075,14 +14075,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 120686,
-          "byte_end": 120941,
+          "byte_begin": 3379,
+          "byte_end": 3516,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3000,
-          "line_end": 3008
+          "column_end": 18,
+          "line_begin": 109,
+          "line_end": 113
         }
       },
       "sql_identity": "function:bioseq.query_len(anyelement)",
@@ -14114,14 +14114,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 121349,
-          "byte_end": 121608,
+          "byte_begin": 3925,
+          "byte_end": 4064,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3021,
-          "line_end": 3029
+          "column_end": 18,
+          "line_begin": 126,
+          "line_end": 130
         }
       },
       "sql_identity": "function:bioseq.query_start(anyelement)",
@@ -14250,14 +14250,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 166450,
-          "byte_end": 168288,
+          "byte_begin": 19521,
+          "byte_end": 19638,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4251,
-          "line_end": 4286
+          "column_end": 28,
+          "line_begin": 625,
+          "line_end": 627
         }
       },
       "sql_identity": "function:bioseq.scheduler_mps_build_stats()",
@@ -14279,14 +14279,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 173343,
-          "byte_end": 173416,
+          "byte_begin": 20775,
+          "byte_end": 20799,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4425,
-          "line_end": 4427
+          "column_end": 25,
+          "line_begin": 665,
+          "line_end": 665
         }
       },
       "sql_identity": "function:bioseq.scheduler_restart()",
@@ -14308,14 +14308,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 173551,
-          "byte_end": 174670,
+          "byte_begin": 20935,
+          "byte_end": 21029,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4433,
-          "line_end": 4459
+          "column_end": 18,
+          "line_begin": 671,
+          "line_end": 673
         }
       },
       "sql_identity": "function:bioseq.scheduler_stats()",
@@ -14347,14 +14347,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 119548,
-          "byte_end": 119861,
+          "byte_begin": 2536,
+          "byte_end": 2669,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 2964,
-          "line_end": 2974
+          "column_end": 18,
+          "line_begin": 83,
+          "line_end": 87
         }
       },
       "sql_identity": "function:bioseq.score(anyelement)",
@@ -14386,14 +14386,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 128524,
-          "byte_end": 128812,
+          "byte_begin": 9443,
+          "byte_end": 9592,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3246,
-          "line_end": 3255
+          "column_end": 18,
+          "line_begin": 296,
+          "line_end": 300
         }
       },
       "sql_identity": "function:bioseq.secondary_chain_score(anyelement)",
@@ -14425,14 +14425,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 127981,
-          "byte_end": 128238,
+          "byte_begin": 9018,
+          "byte_end": 9156,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3229,
-          "line_end": 3237
+          "column_end": 18,
+          "line_begin": 283,
+          "line_end": 287
         }
       },
       "sql_identity": "function:bioseq.seed_count(anyelement)",
@@ -14454,7 +14454,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "target_typmod",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 2,
           "sql_name": "target_typmod",
@@ -14655,7 +14655,7 @@
         {
           "converter_key": "argument.text.owning",
           "cpp_identifier": "value",
-          "cpp_type": "const std::string &",
+          "cpp_type": "const std::__1::string &",
           "nullable": false,
           "ordinal": 2,
           "sql_name": "value",
@@ -14751,7 +14751,7 @@
         {
           "converter_key": "argument.varchar.owning",
           "cpp_identifier": "value",
-          "cpp_type": "const std::string &",
+          "cpp_type": "const std::__1::string &",
           "nullable": false,
           "ordinal": 2,
           "sql_name": "value",
@@ -15039,7 +15039,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "typmod",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 3,
           "sql_name": "typmod",
@@ -15279,7 +15279,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "typmod",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 3,
           "sql_name": "typmod",
@@ -15406,7 +15406,7 @@
       "legacy_source_id": "S253",
       "result": {
         "converter_key": "result.int32.by_value",
-        "cpp_type": "std::int32_t",
+        "cpp_type": "std::__1::int32_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -15435,7 +15435,7 @@
         {
           "converter_key": "argument.int32.by_value",
           "cpp_identifier": "typmod",
-          "cpp_type": "std::int32_t",
+          "cpp_type": "std::__1::int32_t",
           "nullable": false,
           "ordinal": 1,
           "sql_name": "typmod",
@@ -15502,14 +15502,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 216851,
-          "byte_end": 217402,
+          "byte_begin": 31814,
+          "byte_end": 31940,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5684,
-          "line_end": 5703
+          "column_end": 19,
+          "line_begin": 1047,
+          "line_end": 1052
         }
       },
       "sql_identity": "function:bioseq.set_active_read_index(regclass,text)",
@@ -15559,14 +15559,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 216124,
-          "byte_end": 216716,
+          "byte_begin": 31536,
+          "byte_end": 31678,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5658,
-          "line_end": 5678
+          "column_end": 21,
+          "line_begin": 1035,
+          "line_end": 1041
         }
       },
       "sql_identity": "function:bioseq.set_index_policy(regclass,text,text)",
@@ -15607,14 +15607,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 133956,
-          "byte_end": 136534,
+          "byte_begin": 12859,
+          "byte_end": 13035,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3406,
-          "line_end": 3474
+          "column_end": 25,
+          "line_begin": 402,
+          "line_end": 407
         }
       },
       "sql_identity": "function:bioseq.symbol_count(bioseq.seq,text)",
@@ -15646,14 +15646,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 123903,
-          "byte_end": 124160,
+          "byte_begin": 6005,
+          "byte_end": 6143,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3101,
-          "line_end": 3109
+          "column_end": 18,
+          "line_begin": 190,
+          "line_end": 194
         }
       },
       "sql_identity": "function:bioseq.target_end(anyelement)",
@@ -15685,14 +15685,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 122555,
-          "byte_end": 122812,
+          "byte_begin": 4895,
+          "byte_end": 5033,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3059,
-          "line_end": 3067
+          "column_end": 18,
+          "line_begin": 156,
+          "line_end": 160
         }
       },
       "sql_identity": "function:bioseq.target_len(anyelement)",
@@ -15724,14 +15724,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 123228,
-          "byte_end": 123489,
+          "byte_begin": 5450,
+          "byte_end": 5590,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3080,
-          "line_end": 3088
+          "column_end": 18,
+          "line_begin": 173,
+          "line_end": 177
         }
       },
       "sql_identity": "function:bioseq.target_start(anyelement)",
@@ -15792,7 +15792,7 @@
         {
           "converter_key": "argument.text.owning",
           "cpp_identifier": "value",
-          "cpp_type": "const std::string &",
+          "cpp_type": "const std::__1::string &",
           "nullable": false,
           "ordinal": 1,
           "sql_name": "value",
@@ -15967,7 +15967,7 @@
       "legacy_source_id": "S381",
       "result": {
         "converter_key": "result.int64.by_value",
-        "cpp_type": "std::int64_t",
+        "cpp_type": "std::__1::int64_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -16024,14 +16024,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 161723,
-          "byte_end": 161952,
+          "byte_begin": 18170,
+          "byte_end": 18295,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4133,
-          "line_end": 4141
+          "column_end": 19,
+          "line_begin": 578,
+          "line_end": 583
         }
       },
       "sql_identity": "function:bioseq.update_index(regclass,text)",
@@ -16044,7 +16044,7 @@
         {
           "converter_key": "argument.varchar.owning",
           "cpp_identifier": "value",
-          "cpp_type": "const std::string &",
+          "cpp_type": "const std::__1::string &",
           "nullable": false,
           "ordinal": 1,
           "sql_name": "value",
@@ -16101,14 +16101,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 132204,
-          "byte_end": 133402,
+          "byte_begin": 12199,
+          "byte_end": 12304,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 3365,
-          "line_end": 3389
+          "column_end": 24,
+          "line_begin": 383,
+          "line_end": 385
         }
       },
       "sql_identity": "function:bioseq.vulkan_runtime_status()",
@@ -16130,14 +16130,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 162858,
-          "byte_end": 164746,
+          "byte_begin": 19027,
+          "byte_end": 19142,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4172,
-          "line_end": 4211
+          "column_end": 27,
+          "line_begin": 609,
+          "line_end": 611
         }
       },
       "sql_identity": "function:bioseq_internal.active_read_policy_debug()",
@@ -16169,14 +16169,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 168546,
-          "byte_end": 170733,
+          "byte_begin": 19897,
+          "byte_end": 19957,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4296,
-          "line_end": 4351
+          "column_end": 61,
+          "line_begin": 637,
+          "line_end": 637
         }
       },
       "sql_identity": "function:bioseq_internal.arm_async_mps_worker_failure(text)",
@@ -16208,14 +16208,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 218503,
-          "byte_end": 219290,
+          "byte_begin": 32666,
+          "byte_end": 32728,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5743,
-          "line_end": 5766
+          "column_end": 63,
+          "line_begin": 1080,
+          "line_end": 1080
         }
       },
       "sql_identity": "function:bioseq_internal.arm_inline_sequence_pg_failure(text)",
@@ -16247,14 +16247,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 248730,
-          "byte_end": 255021,
+          "byte_begin": 33723,
+          "byte_end": 33782,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 6806,
-          "line_end": 6998
+          "column_end": 60,
+          "line_begin": 1120,
+          "line_end": 1120
         }
       },
       "sql_identity": "function:bioseq_internal.arm_sequence_source_failure(text)",
@@ -16286,14 +16286,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 260199,
-          "byte_end": 260293,
+          "byte_begin": 35115,
+          "byte_end": 35159,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7146,
-          "line_end": 7148
+          "column_end": 45,
+          "line_begin": 1166,
+          "line_end": 1166
         }
       },
       "sql_identity": "function:bioseq_internal.arm_slice_dsm_fixture(text)",
@@ -16315,14 +16315,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 171688,
-          "byte_end": 173208,
+          "byte_begin": 20513,
+          "byte_end": 20639,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4385,
-          "line_end": 4419
+          "column_end": 34,
+          "line_begin": 657,
+          "line_end": 659
         }
       },
       "sql_identity": "function:bioseq_internal.async_mps_worker_boundary_stats()",
@@ -16344,14 +16344,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "f77c978f739ad210c1fe1623dd65a1f80dfb60a1e89b3e7c88758b01b6b8aa3b",
+        "sha256": "9a7924c5d7f05b96a4980e8eb8056532a364a612fb750792f419471900fa791e",
         "span": {
-          "byte_begin": 811393,
-          "byte_end": 816138,
+          "byte_begin": 812885,
+          "byte_end": 817630,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 20549,
-          "line_end": 20662
+          "line_begin": 20593,
+          "line_end": 20706
         }
       },
       "sql_identity": "function:bioseq_internal.base_match_executor_translation_probe()",
@@ -16373,14 +16373,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "f77c978f739ad210c1fe1623dd65a1f80dfb60a1e89b3e7c88758b01b6b8aa3b",
+        "sha256": "9a7924c5d7f05b96a4980e8eb8056532a364a612fb750792f419471900fa791e",
         "span": {
-          "byte_begin": 379300,
-          "byte_end": 384798,
+          "byte_begin": 380852,
+          "byte_end": 386350,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 9478,
-          "line_end": 9643
+          "line_begin": 9522,
+          "line_end": 9687
         }
       },
       "sql_identity": "function:bioseq_internal.batch_join_projection_guard_probe()",
@@ -16466,14 +16466,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 185946,
-          "byte_end": 188703,
+          "byte_begin": 24410,
+          "byte_end": 24869,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4799,
-          "line_end": 4869
+          "column_end": 32,
+          "line_begin": 787,
+          "line_end": 802
         }
       },
       "sql_identity": "function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
@@ -16532,14 +16532,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 201638,
-          "byte_end": 206842,
+          "byte_begin": 29955,
+          "byte_end": 30236,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5256,
-          "line_end": 5398
+          "column_end": 22,
+          "line_begin": 979,
+          "line_end": 988
         }
       },
       "sql_identity": "function:bioseq_internal.build_ready_mpf_generation(regclass,text,bigint,text)",
@@ -16598,14 +16598,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 207263,
-          "byte_end": 215374,
+          "byte_begin": 30658,
+          "byte_end": 30939,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5412,
-          "line_end": 5629
+          "column_end": 22,
+          "line_begin": 1002,
+          "line_end": 1011
         }
       },
       "sql_identity": "function:bioseq_internal.build_ready_mps_generation(regclass,text,bigint,text)",
@@ -16655,14 +16655,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 197291,
-          "byte_end": 197823,
+          "byte_begin": 27510,
+          "byte_end": 27737,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5110,
-          "line_end": 5128
+          "column_end": 20,
+          "line_begin": 892,
+          "line_end": 901
         }
       },
       "sql_identity": "function:bioseq_internal.copy_primary_index_shape(regclass,regclass,text)",
@@ -16682,16 +16682,16 @@
         "sql_type": "boolean"
       },
       "source": {
-        "module": "bioseq.mod",
-        "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "module": "bioseq.highway_target_test_support",
+        "path": "main/bioseq/backend/pg/highway_target_test_support.cppm",
+        "sha256": "d89a482ef6e4479b3c736af2bd3581202d6a3a85ff7e235f9804aa523d31f996",
         "span": {
-          "byte_begin": 174928,
-          "byte_end": 175093,
+          "byte_begin": 2084,
+          "byte_end": 2234,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4469,
-          "line_end": 4472
+          "line_begin": 78,
+          "line_end": 81
         }
       },
       "sql_identity": "function:bioseq_internal.cpu_prepared_target_same_object_reprepare_probe()",
@@ -16741,14 +16741,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 222576,
-          "byte_end": 224072,
+          "byte_begin": 33317,
+          "byte_end": 33468,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5880,
-          "line_end": 5927
+          "column_end": 25,
+          "line_begin": 1104,
+          "line_end": 1110
         }
       },
       "sql_identity": "function:bioseq_internal.delete_index_manifest(regclass,text,bigint)",
@@ -16770,14 +16770,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 170991,
-          "byte_end": 171430,
+          "byte_begin": 20216,
+          "byte_end": 20254,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4361,
-          "line_end": 4375
+          "column_end": 39,
+          "line_begin": 647,
+          "line_end": 647
         }
       },
       "sql_identity": "function:bioseq_internal.disarm_async_mps_worker_failure()",
@@ -16799,14 +16799,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 255275,
-          "byte_end": 255505,
+          "byte_begin": 34037,
+          "byte_end": 34074,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7008,
-          "line_end": 7015
+          "column_end": 38,
+          "line_begin": 1130,
+          "line_end": 1130
         }
       },
       "sql_identity": "function:bioseq_internal.disarm_sequence_source_failure()",
@@ -16904,14 +16904,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 199087,
-          "byte_end": 199620,
+          "byte_begin": 28668,
+          "byte_end": 28875,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5172,
-          "line_end": 5189
+          "column_end": 27,
+          "line_begin": 935,
+          "line_end": 942
         }
       },
       "sql_identity": "function:bioseq_internal.exercise_generation_session_failure(regclass,text,bigint,text)",
@@ -16999,18 +16999,47 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 182658,
-          "byte_end": 183426,
+          "byte_begin": 23774,
+          "byte_end": 24007,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4693,
-          "line_end": 4715
+          "column_end": 33,
+          "line_begin": 766,
+          "line_end": 773
         }
       },
       "sql_identity": "function:bioseq_internal.format6_parallel_scan_probe(regclass,text,bigint,integer)",
       "target_symbol": "format6_parallel_scan_probe"
+    },
+    {
+      "cpp_declaration": "bioseq::pg::sql_routines::highway_baseline_runnable_targets_for_test",
+      "injected_context": [],
+      "inputs": [],
+      "legacy_source_id": null,
+      "result": {
+        "converter_key": "result.int64.by_value",
+        "cpp_type": "std::__1::int64_t",
+        "nullable": false,
+        "representation": "scalar",
+        "row_cpp_declaration": null,
+        "sql_type": "bigint"
+      },
+      "source": {
+        "module": "bioseq.highway_target_test_support",
+        "path": "main/bioseq/backend/pg/highway_target_test_support.cppm",
+        "sha256": "d89a482ef6e4479b3c736af2bd3581202d6a3a85ff7e235f9804aa523d31f996",
+        "span": {
+          "byte_begin": 2492,
+          "byte_end": 2845,
+          "column_begin": 1,
+          "column_end": 2,
+          "line_begin": 91,
+          "line_end": 103
+        }
+      },
+      "sql_identity": "function:bioseq_internal.highway_baseline_runnable_targets_for_test()",
+      "target_symbol": "highway_baseline_runnable_targets_for_test"
     },
     {
       "cpp_declaration": "bioseq::pg::sql_routines::inspect_generation_storage_transition",
@@ -17065,14 +17094,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 200016,
-          "byte_end": 201248,
+          "byte_begin": 29272,
+          "byte_end": 29564,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5203,
-          "line_end": 5242
+          "column_end": 24,
+          "line_begin": 956,
+          "line_end": 965
         }
       },
       "sql_identity": "function:bioseq_internal.inspect_generation_storage_transition(regclass,text,bigint,text)",
@@ -17085,7 +17114,7 @@
       "legacy_source_id": "S356",
       "result": {
         "converter_key": "result.int64.by_value",
-        "cpp_type": "std::int64_t",
+        "cpp_type": "std::__1::int64_t",
         "nullable": false,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -17152,14 +17181,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "f77c978f739ad210c1fe1623dd65a1f80dfb60a1e89b3e7c88758b01b6b8aa3b",
+        "sha256": "9a7924c5d7f05b96a4980e8eb8056532a364a612fb750792f419471900fa791e",
         "span": {
-          "byte_begin": 548338,
-          "byte_end": 561094,
+          "byte_begin": 549890,
+          "byte_end": 562646,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 13902,
-          "line_end": 14201
+          "line_begin": 13946,
+          "line_end": 14245
         }
       },
       "sql_identity": "function:bioseq_internal.match_helper_wrapper_propagation_probe()",
@@ -17191,14 +17220,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "f77c978f739ad210c1fe1623dd65a1f80dfb60a1e89b3e7c88758b01b6b8aa3b",
+        "sha256": "9a7924c5d7f05b96a4980e8eb8056532a364a612fb750792f419471900fa791e",
         "span": {
-          "byte_begin": 828521,
-          "byte_end": 829663,
+          "byte_begin": 830013,
+          "byte_end": 831155,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 20951,
-          "line_end": 20985
+          "line_begin": 20995,
+          "line_end": 21029
         }
       },
       "sql_identity": "function:bioseq_internal.match_owner_finalization_scope_diagnostics(boolean)",
@@ -17342,14 +17371,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 189105,
-          "byte_end": 193119,
+          "byte_begin": 25272,
+          "byte_end": 25729,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4883,
-          "line_end": 4989
+          "column_end": 32,
+          "line_begin": 816,
+          "line_end": 831
         }
       },
       "sql_identity": "function:bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
@@ -17408,14 +17437,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 196311,
-          "byte_end": 196898,
+          "byte_begin": 26910,
+          "byte_end": 27116,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5079,
-          "line_end": 5096
+          "column_end": 32,
+          "line_begin": 871,
+          "line_end": 878
         }
       },
       "sql_identity": "function:bioseq_internal.remove_sequence_fragment(regclass,text,bigint,integer)",
@@ -17437,14 +17466,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 162491,
-          "byte_end": 162600,
+          "byte_begin": 18731,
+          "byte_end": 18768,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 4160,
-          "line_end": 4162
+          "column_end": 38,
+          "line_begin": 599,
+          "line_end": 599
         }
       },
       "sql_identity": "function:bioseq_internal.reset_active_read_policy_debug()",
@@ -17466,14 +17495,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 255759,
-          "byte_end": 256046,
+          "byte_begin": 34329,
+          "byte_end": 34366,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7025,
-          "line_end": 7033
+          "column_end": 38,
+          "line_begin": 1140,
+          "line_end": 1140
         }
       },
       "sql_identity": "function:bioseq_internal.reset_sequence_source_counters()",
@@ -17523,14 +17552,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 198214,
-          "byte_end": 198716,
+          "byte_begin": 28129,
+          "byte_end": 28296,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5142,
-          "line_end": 5158
+          "column_end": 24,
+          "line_begin": 915,
+          "line_end": 921
         }
       },
       "sql_identity": "function:bioseq_internal.rewrite_source_checksum(regclass,bigint,bigint)",
@@ -17616,14 +17645,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 193545,
-          "byte_end": 195951,
+          "byte_begin": 26156,
+          "byte_end": 26549,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5003,
-          "line_end": 5065
+          "column_end": 32,
+          "line_begin": 845,
+          "line_end": 857
         }
       },
       "sql_identity": "function:bioseq_internal.scan_minimizer_generation_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
@@ -17636,7 +17665,7 @@
         {
           "converter_key": "argument.datum.opaque[bioseq.seq].nullable",
           "cpp_identifier": "sequence",
-          "cpp_type": "std::optional<Datum>",
+          "cpp_type": "std::__1::optional<Datum>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "sequence",
@@ -17646,7 +17675,7 @@
       "legacy_source_id": "S372",
       "result": {
         "converter_key": "result.bool.by_value.nullable",
-        "cpp_type": "std::optional<bool>",
+        "cpp_type": "std::__1::optional<bool>",
         "nullable": true,
         "representation": "scalar",
         "row_cpp_declaration": null,
@@ -17655,14 +17684,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 262137,
-          "byte_end": 262572,
+          "byte_begin": 36406,
+          "byte_end": 36575,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7211,
-          "line_end": 7226
+          "column_end": 32,
+          "line_begin": 1208,
+          "line_end": 1212
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_facade_orientation_probe(bioseq.seq)",
@@ -17723,14 +17752,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 256368,
-          "byte_end": 259828,
+          "byte_begin": 34689,
+          "byte_end": 34743,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7046,
-          "line_end": 7133
+          "column_end": 55,
+          "line_begin": 1153,
+          "line_end": 1153
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_counters()",
@@ -17752,14 +17781,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 261042,
-          "byte_end": 261287,
+          "byte_begin": 35710,
+          "byte_end": 35753,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7175,
-          "line_end": 7182
+          "column_end": 44,
+          "line_begin": 1186,
+          "line_end": 1186
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_fault_contract_probe()",
@@ -17781,14 +17810,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 262826,
-          "byte_end": 263058,
+          "byte_begin": 36830,
+          "byte_end": 36870,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7236,
-          "line_end": 7243
+          "column_end": 41,
+          "line_begin": 1222,
+          "line_end": 1222
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_pre_prepare_probe()",
@@ -17810,14 +17839,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 261541,
-          "byte_end": 261780,
+          "byte_begin": 36008,
+          "byte_end": 36048,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7192,
-          "line_end": 7199
+          "column_end": 41,
+          "line_begin": 1196,
+          "line_end": 1196
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_route_alias_probe()",
@@ -17839,18 +17868,57 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 260547,
-          "byte_end": 260788,
+          "byte_begin": 35414,
+          "byte_end": 35455,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 7158,
-          "line_end": 7165
+          "column_end": 42,
+          "line_begin": 1176,
+          "line_end": 1176
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_wrong_thread_probe()",
       "target_symbol": "sequence_source_wrong_thread_probe"
+    },
+    {
+      "cpp_declaration": "bioseq::pg::sql_routines::set_highway_target_for_test",
+      "injected_context": [],
+      "inputs": [
+        {
+          "converter_key": "argument.int64.by_value",
+          "cpp_identifier": "target",
+          "cpp_type": "std::__1::int64_t",
+          "nullable": false,
+          "ordinal": 1,
+          "sql_name": "target",
+          "sql_type": "bigint"
+        }
+      ],
+      "legacy_source_id": null,
+      "result": {
+        "converter_key": "result.text.owning",
+        "cpp_type": "std::__1::string",
+        "nullable": false,
+        "representation": "scalar",
+        "row_cpp_declaration": null,
+        "sql_type": "text"
+      },
+      "source": {
+        "module": "bioseq.highway_target_test_support",
+        "path": "main/bioseq/backend/pg/highway_target_test_support.cppm",
+        "sha256": "d89a482ef6e4479b3c736af2bd3581202d6a3a85ff7e235f9804aa523d31f996",
+        "span": {
+          "byte_begin": 3103,
+          "byte_end": 5052,
+          "column_begin": 1,
+          "column_end": 2,
+          "line_begin": 113,
+          "line_end": 176
+        }
+      },
+      "sql_identity": "function:bioseq_internal.set_highway_target_for_test(bigint)",
+      "target_symbol": "set_highway_target_for_test"
     },
     {
       "cpp_declaration": "bioseq::pg_types::sql_routines::slice_payload_allocation_probe",
@@ -18137,14 +18205,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "703bfe906509df547698425e3ab9fc782c75e2b91e19d3141802a52e615c8545",
+        "sha256": "dcf6938f95083871bf5849cc147cb26783b539dcacd1d5a09944be67bd39b0b6",
         "span": {
-          "byte_begin": 219434,
-          "byte_end": 222432,
+          "byte_begin": 32873,
+          "byte_end": 33172,
           "column_begin": 1,
-          "column_end": 2,
-          "line_begin": 5772,
-          "line_end": 5874
+          "column_end": 38,
+          "line_begin": 1086,
+          "line_end": 1098
         }
       },
       "sql_identity": "function:bioseq_internal.write_index_chunk(regclass,text,bigint,bigint,integer,bytea)",
@@ -18157,7 +18225,7 @@
         {
           "converter_key": "argument.oid.by_value[regclass].nullable",
           "cpp_identifier": "table_name",
-          "cpp_type": "std::optional<Oid>",
+          "cpp_type": "std::__1::optional<Oid>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "table_name",
@@ -18166,7 +18234,7 @@
         {
           "converter_key": "argument.bool.by_value.nullable",
           "cpp_identifier": "chunk_group_row_limit",
-          "cpp_type": "std::optional<bool>",
+          "cpp_type": "std::__1::optional<bool>",
           "nullable": true,
           "ordinal": 2,
           "sql_name": "chunk_group_row_limit",
@@ -18175,7 +18243,7 @@
         {
           "converter_key": "argument.bool.by_value.nullable",
           "cpp_identifier": "stripe_row_limit",
-          "cpp_type": "std::optional<bool>",
+          "cpp_type": "std::__1::optional<bool>",
           "nullable": true,
           "ordinal": 3,
           "sql_name": "stripe_row_limit",
@@ -18184,7 +18252,7 @@
         {
           "converter_key": "argument.bool.by_value.nullable",
           "cpp_identifier": "compression",
-          "cpp_type": "std::optional<bool>",
+          "cpp_type": "std::__1::optional<bool>",
           "nullable": true,
           "ordinal": 4,
           "sql_name": "compression",
@@ -18193,7 +18261,7 @@
         {
           "converter_key": "argument.bool.by_value.nullable",
           "cpp_identifier": "compression_level",
-          "cpp_type": "std::optional<bool>",
+          "cpp_type": "std::__1::optional<bool>",
           "nullable": true,
           "ordinal": 5,
           "sql_name": "compression_level",
@@ -18232,7 +18300,7 @@
         {
           "converter_key": "argument.oid.by_value[regclass].nullable",
           "cpp_identifier": "table_name",
-          "cpp_type": "std::optional<Oid>",
+          "cpp_type": "std::__1::optional<Oid>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "table_name",
@@ -18241,7 +18309,7 @@
         {
           "converter_key": "argument.int32.by_value.nullable",
           "cpp_identifier": "chunk_group_row_limit",
-          "cpp_type": "std::optional<std::int32_t>",
+          "cpp_type": "std::__1::optional<std::__1::int32_t>",
           "nullable": true,
           "ordinal": 2,
           "sql_name": "chunk_group_row_limit",
@@ -18250,7 +18318,7 @@
         {
           "converter_key": "argument.int32.by_value.nullable",
           "cpp_identifier": "stripe_row_limit",
-          "cpp_type": "std::optional<std::int32_t>",
+          "cpp_type": "std::__1::optional<std::__1::int32_t>",
           "nullable": true,
           "ordinal": 3,
           "sql_name": "stripe_row_limit",
@@ -18259,7 +18327,7 @@
         {
           "converter_key": "argument.name.owning.nullable",
           "cpp_identifier": "compression",
-          "cpp_type": "std::optional<NameData>",
+          "cpp_type": "std::__1::optional<NameData>",
           "nullable": true,
           "ordinal": 4,
           "sql_name": "compression",
@@ -18268,7 +18336,7 @@
         {
           "converter_key": "argument.int32.by_value.nullable",
           "cpp_identifier": "compression_level",
-          "cpp_type": "std::optional<std::int32_t>",
+          "cpp_type": "std::__1::optional<std::__1::int32_t>",
           "nullable": true,
           "ordinal": 5,
           "sql_name": "compression_level",
@@ -18314,7 +18382,7 @@
         {
           "converter_key": "argument.oid.by_value[regclass].nullable",
           "cpp_identifier": "rel",
-          "cpp_type": "std::optional<Oid>",
+          "cpp_type": "std::__1::optional<Oid>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "rel",

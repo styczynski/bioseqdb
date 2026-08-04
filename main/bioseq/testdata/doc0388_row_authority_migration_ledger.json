@@ -422,9 +422,9 @@
             {
               "classification": "comment",
               "line_numbers": [
-                92
+                93
               ],
-              "matching_mentions_sha256": "d8cbd6225357eb2e4b5bf92d6f159f906f4006d7423f525808d4bedb6e454a14",
+              "matching_mentions_sha256": "11a8a75e592d7ac6b7f8a34071caa8b1d3da58155031001248f047458900cc71",
               "mention_count": 1,
               "source_path": "main/bioseq/backend/pg/storage_pg/indexing/index_admin_pg.cppm",
               "tokens": [
@@ -459,7 +459,7 @@
             }
           ],
           "production_consumer_count": 0,
-          "scan_sha256": "d28c92dc274a3ebbeaea97eb7e57b726510851bcdafa0c1ac6f910bfd696a99d",
+          "scan_sha256": "66f0f45f47d3256af0428ced465c6e62e7db248be3bf3be1ab9730afec5ec432",
           "scope": "main/bioseq/backend/**/*.{cppm,cpp}"
         },
         "historical_source_scans": [
