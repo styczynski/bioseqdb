@@ -29,11 +29,14 @@ module bioseq.scheduler.supervisor_pg;
 
 import bioseq.common.mlogging;
 import bioseq.instr;
+import bioseq.parallelism.concepts;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.pg_utils;
 import bioseq.indexing.minimizer_sequence;
+import bioseq.sequences.kmers.highway_contract;
+import bioseq.storage.manager;
 import bioseq.storage.lazy;
 import bioseq.storage.scanner;
 import bioseq.storage.scanner_pg;
