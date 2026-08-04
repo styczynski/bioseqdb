@@ -104,7 +104,7 @@ file(GLOB_RECURSE BIOSEQ_PG_RUNTIME_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/*.hpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/**/*.hpp)
 set(BIOSEQ_PG_RUNTIME_OWNER_ALLOWLIST
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_impl.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_shader_impl.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_vulkan.cppm)
 foreach(_bioseq_pg_source IN LISTS BIOSEQ_PG_RUNTIME_GUARD_SOURCES)
   list(FIND BIOSEQ_PG_RUNTIME_OWNER_ALLOWLIST
@@ -1792,6 +1792,7 @@ set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer_api_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_shader_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_mps_impl.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES}

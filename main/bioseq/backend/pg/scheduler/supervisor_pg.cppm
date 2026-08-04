@@ -7,12 +7,16 @@ module;
 #include "common.h"
 
 extern "C" {
+#include "miscadmin.h"
+#include "port/atomics.h"
+#include "storage/condition_variable.h"
 #include "storage/dsm_impl.h"
 #include "utils/snapshot.h"
 }
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <span>
 #include <string>
@@ -21,6 +25,7 @@ extern "C" {
 export module bioseq.scheduler.supervisor_pg;
 
 import bioseq.indexing.type;
+import bioseq.gpu.vulkan.shader_variants;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.sql_guc_settings;
@@ -191,6 +196,144 @@ void disarm_async_mps_worker_pg_failure() noexcept;
 // These declarations are intentionally not exported to importers.
 namespace bioseq::parallelism::pg {
 
+[[nodiscard]] inline bool is_standalone_backend_process() noexcept {
+    return MyBackendType == B_STANDALONE_BACKEND
+        && !IsPostmasterEnvironment
+        && !IsUnderPostmaster;
+}
+
+struct PgSchedulerStats {
+    static constexpr std::size_t kInflightSlots =
+        bioseq::parallelism::SchedulerStats::kInflightSlots;
+    pg_atomic_uint64 batches_scheduled;
+    pg_atomic_uint64 batches_processed;
+    pg_atomic_uint64 batches_in_flight;
+    pg_atomic_uint64 queries_waiting;
+    pg_atomic_uint64 queries_processed;
+    pg_atomic_uint64 rate_window_start_ns;
+    pg_atomic_uint64 rate_window_start_queries;
+    pg_atomic_uint64 restart_ns;
+    pg_atomic_uint64 inflight_submit_ns[kInflightSlots];
+    pg_atomic_uint32 inflight_generation[kInflightSlots];
+    pg_atomic_uint64 inflight_seq;
+};
+
+struct PgPersistQueueSlot {
+    pg_atomic_uint32 state;
+    pg_atomic_uint32 generation;
+    Oid db_oid;
+    Oid user_relid;
+    Oid tablespace_oid;
+    Oid main_relfilenode;
+    std::int16_t column_attno;
+    std::uint8_t bucket_idx;
+    std::uint32_t shard_idx;
+    std::uint64_t sequence_rowno;
+    std::uint64_t payload_bytes;
+    dsm_handle dsm;
+    std::uint32_t payload_kind;
+    std::int32_t requested_provider;
+};
+
+enum class RuntimeInitState : std::uint32_t {
+    Pending = 0,
+    Ready = 1,
+    Failed = 2,
+};
+
+enum class CompileSlotState : std::uint32_t {
+    Free = 0,
+    Filling = 1,
+    Requested = 2,
+    Compiling = 3,
+    DoneOk = 4,
+    DoneErr = 5,
+};
+
+struct ShaderCompileSlot {
+    pg_atomic_uint32 state;
+    pg_atomic_uint32 generation;
+    bioseq::gpu::vulkan::ShaderVariantKey key{};
+    std::uint32_t requester_pid = 0;
+    std::uint32_t errc = 0;
+};
+
+inline constexpr std::uint32_t kShaderCacheOkWireValue = 0;
+
+struct PgMpsBuildStats {
+    pg_atomic_uint64 generation;
+    pg_atomic_uint64 backend_pid;
+    pg_atomic_uint64 db_oid;
+    pg_atomic_uint64 relfilenode;
+    pg_atomic_uint64 sequence_rowno;
+    pg_atomic_uint64 total_run_count;
+    pg_atomic_uint64 resident_runs;
+    pg_atomic_uint64 file_runs;
+    pg_atomic_uint64 resident_run_bytes;
+    pg_atomic_uint64 resident_peak_bytes;
+    pg_atomic_uint64 spilled_run_bytes;
+    pg_atomic_uint64 postgres_temp_file_bytes;
+    pg_atomic_uint64 postgres_temp_file_count;
+    pg_atomic_uint64 merge_reader_buffer_bytes;
+    pg_atomic_uint64 merge_pass_count;
+    pg_atomic_uint64 spill_count_from_pressure;
+    pg_atomic_uint64 resident_demotions;
+    pg_atomic_uint64 position_spill_bytes;
+    pg_atomic_uint64 position_spill_count;
+    pg_atomic_uint64 worker_build_ns;
+    pg_atomic_uint64 pipeline_mode;
+    pg_atomic_uint64 max_concurrency;
+    pg_atomic_uint64 index_memory_cap_mb;
+    pg_atomic_uint64 lazy_worker_shareable;
+};
+
+/*
+ * Cross-backend evidence for the asynchronous MPS worker's PostgreSQL leaf
+ * seams.  These counters live in scheduler shared memory because the backend
+ * that arms an integration failure is not the background worker that consumes
+ * it.  The injection selector is one-shot: the worker atomically clears it
+ * before raising the requested ERROR.
+ */
+struct PgAsyncMpsWorkerBoundaryStats {
+    pg_atomic_uint64 relation_leaf_calls;
+    pg_atomic_uint64 spi_leaf_calls;
+    pg_atomic_uint64 materialize_interrupt_leaf_calls;
+    pg_atomic_uint64 materialize_scanner_read_leaf_calls;
+    pg_atomic_uint64 pg_leaf_failures;
+    pg_atomic_uint64 injected_pg_leaf_failures;
+    pg_atomic_uint64 materialize_admissions;
+    pg_atomic_uint64 materialize_failure_unwinds;
+    pg_atomic_uint64 materialize_admission_restored;
+    pg_atomic_uint64 materialize_admission_mismatches;
+    pg_atomic_uint32 last_failure_point;
+    pg_atomic_uint32 armed_failure_point;
+};
+
+struct BioseqSchedulerShared {
+    pg_atomic_uint32 cfg_max_concurrency;
+    pg_atomic_uint32 cfg_generation;
+    pg_atomic_uint32 state;
+    PgSchedulerStats stats;
+    PgMpsBuildStats mps_build_stats;
+    PgAsyncMpsWorkerBoundaryStats async_mps_worker_boundary_stats;
+    static constexpr std::size_t kPersistQueueSize = 64;
+    PgPersistQueueSlot persist_queue[kPersistQueueSize];
+    pg_atomic_uint32 runtime_init_state;
+    pg_atomic_uint32 runtime_init_generation;
+    ConditionVariable runtime_init_cv;
+    pg_atomic_uint32 runtime_init_errc;
+    char cache_digest_hex[33];
+    pg_atomic_uint32 supervisor_pgprocno;
+    pg_atomic_uint32 supervisor_generation;
+    static constexpr std::size_t kCompileQueueSize = 64;
+    ShaderCompileSlot compile_queue[kCompileQueueSize];
+    ConditionVariable compile_done_cv;
+};
+
+inline BioseqSchedulerShared* g_shared = nullptr;
+
+static_assert(alignof(BioseqSchedulerShared) <= MAXIMUM_ALIGNOF);
+
 enum class PersistPayloadKind : std::uint32_t {
     none = 0,
     prohibited_legacy_dsm = 1,
@@ -251,5 +394,10 @@ void process_mps_build_claim(
     const char* base,
     Size mapped,
     Snapshot registered_snapshot);
+
+[[nodiscard]] std::expected<void, std::string> load_bioseq_runtime();
+void publish_runtime_init_result(
+    std::expected<void, std::string> result) noexcept;
+void service_pending_shader_compiles();
 
 } // namespace bioseq::parallelism::pg
