@@ -34,6 +34,7 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.pg_utils;
+import bioseq.sql_guc_settings;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.sequences.kmers.highway_contract;
 import bioseq.storage.manager;
