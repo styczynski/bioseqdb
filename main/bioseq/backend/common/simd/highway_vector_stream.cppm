@@ -210,11 +210,14 @@ private:
     // Phase 1 worked because each `vec_t` was an independent local.
     std::array<vec_t, W> _data;
 
-    // Explicit private constructor used by pack/splat factories. Since _data
-    // is private, the type is non-aggregate and brace-init `vec_stream{...}`
-    // would otherwise be ill-formed.
-    explicit HWY_INLINE constexpr vec_stream(std::array<vec_t, W> d) noexcept
-        : _data(d) {}
+    // Explicit private constructor used by pack/splat factories. Construct
+    // the array elements in-place so target-specific vector copies stay in
+    // this target-attributed project callable instead of libc++'s implicit
+    // std::array copy constructor.
+    template <typename... Vs>
+    requires (sizeof...(Vs) == W && (std::is_convertible_v<Vs, vec_t> && ...))
+    explicit HWY_INLINE constexpr vec_stream(Vs... vs) noexcept
+        : _data{ static_cast<vec_t>(vs)... } {}
 
 public:
     HWY_INLINE constexpr vec_stream() noexcept : _data{} {}
@@ -230,7 +233,7 @@ public:
     template <typename... Vs>
     requires (sizeof...(Vs) == W && (std::is_convertible_v<Vs, vec_t> && ...))
     [[nodiscard]] static HWY_INLINE constexpr vec_stream pack(Vs... vs) noexcept {
-        return vec_stream{ std::array<vec_t, W>{ static_cast<vec_t>(vs)... } };
+        return vec_stream{ static_cast<vec_t>(vs)... };
     }
 
     /// All-slots-equal factory.
@@ -410,8 +413,10 @@ private:
     // See comment on vec_stream::_data — same SROA rationale.
     std::array<mask_t, W> _data;
 
-    explicit HWY_INLINE constexpr mask_stream(std::array<mask_t, W> d) noexcept
-        : _data(d) {}
+    template <typename... Ms>
+    requires (sizeof...(Ms) == W && (std::is_convertible_v<Ms, mask_t> && ...))
+    explicit HWY_INLINE constexpr mask_stream(Ms... ms) noexcept
+        : _data{ static_cast<mask_t>(ms)... } {}
 
 public:
     HWY_INLINE constexpr mask_stream() noexcept : _data{} {}
@@ -425,7 +430,7 @@ public:
     template <typename... Ms>
     requires (sizeof...(Ms) == W && (std::is_convertible_v<Ms, mask_t> && ...))
     [[nodiscard]] static HWY_INLINE constexpr mask_stream pack(Ms... ms) noexcept {
-        return mask_stream{ std::array<mask_t, W>{ static_cast<mask_t>(ms)... } };
+        return mask_stream{ static_cast<mask_t>(ms)... };
     }
 
     [[nodiscard]] static HWY_INLINE mask_stream splat_false(tag_t d) noexcept {
