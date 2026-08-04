@@ -183,6 +183,18 @@ struct converter_binding final {
         result.pop_back();
     }
     if (result.starts_with("::")) result.erase(0, 2);
+    constexpr std::string_view libcxx_inline_namespace{
+        "std::__1::"};
+    constexpr std::string_view canonical_std_namespace{"std::"};
+    for (std::size_t offset = result.find(libcxx_inline_namespace);
+         offset != std::string::npos;
+         offset = result.find(libcxx_inline_namespace, offset)) {
+        result.replace(
+            offset,
+            libcxx_inline_namespace.size(),
+            canonical_std_namespace);
+        offset += canonical_std_namespace.size();
+    }
     return result;
 }
 

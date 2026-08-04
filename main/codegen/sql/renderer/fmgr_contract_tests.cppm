@@ -1631,6 +1631,11 @@ inline void run_fmgr_renderer_contract_tests() {
             "bioseq::sql::pg::boolean, bool>",
             "boolean",
             true);
+        const auto libcxx_int64_result =
+            fmgr_detail::scalar_converter(
+                "std::__1::int64_t",
+                "bigint",
+                true);
         const auto nullable_column = fmgr_detail::scalar_converter(
             "std::optional<bioseq::pg_utils::vector_column<"
             "bioseq::sql::pg::smallint, std::int16_t>>",
@@ -1719,6 +1724,8 @@ inline void run_fmgr_renderer_contract_tests() {
                     == "argument.vector_operand[character,bpchar_view]"
                 && boolean_result.key
                     == "result.vector_result[boolean,bool]"
+                && libcxx_int64_result.key
+                    == "result.int64.by_value"
                 && nullable_column.key
                     == "argument.vector_column[smallint,int16_t].nullable"
                 && nullable_any_mask.key
