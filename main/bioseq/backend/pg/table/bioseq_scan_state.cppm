@@ -37,7 +37,7 @@ import bioseq.vector.types;
 import bioseq.storage.metadata;   // DOC0322 §9.2 — ParallelBioseqColumnScan (was types.h)
 import bioseq.pg_utils.lists;
 import bioseq.pg_utils.bitmapset;
-import bioseq.sequences.pipe;
+import bioseq.pipeline.stats;
 
 /*
  * DOC0371 \u00a75.2 \u2014 PostgreSQL-only statement-attestation values shared by
