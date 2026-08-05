@@ -326,7 +326,7 @@ struct parsed_slot_callable final {
 inline void validate_no_forbidden_source_macros(
     const std::filesystem::path& path,
     std::string_view source) {
-    static constexpr std::array<std::string_view, 18> forbidden{
+    static constexpr std::array<std::string_view, 19> forbidden{
         "HWY_TARGET_INCLUDE",
         "hwy/foreach_target.h",
         "HWY_ONCE",
@@ -344,6 +344,7 @@ inline void validate_no_forbidden_source_macros(
         "DisableTargets",
         "select_highway_target_once",
         "registered_highway_dispatch_info",
+        "registered_highway_target_binding",
         "STATIC_FACADE",
     };
     for (std::string_view spelling : forbidden) {
@@ -418,7 +419,7 @@ inline void validate_slot_expression(const slot_spec& slot) {
             "Highway slot '" + slot.family_field + "." + slot.slot_field
             + "' expression must contain {target_namespace} exactly once");
     }
-    static constexpr std::array<std::string_view, 11> forbidden{
+    static constexpr std::array<std::string_view, 12> forbidden{
         "HWY_DYNAMIC_DISPATCH",
         "HWY_DYNAMIC_POINTER",
         "HWY_STATIC_DISPATCH",
@@ -430,6 +431,7 @@ inline void validate_slot_expression(const slot_spec& slot) {
         "SupportedTargets",
         "select_highway_target_once",
         "registered_highway_dispatch_info",
+        "registered_highway_target_binding",
     };
     static_assert(!forbidden.back().empty());
     for (std::string_view spelling : forbidden) {

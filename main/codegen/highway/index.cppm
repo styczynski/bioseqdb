@@ -472,9 +472,11 @@ inline void run_contract_self_test() {
             != std::string::npos
         || inventory->content.find("registered_highway_dispatch_info")
             == std::string::npos
-        || inventory->content.find("import") != std::string::npos
         || inventory->content.find("registered_highway_target_binding")
-            != std::string::npos
+            == std::string::npos
+        || inventory->content.find(
+               "import bioseq.highway.generated.x86_64.emu128;")
+            == std::string::npos
         || inventory->content.find("hwy::") != std::string::npos
         || generated.policy_evidence_json.find(
                "\"path\":\"highway_registry.cppm\"")

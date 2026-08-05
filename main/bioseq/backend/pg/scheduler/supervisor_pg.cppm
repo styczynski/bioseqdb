@@ -25,6 +25,7 @@ extern "C" {
 export module bioseq.scheduler.supervisor_pg;
 
 import bioseq.indexing.type;
+import bioseq.sequences.kmers.highway_contract;
 import bioseq.gpu.vulkan.shader_variants;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.mode;
@@ -165,6 +166,7 @@ void disarm_async_mps_stage_pg_failure() noexcept;
     std::int32_t max_concurrency,
     std::int32_t index_memory_cap_mb,
     std::int32_t index_sketch_backend,
+    std::int64_t highway_executed_target,
     int requested_provider_wire_value);
 
 void install_scheduler_shmem_hooks();
@@ -353,6 +355,7 @@ struct MpsBuildMetadata {
     std::int32_t max_concurrency = 0;
     std::int32_t index_memory_cap_mb = 0;
     std::int32_t index_sketch_backend = 0;
+    std::int64_t highway_executed_target = 0;
     IndexPayloadStorageBackend requested_provider =
         IndexPayloadStorageBackend::postgres_relation;
 };
@@ -374,6 +377,10 @@ void init_async_mps_worker_boundary_stats(
     PgAsyncMpsWorkerBoundaryStats& stats);
 [[nodiscard]] std::optional<MpsBuildMetadata>
 parse_mps_build_metadata(const char* base, Size mapped);
+[[nodiscard]] const bioseq::minimizers::MinimizerKernels*
+rebind_minimizer_kernels_for_backend(
+    std::int32_t backend_value,
+    std::int64_t highway_executed_target);
 [[nodiscard]] bool worker_target_accepts_index_persist(
     const PersistTarget& target,
     std::string_view index_name);

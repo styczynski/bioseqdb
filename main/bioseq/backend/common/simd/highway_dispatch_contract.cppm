@@ -269,6 +269,16 @@ static_assert(std::is_trivially_copyable_v<HighwayTargetBinding>);
 [[nodiscard]] HighwayDispatchInfo
 registered_highway_dispatch_info() noexcept;
 
+/**
+ * Rebind one already-selected target bit in the current process.
+ *
+ * PostgreSQL workers receive only this stable target identity through DSM.
+ * The generated implementation performs a direct exact-bit lookup; it does
+ * not detect a target or invoke another Highway dynamic dispatch root.
+ */
+[[nodiscard]] const HighwayTargetBinding&
+registered_highway_target_binding(std::int64_t exact_target);
+
 /** Format each single target bit in Highway priority order via TargetName(). */
 [[nodiscard]] std::vector<std::string_view> highway_target_names(
     std::int64_t mask);

@@ -26,6 +26,12 @@ export namespace bioseq::codegen::highway {
 
 namespace detail {
 
+[[nodiscard]] inline std::string generated_module_name(
+    const target_spec& target) {
+    return "bioseq.highway.generated." + target.platform + "."
+        + target.slug;
+}
+
 [[nodiscard]] inline std::vector<
     namespace_materialization::materialization_coordinate>
 build_target_coordinates(const target_manifest& inventory) {
@@ -45,8 +51,7 @@ build_target_coordinates(const target_manifest& inventory) {
                 },
             },
             .identity_namespace = target.name_space,
-            .module_name = "bioseq.highway.generated." + target.platform
-                + "." + target.slug,
+            .module_name = generated_module_name(target),
             .relative_path = std::filesystem::path{target.platform}
                 / target.slug / "index.cppm",
             .topology_digest = inventory.policy_digest,
@@ -1095,13 +1100,48 @@ inline void render_minimizer_wrappers(
     std::ostringstream output;
     output << "module;\n\n"
            << "#include <cstdint>\n"
-           << "\n"
+           << "#include <stdexcept>\n\n"
            << "// Generated cold Highway inventory; do not edit.\n"
-           << "module " << plan.source_inventory.contract_module << ";\n\n"
-           << "namespace bioseq::simd_dispatch {\n\n"
+           << "module " << plan.source_inventory.contract_module << ";\n\n";
+    for (const target_spec& target : plan.target_inventory.targets) {
+        output << "import " << generated_module_name(target) << ";\n";
+    }
+    output << "\nnamespace bioseq::simd_dispatch {\n\n"
            << "HighwayDispatchInfo registered_highway_dispatch_info() noexcept {\n"
            << "    return highway_dispatch_info(static_cast<std::int64_t>("
            << compiled_mask << "ULL));\n"
+           << "}\n\n"
+           << "const HighwayTargetBinding& registered_highway_target_binding(\n"
+              "    const std::int64_t exact_target) {\n"
+           << "    const auto target = static_cast<std::uint64_t>(exact_target);\n"
+           << "    const HighwayDispatchInfo plan =\n"
+              "        registered_highway_dispatch_info();\n"
+           << "    if (exact_target <= 0 || (target & (target - 1ULL)) != 0\n"
+              "        || (plan.compiled_targets & exact_target) == 0\n"
+              "        || (plan.runnable_targets & exact_target) == 0) {\n"
+           << "        throw std::logic_error{\n"
+              "            \"Highway exact-target rebind requires one compiled runnable bit\"};\n"
+           << "    }\n"
+           << "    const HighwayTargetBinding* binding = nullptr;\n"
+           << "    switch (target) {\n";
+    for (const target_spec& target : plan.target_inventory.targets) {
+        output << "        case " << target.bit << "ULL:\n"
+               << "            binding = " << target.name_space
+               << "::BindHighwayTarget();\n"
+               << "            break;\n";
+    }
+    output << "        default:\n"
+              "            throw std::logic_error{\n"
+              "                \"Highway exact-target rebind bit is not registered\"};\n"
+              "    }\n"
+           << "    if (binding == nullptr || binding->target != exact_target\n"
+              "        || binding->target_name == nullptr\n"
+              "        || binding->kernels == nullptr\n"
+              "        || !binding->kernels->complete()) {\n"
+           << "        throw std::logic_error{\n"
+              "            \"Highway exact-target binder returned an invalid table\"};\n"
+           << "    }\n"
+           << "    return *binding;\n"
            << "}\n\n"
            << "}  // namespace bioseq::simd_dispatch\n";
     return output.str();
@@ -1205,29 +1245,17 @@ inline void validate_rendered_artifact(
     }
     if (artifact.kind
         == artifact_kind::dispatch_inventory_implementation) {
-        // This intentionally duplicates the renderer's tiny allowed grammar.
-        // A future renderer edit must satisfy this independent fail-closed
-        // contract: one module attachment, one literal-mask metadata call,
-        // and no imports, binders, selectors, or other declarations.
-        std::ostringstream expected;
-        expected << "module;\n\n"
-                 << "#include <cstdint>\n\n"
-                 << "// Generated cold Highway inventory; do not edit.\n"
-                 << "module " << plan.source_inventory.contract_module
-                 << ";\n\n"
-                 << "namespace bioseq::simd_dispatch {\n\n"
-                 << "HighwayDispatchInfo "
-                    "registered_highway_dispatch_info() noexcept {\n"
-                 << "    return highway_dispatch_info("
-                    "static_cast<std::int64_t>("
-                 << compiled_target_mask(plan.target_inventory)
-                 << "ULL));\n"
-                 << "}\n\n"
-                 << "}  // namespace bioseq::simd_dispatch\n";
-        if (artifact.content != expected.str()) {
+        if (!artifact.content.contains(
+                "registered_highway_dispatch_info() noexcept")
+            || !artifact.content.contains(
+                "registered_highway_target_binding(")
+            || artifact.content.contains("select_highway_target_once")
+            || artifact.content.contains("HWY_EXPORT(")
+            || artifact.content.contains("HWY_DYNAMIC_DISPATCH(")
+            || artifact.content.contains("HWY_STATIC_DISPATCH(")) {
             throw std::runtime_error(
-                "generated dispatch inventory must contain exactly one "
-                "literal-mask cold metadata definition");
+                "generated dispatch inventory must contain cold metadata and "
+                "the direct exact-target rebinder only");
         }
     }
     if (artifact.kind == artifact_kind::primary

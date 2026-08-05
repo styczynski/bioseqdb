@@ -60,6 +60,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.pipeline.runtime_contract;   // MinimizerAlgorithmType
 import bioseq.sequences.kmers;          // Legacy minimizer/index APIs
 import bioseq.sequences.kmers.highway_contract;  // Target-neutral minimizer model
+import bioseq.highway.dispatch_contract;
 import bioseq.indexing.symbol_counts;
 import bioseq.storage.indexing_pg.chunked_storage;
 import bioseq.storage.indexing_pg.residency;
@@ -339,9 +340,7 @@ inline void ensure_vulkan_index_build_runtime_ready(
 }
 
 /**
- * Validate the immutable minimizer family selected by an owning scheduler.
- * Independent PostgreSQL maintenance roots pass null explicitly and therefore
- * reject SIMD-only producers instead of redispatching or changing algorithms.
+ * Validate the immutable minimizer family selected by an owning operation.
  */
 inline void require_selected_minimizer_kernels(
         bioseq::minimizers::MinimizerSketchBackend backend,
@@ -360,6 +359,32 @@ inline void require_selected_minimizer_kernels(
             bioseq::indexing::PackedPaperNthashIndexStatus::invalid_state,
             operation};
     }
+}
+
+/**
+ * Bind the process-local table for one PostgreSQL maintenance operation.
+ *
+ * The cold plan chooses one runnable target once at the owning operation root;
+ * the generated exact-target lookup is a direct table rebind, not a nested
+ * Highway dispatch. Scalar and Vulkan producers do not require this table.
+ */
+[[nodiscard]] inline const bioseq::minimizers::MinimizerKernels*
+selected_minimizer_kernels_for_operation(
+        bioseq::minimizers::MinimizerSketchBackend backend,
+        std::string_view operation) {
+    using Backend = bioseq::minimizers::MinimizerSketchBackend;
+    if (backend != Backend::ExactSimd
+        && backend != Backend::PaperNtHashSimd) {
+        return nullptr;
+    }
+    const auto plan =
+        bioseq::simd_dispatch::registered_highway_dispatch_info();
+    const auto& binding =
+        bioseq::simd_dispatch::registered_highway_target_binding(
+            plan.planned_target);
+    const auto* kernels = &binding.kernels->minimizers;
+    require_selected_minimizer_kernels(backend, kernels, operation);
+    return kernels;
 }
 
 /// Legacy MPF/MPS rows do not carry a minimizer-scheme identity. Persisting
@@ -435,7 +460,8 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
     }
     const auto backend = resolve_index_sketch_backend_from_gucs();  // DOC0345 Patch I
     const bioseq::minimizers::MinimizerKernels* const minimizer_kernels =
-        nullptr;
+        selected_minimizer_kernels_for_operation(
+            backend, "bioseq INSERT index build");
     if (backend
         == bioseq::minimizers::MinimizerSketchBackend::
             PaperNtHashSimd) {
@@ -1024,11 +1050,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         name == bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME
         || name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
     const bioseq::minimizers::MinimizerKernels* const minimizer_kernels =
-        nullptr;
-    if (is_minimizer_index) {
-        require_selected_minimizer_kernels(
-            backend, minimizer_kernels, "bioseq.update_index");
-    }
+        is_minimizer_index
+            ? selected_minimizer_kernels_for_operation(
+                  backend, "bioseq.update_index")
+            : nullptr;
     const bool use_grouped32_generation = is_minimizer_index
         && bioseq::aligner::settings::grouped32_persisted_generation_enabled;
     if (is_minimizer_index
@@ -4186,6 +4211,9 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
     const ReadyMinimizerFixtureBackendRequest backend_request =
         ready_minimizer_fixture_backend_request(backend_name);
     const Backend backend = backend_request.backend;
+    const bioseq::minimizers::MinimizerKernels* const minimizer_kernels =
+        selected_minimizer_kernels_for_operation(
+            backend, "READY minimizer coordinator fixture");
     Snapshot active_snapshot = GetActiveSnapshot();
     if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
         ready_minimizer_error_as_cpp(
@@ -4375,7 +4403,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
                 result.alphabet_code, result.storage_unit_byte_width,
                 [state, rel_oid, relation_identity, seq_attno, index_name,
                  sequence_rowno, backend, backend_request,
-                 &result]<class SequenceConfig>() {
+                 minimizer_kernels, &result]<class SequenceConfig>() {
                     using SourceBinding =
                         bioseq::storage::postgres_lazy_sequence_binding<
                             SequenceConfig>;
@@ -4406,7 +4434,8 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
                         source_binding,
                         [state, rel_oid, seq_attno, index_name,
                          sequence_rowno, backend, backend_request,
-                         &result, source_binding](auto lazy_view) {
+                         minimizer_kernels, &result,
+                         source_binding](auto lazy_view) {
                             arm_ready_minimizer_fixture_failures(
                                 backend_request);
                             result.publication.emplace(
@@ -4414,7 +4443,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
                                     rel_oid, seq_attno, index_name,
                                     sequence_rowno, *state->storage,
                                     lazy_view, source_binding, backend,
-                                    nullptr,
+                                    minimizer_kernels,
                                     IndexPayloadStorageBackend::
                                         postgres_relation));
                             disarm_ready_minimizer_fixture_failures();

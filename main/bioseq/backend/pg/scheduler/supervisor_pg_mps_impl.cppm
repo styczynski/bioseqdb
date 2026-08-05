@@ -198,6 +198,10 @@ void process_mps_build_claim_cpp(
     const auto worker_backend =
         static_cast<bioseq::minimizers::MinimizerSketchBackend>(
             meta->index_sketch_backend);
+    const bioseq::minimizers::MinimizerKernels* const worker_kernels =
+        rebind_minimizer_kernels_for_backend(
+            meta->index_sketch_backend,
+            meta->highway_executed_target);
 
     MemoryContext work = nullptr;
     bioseq::storage::seq_caches* caches = nullptr;
@@ -310,7 +314,7 @@ void process_mps_build_claim_cpp(
                     bioseq::storage::with_lazy_postgres<S>(
                         source_binding,
                         [&lazy_worker_shareable, meta, &target, &store,
-                         worker_backend](auto source_view) {
+                         worker_backend, worker_kernels](auto source_view) {
                             const bool pg_lazy_worker_shareable =
                                 bioseq::storage::lazy_is_worker_shareable(
                                     source_view);
@@ -340,7 +344,7 @@ void process_mps_build_claim_cpp(
                                     bioseq::indexing::MinimizerSequenceMergedIndex<
                                         bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
                                             store, resident_view, worker_backend,
-                                            nullptr,
+                                            worker_kernels,
                                             meta->alphabet_code);
                                     return;
                                 }
@@ -354,7 +358,7 @@ void process_mps_build_claim_cpp(
                             bioseq::indexing::MinimizerSequenceMergedIndex<
                                 bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
                                     store, source_view, worker_backend,
-                                    nullptr,
+                                    worker_kernels,
                                     meta->alphabet_code);
                         });
                     store.close_checked();
