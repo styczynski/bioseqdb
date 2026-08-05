@@ -6101,7 +6101,7 @@ TEST_CASE("require_absent preserves on-insert policy and prohibits external asyn
 }
 
 TEST_CASE("async MPS staging and worker PostgreSQL leaves recover exactly",
-		  "[mmsearch][async-mps][pg-leaf][recovery][admission][dsm]") {
+		  "[mmsearch][async-mps][pg-leaf][recovery][admission][dsm][highway]") {
 	auto ctx = fresh_context({kAsyncMpsWorkerLeaves});
 	exec_sqlf(ctx,
 		"CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 32)) USING bioseq;",
@@ -6127,10 +6127,22 @@ TEST_CASE("async MPS staging and worker PostgreSQL leaves recover exactly",
 	exec_sql(ctx, "SET bioseq.index_async_persist = on;");
 	exec_sql(ctx, "SET bioseq.recompute_async_persist = on;");
 	exec_sql(ctx,
+		"SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash';");
+	exec_sql(ctx,
 		"SET bioseq.scheduler.pipeline_concurrency_mode = 'task_parallel';");
 	exec_sql(ctx, "SET bioseq.index_memory_cap_mb = 256;");
 	REQUIRE(query_scalar(
 		ctx, "SELECT supervisor::text FROM bioseq.scheduler_stats();") == "true");
+	const auto runnable_targets = static_cast<std::uint64_t>(query_scalar_int(
+		ctx,
+		"SELECT bioseq_internal."
+		"highway_baseline_runnable_targets_for_test();"));
+	REQUIRE(runnable_targets != 0u);
+	const std::uint64_t forced_target =
+		runnable_targets & (~runnable_targets + std::uint64_t{1});
+	(void)query_scalar(ctx, fmt::format(
+		"SELECT bioseq_internal.set_highway_target_for_test({});",
+		static_cast<std::int64_t>(forced_target)));
 	exec_sql(ctx,
 		"SELECT bioseq_internal.disarm_async_mps_worker_failure();");
 
@@ -6247,9 +6259,20 @@ TEST_CASE("async MPS staging and worker PostgreSQL leaves recover exactly",
 			ctx, "SELECT generation FROM bioseq.scheduler_mps_build_stats();");
 	}
 	REQUIRE(generation_after > generation_before);
+	long long persisted_rows = 0;
+	for (int attempt = 0; attempt < 400 && persisted_rows == 0; ++attempt) {
+		persisted_rows = index_table_row_count(
+			ctx, "minimizers_per_sequence", kAsyncMpsWorkerLeaves);
+		if (persisted_rows == 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds{25});
+		}
+	}
+	REQUIRE(persisted_rows > 0);
 	const row_t recovered = boundary();
 	REQUIRE(recovered[11].value_or("") == "none");
 	REQUIRE(count_at(recovered, 9) == initial_admission_mismatches);
+	(void)query_scalar(
+		ctx, "SELECT bioseq_internal.set_highway_target_for_test(0);");
 }
 
 // Each named override field is a separate TEST_CASE; the helper keeps the body

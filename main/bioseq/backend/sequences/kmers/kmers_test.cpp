@@ -4,10 +4,14 @@
 #include "common_tests.h"
 
 import bioseq.common.sequan_compat;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers;
 import bioseq.sequences.kmers.mm_sketch_baseline;
+import bioseq.sequences.pipe;
+import bioseq.storage.lazy;
 
 using namespace seq::literals;
 
@@ -109,6 +113,88 @@ TEST_CASE("collect_minimizers (scalar) == mm_sketch baseline — dna4 poly-A",
           "[minimizers][baseline]") {
     check_scalar_matches_mm_sketch<seq::dna4>(
         MINIMIZER_TEST_DNA4_SEQ_LONGER2, 10, 15, "dna4-polyA-2016");
+}
+
+template<typename UnitType>
+static void check_generated_reference_matches_mm_sketch(
+    std::vector<seq::dna4>& data,
+    const size_t w,
+    const size_t k,
+    const std::string& fixture_name)
+{
+    using seq_type = sequence_custom_alphabet<seq::dna4, UnitType>;
+
+    auto sequence = compact_sequence_range<seq_type>(data);
+    auto lazy = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(lazy);
+
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    const auto& table =
+        ::bioseq::simd_dispatch::highway_test_kernel_table();
+    REQUIRE(binding.kernels == &table);
+
+    const auto descriptor = pipe::try_word_minimizer_resident_packed(
+        sequence_view, 0u, sequence_view.bp_size());
+    REQUIRE(descriptor.has_value());
+    REQUIRE(descriptor->storage_unit_byte_width == sizeof(UnitType));
+
+    sketch_collector collector;
+    const auto result = pipe::invoke_selected_minimizer_kernel<
+        MinimapSketchData>(
+            &table,
+            ::bioseq::simd_dispatch::HighwayKernelId::
+                minimizer_reference_minimap_int,
+            ::bioseq::minimizers::MinimizerKernelAlgorithm::
+                reference_minimap_int,
+            pipe::minimizer_kernel_view<seq::dna4>(*descriptor, &table),
+            w,
+            k,
+            collector);
+    const auto generated_pairs = collector.extract_pairs();
+
+    auto baseline_sequence = compact_sequence_range<seq_type>(data);
+    const auto baseline_pairs =
+        mm_sketch_baseline_pairs(baseline_sequence, w, k);
+
+    ASSERT(
+        generated_pairs == baseline_pairs,
+        fmt::format(
+            "generated fixed-target reference minimizer must preserve the "
+            "mm_sketch minimizer set. fixture={}, unit_bits={}, w={}, k={}, "
+            "seq_len={}, generated_count={}, baseline_count={}",
+            fixture_name, sizeof(UnitType) * 8, w, k, data.size(),
+            generated_pairs.size(), baseline_pairs.size()),
+        generated_pairs,
+        baseline_pairs);
+    REQUIRE(result.ok());
+    REQUIRE(result.proof.algorithm
+            == ::bioseq::minimizers::MinimizerKernelAlgorithm::
+                reference_minimap_int);
+    REQUIRE(result.proof.target == binding.target);
+    REQUIRE(result.emitted == generated_pairs.size());
+    REQUIRE(result.proof.reference.kernel_calls == 1u);
+    REQUIRE(result.proof.reference.last_storage_unit_bytes
+            == sizeof(UnitType));
+}
+
+TEST_CASE(
+    "generated fixed-target reference SIMD matches mm_sketch across full "
+    "matrices and tails",
+    "[minimizers][reference-simd][highway][matrix][hasher]"
+    "[sequence-iteration]")
+{
+    SECTION("dna4/u32 mixed full and partial iteration") {
+        check_generated_reference_matches_mm_sketch<std::uint32_t>(
+            MINIMIZER_TEST_DNA4_SEQ_LONGER, 10, 15, "dna4-u32-longer");
+    }
+
+    SECTION("dna4/u64 poly-A tie chronology") {
+        check_generated_reference_matches_mm_sketch<std::uint64_t>(
+            MINIMIZER_TEST_DNA4_SEQ_LONGER2, 10, 15,
+            "dna4-u64-polyA-2016");
+    }
 }
 
 }  // namespace bioseq::simd

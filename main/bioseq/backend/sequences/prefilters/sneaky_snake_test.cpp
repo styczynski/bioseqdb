@@ -300,7 +300,7 @@ TEST_CASE(
 
 TEST_CASE(
     "SneakySnake Highway batch exactly matches scalar for arbitrary ranks",
-    "[sneaky_snake][prefilter][simd]")
+    "[sneaky_snake][prefilter][simd][candidate-mask][highway]")
 {
     const hn::ScalableTag<std::uint32_t> d;
     const std::size_t job_count = std::max<std::size_t>(
@@ -424,6 +424,71 @@ TEST_CASE(
             REQUIRE(prefilter_accepted(scalar[index]));
         }
     }
+}
+
+TEST_CASE(
+    "SneakySnake generated fixed-target candidate mask preserves the longest diagonal",
+    "[sneaky_snake][prefilter][simd][candidate-mask][highway]")
+{
+    constexpr std::uint32_t submaze_width = 512u;
+    constexpr std::uint32_t length = 2u * submaze_width;
+    constexpr std::uint32_t position = submaze_width;
+    constexpr std::uint32_t candidate_block = 64u;
+    constexpr std::uint32_t max_edits = 4u * candidate_block + 3u;
+    constexpr std::uint32_t lower = position - max_edits;
+    constexpr std::uint32_t winning_start = position - candidate_block;
+
+    std::vector<std::uint8_t> target(length, 1u);
+    target[lower] = 0u;
+    target[lower + candidate_block - 1u] = 0u;
+    target[lower + candidate_block] = 0u;
+    target[winning_start] = 0u;
+    target[winning_start + 1u] = 2u;
+
+    // Keep the first submaze identical while making the winning candidate in
+    // the second submaze begin beyond three complete maximum-size fixed-target
+    // candidate-mask blocks.
+    std::copy_n(
+        target.begin() + winning_start,
+        candidate_block,
+        target.begin() + position);
+    for (std::uint32_t index = position + candidate_block;
+         index < length;
+         ++index) {
+        target[index] = static_cast<std::uint8_t>(
+            3u + index % 251u);
+    }
+
+    std::vector<std::uint8_t> query = target;
+    std::copy_n(
+        target.begin() + position,
+        submaze_width,
+        query.begin() + winning_start);
+
+    const std::array<PrefilterJob, 1u> jobs{PrefilterJob{
+        .query_offset = 0u,
+        .target_offset = 0u,
+        .query_length = length,
+        .target_length = length,
+        .max_edits = max_edits,
+    }};
+    const PrefilterBatchInput input{
+        .query_ranks = query,
+        .target_ranks = target,
+        .jobs = jobs,
+    };
+    const SneakySnakeOptions options{
+        .submaze_width = submaze_width,
+        .max_escape_segments = submaze_width,
+    };
+
+    const auto scalar = sneaky_snake_scalar_batch(input, options);
+    const auto fixed = fixed_sneaky_snake_kernel()(input, options);
+    REQUIRE(scalar.size() == 1u);
+    REQUIRE(fixed.size() == scalar.size());
+    REQUIRE(scalar.front().lower_bound == 0u);
+    REQUIRE(prefilter_accepted(scalar.front()));
+    REQUIRE(same_result(fixed.front(), scalar.front()));
 }
 
 TEST_CASE(
