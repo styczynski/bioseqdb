@@ -96,9 +96,42 @@ private:
     explicit HWY_INLINE constexpr vec_stream(std::index_sequence<S...>) noexcept
         : _data{ ((void)S, vec_t{})... } {}
 
+    template <size_t... S>
+    HWY_INLINE constexpr vec_stream(
+        const vec_stream& other,
+        std::index_sequence<S...>) noexcept
+        : _data{ other._data[S]... } {}
+
+    template <size_t... S>
+    HWY_INLINE constexpr void assign_from(
+        const vec_stream& other,
+        std::index_sequence<S...>) noexcept {
+        ((_data[S] = other._data[S]), ...);
+    }
+
 public:
     HWY_INLINE constexpr vec_stream() noexcept
         : vec_stream(std::make_index_sequence<W>{}) {}
+
+    // libc++'s implicit std::array special members are not target-attributed.
+    // Keep vector copies in generated project callables so fixed targets such
+    // as NEON_BF16 never instantiate a targetless array copy boundary.
+    HWY_INLINE constexpr vec_stream(const vec_stream& other) noexcept
+        : vec_stream(other, std::make_index_sequence<W>{}) {}
+
+    HWY_INLINE constexpr vec_stream(vec_stream&& other) noexcept
+        : vec_stream(other, std::make_index_sequence<W>{}) {}
+
+    HWY_INLINE constexpr vec_stream& operator=(
+        const vec_stream& other) noexcept {
+        assign_from(other, std::make_index_sequence<W>{});
+        return *this;
+    }
+
+    HWY_INLINE constexpr vec_stream& operator=(vec_stream&& other) noexcept {
+        assign_from(other, std::make_index_sequence<W>{});
+        return *this;
+    }
 
     [[nodiscard]] constexpr vec_t&       operator[](size_t s)       noexcept { return _data[s]; }
     [[nodiscard]] constexpr const vec_t& operator[](size_t s) const noexcept { return _data[s]; }
@@ -300,9 +333,39 @@ private:
     explicit HWY_INLINE constexpr mask_stream(std::index_sequence<S...>) noexcept
         : _data{ ((void)S, mask_t{})... } {}
 
+    template <size_t... S>
+    HWY_INLINE constexpr mask_stream(
+        const mask_stream& other,
+        std::index_sequence<S...>) noexcept
+        : _data{ other._data[S]... } {}
+
+    template <size_t... S>
+    HWY_INLINE constexpr void assign_from(
+        const mask_stream& other,
+        std::index_sequence<S...>) noexcept {
+        ((_data[S] = other._data[S]), ...);
+    }
+
 public:
     HWY_INLINE constexpr mask_stream() noexcept
         : mask_stream(std::make_index_sequence<W>{}) {}
+
+    HWY_INLINE constexpr mask_stream(const mask_stream& other) noexcept
+        : mask_stream(other, std::make_index_sequence<W>{}) {}
+
+    HWY_INLINE constexpr mask_stream(mask_stream&& other) noexcept
+        : mask_stream(other, std::make_index_sequence<W>{}) {}
+
+    HWY_INLINE constexpr mask_stream& operator=(
+        const mask_stream& other) noexcept {
+        assign_from(other, std::make_index_sequence<W>{});
+        return *this;
+    }
+
+    HWY_INLINE constexpr mask_stream& operator=(mask_stream&& other) noexcept {
+        assign_from(other, std::make_index_sequence<W>{});
+        return *this;
+    }
 
     [[nodiscard]] constexpr mask_t&       operator[](size_t s)       noexcept { return _data[s]; }
     [[nodiscard]] constexpr const mask_t& operator[](size_t s) const noexcept { return _data[s]; }

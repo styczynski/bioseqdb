@@ -764,68 +764,63 @@ collect_alphabet_identities(
     return expression;
 }
 
-inline void render_minimizer_wrappers(
+inline void render_minimizer_wrapper(
     std::ostringstream& output,
     const std::vector<minimizer_case_binding>& cases,
+    const minimizer_required_member& member,
     const namespace_materialization::materialization_coordinate& coordinate) {
     if (cases.empty()) return;
 
-    for (const minimizer_required_member& member
-         : minimizer_required_members) {
-        output
-            << "[[nodiscard]] HWY_ATTR "
-               "::bioseq::minimizers::MinimizerKernelResult "
-            << minimizer_wrapper_name(member.slot) << "(\n"
-            << "    ::bioseq::minimizers::MinimizerKernelInvocation& "
-               "invocation) {\n"
-            << "    switch (invocation.sequence.alphabet_code) {\n";
+    output
+        << "[[nodiscard]] HWY_ATTR "
+           "::bioseq::minimizers::MinimizerKernelResult "
+        << minimizer_wrapper_name(member.slot) << "(\n"
+        << "    ::bioseq::minimizers::MinimizerKernelInvocation& "
+           "invocation) {\n"
+        << "    switch (invocation.sequence.alphabet_code) {\n";
 
-        std::size_t begin = 0u;
-        while (begin < cases.size()) {
-            const std::uint8_t alphabet_code =
-                cases[begin].alphabet_code;
-            output << "        case "
-                   << static_cast<unsigned int>(alphabet_code) << "u:\n"
-                   << "            switch ("
-                      "invocation.sequence.storage_unit_bytes) {\n";
-            std::size_t end = begin;
-            while (end < cases.size()
-                   && cases[end].alphabet_code == alphabet_code) {
-                const minimizer_case_binding& binding = cases[end];
-                const slot_spec* slot =
-                    binding.members.find(member.slot)->second;
-                output << "                case "
-                       << static_cast<unsigned int>(
-                              binding.storage_unit_bytes)
-                       << "u:\n"
-                       << "                    return "
-                       << minimizer_callable_expression(
-                              *slot, coordinate.identity_namespace)
-                       << "(invocation);\n";
-                ++end;
-            }
-            output << "                default:\n"
-                   << "                    break;\n"
-                   << "            }\n"
-                   << "            break;\n";
-            begin = end;
+    std::size_t begin = 0u;
+    while (begin < cases.size()) {
+        const std::uint8_t alphabet_code = cases[begin].alphabet_code;
+        output << "        case "
+               << static_cast<unsigned int>(alphabet_code) << "u:\n"
+               << "            switch ("
+                  "invocation.sequence.storage_unit_bytes) {\n";
+        std::size_t end = begin;
+        while (end < cases.size()
+               && cases[end].alphabet_code == alphabet_code) {
+            const minimizer_case_binding& binding = cases[end];
+            const slot_spec* slot = binding.members.find(member.slot)->second;
+            output << "                case "
+                   << static_cast<unsigned int>(binding.storage_unit_bytes)
+                   << "u:\n"
+                   << "                    return "
+                   << minimizer_callable_expression(
+                          *slot, coordinate.identity_namespace)
+                   << "(invocation);\n";
+            ++end;
         }
-        output
-            << "        default:\n"
-            << "            break;\n"
-            << "    }\n"
-            << "    ::bioseq::minimizers::MinimizerKernelResult result{};\n"
-            << "    result.proof.algorithm = "
-               "::bioseq::minimizers::MinimizerKernelAlgorithm::"
-            << member.slot << ";\n"
-            << "    result.proof.target = "
-               "static_cast<::std::int64_t>(HWY_TARGET);\n"
-            << "    result.status = "
-               "::bioseq::minimizers::MinimizerKernelStatus::"
-               "invalid_configuration;\n"
-            << "    return result;\n"
-            << "}\n\n";
+        output << "                default:\n"
+               << "                    break;\n"
+               << "            }\n"
+               << "            break;\n";
+        begin = end;
     }
+    output
+        << "        default:\n"
+        << "            break;\n"
+        << "    }\n"
+        << "    ::bioseq::minimizers::MinimizerKernelResult result{};\n"
+        << "    result.proof.algorithm = "
+           "::bioseq::minimizers::MinimizerKernelAlgorithm::"
+        << member.slot << ";\n"
+        << "    result.proof.target = "
+           "static_cast<::std::int64_t>(HWY_TARGET);\n"
+        << "    result.status = "
+           "::bioseq::minimizers::MinimizerKernelStatus::"
+           "invalid_configuration;\n"
+        << "    return result;\n"
+        << "}\n\n";
 }
 
 [[nodiscard]] inline std::string_view kernel_enumerator_for_owner(
@@ -852,19 +847,95 @@ inline void render_minimizer_wrappers(
         + "' has no HighwayKernelId mapping");
 }
 
+[[nodiscard]] inline std::string population_name(
+    const std::string_view owner) {
+    return "Populate_" + std::string{owner};
+}
+
+[[nodiscard]] inline std::string alignment_population_name(
+    const std::string_view owner,
+    const std::uint8_t alphabet_code) {
+    return population_name(owner) + "_alignment_"
+        + std::to_string(static_cast<unsigned int>(alphabet_code));
+}
+
+[[nodiscard]] inline std::map<
+    std::string,
+    std::vector<const slot_spec*>,
+    std::less<>>
+collect_slot_families(const source_manifest& inventory) {
+    std::map<std::string, std::vector<const slot_spec*>, std::less<>> families;
+    for (const slot_spec& slot : inventory.slots) {
+        families[slot.family_field].push_back(&slot);
+    }
+    return families;
+}
+
+[[nodiscard]] inline std::set<std::string, std::less<>>
+collect_slot_owners(const source_manifest& inventory) {
+    std::set<std::string, std::less<>> owners;
+    for (const slot_spec& slot : inventory.slots) {
+        owners.insert(slot.owner_key);
+    }
+    return owners;
+}
+
 [[nodiscard]] inline std::string render_primary(
     const source_manifest& inventory,
     const namespace_materialization::materialization_coordinate& coordinate) {
+    const auto families = collect_slot_families(inventory);
+    const std::vector<alignment_family_binding> alignment_families =
+        collect_alignment_families(families);
+    const std::set<std::string, std::less<>> owners =
+        collect_slot_owners(inventory);
+
     std::ostringstream output;
     output << "// Generated by bioseq_codegen highway; do not edit.\n"
            << "export module " << coordinate.module_name << ";\n\n"
-           << "import " << inventory.contract_module << ";\n\n"
+           << "import " << inventory.contract_module << ";\n";
+    if (!alignment_families.empty()) {
+        output << "import bioseq.common.sequan_compat;\n"
+               << "import bioseq.sequences;\n";
+    }
+    output << "\n"
            << "export namespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace << " {\n"
            << "[[nodiscard]] const HighwayTargetBinding* "
               "BindHighwayTarget() noexcept;\n"
            << "}  // namespace bioseq::simd_dispatch::"
-           << coordinate.identity_namespace << "\n";
+           << coordinate.identity_namespace << "\n\n"
+           << "namespace bioseq::simd_dispatch::"
+           << coordinate.identity_namespace << "::binding_detail {\n";
+
+    for (const std::string& owner : owners) {
+        const bool has_root_slots = std::ranges::any_of(
+            inventory.slots,
+            [&owner](const slot_spec& slot) {
+                return slot.owner_key == owner
+                    && !is_alignment_family(slot.family_field);
+            });
+        if (has_root_slots) {
+            output << "void " << population_name(owner)
+                   << "(::bioseq::simd_dispatch::HighwayKernelTable& table) "
+                      "noexcept;\n";
+        }
+        for (const alignment_family_binding& family : alignment_families) {
+            const bool owns_family_member = std::ranges::any_of(
+                family.members,
+                [&owner](const auto& member) {
+                    return member.second->owner_key == owner;
+                });
+            if (owns_family_member) {
+                output << "void "
+                       << alignment_population_name(
+                              owner, family.alphabet_code)
+                       << "(::bioseq::simd::AlignmentKernels<"
+                       << family.alphabet_type << ">& table) noexcept;\n";
+            }
+        }
+    }
+    output << "}  // namespace bioseq::simd_dispatch::"
+           << coordinate.identity_namespace << "::binding_detail\n";
     return output.str();
 }
 
@@ -904,14 +975,131 @@ inline void render_minimizer_wrappers(
     return output.str();
 }
 
+[[nodiscard]] inline std::string render_kernel_instantiation(
+    const generation_plan& plan,
+    const target_spec& target,
+    const namespace_materialization::materialization_coordinate& coordinate,
+    const std::string_view owner,
+    const source_spec& source) {
+    const auto families = collect_slot_families(plan.source_inventory);
+    const std::vector<alignment_family_binding> alignment_families =
+        collect_alignment_families(families);
+    const auto minimizer_member = std::ranges::find(
+        minimizer_required_members,
+        owner,
+        &minimizer_required_member::owner);
+
+    std::vector<const slot_spec*> owned_slots;
+    for (const slot_spec& slot : plan.source_inventory.slots) {
+        if (slot.owner_key == owner) owned_slots.push_back(&slot);
+    }
+    const bool owns_typed_minimizer =
+        minimizer_member != minimizer_required_members.end()
+        && std::ranges::any_of(
+            owned_slots,
+            [](const slot_spec* slot) {
+                return is_minimizer_case_family(slot->family_field);
+            });
+    std::ranges::sort(
+        owned_slots,
+        {},
+        [](const slot_spec* slot) {
+            return std::pair{slot->family_field, slot->slot_field};
+        });
+
+    std::ostringstream output;
+    output << fixed_target_fragment(plan.target_inventory, target)
+           << "// Generated concrete bindings for " << owner
+           << "; do not edit.\n"
+           << "module " << coordinate.module_name << ";\n\n"
+           << "import " << plan.source_inventory.contract_module << ";\n";
+    if (owns_typed_minimizer
+        || std::ranges::any_of(
+            owned_slots,
+            [](const slot_spec* slot) {
+                return is_alignment_family(slot->family_field);
+            })) {
+        output << "import bioseq.common.sequan_compat;\n"
+               << "import bioseq.sequences;\n";
+    }
+    output << "import :" << source.partition << ";\n\n"
+           << "namespace bioseq::simd_dispatch::"
+           << coordinate.identity_namespace << "::binding_detail {\n\n";
+
+    if (owns_typed_minimizer) {
+        render_minimizer_wrapper(
+            output,
+            collect_minimizer_cases(families),
+            *minimizer_member,
+            coordinate);
+    }
+
+    const bool has_root_slots = std::ranges::any_of(
+        owned_slots,
+        [](const slot_spec* slot) {
+            return !is_alignment_family(slot->family_field);
+        });
+    if (has_root_slots) {
+        output << "HWY_ATTR void " << population_name(owner)
+               << "(::bioseq::simd_dispatch::HighwayKernelTable& table) "
+                  "noexcept {\n";
+        if (owns_typed_minimizer) {
+            output << "    table.minimizers." << minimizer_member->slot
+                   << " = &" << minimizer_wrapper_name(minimizer_member->slot)
+                   << ";\n";
+        }
+        for (const slot_spec* slot : owned_slots) {
+            if (is_alignment_family(slot->family_field)
+                || is_minimizer_case_family(slot->family_field)) {
+                continue;
+            }
+            if (slot->slot_field == "@") {
+                output << "    table." << slot->family_field << " = ";
+            } else {
+                output << "    table." << slot->family_field << "."
+                       << slot->slot_field << " = ";
+            }
+            output << replace_target_namespace(
+                          slot->expression, coordinate.identity_namespace)
+                   << ";\n";
+        }
+        output << "}\n\n";
+    }
+
+    for (const alignment_family_binding& family : alignment_families) {
+        std::vector<const slot_spec*> owned_members;
+        for (const auto& [member, slot] : family.members) {
+            static_cast<void>(member);
+            if (slot->owner_key == owner) owned_members.push_back(slot);
+        }
+        if (owned_members.empty()) continue;
+        std::ranges::sort(
+            owned_members,
+            {},
+            [](const slot_spec* slot) { return slot->slot_field; });
+        output << "HWY_ATTR void "
+               << alignment_population_name(owner, family.alphabet_code)
+               << "(::bioseq::simd::AlignmentKernels<"
+               << family.alphabet_type << ">& table) noexcept {\n";
+        for (const slot_spec* slot : owned_members) {
+            output << "    table." << slot->slot_field << " = "
+                   << replace_target_namespace(
+                          slot->expression, coordinate.identity_namespace)
+                   << ";\n";
+        }
+        output << "}\n\n";
+    }
+
+    output << "}  // namespace bioseq::simd_dispatch::"
+           << coordinate.identity_namespace << "::binding_detail\n";
+    return output.str();
+}
+
 [[nodiscard]] inline std::string render_binder(
     const generation_plan& plan,
     const target_spec& target,
     const namespace_materialization::materialization_coordinate& coordinate) {
-    std::map<std::string, std::vector<const slot_spec*>, std::less<>> families;
-    for (const slot_spec& slot : plan.source_inventory.slots) {
-        families[slot.family_field].push_back(&slot);
-    }
+    const auto families = collect_slot_families(plan.source_inventory);
     const std::vector<alignment_family_binding> alignment_families =
         collect_alignment_families(families);
     const std::vector<minimizer_case_binding> minimizer_cases =
@@ -927,17 +1115,36 @@ inline void render_minimizer_wrappers(
     for (const slot_spec& slot : plan.source_inventory.slots) {
         if (is_alignment_family(slot.family_field)
             || is_minimizer_case_family(slot.family_field)) {
-            output << "import bioseq.sequences;\n";
+            output << "import bioseq.common.sequan_compat;\n"
+                   << "import bioseq.sequences;\n";
             break;
         }
-    }
-    for (const extracted_source& source : plan.extracted_sources) {
-        output << "import :" << source.source.partition << ";\n";
     }
     output << "\nnamespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace
            << " {\n\n";
-    render_minimizer_wrappers(output, minimizer_cases, coordinate);
+
+    for (const alignment_family_binding& family : alignment_families) {
+        const auto code = static_cast<unsigned int>(family.alphabet_code);
+        std::set<std::string, std::less<>> family_owners;
+        for (const auto& [member, slot] : family.members) {
+            static_cast<void>(member);
+            family_owners.insert(slot->owner_key);
+        }
+        output << "HWY_ATTR ::bioseq::simd::AlignmentKernels<"
+               << family.alphabet_type << "> MakeAlignment_" << code
+               << "() noexcept {\n"
+               << "    ::bioseq::simd::AlignmentKernels<"
+               << family.alphabet_type << "> table{};\n";
+        for (const std::string& owner : family_owners) {
+            output << "    binding_detail::"
+                   << alignment_population_name(owner, family.alphabet_code)
+                   << "(table);\n";
+        }
+        output << "    return table;\n"
+               << "}\n\n";
+    }
+
     output << "HWY_ATTR HighwayKernelTable MakeHighwayKernelTable() noexcept {\n"
            << "    HighwayKernelTable table{};\n";
 
@@ -978,15 +1185,8 @@ inline void render_minimizer_wrappers(
     for (const alignment_family_binding& family : alignment_families) {
         const auto code = static_cast<unsigned int>(family.alphabet_code);
         output << "    static const ::bioseq::simd::AlignmentKernels<"
-               << family.alphabet_type << "> alignment_" << code << "{\n";
-        for (const std::string_view member : alignment_required_members) {
-            const slot_spec* slot = family.members.find(member)->second;
-            output << "        ." << member << " = "
-                   << replace_target_namespace(
-                          slot->expression, coordinate.identity_namespace)
-                   << ",\n";
-        }
-        output << "    };\n";
+               << family.alphabet_type << "> alignment_" << code
+               << " = MakeAlignment_" << code << "();\n";
     }
     if (!alignment_families.empty()) {
         output << "    static const ::bioseq::simd::AlignmentTableEntry "
@@ -1000,32 +1200,17 @@ inline void render_minimizer_wrappers(
                << "    table.alignment_by_alphabet = "
                   "alignment_by_alphabet;\n";
     }
-    if (!minimizer_cases.empty()) {
-        for (const minimizer_required_member& member
-             : minimizer_required_members) {
-            output << "    table.minimizers." << member.slot << " = &"
-                   << minimizer_wrapper_name(member.slot) << ";\n";
-        }
-    }
-    for (const auto& [family, slots] : families) {
-        if (is_alignment_family(family)
-            || is_minimizer_case_family(family)) {
-            continue;
-        }
-        if (slots.size() == 1 && slots.front()->slot_field == "@") {
-            output << "    table." << family << " = "
-                   << replace_target_namespace(
-                          slots.front()->expression,
-                          coordinate.identity_namespace)
-                   << ";\n";
-            continue;
-        }
-        for (const slot_spec* slot : slots) {
-            output << "    table." << family << "." << slot->slot_field
-                   << " = "
-                   << replace_target_namespace(
-                          slot->expression, coordinate.identity_namespace)
-                   << ";\n";
+    for (const std::string& owner : collect_slot_owners(
+             plan.source_inventory)) {
+        const bool has_root_slots = std::ranges::any_of(
+            plan.source_inventory.slots,
+            [&owner](const slot_spec& slot) {
+                return slot.owner_key == owner
+                    && !is_alignment_family(slot.family_field);
+            });
+        if (has_root_slots) {
+            output << "    binding_detail::" << population_name(owner)
+                   << "(table);\n";
         }
     }
     output << "    return table;\n"
@@ -1266,6 +1451,21 @@ inline void validate_rendered_artifact(
             artifact.relative_path.string()
             + ": target primary is not a neutral minimal BMI");
     }
+    if (artifact.kind == artifact_kind::binder
+        && artifact.content.contains("import :")) {
+        throw std::runtime_error(
+            artifact.relative_path.string()
+            + ": target binder must not import template partitions");
+    }
+    if (artifact.kind == artifact_kind::kernel_instantiation
+        && (!artifact.content.contains("#define HWY_TARGET ")
+            || !artifact.content.contains("import :")
+            || !artifact.content.contains("HWY_ATTR void Populate_")
+            || artifact.content.contains("BindHighwayTarget"))) {
+        throw std::runtime_error(
+            artifact.relative_path.string()
+            + ": kernel instantiation must own one target/partition binding");
+    }
 }
 
 }  // namespace detail
@@ -1304,6 +1504,28 @@ inline void validate_rendered_artifact(
             .kind = artifact_kind::binder,
             .content = detail::render_binder(plan, target, coordinate),
         });
+        for (const std::string& owner : detail::collect_slot_owners(
+                 plan.source_inventory)) {
+            const auto source = sources_by_key.find(owner);
+            if (source == sources_by_key.end()) {
+                throw std::runtime_error(
+                    "renderer cannot resolve Highway slot owner '" + owner
+                    + "' to a generated source partition");
+            }
+            result.artifacts.push_back(generated_artifact{
+                .relative_path = root / "instances" / (owner + ".cppm"),
+                .module_name = coordinate.module_name,
+                .target_token = target.token,
+                .source_key = owner,
+                .kind = artifact_kind::kernel_instantiation,
+                .content = detail::render_kernel_instantiation(
+                    plan,
+                    target,
+                    coordinate,
+                    owner,
+                    *source->second),
+            });
+        }
         for (const extracted_source& source : plan.extracted_sources) {
             result.artifacts.push_back(generated_artifact{
                 .relative_path = root / (source.source.partition + ".cppm"),

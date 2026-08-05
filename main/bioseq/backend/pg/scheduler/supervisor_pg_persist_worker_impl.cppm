@@ -33,11 +33,13 @@ void AbortCurrentTransaction(void);
 module bioseq.scheduler.supervisor_pg;
 
 import bioseq.common.mlogging;
+import bioseq.config;
 import bioseq.pg_utils;
 import bioseq.indexing.type;
 
 namespace bioseq::parallelism::pg {
 
+template <class F>
 auto invoke_async_mps_worker_pg_leaf(
         AsyncMpsWorkerPgFailure point,
         F&& function)

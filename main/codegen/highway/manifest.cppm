@@ -5,6 +5,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -218,6 +219,8 @@ inline void require_field_count(
         case artifact_kind::primary: return "primary";
         case artifact_kind::binder: return "binder";
         case artifact_kind::partition: return "partition";
+        case artifact_kind::kernel_instantiation:
+            return "kernel_instantiation";
         case artifact_kind::dispatch_registry_partition:
             return "dispatch_registry_partition";
         case artifact_kind::dispatch_inventory_implementation:
@@ -409,9 +412,13 @@ inline void require_field_count(
 [[nodiscard]] inline std::string render_policy_evidence(
     const generation_plan& plan,
     const std::vector<generated_artifact>& artifacts) {
+    std::set<std::string_view> slot_owners;
+    for (const slot_spec& slot : plan.source_inventory.slots) {
+        slot_owners.insert(slot.owner_key);
+    }
     const std::size_t expected_artifact_count =
         plan.target_inventory.targets.size()
-            * (2u + plan.extracted_sources.size())
+            * (2u + plan.extracted_sources.size() + slot_owners.size())
         + 3u;
     if (plan.target_inventory.targets.empty()
         || artifacts.size() != expected_artifact_count

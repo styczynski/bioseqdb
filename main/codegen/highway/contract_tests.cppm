@@ -142,6 +142,29 @@ inline void require_rejected(Function&& function, std::string_view message) {
     };
 }
 
+inline void append_fixture_source(
+    generation_plan& plan,
+    const std::string_view key,
+    const std::string_view family) {
+    source_spec source{
+        .key = std::string{key},
+        .path = std::string{key} + "_fixture.cppm",
+        .module_name = "bioseq.highway.sources." + std::string{key},
+        .partition = std::string{key},
+        .family = std::string{family},
+    };
+    plan.source_inventory.sources.push_back(source);
+    plan.extracted_sources.push_back(extracted_source{
+        .source = std::move(source),
+        .enclosing_namespace = "bioseq::simd",
+        .body = {},
+        .body_first_line = 1u,
+        .source_sha256 =
+            "22222222222222222222222222222222"
+            "22222222222222222222222222222222",
+    });
+}
+
 inline void verify_exact_structural_marker() {
     constexpr std::string_view source = R"CPP(
 export module fixture.highway_marker;
@@ -548,14 +571,15 @@ inline void verify_shared_target_coordinates() {
 inline void verify_generated_closure() {
     const generation_result generated = render_generation(two_target_plan());
     require(
-        generated.artifacts.size() == 9u,
+        generated.artifacts.size() == 11u,
         "two targets and one source produce two primaries, binders, "
-        "partitions, one private registry, one cold inventory, and "
-        "fixed-target test support");
+        "partitions, owner instantiations, one private registry, one cold "
+        "inventory, and fixed-target test support");
 
     std::size_t primary_count = 0;
     std::size_t binder_count = 0;
     std::size_t partition_count = 0;
+    std::size_t instantiation_count = 0;
     std::size_t registry_count = 0;
     std::size_t inventory_count = 0;
     std::size_t test_support_count = 0;
@@ -604,8 +628,14 @@ inline void verify_generated_closure() {
                         && artifact.content.contains(
                             "highway_kernel_set(HighwayKernelId::"
                             "prefilter_sneaky_snake_simd_batch)")
+                        && artifact.content.contains(
+                            "binding_detail::Populate_prefilter(table)")
+                        && !artifact.content.contains(
+                            "&::bioseq::fixture::N_")
+                        && !artifact.content.contains("import :")
                         && artifact.content.contains("BindHighwayTarget"),
-                    "each target binder owns a complete availability/table binding");
+                    "each target binder owns a complete table without "
+                    "instantiating source callables");
                 break;
             case artifact_kind::partition:
                 ++partition_count;
@@ -620,6 +650,21 @@ inline void verify_generated_closure() {
                             "import bioseq.fixture.neutral;"),
                     "each target/source partition fixes its target, provides "
                     "the Highway allocation surface, and rewrites the callable");
+                break;
+            case artifact_kind::kernel_instantiation:
+                ++instantiation_count;
+                require(
+                    artifact.source_key == "prefilter"
+                        && artifact.relative_path.generic_string().contains(
+                            "/instances/prefilter.cppm")
+                        && artifact.content.contains("import :fixture;")
+                        && artifact.content.contains(
+                            "HWY_ATTR void Populate_prefilter")
+                        && artifact.content.contains(
+                            "&::bioseq::fixture::N_")
+                        && !artifact.content.contains("BindHighwayTarget"),
+                    "each target compiles concrete slot ownership in an "
+                    "ordinary owner-instantiation unit");
                 break;
             case artifact_kind::dispatch_registry_partition:
                 ++registry_count;
@@ -686,7 +731,8 @@ inline void verify_generated_closure() {
 
     require(
         primary_count == 2u && binder_count == 2u
-            && partition_count == 2u && registry_count == 1u
+            && partition_count == 2u && instantiation_count == 2u
+            && registry_count == 1u
             && inventory_count == 1u && test_support_count == 1u,
         "the generated artifact-kind closure is exact");
     require(
@@ -709,7 +755,11 @@ inline void verify_generated_closure() {
             && generated.policy_evidence_json.contains(
                 "\"path\":\"x86/emu128/fixture.cppm\"")
             && generated.policy_evidence_json.contains(
-                "\"path\":\"x86/sse2/fixture.cppm\""),
+                "\"path\":\"x86/sse2/fixture.cppm\"")
+            && generated.policy_evidence_json.contains(
+                "\"path\":\"x86/emu128/instances/prefilter.cppm\"")
+            && generated.policy_evidence_json.contains(
+                "\"path\":\"x86/sse2/instances/prefilter.cppm\""),
         "the artifact manifest records the complete generated topology");
 }
 
@@ -879,6 +929,9 @@ inline void verify_typed_alignment_binder() {
     plan.source_inventory.require_complete_table = false;
     plan.source_inventory.required_slots.clear();
     plan.source_inventory.slots.clear();
+    append_fixture_source(plan, "ksw2", "alignment");
+    append_fixture_source(plan, "ksw2_batched", "alignment");
+    append_fixture_source(plan, "block_aligner", "alignment");
 
     const auto append_alphabet = [&plan](
         const std::uint8_t code,
@@ -909,7 +962,22 @@ inline void verify_typed_alignment_binder() {
 
     const generation_result generated = render_generation(plan);
     std::size_t checked_binders = 0u;
+    std::size_t checked_alignment_binding_partitions = 0u;
     for (const generated_artifact& artifact : generated.artifacts) {
+        if (artifact.kind == artifact_kind::kernel_instantiation
+            && (artifact.source_key == "ksw2"
+                || artifact.source_key == "ksw2_batched"
+                || artifact.source_key == "block_aligner")) {
+            ++checked_alignment_binding_partitions;
+            require(
+                artifact.content.contains("HWY_ATTR void Populate_")
+                    && artifact.content.contains(
+                        " = &::bioseq::simd::N_")
+                    && artifact.content.contains("<::seq::dna4>")
+                    && artifact.content.contains("<::seq::dna5>"),
+                "each alignment owner partition instantiates its typed slots");
+            continue;
+        }
         if (artifact.kind != artifact_kind::binder) continue;
         ++checked_binders;
         require(
@@ -938,11 +1006,21 @@ inline void verify_typed_alignment_binder() {
                     "highway_kernel_set(HighwayKernelId::alignment_ksw2_batched)")
                 && artifact.content.contains(
                     "highway_kernel_set(HighwayKernelId::alignment_block_aligner)")
+                && artifact.content.contains(
+                    "binding_detail::Populate_ksw2_alignment_0(table)")
+                && artifact.content.contains(
+                    "binding_detail::Populate_block_aligner_alignment_1(table)")
+                && !artifact.content.contains("ksw2_z2<")
+                && !artifact.content.contains("block_align<")
+                && !artifact.content.contains("import :")
                 && !artifact.content.contains("table.alignment_0"),
             "each binder synthesizes exact typed alignment tables without "
-            "inventing root-table fields");
+            "instantiating their templates or inventing root-table fields");
     }
     require(checked_binders == 2u, "both fixed targets receive typed alignment tables");
+    require(
+        checked_alignment_binding_partitions == 6u,
+        "each fixed target compiles three alignment instantiation units");
 
     generation_plan incomplete = plan;
     incomplete.source_inventory.slots.pop_back();
@@ -974,6 +1052,12 @@ inline void verify_typed_minimizer_binder() {
     plan.source_inventory.require_complete_table = false;
     plan.source_inventory.required_slots.clear();
     plan.source_inventory.slots.clear();
+    append_fixture_source(plan, "minimizer_reference", "minimizers");
+    append_fixture_source(plan, "minimizer_two_stack", "minimizers");
+    append_fixture_source(plan, "minimizer_paper", "minimizers");
+    append_fixture_source(plan, "ksw2", "alignment");
+    append_fixture_source(plan, "ksw2_batched", "alignment");
+    append_fixture_source(plan, "block_aligner", "alignment");
 
     const auto append_case = [&plan](
         const std::uint8_t alphabet_code,
@@ -1031,26 +1115,76 @@ inline void verify_typed_minimizer_binder() {
 
     const generation_result generated = render_generation(plan);
     std::size_t checked_binders = 0u;
+    std::size_t checked_minimizer_binding_partitions = 0u;
     for (const generated_artifact& artifact : generated.artifacts) {
+        if (artifact.kind == artifact_kind::kernel_instantiation
+            && artifact.source_key.starts_with("minimizer_")) {
+            ++checked_minimizer_binding_partitions;
+            require(
+                occurrences(
+                    artifact.content,
+                    "switch (invocation.sequence.alphabet_code)") == 1u
+                    && occurrences(
+                           artifact.content,
+                           "switch (invocation.sequence.storage_unit_bytes)")
+                        == 2u
+                    && occurrences(
+                           artifact.content,
+                           "MinimizerKernelStatus::invalid_configuration")
+                        == 1u,
+                "each minimizer owner partition contains one typed wrapper");
+
+            if (artifact.source_key == "minimizer_reference") {
+                require(
+                    artifact.content.contains(
+                        "MinimizerDispatch_reference_minimap_int")
+                        && occurrences(
+                               artifact.content,
+                               "reference_minimap_int_case<") == 8u,
+                    "the reference owner instantiates its complete case matrix");
+                const std::size_t dna4_u8 = artifact.content.find(
+                    "reference_minimap_int_case<::seq::dna4,::std::uint8_t>");
+                const std::size_t dna4_u16 = artifact.content.find(
+                    "reference_minimap_int_case<::seq::dna4,::std::uint16_t>");
+                const std::size_t dna5_u8 = artifact.content.find(
+                    "reference_minimap_int_case<::seq::dna5,::std::uint8_t>");
+                require(
+                    dna4_u8 != std::string::npos
+                        && dna4_u16 != std::string::npos
+                        && dna5_u8 != std::string::npos
+                        && dna4_u8 < dna4_u16 && dna4_u16 < dna5_u8,
+                    "typed minimizer wrapper cases are deterministically ordered");
+            } else if (artifact.source_key == "minimizer_two_stack") {
+                require(
+                    artifact.content.contains(
+                        "MinimizerDispatch_two_stack_nthash")
+                        && occurrences(
+                               artifact.content,
+                               "two_stack_nthash_case<") == 8u,
+                    "the two-stack owner instantiates its complete case matrix");
+            } else if (artifact.source_key == "minimizer_paper") {
+                require(
+                    artifact.content.contains(
+                        "MinimizerDispatch_paper_nthash")
+                        && occurrences(
+                               artifact.content,
+                               "paper_nthash_case<") == 8u,
+                    "the paper owner instantiates its complete case matrix");
+            }
+            continue;
+        }
         if (artifact.kind != artifact_kind::binder) continue;
         ++checked_binders;
         require(
             artifact.content.contains("import bioseq.sequences;")
                 && artifact.content.contains(
-                    "MinimizerDispatch_reference_minimap_int")
+                    "binding_detail::Populate_minimizer_reference(table)")
                 && artifact.content.contains(
-                    "MinimizerDispatch_two_stack_nthash")
+                    "binding_detail::Populate_minimizer_two_stack(table)")
                 && artifact.content.contains(
-                    "MinimizerDispatch_paper_nthash")
-                && artifact.content.contains(
-                    "table.minimizers.reference_minimap_int = "
-                    "&MinimizerDispatch_reference_minimap_int")
-                && artifact.content.contains(
-                    "table.minimizers.two_stack_nthash = "
-                    "&MinimizerDispatch_two_stack_nthash")
-                && artifact.content.contains(
-                    "table.minimizers.paper_nthash = "
-                    "&MinimizerDispatch_paper_nthash")
+                    "binding_detail::Populate_minimizer_paper(table)")
+                && !artifact.content.contains("MinimizerDispatch_")
+                && !artifact.content.contains("table.minimizers.")
                 && artifact.content.contains(
                     "highway_kernel_set(HighwayKernelId::"
                     "minimizer_reference_minimap_int)")
@@ -1062,23 +1196,23 @@ inline void verify_typed_minimizer_binder() {
                     "minimizer_paper_nthash)")
                 && occurrences(
                        artifact.content,
-                       "switch (invocation.sequence.alphabet_code)") == 3u
+                       "switch (invocation.sequence.alphabet_code)") == 0u
                 && occurrences(
                        artifact.content,
                        "switch (invocation.sequence.storage_unit_bytes)")
-                    == 6u
+                    == 0u
                 && occurrences(
                        artifact.content,
-                       "reference_minimap_int_case<") == 8u
+                       "reference_minimap_int_case<") == 0u
                 && occurrences(
                        artifact.content,
-                       "two_stack_nthash_case<") == 8u
+                       "two_stack_nthash_case<") == 0u
                 && occurrences(
                        artifact.content,
-                       "paper_nthash_case<") == 8u
+                       "paper_nthash_case<") == 0u
                 && occurrences(
                        artifact.content,
-                       "MinimizerKernelStatus::invalid_configuration") == 3u
+                       "MinimizerKernelStatus::invalid_configuration") == 0u
                 && artifact.content.contains(
                     "HighwayAlphabetIdentityEntry alphabet_identities[]")
                 && occurrences(
@@ -1089,26 +1223,17 @@ inline void verify_typed_minimizer_binder() {
                        "highway_alphabet_type_identity<::seq::dna5>()") == 1u
                 && artifact.content.contains(
                     "table.alphabet_identities = alphabet_identities")
+                && !artifact.content.contains("import :")
                 && !artifact.content.contains("table.minimizer_case_"),
-            "each binder folds the exact typed minimizer matrix into three "
-            "neutral runtime wrappers");
-
-        const std::size_t dna4_u8 = artifact.content.find(
-            "reference_minimap_int_case<::seq::dna4,::std::uint8_t>");
-        const std::size_t dna4_u16 = artifact.content.find(
-            "reference_minimap_int_case<::seq::dna4,::std::uint16_t>");
-        const std::size_t dna5_u8 = artifact.content.find(
-            "reference_minimap_int_case<::seq::dna5,::std::uint8_t>");
-        require(
-            dna4_u8 != std::string::npos
-                && dna4_u16 != std::string::npos
-                && dna5_u8 != std::string::npos
-                && dna4_u8 < dna4_u16 && dna4_u16 < dna5_u8,
-            "typed minimizer wrapper cases are deterministically ordered");
+            "each binder assembles neutral minimizer wrapper pointers without "
+            "instantiating the typed case matrix");
     }
     require(
         checked_binders == 2u,
         "both fixed targets receive typed minimizer wrappers");
+    require(
+        checked_minimizer_binding_partitions == 6u,
+        "each fixed target compiles three minimizer instantiation units");
 
     generation_plan incomplete = plan;
     incomplete.source_inventory.slots.erase(
