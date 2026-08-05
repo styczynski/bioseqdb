@@ -332,20 +332,30 @@ inline void verify_complete_table_target_policy() {
     const generation_plan valid = two_target_plan();
     validate_complete_table_target_policy(valid.target_inventory);
 
-    generation_plan scalar = valid;
-    scalar.target_inventory.targets.push_back(target_spec{
-        .platform = "x86",
-        .slug = "scalar",
-        .token = "HWY_SCALAR",
-        .name_space = "N_SCALAR",
-        .bit = 4u,
-    });
-    require_rejected(
-        [&] {
-            validate_complete_table_target_policy(
-                scalar.target_inventory);
-        },
-        "the complete-table target policy rejects HWY_SCALAR");
+    constexpr std::array<std::string_view, 6> excluded_targets{
+        "HWY_SCALAR",
+        "HWY_RVV",
+        "HWY_SVE",
+        "HWY_SVE2",
+        "HWY_SVE_256",
+        "HWY_SVE2_128",
+    };
+    for (std::size_t index = 0; index < excluded_targets.size(); ++index) {
+        generation_plan excluded = valid;
+        excluded.target_inventory.targets.push_back(target_spec{
+            .platform = "fixture",
+            .slug = "excluded_" + std::to_string(index),
+            .token = std::string{excluded_targets[index]},
+            .name_space = "N_EXCLUDED_" + std::to_string(index),
+            .bit = 4u + index,
+        });
+        require_rejected(
+            [&] {
+                validate_complete_table_target_policy(
+                    excluded.target_inventory);
+            },
+            "the complete-table target policy rejects scalar and sizeless targets");
+    }
 
     generation_plan no_emu128 = valid;
     no_emu128.target_inventory.targets.erase(

@@ -1471,10 +1471,10 @@ bioseq_add_highway_codegen(
   DISPATCH_MODULE bioseq.scheduler.dispatch_processor
   HIGHWAY_VERSION 1.3.0
   # Block Aligner requires at least eight lanes. EMU128 remains the portable
-  # generated fallback; scalar is not advertised as a complete target table.
+  # fixed-width fallback; scalar and sizeless targets are outside this table.
   POLICY_DEFINITIONS
     HWY_COMPILE_ALL_ATTAINABLE=1
-    HWY_DISABLED_TARGETS=HWY_SCALAR
+    HWY_DISABLED_TARGETS=(HWY_SCALAR|HWY_ALL_SVE|HWY_RVV)
   DOMAIN_TOPOLOGY_MANIFESTS
     "typed_scheduler=${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
   COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"

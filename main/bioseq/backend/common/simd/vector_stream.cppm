@@ -9,10 +9,6 @@ module;
 #include <type_traits>
 #include <utility>
 
-#if HWY_TARGET == HWY_RVV || HWY_TARGET == HWY_SVE || HWY_TARGET == HWY_SVE2
-#  error "bioseq_simd.vector_stream: vectors are sizeless on RVV/SVE; this module is only enabled for fixed-vector targets (NEON, SSE/AVX, AVX-512, SCALAR)."
-#endif
-
 export module bioseq.simd.vector_stream;
 
 import bioseq.simd.utils;     // for_each_index<W>

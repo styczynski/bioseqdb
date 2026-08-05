@@ -762,20 +762,29 @@ inline void validate_prepare_command_line(prepare_command_line& command) {
 
 inline void validate_complete_table_target_policy(
     const target_manifest& targets) {
-    const bool contains_scalar = std::ranges::any_of(
+    constexpr std::array<std::string_view, 6> excluded_targets{
+        "HWY_SCALAR",
+        "HWY_RVV",
+        "HWY_SVE",
+        "HWY_SVE2",
+        "HWY_SVE_256",
+        "HWY_SVE2_128",
+    };
+    const auto excluded = std::ranges::find_if(
         targets.targets,
-        [](const target_spec& target) {
-            return target.token == "HWY_SCALAR";
+        [&excluded_targets](const target_spec& target) {
+            return std::ranges::find(
+                excluded_targets, target.token) != excluded_targets.end();
         });
     const bool contains_emu128 = std::ranges::any_of(
         targets.targets,
         [](const target_spec& target) {
             return target.token == "HWY_EMU128";
         });
-    if (contains_scalar) {
+    if (excluded != targets.targets.end()) {
         throw std::runtime_error(
-            "Highway target inventory must exclude HWY_SCALAR because the "
-            "complete kernel table requires at least eight SIMD lanes");
+            "Highway target inventory must exclude scalar and sizeless "
+            "targets; unsupported target " + excluded->token);
     }
     if (!contains_emu128) {
         throw std::runtime_error(
