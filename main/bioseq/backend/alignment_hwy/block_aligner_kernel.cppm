@@ -17,6 +17,8 @@ module;
 #include <hwy/highway.h>
 #include <hwy/aligned_allocator.h>
 
+#include "common.h"
+
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>

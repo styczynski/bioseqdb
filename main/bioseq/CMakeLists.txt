@@ -249,8 +249,7 @@ function(bioseq_private_packed_access_scope_names
     set(_bioseq_scopes
       consume_two_stack_nthash_fragment
       collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
-      run_fragmented_impl
-      scalable_two_stack_storage_fallback)
+      run_fragmented_impl)
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
     set(_bioseq_scopes
@@ -344,11 +343,6 @@ function(bioseq_private_packed_access_line_allowed
             ": resident.read_cptr(resident.cbegin());"))
       set(_bioseq_allowed TRUE)
     elseif("${_bioseq_scope}" STREQUAL "run_fragmented_impl"
-        AND "${_bioseq_line}" STREQUAL
-          "constexpr std::size_t letters_per_unit = traits::letters_per_unit;")
-      set(_bioseq_allowed TRUE)
-    elseif("${_bioseq_scope}" STREQUAL
-        "scalable_two_stack_storage_fallback"
         AND "${_bioseq_line}" STREQUAL
           "constexpr std::size_t letters_per_unit = traits::letters_per_unit;")
       set(_bioseq_allowed TRUE)
@@ -1474,7 +1468,7 @@ bioseq_add_highway_codegen(
   # fixed-width fallback; scalar and sizeless targets are outside this table.
   POLICY_DEFINITIONS
     HWY_COMPILE_ALL_ATTAINABLE=1
-    HWY_DISABLED_TARGETS=(HWY_SCALAR|HWY_ALL_SVE|HWY_RVV)
+    "HWY_DISABLED_TARGETS=(HWY_SCALAR|HWY_ALL_SVE|HWY_RVV)"
   DOMAIN_TOPOLOGY_MANIFESTS
     "typed_scheduler=${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
   COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"
