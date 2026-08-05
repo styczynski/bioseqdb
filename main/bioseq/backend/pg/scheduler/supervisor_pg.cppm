@@ -344,6 +344,9 @@ enum class PersistPayloadKind : std::uint32_t {
     mps_build_identity = 3,
 };
 
+inline constexpr std::uint32_t kIndexBuildMpsDsmMagic = 0xB1051D5Au;
+inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 5;
+
 struct MpsBuildMetadata {
     std::string index_name{};
     bioseq::storage::seq_locator locator{};
@@ -375,6 +378,9 @@ struct PersistClaim {
 void init_mps_build_stats(PgMpsBuildStats& stats);
 void init_async_mps_worker_boundary_stats(
     PgAsyncMpsWorkerBoundaryStats& stats);
+void release_pinned_dsm(dsm_handle handle) noexcept;
+void record_prohibited_legacy_persist_rejection(
+    std::string_view route) noexcept;
 [[nodiscard]] std::optional<MpsBuildMetadata>
 parse_mps_build_metadata(const char* base, Size mapped);
 [[nodiscard]] const bioseq::minimizers::MinimizerKernels*
