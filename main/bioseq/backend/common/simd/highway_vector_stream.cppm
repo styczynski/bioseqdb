@@ -219,8 +219,13 @@ private:
     explicit HWY_INLINE constexpr vec_stream(Vs... vs) noexcept
         : _data{ static_cast<vec_t>(vs)... } {}
 
+    template <size_t... S>
+    explicit HWY_INLINE constexpr vec_stream(std::index_sequence<S...>) noexcept
+        : _data{ ((void)S, vec_t{})... } {}
+
 public:
-    HWY_INLINE constexpr vec_stream() noexcept : _data{} {}
+    HWY_INLINE constexpr vec_stream() noexcept
+        : vec_stream(std::make_index_sequence<W>{}) {}
 
     [[nodiscard]] constexpr vec_t&       operator[](size_t s)       noexcept { return _data[s]; }
     [[nodiscard]] constexpr const vec_t& operator[](size_t s) const noexcept { return _data[s]; }
@@ -418,8 +423,13 @@ private:
     explicit HWY_INLINE constexpr mask_stream(Ms... ms) noexcept
         : _data{ static_cast<mask_t>(ms)... } {}
 
+    template <size_t... S>
+    explicit HWY_INLINE constexpr mask_stream(std::index_sequence<S...>) noexcept
+        : _data{ ((void)S, mask_t{})... } {}
+
 public:
-    HWY_INLINE constexpr mask_stream() noexcept : _data{} {}
+    HWY_INLINE constexpr mask_stream() noexcept
+        : mask_stream(std::make_index_sequence<W>{}) {}
 
     [[nodiscard]] constexpr mask_t&       operator[](size_t s)       noexcept { return _data[s]; }
     [[nodiscard]] constexpr const mask_t& operator[](size_t s) const noexcept { return _data[s]; }
