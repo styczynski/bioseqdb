@@ -61,7 +61,6 @@ import bioseq.config;
 import bioseq.instr;
 import bioseq.parallelism.memory_admission;
 import bioseq.pg_utils;
-import bioseq.highway.dispatch_contract;
 import bioseq.indexing.type;
 import bioseq.storage.manager;
 import bioseq.sequences;
@@ -160,29 +159,6 @@ inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 5;
     return backend == MinimizerSketchBackend::Scalar
         || backend == MinimizerSketchBackend::VulkanSegment
         || backend == MinimizerSketchBackend::ExactSimd;
-}
-
-const bioseq::minimizers::MinimizerKernels*
-rebind_minimizer_kernels_for_backend(
-        std::int32_t backend_value,
-        std::int64_t highway_executed_target) {
-    using bioseq::minimizers::MinimizerSketchBackend;
-    const auto backend = static_cast<MinimizerSketchBackend>(backend_value);
-    if (backend == MinimizerSketchBackend::Scalar
-        || backend == MinimizerSketchBackend::VulkanSegment) {
-        return nullptr;
-    }
-    const auto& binding = bioseq::simd_dispatch::
-        registered_highway_target_binding(highway_executed_target);
-    const auto* kernels = &binding.kernels->minimizers;
-    if ((backend == MinimizerSketchBackend::ExactSimd
-            && kernels->two_stack_nthash == nullptr)
-        || (backend == MinimizerSketchBackend::PaperNtHashSimd
-            && kernels->paper_nthash == nullptr)) {
-        throw std::logic_error{
-            "selected Highway target lacks the requested minimizer kernel"};
-    }
-    return kernels;
 }
 
 inline bool g_persist_xact_callback_registered = false;
