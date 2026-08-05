@@ -1792,6 +1792,7 @@ set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer_api_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_shader_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_mps_impl.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES

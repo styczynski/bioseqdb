@@ -369,6 +369,9 @@ struct PersistClaim {
 };
 
 [[nodiscard]] unsigned effective_max_concurrency(unsigned configured);
+void init_mps_build_stats(PgMpsBuildStats& stats);
+void init_async_mps_worker_boundary_stats(
+    PgAsyncMpsWorkerBoundaryStats& stats);
 [[nodiscard]] std::optional<MpsBuildMetadata>
 parse_mps_build_metadata(const char* base, Size mapped);
 [[nodiscard]] bool worker_target_accepts_index_persist(
@@ -400,5 +403,6 @@ void process_mps_build_claim(
 void publish_runtime_init_result(
     std::expected<void, std::string> result) noexcept;
 void service_pending_shader_compiles();
+void process_one_persist_job_if_ready();
 
 } // namespace bioseq::parallelism::pg
