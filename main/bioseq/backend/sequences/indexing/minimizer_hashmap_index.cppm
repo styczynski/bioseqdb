@@ -799,7 +799,7 @@ collect_bounded_packed_paper_nthash_index_lazy(
             resident_packed_region descriptor{};
         bool borrowed_native = false;
         for (const std::uint8_t width :
-             std::array<std::uint8_t, 4>{1u, 2u, 4u, 8u}) {
+             std::array<std::uint8_t, 2>{8u, 4u}) {
             auto resident = sequence.try_resident_packed(
                 lo_bp, hi_bp, width);
             if (resident.has_value()
@@ -830,9 +830,7 @@ collect_bounded_packed_paper_nthash_index_lazy(
             descriptor = owner->descriptor();
         }
         if (descriptor.bp_length != local_bp_size
-            || !(descriptor.storage_unit_byte_width == 1u
-                || descriptor.storage_unit_byte_width == 2u
-                || descriptor.storage_unit_byte_width == 4u
+            || !(descriptor.storage_unit_byte_width == 4u
                 || descriptor.storage_unit_byte_width == 8u)
             || descriptor.bits_per_symbol
                 != bioseq::storage::lazy_rank_stream_traits<Alphabet>::

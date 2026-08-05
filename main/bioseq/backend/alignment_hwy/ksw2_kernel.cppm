@@ -92,21 +92,29 @@ template<typename D, typename VecT = hn::Vec<D>>
 [[always_inline]] inline VecT set_lane_zero(
     const D& d, hn::TFromD<D> value) noexcept
 {
-    constexpr size_t kMaxLanes = hn::MaxLanes(D{});
-    HWY_ALIGN hn::TFromD<D> buffer[kMaxLanes] = {};
-    buffer[0] = value;
-    return hn::Load(d, buffer);
+    return hn::IfThenElse(
+        hn::FirstN(d, 1u), hn::Set(d, value), hn::Zero(d));
 }
 
 template<typename D, typename VecT = hn::Vec<D>>
 [[always_inline]] inline VecT shift_left_insert(
     const D& d, VecT vec, VecT& lane0) noexcept
 {
-    const auto carry_out = hn::ExtractLane(vec, hn::Lanes(d) - 1u);
-    auto shifted = hn::SlideUpLanes(d, vec, 1u);
-    shifted = hn::IfThenElse(hn::FirstN(d, 1u), lane0, shifted);
-    lane0 = set_lane_zero(d, carry_out);
-    return shifted;
+    constexpr size_t kElemBytes = sizeof(hn::TFromD<D>);
+    constexpr size_t kVecBytes = hn::MaxLanes(D{}) * kElemBytes;
+    if constexpr (kVecBytes <= 16) {
+        auto carry_out =
+            hn::ShiftRightBytes<kVecBytes - kElemBytes>(d, vec);
+        auto shifted = hn::Or(hn::ShiftLeftBytes<kElemBytes>(d, vec), lane0);
+        lane0 = carry_out;
+        return shifted;
+    } else {
+        const auto carry_out = hn::ExtractLane(vec, hn::Lanes(d) - 1u);
+        auto shifted = hn::SlideUpLanes(d, vec, 1u);
+        shifted = hn::IfThenElse(hn::FirstN(d, 1u), lane0, shifted);
+        lane0 = set_lane_zero(d, carry_out);
+        return shifted;
+    }
 }
 
 // =============================================================================
@@ -416,22 +424,18 @@ inline void ksw_backtrack_cigar(
 }
 
 // =============================================================================
-// KswDpCell — references to caller-owned DP locals.
-//
-// SVE/RVV vectors are sizeless and cannot be class data members. References
-// are permitted, so the named cell interface remains readable without ever
-// placing a vector inside an aggregate.
+// KswDpCell — return type for the DP load step (replaces KSW_DP_LOAD macro).
 // =============================================================================
 
 template<typename D>
 struct KswDpCell {
-    hn::Vec<D>& score_max_cell;
-    hn::Vec<D>& diff_left_sh;
-    hn::Vec<D>& diff_up_cur;
-    hn::Vec<D>& diag_chain;
-    hn::Vec<D>& vert_chain;
-    hn::Vec<D>& diag_chain2;
-    hn::Vec<D>& vert_chain2;
+    hn::Vec<D> score_max_cell;
+    hn::Vec<D> diff_left_sh;
+    hn::Vec<D> diff_up_cur;
+    hn::Vec<D> diag_chain;
+    hn::Vec<D> vert_chain;
+    hn::Vec<D> diag_chain2;
+    hn::Vec<D> vert_chain2;
 };
 
 // =============================================================================
@@ -443,10 +447,9 @@ struct KswDpCell {
 // =============================================================================
 
 template<KswAlignerMode mode, bool fused_score, typename D, typename StateT>
-[[always_inline]] inline void ksw_dp_load(
+[[always_inline]] inline KswDpCell<D> ksw_dp_load(
     D pst, int off,
     StateT& HWY_RESTRICT state,
-    KswDpCell<D>& c,
     const uint8_t* HWY_RESTRICT query_reversed_aligned,
     hn::Vec<D>& bx_vec, hn::Vec<D>& bv_vec,
     [[maybe_unused]] hn::Vec<D>& bx2_vec,
@@ -458,6 +461,7 @@ template<KswAlignerMode mode, bool fused_score, typename D, typename StateT>
 {
     constexpr bool is_dual = (mode == KswAlignerMode::DUAL_AFFINE);
     using partial_t = hn::TFromD<D>;
+    KswDpCell<D> c;
 
     // --- Cell score ---
     if constexpr (fused_score) {
@@ -501,6 +505,7 @@ template<KswAlignerMode mode, bool fused_score, typename D, typename StateT>
             hn::Load(pst, state.gap_f2_offset_base + off), c.diff_up_cur);
     }
 
+    return c;
 }
 
 // =============================================================================
@@ -919,29 +924,17 @@ template<
             // ---- Score-only path ------------------------------------------
             for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
                 const int off = bvi * bl;
-                auto score_max_cell = hn::Zero(pst);
-                auto diff_left_sh = hn::Zero(pst);
-                auto diff_up_cur = hn::Zero(pst);
-                auto diag_chain = hn::Zero(pst);
-                auto vert_chain = hn::Zero(pst);
-                auto diag_chain2 = hn::Zero(pst);
-                auto vert_chain2 = hn::Zero(pst);
-                KswDpCell<decltype(pst)> c{
-                    score_max_cell, diff_left_sh, diff_up_cur,
-                    diag_chain, vert_chain, diag_chain2, vert_chain2};
-                if (use_fused_score) {
-                    ksw_dp_load<mode, true>(pst, off, state, c,
+                auto c = use_fused_score
+                    ? ksw_dp_load<mode, true>(pst, off, state,
+                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
+                        double_gap_cost_vec, match_score_vec,
+                        mismatch_score_vec, wildcard_score_vec,
+                        wildcard_rank_vec)
+                    : ksw_dp_load<mode, false>(pst, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
                         wildcard_rank_vec);
-                } else {
-                    ksw_dp_load<mode, false>(pst, off, state, c,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec);
-                }
                 ksw_dp_max_reduce<mode>(pst, c, max_plausible_score_vec,
                     match_score_vec);
                 ksw_dp_store<mode>(pst, off, c, state,
@@ -954,29 +947,17 @@ template<
             anti_diag_band_end  [static_cast<size_t>(anti_diagonal)] = band_end;
             for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
                 const int off = bvi * bl;
-                auto score_max_cell = hn::Zero(pst);
-                auto diff_left_sh = hn::Zero(pst);
-                auto diff_up_cur = hn::Zero(pst);
-                auto diag_chain = hn::Zero(pst);
-                auto vert_chain = hn::Zero(pst);
-                auto diag_chain2 = hn::Zero(pst);
-                auto vert_chain2 = hn::Zero(pst);
-                KswDpCell<decltype(pst)> c{
-                    score_max_cell, diff_left_sh, diff_up_cur,
-                    diag_chain, vert_chain, diag_chain2, vert_chain2};
-                if (use_fused_score) {
-                    ksw_dp_load<mode, true>(pst, off, state, c,
+                auto c = use_fused_score
+                    ? ksw_dp_load<mode, true>(pst, off, state,
+                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
+                        double_gap_cost_vec, match_score_vec,
+                        mismatch_score_vec, wildcard_score_vec,
+                        wildcard_rank_vec)
+                    : ksw_dp_load<mode, false>(pst, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
                         wildcard_rank_vec);
-                } else {
-                    ksw_dp_load<mode, false>(pst, off, state, c,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec);
-                }
 
                 // Direction tracking — left-align tie-break
                 auto dir = hn::IfThenElseZero(
@@ -1063,29 +1044,17 @@ template<
             anti_diag_band_end  [static_cast<size_t>(anti_diagonal)] = band_end;
             for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
                 const int off = bvi * bl;
-                auto score_max_cell = hn::Zero(pst);
-                auto diff_left_sh = hn::Zero(pst);
-                auto diff_up_cur = hn::Zero(pst);
-                auto diag_chain = hn::Zero(pst);
-                auto vert_chain = hn::Zero(pst);
-                auto diag_chain2 = hn::Zero(pst);
-                auto vert_chain2 = hn::Zero(pst);
-                KswDpCell<decltype(pst)> c{
-                    score_max_cell, diff_left_sh, diff_up_cur,
-                    diag_chain, vert_chain, diag_chain2, vert_chain2};
-                if (use_fused_score) {
-                    ksw_dp_load<mode, true>(pst, off, state, c,
+                auto c = use_fused_score
+                    ? ksw_dp_load<mode, true>(pst, off, state,
+                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
+                        double_gap_cost_vec, match_score_vec,
+                        mismatch_score_vec, wildcard_score_vec,
+                        wildcard_rank_vec)
+                    : ksw_dp_load<mode, false>(pst, off, state,
                         query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
                         double_gap_cost_vec, match_score_vec,
                         mismatch_score_vec, wildcard_score_vec,
                         wildcard_rank_vec);
-                } else {
-                    ksw_dp_load<mode, false>(pst, off, state, c,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec);
-                }
 
                 // Direction tracking — right-align tie-break
                 auto dir = hn::IfThenZeroElse(

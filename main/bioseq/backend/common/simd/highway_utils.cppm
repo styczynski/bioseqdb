@@ -42,9 +42,16 @@ HWY_INLINE Stored extract_last(D d, hn::Vec<D> value) {
 
 template<class D, size_t index = 0>
 HWY_INLINE hn::Vec<D> broadcast_last(D d, hn::Vec<D> value) {
-    // Runtime lane lookup is required for capped scalable descriptors, where
-    // MaxLanes(d) is not necessarily the active last lane.
-    return hn::Set(d, extract_last<D, index>(d, value));
+    constexpr size_t vector_bytes =
+        hn::MaxLanes(D{}) * sizeof(hn::TFromD<D>);
+    if constexpr (vector_bytes <= 16) {
+        constexpr size_t lane = hn::MaxLanes(D{}) - 1 - index;
+        return hn::BroadcastLane<lane>(value);
+    } else {
+        // Combine/broadcast operations on wide fixed-width targets retain
+        // 128-bit-block semantics. Extract the actual final lane instead.
+        return hn::Set(d, extract_last<D, index>(d, value));
+    }
 }
 
 template<class D, size_t first_count = 1,
@@ -83,11 +90,18 @@ template<class D, class Stored = hn::TFromD<D>>
 HWY_INLINE hn::Vec<D> lanes_shift_left_1_borrow(
     D d, hn::Vec<D> current, hn::Vec<D> previous)
 {
-    const auto shifted = hn::SlideUpLanes(d, current, 1);
-    return hn::IfThenElse(
-        hn::FirstN(d, 1),
-        hn::Set(d, extract_last(d, previous)),
-        shifted);
+    constexpr size_t vector_bytes =
+        hn::MaxLanes(D{}) * sizeof(hn::TFromD<D>);
+    if constexpr (vector_bytes <= 16) {
+        constexpr size_t shift = hn::MaxLanes(D{}) - 1;
+        return hn::CombineShiftRightLanes<shift>(d, current, previous);
+    } else {
+        const auto shifted = hn::SlideUpLanes(d, current, 1);
+        return hn::IfThenElse(
+            hn::FirstN(d, 1),
+            hn::Set(d, extract_last(d, previous)),
+            shifted);
+    }
 }
 
 template<class D_I, class D_F>

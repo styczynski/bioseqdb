@@ -1059,7 +1059,7 @@ minimizer_kernel_view(
     };
 }
 
-/** Preserve any scheduler-supported resident packing before materialising. */
+/** Preserve any genuinely vectorized resident packing before materialising. */
 template <sequence_alphabet Alphabet>
 [[nodiscard]] inline std::optional<typename bioseq::storage::
     basic_lazy_sequence_view<Alphabet>::resident_packed_region>
@@ -1070,6 +1070,26 @@ try_minimizer_resident_packed(
 {
     for (const std::uint8_t width :
          std::array<std::uint8_t, 4>{1u, 2u, 4u, 8u}) {
+        auto descriptor = sequence.try_resident_packed(from, to, width);
+        if (descriptor.has_value()
+            && descriptor->leading_symbol_offset == 0u) {
+            return descriptor;
+        }
+    }
+    return std::nullopt;
+}
+
+/** Reference/Paper kernels retain their established u32/u64 SIMD contract. */
+template <sequence_alphabet Alphabet>
+[[nodiscard]] inline std::optional<typename bioseq::storage::
+    basic_lazy_sequence_view<Alphabet>::resident_packed_region>
+try_word_minimizer_resident_packed(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    sequence_size_t from,
+    sequence_size_t to)
+{
+    for (const std::uint8_t width :
+         std::array<std::uint8_t, 2>{8u, 4u}) {
         auto descriptor = sequence.try_resident_packed(from, to, width);
         if (descriptor.has_value()
             && descriptor->leading_symbol_offset == 0u) {
@@ -1348,7 +1368,7 @@ template <MinKernelKind Kind, class MinimizerT,
                     "selected Highway reference minimizer declined");
             }
         };
-        if (auto descriptor = try_minimizer_resident_packed(
+        if (auto descriptor = try_word_minimizer_resident_packed(
                 seq, 0u, seq.bp_size()); descriptor.has_value()) {
             run_reference(*descriptor);
             return {};
@@ -1570,7 +1590,7 @@ minimizer_dispatch_range(
                 collector);
         };
         ::bioseq::minimizers::MinimizerKernelResult result{};
-        if (auto native = try_minimizer_resident_packed(
+        if (auto native = try_word_minimizer_resident_packed(
                 seq, lo_bp, hi_bp); native.has_value()) {
             result = run_paper(*native);
         } else {
