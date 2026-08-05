@@ -219,6 +219,48 @@ lane_indices(D d) noexcept
     return hn::LoadU(d, indices.data());
 }
 
+template<class D, typename ST, std::size_t W, std::size_t... I>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+vec_stream<D, ST, W> make_undefined_vec_stream(
+    D d,
+    std::index_sequence<I...>) noexcept
+{
+    return pack_vec_stream<D, ST, W>(
+        d, ((void)I, hn::Undefined(d))...);
+}
+
+template<
+    std::size_t Capacity,
+    class D,
+    typename ST,
+    std::size_t W,
+    std::size_t... I>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+std::array<vec_stream<D, ST, W>, Capacity>
+make_undefined_vec_stream_array(
+    D d,
+    std::index_sequence<I...>) noexcept
+{
+    return {
+        ((void)I, make_undefined_vec_stream<D, ST, W>(
+            d, std::make_index_sequence<W>{}))...
+    };
+}
+
+/**
+ * Construct every std::array element inside target-attributed project code.
+ * The ring's live prefix is overwritten with its semantic max/zero values
+ * before the first read, so Undefined avoids an otherwise redundant fill.
+ */
+template<std::size_t Capacity, class D, typename ST, std::size_t W>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+std::array<vec_stream<D, ST, W>, Capacity>
+make_undefined_vec_stream_array(D d) noexcept
+{
+    return make_undefined_vec_stream_array<Capacity, D, ST, W>(
+        d, std::make_index_sequence<Capacity>{});
+}
+
 // =================================================================================
 // `sequence_simd_iteration_state` — Phase-4 lambda extraction (REPORT_PHASE_3_INDEPTH §7.1).
 // ---------------------------------------------------------------------------------
@@ -808,9 +850,10 @@ collect_minimizers_two_stack_nthash_simd_impl(
     // ---- Per-iteration state struct (Phase-4 lambda extraction) ----
     // Aggregate-init in declaration order so `step_one_bp_vec_stream` sees
     // a fully-populated stack-resident object on its first invocation.
-    // Ring buffers default-init to zero here — the meaningful "splat(max)"
-    // initialisation runs in the loop below (only the first `w` slots are
-    // ever read; this matches the pre-Phase-4 init contract). With
+    // Ring-buffer elements are explicitly constructed with Undefined inside
+    // target-attributed project code; the meaningful max/zero initialization
+    // runs in the loop below before any read (only the first `w` slots are
+    // live; this matches the pre-Phase-4 init contract). With
     // [[clang::trivial_abi]] on `vec_stream` and the impl being
     // [[gnu::always_inline]] [[gnu::flatten]], SROA should break the struct
     // back apart into per-member NEON-register-resident locals so the
@@ -825,8 +868,12 @@ collect_minimizers_two_stack_nthash_simd_impl(
         .prefix_kmer                = vec_stream_t::splat(d, static_cast<storage_unit>(0)),
         .pos_local                  = vec_stream_t::splat(d, static_cast<storage_unit>(0)),
         .last_emit_pos              = vec_stream_t::splat(d, max_val),
-        .ring_buf_elem              = {},
-        .ring_buf_hash_strand       = {},
+        .ring_buf_elem              = two_stack_internal::
+            make_undefined_vec_stream_array<
+                buf_capacity, d_t, storage_unit, NumStreams>(d),
+        .ring_buf_hash_strand       = two_stack_internal::
+            make_undefined_vec_stream_array<
+                buf_capacity, d_t, storage_unit, NumStreams>(d),
         .pos_wrap_delta             = static_cast<storage_unit>(0),
         .step                       = 0,
         .ring_idx                   = 0,

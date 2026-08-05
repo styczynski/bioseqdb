@@ -436,6 +436,10 @@ struct KswDpCell {
     hn::Vec<D> vert_chain;
     hn::Vec<D> diag_chain2;
     hn::Vec<D> vert_chain2;
+
+    // A project-declared body gives the generator a callable on which to put
+    // HWY_ATTR. Default-initialization still leaves every vector uninitialized.
+    [[gnu::always_inline]] KswDpCell() noexcept {}
 };
 
 // =============================================================================

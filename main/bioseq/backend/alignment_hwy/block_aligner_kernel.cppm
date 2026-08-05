@@ -17,8 +17,6 @@ module;
 #include <hwy/highway.h>
 #include <hwy/aligned_allocator.h>
 
-#include "common.h"
-
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -318,8 +316,8 @@ public:
         // trace word. Keep only a debug assertion in the hottest DP loop;
         // fail-closed runtime checks remain at capacity construction and at
         // the rectangle-level skip boundary below.
-        DEBUG_ASSERT(trace_idx_ < prevalidated_trace_capacity_,
-                     "prevalidated Block trace capacity exceeded");
+        HWY_DASSERT_M(trace_idx_ < prevalidated_trace_capacity_,
+                      "prevalidated Block trace capacity exceeded");
         trace_[trace_idx_] = t;
         trace2_[trace_idx_] = t2;
         ++trace_idx_;
@@ -604,7 +602,7 @@ HWY_INLINE void ba_record_trace(
     [[maybe_unused]] const size_t L = hn::Lanes(d);
     // TraceType is uint32_t (32 bits). With 2 bits per lane, max L = 16.
     // AVX-512 (L=32) would need uint64_t traces.
-    DEBUG_ASSERT(L <= 16, "Trace bitmask overflow: L > 16 not supported");
+    HWY_DASSERT_M(L <= 16, "Trace bitmask overflow: L > 16 not supported");
 
     // Per-lane "score came from" decisions: BitsFromMask compresses one
     // mask bit per lane into a uint64_t, lowering to PMOVMSKB on x86 and

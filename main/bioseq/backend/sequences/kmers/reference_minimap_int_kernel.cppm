@@ -6,7 +6,6 @@ export module bioseq.highway.sources.minimizer_reference;
 
 import std;
 import bioseq.common.sequan_compat;
-import bioseq.common.circular_append_buffer;
 import bioseq.sequences;
 import bioseq.instr;
 import bioseq.sequences.kmers.hashers.base;
@@ -32,6 +31,79 @@ using ::bioseq::minimizers::MinimizerSink;
 using ::bioseq::minimizers::PackedSequenceKernelView;
 
 using ::bioseq::minimizers::minimizer_sink_collector;
+
+template<class D, std::size_t Capacity>
+class reference_minimizer_ring {
+public:
+    using value_type = hn::Vec<D>;
+    using iterator = std::size_t;
+
+private:
+    alignas(HWY_MAX_BYTES) std::array<value_type, Capacity> values_;
+    iterator write_position_ = 0u;
+    iterator previous_position_ = 0u;
+    std::size_t capacity_ = 0u;
+
+    template<std::size_t... I>
+    HWY_INLINE explicit reference_minimizer_ring(
+        D d,
+        const std::size_t capacity,
+        std::index_sequence<I...>) noexcept
+        : values_{((void)I, hn::Undefined(d))...},
+          capacity_(capacity) {}
+
+public:
+    HWY_INLINE explicit reference_minimizer_ring(
+        D d,
+        const std::size_t capacity) noexcept
+        : reference_minimizer_ring(
+              d, capacity, std::make_index_sequence<Capacity>{}) {
+        HWY_DASSERT(capacity_ != 0u && capacity_ <= Capacity);
+    }
+
+    [[nodiscard]] static constexpr iterator get_begin() noexcept {
+        return 0u;
+    }
+
+    [[nodiscard]] HWY_INLINE std::size_t capacity() const noexcept {
+        return capacity_;
+    }
+
+    [[nodiscard]] HWY_INLINE const value_type& get_value_iter(
+        const iterator position) const noexcept {
+        return values_[position];
+    }
+
+    HWY_INLINE void push_back(value_type value) noexcept {
+        previous_position_ = write_position_;
+        values_[write_position_] = value;
+        if (++write_position_ == capacity_) write_position_ = 0u;
+    }
+
+    [[nodiscard]] HWY_INLINE iterator last_write_pos() const noexcept {
+        return previous_position_;
+    }
+
+    [[nodiscard]] HWY_INLINE value_type& last() noexcept {
+        return values_[previous_position_];
+    }
+
+    template<class Function>
+    HWY_INLINE void unsafe_filled_for_each(Function&& function) {
+        std::size_t distance = capacity_ - 1u;
+        for (iterator position = write_position_;
+             position < capacity_;
+             ++position, --distance) {
+            function(position, values_[position], distance);
+        }
+        for (iterator position = 0u;
+             position < write_position_;
+             ++position, --distance) {
+            function(position, values_[position], distance);
+        }
+    }
+};
+
 #ifdef BIOSEQ_TEST_INDEXES
 /// Algorithm-local receipt for the legacy reference-SIMD minimizer kernel.
 /// Dispatcher tests reset/snapshot this thread-local seam around one call; a
@@ -102,7 +174,7 @@ inline void collect_minimizers_simd(
 	size_t pos = 0;
 	using hash_vec_t = hn::Vec<outp_d_t>;
 	using hash_mask_t = hn::Mask<outp_d_t>;
-	circular_append_buffer<hash_vec_t, 256, HWY_MAX_BYTES> buffer(w);
+	reference_minimizer_ring<outp_d_t, 256> buffer(dd, w);
 	// Parallel buffer holding the per-lane strand bit (0=forward, 1=reverse-complement)
 	// for the same slot the hash buffer above stores. The previous SIMD
 	// implementation always emitted strand=0 because the simd hasher's `next()` only
@@ -113,7 +185,7 @@ inline void collect_minimizers_simd(
 	// derive strand per lane via `hasher.get_strand_mask(d)` and carry it through the
 	// rolling-window state alongside the hash so the rescan path can recover the
 	// strand of an arbitrary buffer slot too.
-	circular_append_buffer<hash_vec_t, 256, HWY_MAX_BYTES> strand_buffer(w);
+	reference_minimizer_ring<outp_d_t, 256> strand_buffer(dd, w);
 
 	constexpr auto max_val = static_cast<seq_traits::storage_unit>(-1);
 	const hash_vec_t max_vec = hn::Set(dd, max_val);
