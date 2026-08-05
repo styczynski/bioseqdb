@@ -282,8 +282,8 @@ struct sequence_simd_iteration_state {
     vec_stream_t prefix_kmer;
     vec_stream_t pos_local;
     vec_stream_t last_emit_pos;
-    std::array<vec_stream_t, BufCapacity> ring_buf_elem;
-    std::array<vec_stream_t, BufCapacity> ring_buf_hash_strand;
+    vec_stream_t ring_buf_elem[BufCapacity];
+    vec_stream_t ring_buf_hash_strand[BufCapacity];
     ST     pos_wrap_delta;
     size_t step;
     size_t ring_idx;
