@@ -9,7 +9,6 @@ import bioseq.common.sequan_compat;
 import bioseq.common.circular_append_buffer;
 import bioseq.sequences;
 import bioseq.instr;
-import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.base;
 import bioseq.sequences.kmers.highway_contract;
 import bioseq.highway.sources.sequence_ops;
@@ -42,9 +41,6 @@ struct ReferenceSimdMinimizerTestReceipt {
     std::uint64_t vector_callback_batches = 0u;
     std::uint64_t vector_lane_visits = 0u;
     std::uint64_t last_storage_unit_bytes = 0u;
-    std::uint64_t scalable_storage_fallback_calls = 0u;
-    std::uint64_t scalable_storage_fallback_input_symbols = 0u;
-    std::uint64_t scalable_storage_fallback_minimizers_emitted = 0u;
 };
 
 inline thread_local ReferenceSimdMinimizerTestReceipt
@@ -499,27 +495,6 @@ inline void collect_minimizers_simd_constexpr(
 
 namespace minimizer_kernel_detail {
 
-// Donor-visible callable: SVE/RVV select it from statements inside the common
-// run_reference body, so the code generator observes and attributes the same
-// callable geometry before emitting every target.
-template<class Range, class Collector>
-void collect_reference_scalable_storage_fallback(
-    Collector& collector,
-    Range& range,
-    std::size_t window,
-    std::size_t kmer)
-{
-    ::bioseq::simd::collect_minimizers<
-        minimap_int_hasher,
-        MinimapSketchData>(
-            collector,
-            range,
-            range.begin(),
-            range.end(),
-            window,
-            kmer);
-}
-
 template<sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] bool run_reference(
     MinimizerKernelInvocation& invocation,
@@ -534,55 +509,20 @@ template<sequence_alphabet Alphabet, class StorageUnit>
 #ifdef BIOSEQ_TEST_INDEXES
             reset_reference_simd_minimizer_test_receipt();
 #endif
-#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-            constexpr bool use_exact_storage_fallback = true;
-#else
-            // The legacy SIMD minimap-int hasher consumes dna5 ranks directly,
-            // and its rolling lane cannot hold K=15 in u8/u16 storage. The
-            // canonical scalar collector normalizes A/C/G/T to nt4, resets at
-            // N, and hashes in a wide scalar state. Keep those topology cases
-            // exact until target-native implementations provide those same
-            // semantics.
-            constexpr bool use_exact_storage_fallback =
-                std::same_as<Alphabet, seq::dna5>
-                || sizeof(StorageUnit) < sizeof(std::uint32_t);
-#endif
-            if constexpr (use_exact_storage_fallback) {
-                collect_reference_scalable_storage_fallback(
-                    collector,
-                    range,
-                    invocation.window,
-                    invocation.kmer);
-#ifdef BIOSEQ_TEST_INDEXES
-                reference_simd_minimizer_test_receipt.kernel_calls = 1u;
-                reference_simd_minimizer_test_receipt.last_storage_unit_bytes =
-                    sizeof(StorageUnit);
-                reference_simd_minimizer_test_receipt.
-                    scalable_storage_fallback_calls = 1u;
-                reference_simd_minimizer_test_receipt.
-                    scalable_storage_fallback_input_symbols = range.bp_size();
-#endif
+            if (invocation.window == 10u && invocation.kmer == 15u) {
+                collect_minimizers_simd_constexpr<
+                    10u, 15u, minimap_int_hasher, MinimapSketchData>(
+                        collector, range, range.begin(), range.end());
             } else {
-                if (invocation.window == 10u && invocation.kmer == 15u) {
-                    collect_minimizers_simd_constexpr<
-                        10u, 15u, minimap_int_hasher, MinimapSketchData>(
-                            collector, range, range.begin(), range.end());
-                } else {
-                    collect_minimizers_simd<
-                        minimap_int_hasher, MinimapSketchData>(
-                            collector, range, range.begin(), range.end(),
-                        invocation.window, invocation.kmer);
-                }
+                collect_minimizers_simd<
+                    minimap_int_hasher, MinimapSketchData>(
+                        collector, range, range.begin(), range.end(),
+                    invocation.window, invocation.kmer);
             }
 
             const bool flushed = collector.flush();
             result.emitted = collector.committed_size();
 #ifdef BIOSEQ_TEST_INDEXES
-            if constexpr (use_exact_storage_fallback) {
-                reference_simd_minimizer_test_receipt.
-                    scalable_storage_fallback_minimizers_emitted =
-                        result.emitted;
-            }
             const auto receipt =
                 reference_simd_minimizer_test_receipt_snapshot();
             result.proof.reference = {
@@ -591,25 +531,11 @@ template<sequence_alphabet Alphabet, class StorageUnit>
                 .vector_lane_visits = receipt.vector_lane_visits,
                 .last_storage_unit_bytes =
                     receipt.last_storage_unit_bytes,
-                .scalable_storage_fallback_calls =
-                    receipt.scalable_storage_fallback_calls,
-                .scalable_storage_fallback_input_symbols =
-                    receipt.scalable_storage_fallback_input_symbols,
-                .scalable_storage_fallback_minimizers_emitted =
-                    receipt.scalable_storage_fallback_minimizers_emitted,
             };
 #else
             result.proof.reference.kernel_calls = 1u;
             result.proof.reference.last_storage_unit_bytes =
                 sizeof(StorageUnit);
-            if constexpr (use_exact_storage_fallback) {
-                result.proof.reference.scalable_storage_fallback_calls = 1u;
-                result.proof.reference.
-                    scalable_storage_fallback_input_symbols = range.bp_size();
-                result.proof.reference.
-                    scalable_storage_fallback_minimizers_emitted =
-                        result.emitted;
-            }
 #endif
             if (!flushed || !collector.ok()) {
                 result.status = MinimizerKernelStatus::sink_rejected;
@@ -644,34 +570,38 @@ requires (
         MinimizerKernelAlgorithm::reference_minimap_int;
     result.proof.target = static_cast<std::int64_t>(HWY_TARGET);
 
-    if (!invocation.sequence.final_segment
-        || invocation.fragments.present()
-        || invocation.emitted_position_base != 0u
-        || invocation.sequence.begin_symbol != 0u
-        || invocation.window == 0u
-        || invocation.window > 256u
-        || invocation.kmer == 0u
-        || invocation.kmer > 15u
-        || invocation.sequence.end_symbol
-            > static_cast<std::size_t>(
-                MinimapSketchData::pos_field_mask) + 1u
-        || invocation.window
-            > (std::numeric_limits<std::size_t>::max)()
-                - invocation.kmer) {
+    if constexpr (!std::same_as<Alphabet, seq::dna4>
+                  || (!std::same_as<StorageUnit, std::uint32_t>
+                      && !std::same_as<StorageUnit, std::uint64_t>)) {
         result.status = MinimizerKernelStatus::invalid_configuration;
         return result;
-    }
+    } else {
+        if (!invocation.sequence.final_segment
+            || invocation.fragments.present()
+            || invocation.emitted_position_base != 0u
+            || invocation.sequence.begin_symbol != 0u
+            || invocation.window == 0u
+            || invocation.window > 256u
+            || invocation.kmer == 0u
+            || invocation.kmer > 15u
+            || invocation.sequence.end_symbol
+                > static_cast<std::size_t>(
+                    MinimapSketchData::pos_field_mask) + 1u
+            || invocation.window
+                > (std::numeric_limits<std::size_t>::max)()
+                    - invocation.kmer) {
+            result.status = MinimizerKernelStatus::invalid_configuration;
+            return result;
+        }
 
-    const bool accepted = minimizer_kernel_detail::run_reference<
-        Alphabet, StorageUnit>(invocation, result);
-    if (!accepted && result.status == MinimizerKernelStatus::ok) {
-        result.status = MinimizerKernelStatus::invalid_sequence_view;
+        const bool accepted = minimizer_kernel_detail::run_reference<
+            Alphabet, StorageUnit>(invocation, result);
+        if (!accepted && result.status == MinimizerKernelStatus::ok) {
+            result.status = MinimizerKernelStatus::invalid_sequence_view;
+        }
+        return result;
     }
-    return result;
 }
-
-static_assert(
-    ::bioseq::simd::supports_scalar_hash<minimap_int_hasher, seq::dna5>);
 
 } // namespace target
 } // namespace bioseq::simd

@@ -361,6 +361,7 @@ inline void iterate_sequence_bp_simd_offsets(
  */
 template<
 	size_t NumStreams,
+	typename DTag = void,
 	typename... delays_ts,
 	supports_compact_sequence_bitcast_view View,
 	typename handler_fn_t,
@@ -408,7 +409,12 @@ iterate_sequence_bp_simd_v2(
 	// `square_lane_matrix<d_unq_t>::transpose(D& d)` (and friends) bind
 	// without const-dance — matching what `iterate_sequence_bp_simd_offsets`
 	// (v1) achieves via `decltype(d)` propagation.
-	using d_unq_t      = hn::ScalableTag<typename seq_traits::storage_unit>;
+	using default_d_t  = hn::ScalableTag<typename seq_traits::storage_unit>;
+	using d_unq_t      = std::conditional_t<std::same_as<DTag, void>,
+		default_d_t, std::remove_cvref_t<DTag>>;
+	static_assert(std::same_as<hn::TFromD<d_unq_t>,
+		typename seq_traits::storage_unit>,
+		"sequence iterator tag must preserve the packed storage unit type");
 	using vec_t        = hn::Vec<d_unq_t>;
 	using vec_mask_t   = hn::Mask<d_unq_t>;
 	using matrix       = square_lane_matrix<d_unq_t>;

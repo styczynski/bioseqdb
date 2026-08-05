@@ -12,7 +12,6 @@ import bioseq.instr;
 import bioseq.storage.lazy;
 import bioseq.storage.size;
 import bioseq.sequences.kmers.highway_contract;
-import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.highway.sources.sequence_ops;
 import bioseq.highway.sources.hasher_base;
@@ -282,8 +281,8 @@ struct sequence_simd_iteration_state {
     vec_stream_t prefix_kmer;
     vec_stream_t pos_local;
     vec_stream_t last_emit_pos;
-    vec_stream_t ring_buf_elem[BufCapacity];
-    vec_stream_t ring_buf_hash_strand[BufCapacity];
+    std::array<vec_stream_t, BufCapacity> ring_buf_elem;
+    std::array<vec_stream_t, BufCapacity> ring_buf_hash_strand;
     ST     pos_wrap_delta;
     size_t step;
     size_t ring_idx;
@@ -2467,29 +2466,24 @@ process_exact_k15_w10_b8_candidate_block(
 
     const auto natural = extract_exact_k15_b8_windows(
         d32, d64, pack_k15_b8_dna4_codes_swar(code_scratch.data()));
-    const auto forward = hn::Create2(
-        d32,
+    std::array<hn::Vec<d32_t>, 2> forward{
         reverse_two_bit_groups(d32, natural.lower),
-        reverse_two_bit_groups(d32, natural.upper));
-    const auto reverse = hn::Create2(
-        d32,
+        reverse_two_bit_groups(d32, natural.upper)};
+    std::array<hn::Vec<d32_t>, 2> reverse{
         hn::Xor(natural.lower, hn::Set(d32, kmer_mask)),
-        hn::Xor(natural.upper, hn::Set(d32, kmer_mask)));
+        hn::Xor(natural.upper, hn::Set(d32, kmer_mask))};
 
     HWY_ALIGN std::array<std::uint32_t, block> candidate_hash;
     HWY_ALIGN std::array<std::uint64_t, block> candidate_raw;
     HWY_ALIGN std::array<std::uint64_t, block> candidate_ordinal;
-    for_each_stream<2>([&](auto group_constant) [[gnu::always_inline]] {
-        constexpr std::size_t group = decltype(group_constant)::value;
-        const auto forward_group = hn::Get2<group>(forward);
-        const auto reverse_group = hn::Get2<group>(reverse);
+    for (std::size_t group = 0; group < 2; ++group) {
         const std::size_t group_offset = group * lanes;
         const std::size_t group_active = active_candidates > group_offset
             ? std::min(lanes, active_candidates - group_offset)
             : 0;
         const auto active = hn::FirstN(d32, group_active);
-        const auto palindrome = hn::Eq(forward_group, reverse_group);
-        const auto canonical = hn::Min(forward_group, reverse_group);
+        const auto palindrome = hn::Eq(forward[group], reverse[group]);
+        const auto canonical = hn::Min(forward[group], reverse[group]);
         auto hash = minimap_int_hasher<seq::dna4>::template scramble_simd<
             d32_t>(d32, canonical, hn::Set(d32, kmer_mask));
         hash = hn::And(hash, hn::Set(d32, kmer_mask));
@@ -2504,7 +2498,7 @@ process_exact_k15_w10_b8_candidate_block(
 
         const auto valid_halves = split_u32_mask(d32, d64, valid);
         const auto active_halves = split_u32_mask(d32, d64, active);
-        const auto reverse_strand = hn::Lt(reverse_group, forward_group);
+        const auto reverse_strand = hn::Lt(reverse[group], forward[group]);
         const auto strand_halves = split_u32_mask(
             d32, d64, hn::And(active, reverse_strand));
         const std::uint64_t ordinal_base =
@@ -2569,7 +2563,7 @@ process_exact_k15_w10_b8_candidate_block(
         add_proof_counter(
             state.proof.palindrome_lanes,
             hn::CountTrue(d32, hn::And(active, palindrome)));
-    });
+    }
 
     const std::size_t first_group = std::min(lanes, active_candidates);
     auto status = process_exact_k15_w10_u32_group<MinimizerT>(
@@ -4368,11 +4362,6 @@ template<sequence_alphabet Alphabet, class StorageUnit>
     MinimizerKernelInvocation& invocation,
     MinimizerKernelResult& result)
 {
-#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-    (void)invocation;
-    (void)result;
-    return false;
-#else
     return ::bioseq::minimizers::kernel_detail::
         with_borrowed_compact_range<seq::dna4, std::uint32_t>(
             invocation.sequence,
@@ -4404,7 +4393,6 @@ template<sequence_alphabet Alphabet, class StorageUnit>
                         TwoStackContinuationStatus::collector_overflow);
                 }
             });
-#endif
 }
 
 } // namespace coarse_two_stack_detail
@@ -4418,12 +4406,6 @@ template<sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] inline MinimizerKernelResult two_stack_nthash_fixed_case(
     MinimizerKernelInvocation& invocation)
 {
-#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-    (void)invocation;
-    MinimizerKernelResult unavailable{};
-    unavailable.status = MinimizerKernelStatus::invalid_configuration;
-    return unavailable;
-#else
     MinimizerKernelResult result{};
     result.proof.algorithm = MinimizerKernelAlgorithm::two_stack_nthash;
     result.proof.target = static_cast<std::int64_t>(HWY_TARGET);
@@ -4475,253 +4457,6 @@ template<sequence_alphabet Alphabet, class StorageUnit>
         result.status = MinimizerKernelStatus::invalid_sequence_view;
     }
     return result;
-#endif
-}
-
-// SVE/RVV vectors are sizeless and cannot be retained in the report-76 or
-// chronological state aggregates above. These targets use the same canonical
-// scalar minimap recurrence over target-local decoded storage. The selected
-// Highway target remains the outer dispatch identity; the proof records this
-// path explicitly and never claims vector work.
-namespace scalable_two_stack_fallback {
-
-template<class Alphabet>
-void append_rank(
-    std::vector<Alphabet>& decoded,
-    std::uint8_t rank)
-{
-    Alphabet letter{};
-    letter.assign_rank(static_cast<seqan3::alphabet_rank_t<Alphabet>>(rank));
-    decoded.push_back(letter);
-}
-
-template<sequence_alphabet Alphabet, class StorageUnit>
-[[nodiscard]] bool decode_resident(
-    const MinimizerKernelInvocation& invocation,
-    std::vector<Alphabet>& decoded)
-{
-    return ::bioseq::minimizers::kernel_detail::
-        with_borrowed_compact_range<Alphabet, StorageUnit>(
-            invocation.sequence,
-            [&decoded]<class Range>(Range& range) {
-                decoded.reserve(range.bp_size());
-                for (const auto rank : range.template iterable<BP>()) {
-                    append_rank(decoded, static_cast<std::uint8_t>(rank));
-                }
-            });
-}
-
-// BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN scalable_two_stack_storage_fallback
-template<sequence_alphabet Alphabet, class StorageUnit>
-[[nodiscard]] bool decode_fragments(
-    MinimizerKernelInvocation& invocation,
-    std::vector<Alphabet>& decoded)
-{
-    using config = sequence_custom_alphabet<Alphabet, StorageUnit>;
-    using traits = typename compact_sequence_range<config>::traits;
-    constexpr std::size_t letters_per_unit = traits::letters_per_unit;
-    constexpr std::size_t bits_per_char = traits::bits_per_char;
-    const auto& source = invocation.fragments;
-    if (source.read == nullptr
-        || source.release == nullptr
-        || source.fragment_end < source.first_fragment) {
-        return false;
-    }
-
-    bool saw_fragment = false;
-    std::size_t next_input_position = 0;
-    for (std::size_t fragment_no = source.first_fragment;
-         fragment_no < source.fragment_end;
-         ++fragment_no) {
-        const auto fragment = source.read(source.state, fragment_no);
-        const auto release = [&source, fragment_no]() noexcept {
-            source.release(source.state, fragment_no);
-        };
-        const bool pointer_valid = fragment.storage_units == 0u
-            || (fragment.storage != nullptr
-                && reinterpret_cast<std::uintptr_t>(fragment.storage)
-                    % alignof(StorageUnit) == 0u);
-        const bool capacity_valid = fragment.storage_units
-                <= (std::numeric_limits<std::size_t>::max)()
-                    / letters_per_unit
-            && fragment.fragment_bp_size
-                <= fragment.storage_units * letters_per_unit;
-        const bool coordinate_valid = fragment.fragment_begin_bp
-                <= fragment.consume_begin_bp
-            && fragment.consume_begin_bp <= fragment.consume_end_bp
-            && fragment.fragment_bp_size
-                <= (std::numeric_limits<std::size_t>::max)()
-                    - fragment.fragment_begin_bp
-            && fragment.consume_end_bp
-                <= fragment.fragment_begin_bp + fragment.fragment_bp_size;
-        if (!pointer_valid || !capacity_valid || !coordinate_valid
-            || (saw_fragment
-                && fragment.consume_begin_bp != next_input_position)) {
-            release();
-            return false;
-        }
-        if (!saw_fragment) {
-            saw_fragment = true;
-            next_input_position = fragment.consume_begin_bp;
-        }
-
-        const auto* units = reinterpret_cast<const StorageUnit*>(
-            fragment.storage);
-        const std::size_t local_begin =
-            fragment.consume_begin_bp - fragment.fragment_begin_bp;
-        const std::size_t local_end =
-            fragment.consume_end_bp - fragment.fragment_begin_bp;
-        const std::size_t consume_count = local_end - local_begin;
-        if (consume_count > decoded.max_size() - decoded.size()) {
-            release();
-            return false;
-        }
-        try {
-            decoded.reserve(decoded.size() + consume_count);
-            for (std::size_t local = local_begin;
-                 local < local_end;
-                 ++local) {
-                const StorageUnit word = units[local / letters_per_unit];
-                const std::size_t shift =
-                    (local % letters_per_unit) * bits_per_char;
-                const std::uint8_t rank = static_cast<std::uint8_t>(
-                    (word >> shift) & traits::char_mask);
-                append_rank(decoded, rank);
-            }
-        } catch (...) {
-            release();
-            throw;
-        }
-        next_input_position = fragment.consume_end_bp;
-        release();
-    }
-    return true;
-}
-// BIOSEQ_PRIVATE_PACKED_ACCESS_END scalable_two_stack_storage_fallback
-
-struct offset_sink_collector {
-    minimizer_sink_collector<MinimapSketchData>& sink;
-    std::size_t position_base;
-
-    void collect(const MinimapSketchData& value) {
-        sink.collect(MinimapSketchData{
-            value.kmer(),
-            value.last_pos() + position_base,
-            value.strand()});
-    }
-    void collect(MinimapSketchData&& value) {
-        collect(static_cast<const MinimapSketchData&>(value));
-    }
-};
-
-template<sequence_alphabet Alphabet>
-void execute_scalar(
-    MinimizerKernelInvocation& invocation,
-    std::vector<Alphabet>&& decoded,
-    MinimizerKernelResult& result)
-{
-    // The named rvalue-reference remains alive for this call. Borrow it as a
-    // proper alphabet range so the scalar collector does not materialise a
-    // second packed copy of a fragmented input.
-    compact_sequence_range<std::vector<Alphabet>> range{decoded};
-    minimizer_sink_collector<MinimapSketchData> sink{invocation.sink};
-    offset_sink_collector offset_sink{
-        .sink = sink,
-        .position_base = invocation.emitted_position_base,
-    };
-    ::bioseq::simd::collect_minimizers<
-        ::bioseq::simd::minimap_int_hasher,
-        MinimapSketchData>(
-            offset_sink,
-            range,
-            range.begin(),
-            range.end(),
-            invocation.window,
-            invocation.kmer);
-
-    const bool flushed = sink.flush();
-    result.emitted = sink.committed_size();
-    auto& proof = result.proof.two_stack;
-    proof.bp_consumed = range.bp_size();
-    proof.minimizers_emitted = result.emitted;
-    proof.scalar_backend_branches = 1u;
-    proof.scalar_hash_symbols = range.bp_size();
-    proof.scalar_window_transitions = range.bp_size();
-    proof.scalar_event_records = result.emitted;
-    proof.scalable_storage_fallback_calls = 1u;
-    proof.scalable_storage_fallback_input_symbols = range.bp_size();
-    proof.scalable_storage_fallback_minimizers_emitted = result.emitted;
-    result.family_status = static_cast<std::uint32_t>(
-        flushed && sink.ok()
-            ? TwoStackContinuationStatus::ok
-            : TwoStackContinuationStatus::collector_overflow);
-    result.status = flushed && sink.ok()
-        ? MinimizerKernelStatus::ok
-        : MinimizerKernelStatus::sink_rejected;
-}
-
-} // namespace scalable_two_stack_fallback
-
-template<sequence_alphabet Alphabet, class StorageUnit>
-[[nodiscard]] inline MinimizerKernelResult
-two_stack_nthash_scalable_storage_fallback_case(
-    MinimizerKernelInvocation& invocation)
-{
-    MinimizerKernelResult result{};
-    result.proof.algorithm = MinimizerKernelAlgorithm::two_stack_nthash;
-    result.proof.target = static_cast<std::int64_t>(HWY_TARGET);
-
-    if (!invocation.sequence.final_segment
-        || invocation.sequence.begin_symbol != 0u
-        || invocation.window == 0u
-        || invocation.window > two_stack_max_window
-        || invocation.kmer == 0u
-        || invocation.kmer > two_stack_exact_max_kmer
-        || invocation.sequence.end_symbol
-            > static_cast<std::size_t>(
-                MinimapSketchData::pos_field_mask) + 1u
-        || invocation.emitted_position_base
-            > static_cast<std::size_t>(MinimapSketchData::pos_field_mask)) {
-        result.status = MinimizerKernelStatus::invalid_configuration;
-        result.family_status = static_cast<std::uint32_t>(
-            TwoStackContinuationStatus::invalid_static_configuration);
-        return result;
-    }
-    if (invocation.two_stack_route == TwoStackRoute::resident_report76
-        && (!std::same_as<Alphabet, seq::dna4>
-            || !std::same_as<StorageUnit, std::uint32_t>
-            || invocation.window != 10u
-            || invocation.kmer != 15u
-            || invocation.emitted_position_base != 0u
-            || invocation.fragments.present())) {
-        result.status = MinimizerKernelStatus::invalid_configuration;
-        result.family_status = static_cast<std::uint32_t>(
-            TwoStackContinuationStatus::invalid_static_configuration);
-        return result;
-    }
-
-    std::vector<Alphabet> decoded;
-    const bool decoded_ok = invocation.fragments.present()
-        ? scalable_two_stack_fallback::decode_fragments<
-            Alphabet, StorageUnit>(invocation, decoded)
-        : scalable_two_stack_fallback::decode_resident<
-            Alphabet, StorageUnit>(invocation, decoded);
-    if (decoded_ok
-        && decoded.size()
-            <= static_cast<std::size_t>(MinimapSketchData::pos_field_mask)
-                - invocation.emitted_position_base + 1u) {
-        scalable_two_stack_fallback::execute_scalar(
-            invocation, std::move(decoded), result);
-        return result;
-    }
-    result.status = decoded_ok
-        ? MinimizerKernelStatus::invalid_configuration
-        : MinimizerKernelStatus::invalid_sequence_view;
-    result.family_status = static_cast<std::uint32_t>(
-        decoded_ok
-            ? TwoStackContinuationStatus::invalid_static_configuration
-            : TwoStackContinuationStatus::invalid_range);
-    return result;
 }
 
 /** Source-topology-owned exact two-stack case. */
@@ -4749,12 +4484,7 @@ requires (
             TwoStackContinuationStatus::invalid_static_configuration);
         return rejected;
     }
-#if HWY_TARGET_IS_SVE || HWY_TARGET == HWY_RVV
-    return two_stack_nthash_scalable_storage_fallback_case<
-        Alphabet, StorageUnit>(invocation);
-#else
     return two_stack_nthash_fixed_case<Alphabet, StorageUnit>(invocation);
-#endif
 }
 
 
