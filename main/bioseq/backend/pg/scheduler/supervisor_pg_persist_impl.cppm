@@ -64,6 +64,7 @@ import bioseq.pg_utils;
 import bioseq.indexing.type;
 import bioseq.storage.manager;
 import bioseq.sequences;
+import bioseq.sequences.kmers.highway_contract;
 import bioseq.storage.indexing_pg.chunked_storage;
 import bioseq.storage.indexing_pg.handles;
 
