@@ -207,7 +207,6 @@ inline void collect_minimizers_simd(
     HWY_ALIGN storage_unit temp_buffer3[hn::MaxLanes(dd)];
     HWY_ALIGN storage_unit temp_buffer4[hn::MaxLanes(dd)];
     size_t last_pushed_position = 0;
-    bool has_last_pushed_position = false;
 
     // submit_results emits one MinimapSketch per lane in `min_mask`, drawing the
     // hash from `current_min` and the strand from `strand_to_emit` (which lets the
@@ -256,25 +255,21 @@ inline void collect_minimizers_simd(
                     const size_t current_pos = static_cast<storage_unit>(buffer.last_write_pos());
                     const size_t distance = (current_pos > temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
-                    if (!has_last_pushed_position
-                        || last_pushed_position != real_pos) {
+                    if (last_pushed_position != real_pos) {
                         collector.collect(MinimizerT(
                             /*kmer=*/temp_buffer1[i],
                             /*last_pos=*/real_pos,
                             /*strand=*/strand_bit));
                         last_pushed_position = real_pos;
-                        has_last_pushed_position = true;
                     }
                 } else {
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
-                    if (!has_last_pushed_position
-                        || last_pushed_position != real_pos) {
+                    if (last_pushed_position != real_pos) {
                         collector.collect(MinimizerT(
                             /*kmer=*/temp_buffer1[i],
                             /*last_pos=*/real_pos,
                             /*strand=*/strand_bit));
                         last_pushed_position = real_pos;
-                        has_last_pushed_position = true;
                     }
                 }
             }

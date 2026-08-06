@@ -992,9 +992,38 @@ inline void verify_typed_alignment_binder() {
     append_alphabet(1u, "::seq::dna5");
 
     const generation_result generated = render_generation(plan);
+    std::size_t checked_primaries = 0u;
     std::size_t checked_binders = 0u;
     std::size_t checked_alignment_owner_units = 0u;
     for (const generated_artifact& artifact : generated.artifacts) {
+        if (artifact.kind == artifact_kind::primary) {
+            ++checked_primaries;
+            const auto has_declaration = [&artifact](
+                const std::string_view owner,
+                const std::uint8_t alphabet_code,
+                const std::string_view alphabet) {
+                const std::string expected =
+                    "void Populate_" + std::string{owner}
+                    + "_alignment_" + std::to_string(alphabet_code)
+                    + "(::bioseq::simd::AlignmentKernels<"
+                    + std::string{alphabet} + ">& table) noexcept;";
+                return occurrences(artifact.content, expected) == 1u;
+            };
+            require(
+                occurrences(artifact.content, "void Populate_") == 6u
+                    && has_declaration("ksw2", 0u, "::seq::dna4")
+                    && has_declaration("ksw2", 1u, "::seq::dna5")
+                    && has_declaration(
+                        "ksw2_batched", 0u, "::seq::dna4")
+                    && has_declaration(
+                        "ksw2_batched", 1u, "::seq::dna5")
+                    && has_declaration(
+                        "block_aligner", 0u, "::seq::dna4")
+                    && has_declaration(
+                        "block_aligner", 1u, "::seq::dna5"),
+                "each primary declares the exact typed alignment populators");
+            continue;
+        }
         if (artifact.kind == artifact_kind::kernel_instantiation
             && (artifact.source_key == "ksw2"
                 || artifact.source_key == "ksw2_batched"
@@ -1091,6 +1120,9 @@ inline void verify_typed_alignment_binder() {
             "each binder synthesizes exact typed alignment tables without "
             "instantiating their templates or inventing root-table fields");
     }
+    require(
+        checked_primaries == 2u,
+        "both fixed targets declare typed alignment populators");
     require(checked_binders == 2u, "both fixed targets receive typed alignment tables");
     require(
         checked_alignment_owner_units == 6u,
