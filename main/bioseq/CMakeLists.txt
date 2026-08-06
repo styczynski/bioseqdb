@@ -1784,7 +1784,6 @@ unset(_bioseq_typed_expected_count)
 set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_evidence_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hooks_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_stats_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_index_admin_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_minimizer_diagnostics_impl.cppm"
@@ -1797,6 +1796,7 @@ set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_highway_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_publish_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_stage_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_stats_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_worker_impl.cppm"

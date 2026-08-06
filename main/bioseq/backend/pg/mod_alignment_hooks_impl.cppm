@@ -20,7 +20,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-module bioseq.mod;
+module bioseq.mod:alignment_hooks_impl;
 
 import bioseq.pipeline.stats;
 import bioseq.table.scan_state;

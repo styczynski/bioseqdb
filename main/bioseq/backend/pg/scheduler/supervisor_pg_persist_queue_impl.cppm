@@ -167,59 +167,6 @@ parse_persist_file_metadata(const char* base, Size mapped) {
     return meta;
 }
 
-[[nodiscard]] bool publish_persist_job_to_shared_queue(
-        const PersistTarget& target,
-        std::string_view index_name,
-        dsm_handle dsm,
-        std::uint64_t payload_bytes,
-        PersistPayloadKind payload_kind,
-        IndexPayloadStorageBackend requested_provider) noexcept {
-    if (g_shared == nullptr || dsm == DSM_HANDLE_INVALID) {
-        return false;
-    }
-    if (payload_kind != PersistPayloadKind::mps_build_identity) {
-        record_prohibited_legacy_persist_rejection("queue_publish");
-        return false;
-    }
-    if (!is_valid_index_payload_storage_backend_wire_value(
-            index_payload_storage_backend_wire_value(
-                requested_provider))
-        || requested_provider
-            != IndexPayloadStorageBackend::postgres_relation) {
-        record_prohibited_legacy_persist_rejection(
-            "queue_publish_provider");
-        return false;
-    }
-    for (PgPersistQueueSlot& slot : g_shared->persist_queue) {
-        std::uint32_t expected = 0;
-        if (!pg_atomic_compare_exchange_u32(&slot.state, &expected, 3)) {
-            continue;
-        }
-        slot.db_oid = target.db_oid;
-        slot.user_relid = target.user_relid;
-        slot.tablespace_oid = target.tablespace_oid;
-        slot.main_relfilenode = target.main_relfilenode;
-        slot.column_attno = target.column_attno;
-        slot.bucket_idx = target.bucket_idx;
-        slot.shard_idx = target.shard_idx;
-        slot.sequence_rowno = target.sequence_rowno;
-        slot.payload_bytes = payload_bytes;
-        slot.dsm = dsm;
-        slot.payload_kind = static_cast<std::uint32_t>(payload_kind);
-        slot.requested_provider =
-            index_payload_storage_backend_wire_value(
-                requested_provider);
-        pg_atomic_fetch_add_u32(&slot.generation, 1);
-        pg_atomic_write_u32(&slot.state, 1);
-        bioseq_log<DBG>("[bioseq] index: published async persist job row={} index={} bytes={}",
-                static_cast<unsigned long long>(target.sequence_rowno),
-                index_name,
-                static_cast<unsigned long long>(payload_bytes));
-        return true;
-    }
-    return false;
-}
-
 [[nodiscard]] bool stage_async_index_persist(
         const PersistTarget& target,
         std::span<const PersistChunk> chunks) {
