@@ -22,8 +22,6 @@ module;
 
 export module bioseq.mod;
 
-export import :alignment_hooks_impl;
-
 import bioseq.codegen.sql.annotation_model;
 import bioseq.mod.alignment.sql_rows;
 import bioseq.mod.sql_rows;
