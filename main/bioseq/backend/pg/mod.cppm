@@ -14,6 +14,8 @@ module;
 
 #include "common.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -23,8 +25,10 @@ export module bioseq.mod;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.mod.alignment.sql_rows;
 import bioseq.mod.sql_rows;
+import bioseq.pipeline.stats;
 import bioseq.pg_utils.sql_boundary;
 import bioseq.table.sql_rows;
+import bioseq.table.scan_state;
 
 export namespace bioseq::pg::sql_routines {
 
@@ -1222,3 +1226,50 @@ std::optional<bool> sequence_facade_orientation_probe(
 void sequence_source_pre_prepare_probe();
 
 } // namespace bioseq::pg::sql_routines
+
+namespace bioseq::pg::detail {
+
+void install_alignment_execution_hooks();
+
+[[nodiscard]] const std::optional<
+	bioseq::pg::alignment_execution::AlignmentExecutionSnapshot>&
+last_alignment_execution_snapshot_ref() noexcept;
+
+[[nodiscard]] const std::optional<
+	bioseq::pg::alignment_execution::AlignmentExecutionSnapshot>&
+last_completed_alignment_evidence_snapshot_ref() noexcept;
+
+[[nodiscard]] bioseq::pipeline_stats::ExecutedBackend
+validate_alignment_snapshot_environment(
+	const bioseq::pg::alignment_execution::AlignmentExecutionSnapshot& snapshot);
+
+[[nodiscard]] std::string fixed_hex_u64(std::uint64_t value);
+
+template<std::size_t N>
+[[nodiscard]] std::string fixed_hex_bytes(
+		const std::array<std::uint8_t, N>& bytes)
+{
+	constexpr char digits[] = "0123456789abcdef";
+	std::string result(N * 2, '0');
+	for (std::size_t i = 0; i < N; ++i) {
+		result[i * 2] = digits[(bytes[i] >> 4U) & 0x0fU];
+		result[i * 2 + 1] = digits[bytes[i] & 0x0fU];
+	}
+	return result;
+}
+
+template<std::size_t N>
+[[nodiscard]] std::string fixed_hex_bytes(
+		const std::array<std::byte, N>& bytes)
+{
+	constexpr char digits[] = "0123456789abcdef";
+	std::string result(N * 2, '0');
+	for (std::size_t i = 0; i < N; ++i) {
+		const std::uint8_t value = std::to_integer<std::uint8_t>(bytes[i]);
+		result[i * 2] = digits[(value >> 4U) & 0x0fU];
+		result[i * 2 + 1] = digits[value & 0x0fU];
+	}
+	return result;
+}
+
+} // namespace bioseq::pg::detail

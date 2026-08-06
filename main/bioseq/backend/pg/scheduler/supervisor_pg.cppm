@@ -381,6 +381,20 @@ void init_async_mps_worker_boundary_stats(
 void release_pinned_dsm(dsm_handle handle) noexcept;
 void record_prohibited_legacy_persist_rejection(
     std::string_view route) noexcept;
+void remove_temp_file_noexcept(std::string_view path) noexcept;
+[[nodiscard]] bool publish_persist_job_to_shared_queue(
+    const PersistTarget& target,
+    std::string_view index_name,
+    dsm_handle dsm,
+    std::uint64_t payload_bytes,
+    PersistPayloadKind payload_kind,
+    IndexPayloadStorageBackend requested_provider) noexcept;
+void register_persist_xact_callback_pg_leaf();
+void enqueue_pending_mps_build(
+    const PersistTarget& target,
+    dsm_handle handle,
+    std::uint64_t payload_bytes,
+    IndexPayloadStorageBackend requested_provider);
 [[nodiscard]] std::optional<MpsBuildMetadata>
 parse_mps_build_metadata(const char* base, Size mapped);
 [[nodiscard]] const bioseq::minimizers::MinimizerKernels*

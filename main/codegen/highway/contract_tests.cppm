@@ -579,13 +579,14 @@ inline void verify_generated_closure() {
     std::size_t primary_count = 0;
     std::size_t binder_count = 0;
     std::size_t partition_count = 0;
-    std::size_t instantiation_count = 0;
+    std::size_t owner_unit_count = 0;
     std::size_t registry_count = 0;
     std::size_t inventory_count = 0;
     std::size_t test_support_count = 0;
     std::size_t export_count = 0;
     std::size_t dispatch_count = 0;
     std::set<std::pair<std::string, std::string>> target_source_closure;
+    std::set<std::pair<std::string, std::string>> target_owner_unit_closure;
 
     for (const generated_artifact& artifact : generated.artifacts) {
         require(
@@ -615,6 +616,11 @@ inline void verify_generated_closure() {
                 require(
                     artifact.content.contains(
                         "import bioseq.highway.dispatch_contract;")
+                        && occurrences(
+                               artifact.content,
+                               "void Populate_prefilter("
+                               "::bioseq::simd_dispatch::HighwayKernelTable& "
+                               "table) noexcept;") == 1u
                         && !artifact.content.contains("#include <hwy/")
                         && !artifact.content.contains("import :")
                         && !artifact.content.contains("HWY_TARGET"),
@@ -652,19 +658,37 @@ inline void verify_generated_closure() {
                     "the Highway allocation surface, and rewrites the callable");
                 break;
             case artifact_kind::kernel_instantiation:
-                ++instantiation_count;
+                ++owner_unit_count;
+                target_owner_unit_closure.emplace(
+                    artifact.target_token, artifact.source_key);
                 require(
                     artifact.source_key == "prefilter"
                         && artifact.relative_path.generic_string().contains(
                             "/instances/prefilter.cppm")
+                        && artifact.content.contains(
+                            "module " + artifact.module_name + ";\n\n")
+                        && !artifact.content.contains(
+                            "export module " + artifact.module_name)
+                        && !artifact.content.contains(
+                            "module " + artifact.module_name + ":")
                         && artifact.content.contains("import :fixture;")
                         && artifact.content.contains(
                             "HWY_ATTR void Populate_prefilter")
                         && artifact.content.contains(
                             "&::bioseq::fixture::N_")
-                        && !artifact.content.contains("BindHighwayTarget"),
+                        && !artifact.content.contains("BindHighwayTarget")
+                        && ((artifact.target_token == "HWY_EMU128"
+                                && artifact.content.ends_with(
+                                    "}  // namespace "
+                                    "bioseq::simd_dispatch::N_EMU128::"
+                                    "binding_detail\n"))
+                            || (artifact.target_token == "HWY_SSE2"
+                                && artifact.content.ends_with(
+                                    "}  // namespace "
+                                    "bioseq::simd_dispatch::N_SSE2::"
+                                    "binding_detail\n"))),
                     "each target compiles concrete slot ownership in an "
-                    "ordinary owner-instantiation unit");
+                    "ordinary owner unit with an exact namespace closure");
                 break;
             case artifact_kind::dispatch_registry_partition:
                 ++registry_count;
@@ -731,7 +755,7 @@ inline void verify_generated_closure() {
 
     require(
         primary_count == 2u && binder_count == 2u
-            && partition_count == 2u && instantiation_count == 2u
+            && partition_count == 2u && owner_unit_count == 2u
             && registry_count == 1u
             && inventory_count == 1u && test_support_count == 1u,
         "the generated artifact-kind closure is exact");
@@ -745,6 +769,13 @@ inline void verify_generated_closure() {
                 {"HWY_SSE2", "prefilter"},
             },
         "every target has exactly one generated partition for every registered source");
+    require(
+        target_owner_unit_closure
+            == std::set<std::pair<std::string, std::string>>{
+                {"HWY_EMU128", "prefilter"},
+                {"HWY_SSE2", "prefilter"},
+            },
+        "every target has exactly one ordinary owner unit for every slot owner");
     require(
         generated.policy_evidence_json.contains(
             "\"path\":\"highway_registry.cppm\"")
@@ -962,20 +993,63 @@ inline void verify_typed_alignment_binder() {
 
     const generation_result generated = render_generation(plan);
     std::size_t checked_binders = 0u;
-    std::size_t checked_alignment_binding_partitions = 0u;
+    std::size_t checked_alignment_owner_units = 0u;
     for (const generated_artifact& artifact : generated.artifacts) {
         if (artifact.kind == artifact_kind::kernel_instantiation
             && (artifact.source_key == "ksw2"
                 || artifact.source_key == "ksw2_batched"
                 || artifact.source_key == "block_aligner")) {
-            ++checked_alignment_binding_partitions;
+            ++checked_alignment_owner_units;
             require(
-                artifact.content.contains("HWY_ATTR void Populate_")
-                    && artifact.content.contains(
-                        " = &::bioseq::simd::N_")
-                    && artifact.content.contains("<::seq::dna4>")
-                    && artifact.content.contains("<::seq::dna5>"),
-                "each alignment owner partition instantiates its typed slots");
+                artifact.target_token == "HWY_EMU128"
+                    || artifact.target_token == "HWY_SSE2",
+                "each alignment owner unit belongs to a fixture target");
+            const std::string target_namespace =
+                artifact.target_token == "HWY_EMU128"
+                ? "N_EMU128"
+                : "N_SSE2";
+            const auto has_assignment = [&](
+                const std::string_view member,
+                const std::string_view alphabet) {
+                const std::string expected =
+                    "    table." + std::string{member}
+                    + " = &::bioseq::simd::" + target_namespace + "::"
+                    + std::string{member} + "<" + std::string{alphabet}
+                    + ">;";
+                return occurrences(artifact.content, expected) == 1u;
+            };
+            bool has_exact_owner_assignments = false;
+            if (artifact.source_key == "ksw2") {
+                has_exact_owner_assignments =
+                    occurrences(artifact.content, "    table.") == 4u
+                    && has_assignment("ksw2_d2", "::seq::dna4")
+                    && has_assignment("ksw2_z2", "::seq::dna4")
+                    && has_assignment("ksw2_d2", "::seq::dna5")
+                    && has_assignment("ksw2_z2", "::seq::dna5");
+            } else if (artifact.source_key == "ksw2_batched") {
+                has_exact_owner_assignments =
+                    occurrences(artifact.content, "    table.") == 2u
+                    && has_assignment("ksw2_batched", "::seq::dna4")
+                    && has_assignment("ksw2_batched", "::seq::dna5");
+            } else {
+                has_exact_owner_assignments =
+                    occurrences(artifact.content, "    table.") == 6u
+                    && has_assignment("block_align", "::seq::dna4")
+                    && has_assignment("block_prepare", "::seq::dna4")
+                    && has_assignment(
+                        "block_try_certified_gap", "::seq::dna4")
+                    && has_assignment("block_align", "::seq::dna5")
+                    && has_assignment("block_prepare", "::seq::dna5")
+                    && has_assignment(
+                        "block_try_certified_gap", "::seq::dna5");
+            }
+            require(
+                occurrences(
+                    artifact.content,
+                    "HWY_ATTR void Populate_" + artifact.source_key
+                        + "_alignment_") == 2u
+                    && has_exact_owner_assignments,
+                "each alignment owner unit assigns exactly its typed slots");
             continue;
         }
         if (artifact.kind != artifact_kind::binder) continue;
@@ -1019,8 +1093,8 @@ inline void verify_typed_alignment_binder() {
     }
     require(checked_binders == 2u, "both fixed targets receive typed alignment tables");
     require(
-        checked_alignment_binding_partitions == 6u,
-        "each fixed target compiles three alignment instantiation units");
+        checked_alignment_owner_units == 6u,
+        "each fixed target compiles three alignment owner units");
 
     generation_plan incomplete = plan;
     incomplete.source_inventory.slots.pop_back();
@@ -1115,11 +1189,11 @@ inline void verify_typed_minimizer_binder() {
 
     const generation_result generated = render_generation(plan);
     std::size_t checked_binders = 0u;
-    std::size_t checked_minimizer_binding_partitions = 0u;
+    std::size_t checked_minimizer_owner_units = 0u;
     for (const generated_artifact& artifact : generated.artifacts) {
         if (artifact.kind == artifact_kind::kernel_instantiation
             && artifact.source_key.starts_with("minimizer_")) {
-            ++checked_minimizer_binding_partitions;
+            ++checked_minimizer_owner_units;
             require(
                 occurrences(
                     artifact.content,
@@ -1131,13 +1205,19 @@ inline void verify_typed_minimizer_binder() {
                     && occurrences(
                            artifact.content,
                            "MinimizerKernelStatus::invalid_configuration")
-                        == 1u,
-                "each minimizer owner partition contains one typed wrapper");
+                        == 1u
+                    && occurrences(
+                           artifact.content, "    table.minimizers.") == 1u,
+                "each minimizer owner unit contains one typed wrapper and "
+                "one wrapper-to-slot assignment");
 
             if (artifact.source_key == "minimizer_reference") {
                 require(
                     artifact.content.contains(
                         "MinimizerDispatch_reference_minimap_int")
+                        && artifact.content.contains(
+                            "table.minimizers.reference_minimap_int = "
+                            "&MinimizerDispatch_reference_minimap_int;")
                         && occurrences(
                                artifact.content,
                                "reference_minimap_int_case<") == 8u,
@@ -1158,6 +1238,9 @@ inline void verify_typed_minimizer_binder() {
                 require(
                     artifact.content.contains(
                         "MinimizerDispatch_two_stack_nthash")
+                        && artifact.content.contains(
+                            "table.minimizers.two_stack_nthash = "
+                            "&MinimizerDispatch_two_stack_nthash;")
                         && occurrences(
                                artifact.content,
                                "two_stack_nthash_case<") == 8u,
@@ -1166,6 +1249,9 @@ inline void verify_typed_minimizer_binder() {
                 require(
                     artifact.content.contains(
                         "MinimizerDispatch_paper_nthash")
+                        && artifact.content.contains(
+                            "table.minimizers.paper_nthash = "
+                            "&MinimizerDispatch_paper_nthash;")
                         && occurrences(
                                artifact.content,
                                "paper_nthash_case<") == 8u,
@@ -1232,8 +1318,8 @@ inline void verify_typed_minimizer_binder() {
         checked_binders == 2u,
         "both fixed targets receive typed minimizer wrappers");
     require(
-        checked_minimizer_binding_partitions == 6u,
-        "each fixed target compiles three minimizer instantiation units");
+        checked_minimizer_owner_units == 6u,
+        "each fixed target compiles three minimizer owner units");
 
     generation_plan incomplete = plan;
     incomplete.source_inventory.slots.erase(
