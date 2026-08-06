@@ -1229,6 +1229,28 @@ void sequence_source_pre_prepare_probe();
 
 namespace bioseq::pg::detail {
 
+struct AlignmentExecutorFrame;
+
+/* PostgreSQL 17 has no reset-callback unregister API. */
+struct AlignmentFrameCleanupToken {
+	MemoryContextCallback callback{};
+	AlignmentExecutorFrame* frame = nullptr;
+};
+
+struct AlignmentExecutorFrame {
+	QueryDesc* query_desc = nullptr;
+	EState* estate = nullptr;
+	bioseq::pg::alignment_execution::AlignmentExecutionCollector collector{};
+	bioseq::pg::alignment_execution::AlignmentCollectorBinding collector_binding{};
+	AlignmentFrameCleanupToken* cleanup_token = nullptr;
+	bool nested = false;
+	bool nested_alignment_invoked = false;
+	bool query_output_fully_drained = false;
+	bool finished = false;
+};
+
+void publish_alignment_root(AlignmentExecutorFrame* frame);
+
 void install_alignment_execution_hooks();
 
 [[nodiscard]] const std::optional<
