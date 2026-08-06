@@ -2222,6 +2222,21 @@ void bioseq_log<
     std::string_view& route,
     unsigned long long&& total_rejections);
 
+template<>
+void bioseq_log<
+    LoggingLevel::DBG,
+    LoggingTarget::FILE,
+    unsigned long long,
+    std::string_view&,
+    unsigned long long>(
+    bioseq_logging_detail::format_with_location<
+        unsigned long long,
+        std::string_view&,
+        unsigned long long> fmt_loc,
+    unsigned long long&& sequence_rowno,
+    std::string_view& index_name,
+    unsigned long long&& payload_bytes);
+
 }
 
 export template<typename... Args>

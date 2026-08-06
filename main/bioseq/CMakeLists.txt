@@ -1786,6 +1786,7 @@ unset(_bioseq_typed_expected_count)
 set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_run_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_callbacks_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_publish_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_evidence_impl.cppm"

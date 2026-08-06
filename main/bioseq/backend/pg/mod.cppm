@@ -1250,7 +1250,13 @@ struct AlignmentExecutorFrame {
 	bool finished = false;
 };
 
+struct AlignmentQueryRegistryEntry {
+	QueryDesc* key = nullptr;
+	AlignmentExecutorFrame* frame = nullptr;
+};
+
 extern ExecutorRun_hook_type PreviousExecutorRunHook;
+extern std::vector<AlignmentQueryRegistryEntry> alignment_query_registry;
 extern std::vector<AlignmentExecutorFrame*> alignment_start_in_progress;
 extern std::vector<AlignmentExecutorFrame*> alignment_current_run;
 
