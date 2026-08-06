@@ -1795,7 +1795,6 @@ set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_highway_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_legacy_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_metadata_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_publish_impl.cppm"
