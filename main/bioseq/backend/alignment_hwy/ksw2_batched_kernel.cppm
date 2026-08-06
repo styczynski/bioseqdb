@@ -91,52 +91,9 @@ struct alignas(16) FillDescriptor {
     std::uint8_t pad[3];
 };
 
-struct FillBucketKey {
-    std::int32_t q_max;
-    std::int32_t t_max;
-    std::int32_t bw_max;
-    bool         is_long_fill;
-    bool         is_reverse;
-
-    [[nodiscard]] friend constexpr bool operator==(
-        const FillBucketKey&, const FillBucketKey&) noexcept = default;
-};
-
-inline constexpr std::array<std::int32_t, 4> kFillLenBrackets   = {32, 64, 128, 256};
-inline constexpr std::array<std::int32_t, 3> kFillBandBrackets  = {16, 32, 64};
-
-[[nodiscard]] inline std::int32_t round_up_to_bracket(
-    std::int32_t value, std::span<const std::int32_t> brackets) noexcept
-{
-    for (auto upper : brackets) {
-        if (value <= upper) return upper;
-    }
-    return value;
-}
-
-[[nodiscard]] inline FillBucketKey bucket_key_for(
-    const FillDescriptor& fill, std::int32_t default_bandwidth) noexcept
-{
-    const bool is_long = (fill.query_len > 256) || (fill.target_len > 256);
-    FillBucketKey key{};
-    if (is_long) {
-        key.q_max = fill.query_len;
-        key.t_max = fill.target_len;
-        key.bw_max = fill.bandwidth > 0 ? fill.bandwidth : default_bandwidth;
-        key.is_long_fill = true;
-    } else {
-        key.q_max = round_up_to_bracket(fill.query_len,
-            std::span<const std::int32_t>{kFillLenBrackets});
-        key.t_max = round_up_to_bracket(fill.target_len,
-            std::span<const std::int32_t>{kFillLenBrackets});
-        key.bw_max = round_up_to_bracket(
-            fill.bandwidth > 0 ? fill.bandwidth : default_bandwidth,
-            std::span<const std::int32_t>{kFillBandBrackets});
-        key.is_long_fill = false;
-    }
-    key.is_reverse = fill.is_reverse;
-    return key;
-}
+using FillBucketKey =
+    ::bioseq::simd::detail_ksw2_batched_ordering::FillBucketKey;
+using ::bioseq::simd::detail_ksw2_batched_ordering::bucket_key_for;
 
 namespace detail_ksw2_batched {
 
@@ -175,24 +132,9 @@ bucket_fills_by_geometry(
     const std::int32_t default_bw =
         static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
 
-    struct ByBucketThenOrder {
-        std::int32_t default_bw;
-        [[nodiscard, gnu::always_inline]] inline bool operator()(
-            const FillDescriptor& a, const FillDescriptor& b) const noexcept
-        {
-            const FillBucketKey ka = bucket_key_for(a, default_bw);
-            const FillBucketKey kb = bucket_key_for(b, default_bw);
-            if (ka.is_long_fill != kb.is_long_fill) return !ka.is_long_fill;
-            if (ka.is_reverse != kb.is_reverse) return !ka.is_reverse;
-            if (ka.q_max != kb.q_max) return ka.q_max < kb.q_max;
-            if (ka.t_max != kb.t_max) return ka.t_max < kb.t_max;
-            if (ka.bw_max != kb.bw_max) return ka.bw_max < kb.bw_max;
-            if (a.region_idx != b.region_idx) return a.region_idx < b.region_idx;
-            return a.fill_order < b.fill_order;
-        }
-    };
     std::stable_sort(fills.data(), fills.data() + fills.size(),
-                     ByBucketThenOrder{default_bw});
+        ::bioseq::simd::detail_ksw2_batched_ordering::ByBucketThenOrder{
+            default_bw});
 
     std::vector<std::pair<FillBucketKey, std::span<FillDescriptor>>> out;
     if (fills.size() == 0) return out;
@@ -490,15 +432,8 @@ inline void stitch_cigars_into_regions(
     std::int32_t                                    query_length,
     bool                                            emit_cigar)
 {
-    struct ChainOrder {
-        [[nodiscard, gnu::always_inline]] inline bool operator()(
-            const FillDescriptor& a, const FillDescriptor& b) const noexcept
-        {
-            if (a.region_idx != b.region_idx) return a.region_idx < b.region_idx;
-            return a.fill_order < b.fill_order;
-        }
-    };
-    std::stable_sort(fills.data(), fills.data() + fills.size(), ChainOrder{});
+    std::stable_sort(fills.data(), fills.data() + fills.size(),
+        ::bioseq::simd::detail_ksw2_batched_ordering::ChainOrder{});
 
     std::size_t fill_index = 0;
     const sequence_size_t query_extent =

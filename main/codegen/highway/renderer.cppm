@@ -901,7 +901,7 @@ collect_slot_owners(const source_manifest& inventory) {
            << "export namespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace << " {\n"
            << "[[nodiscard]] const HighwayTargetBinding* "
-              "BindHighwayTarget() noexcept;\n"
+              "BindHighwayTarget();\n"
            << "}  // namespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace << "\n\n"
            << "namespace bioseq::simd_dispatch::"
@@ -1215,7 +1215,7 @@ collect_slot_owners(const source_manifest& inventory) {
     }
     output << "    return table;\n"
            << "}\n\n"
-           << "HWY_ATTR const HighwayTargetBinding* BindHighwayTarget() noexcept {\n"
+           << "HWY_ATTR const HighwayTargetBinding* BindHighwayTarget() {\n"
            << "    static const HighwayKernelTable kernels = "
               "MakeHighwayKernelTable();\n"
            << "    if (!kernels.complete()) {\n"

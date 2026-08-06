@@ -148,10 +148,8 @@ inline void iterate_sequence_bp_simd_offsets(
 	const vec_mask_t full_mask = hn::FirstN(d, hn::Lanes(d));
 	const vec_mask_t none_mask = hn::MaskFalse(d);
 	//const vec_mask_t dummy_mask = hn::FirstN(d, hn::Lanes(d));
-	HWY_ALIGN std::array<vec_mask_t, delays_count> delays_masks;
-	if constexpr (delays_count > 0) {
-		delays_masks.fill(none_mask);
-	}
+	HWY_ALIGN std::array<vec_mask_t, delays_count> delays_masks{
+		((void)delays, none_mask)...};
 
 	const vec_mask_t left_mask = offsets[0] == offsets[hn::Lanes(d)-1] ? hn::MaskFalse(d) : hn::FirstN(d, hn::Lanes(d)-1);
 	typename std::conditional<delays_count == 0, std::monostate, std::array<int32_t, delays_count>>::type delays_counters = { -static_cast<int32_t>(delays)... };
@@ -164,7 +162,8 @@ inline void iterate_sequence_bp_simd_offsets(
 
 	size_t live_iterators_count = 1 + delays_count;
 
-	HWY_ALIGN std::array<VecT, delays_count> all_bp_vecs;
+	HWY_ALIGN std::array<VecT, delays_count> all_bp_vecs{
+		((void)delays, hn::Undefined(d))...};
 	VecT base_bp_vec;
 
 	auto handle_row_bp = [&]<simd_bp_iteration_part mode>(VecT row)

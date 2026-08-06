@@ -20,7 +20,7 @@ import :kernel;
 
 namespace bioseq::highway_gcc_canary::HWY_NAMESPACE {
 
-HWY_ATTR const TargetBinding* BindHighwayTarget() noexcept {
+HWY_ATTR const TargetBinding* BindHighwayTarget() {
 @ATTRIBUTE_COVERAGE_CHECK@
   static const KernelTable kernels{
       .add_one = &AddOne,

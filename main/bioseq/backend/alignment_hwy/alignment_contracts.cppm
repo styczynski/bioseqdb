@@ -5,11 +5,13 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <span>
 #include <vector>
 
 export module bioseq.alignment.contracts;
@@ -17,6 +19,90 @@ export module bioseq.alignment.contracts;
 export import bioseq.alignment.utils;
 
 export namespace bioseq::simd {
+
+namespace detail_ksw2_batched_ordering {
+
+struct FillBucketKey {
+    std::int32_t q_max;
+    std::int32_t t_max;
+    std::int32_t bw_max;
+    bool         is_long_fill;
+    bool         is_reverse;
+
+    [[nodiscard]] friend constexpr bool operator==(
+        const FillBucketKey&, const FillBucketKey&) noexcept = default;
+};
+
+inline constexpr std::array<std::int32_t, 4> kFillLenBrackets = {
+    32, 64, 128, 256};
+inline constexpr std::array<std::int32_t, 3> kFillBandBrackets = {
+    16, 32, 64};
+
+[[nodiscard, gnu::always_inline]] inline std::int32_t
+round_up_to_bracket(
+    std::int32_t value, std::span<const std::int32_t> brackets) noexcept
+{
+    for (auto upper : brackets) {
+        if (value <= upper) return upper;
+    }
+    return value;
+}
+
+template <class FillDescriptor>
+[[nodiscard, gnu::always_inline]] inline FillBucketKey bucket_key_for(
+    const FillDescriptor& fill, std::int32_t default_bandwidth) noexcept
+{
+    const bool is_long = (fill.query_len > 256) || (fill.target_len > 256);
+    FillBucketKey key{};
+    if (is_long) {
+        key.q_max = fill.query_len;
+        key.t_max = fill.target_len;
+        key.bw_max = fill.bandwidth > 0 ? fill.bandwidth : default_bandwidth;
+        key.is_long_fill = true;
+    } else {
+        key.q_max = round_up_to_bracket(fill.query_len,
+            std::span<const std::int32_t>{kFillLenBrackets});
+        key.t_max = round_up_to_bracket(fill.target_len,
+            std::span<const std::int32_t>{kFillLenBrackets});
+        key.bw_max = round_up_to_bracket(
+            fill.bandwidth > 0 ? fill.bandwidth : default_bandwidth,
+            std::span<const std::int32_t>{kFillBandBrackets});
+        key.is_long_fill = false;
+    }
+    key.is_reverse = fill.is_reverse;
+    return key;
+}
+
+struct ByBucketThenOrder {
+    std::int32_t default_bw;
+
+    template <class FillDescriptor>
+    [[nodiscard, gnu::always_inline]] inline bool operator()(
+        const FillDescriptor& a, const FillDescriptor& b) const noexcept
+    {
+        const FillBucketKey ka = bucket_key_for(a, default_bw);
+        const FillBucketKey kb = bucket_key_for(b, default_bw);
+        if (ka.is_long_fill != kb.is_long_fill) return !ka.is_long_fill;
+        if (ka.is_reverse != kb.is_reverse) return !ka.is_reverse;
+        if (ka.q_max != kb.q_max) return ka.q_max < kb.q_max;
+        if (ka.t_max != kb.t_max) return ka.t_max < kb.t_max;
+        if (ka.bw_max != kb.bw_max) return ka.bw_max < kb.bw_max;
+        if (a.region_idx != b.region_idx) return a.region_idx < b.region_idx;
+        return a.fill_order < b.fill_order;
+    }
+};
+
+struct ChainOrder {
+    template <class FillDescriptor>
+    [[nodiscard, gnu::always_inline]] inline bool operator()(
+        const FillDescriptor& a, const FillDescriptor& b) const noexcept
+    {
+        if (a.region_idx != b.region_idx) return a.region_idx < b.region_idx;
+        return a.fill_order < b.fill_order;
+    }
+};
+
+}  // namespace detail_ksw2_batched_ordering
 
 struct KswFlags {
     bool score_only    : 1 = false;

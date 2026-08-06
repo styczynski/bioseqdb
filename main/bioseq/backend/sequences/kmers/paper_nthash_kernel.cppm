@@ -179,6 +179,70 @@ struct minimum_stream {
     vec_stream_t left_strand;
     vec_stream_t right_strand;
     mask_stream_t valid;
+
+    // This template is instantiated by an ordinary per-target owner unit.
+    // Keep every special member explicit so the renderer can attach HWY_ATTR;
+    // otherwise Clang synthesizes targetless members around BF16 streams.
+    HWY_INLINE minimum_stream() noexcept
+        : hash{},
+          left_position{},
+          right_position{},
+          left_strand{},
+          right_strand{},
+          valid{} {}
+
+    HWY_INLINE minimum_stream(
+        vec_stream_t hash_value,
+        vec_stream_t left_position_value,
+        vec_stream_t right_position_value,
+        vec_stream_t left_strand_value,
+        vec_stream_t right_strand_value,
+        mask_stream_t valid_value) noexcept
+        : hash(std::move(hash_value)),
+          left_position(std::move(left_position_value)),
+          right_position(std::move(right_position_value)),
+          left_strand(std::move(left_strand_value)),
+          right_strand(std::move(right_strand_value)),
+          valid(std::move(valid_value)) {}
+
+    HWY_INLINE minimum_stream(const minimum_stream& other) noexcept
+        : hash(other.hash),
+          left_position(other.left_position),
+          right_position(other.right_position),
+          left_strand(other.left_strand),
+          right_strand(other.right_strand),
+          valid(other.valid) {}
+
+    HWY_INLINE minimum_stream(minimum_stream&& other) noexcept
+        : hash(std::move(other.hash)),
+          left_position(std::move(other.left_position)),
+          right_position(std::move(other.right_position)),
+          left_strand(std::move(other.left_strand)),
+          right_strand(std::move(other.right_strand)),
+          valid(std::move(other.valid)) {}
+
+    HWY_INLINE minimum_stream& operator=(
+        const minimum_stream& other) noexcept
+    {
+        hash = other.hash;
+        left_position = other.left_position;
+        right_position = other.right_position;
+        left_strand = other.left_strand;
+        right_strand = other.right_strand;
+        valid = other.valid;
+        return *this;
+    }
+
+    HWY_INLINE minimum_stream& operator=(minimum_stream&& other) noexcept
+    {
+        hash = std::move(other.hash);
+        left_position = std::move(other.left_position);
+        right_position = std::move(other.right_position);
+        left_strand = std::move(other.left_strand);
+        right_strand = std::move(other.right_strand);
+        valid = std::move(other.valid);
+        return *this;
+    }
 };
 
 /**
@@ -202,37 +266,37 @@ template<class D, std::size_t NumStreams>
     const auto second_rightmost = And(
         hashes_equal, Gt(second.right_position, first.right_position));
 
-    return {
-        .hash = IfThenElse(second_smaller, second.hash, first.hash),
-        .left_position = IfThenElse(
+    return minimum_stream<D, NumStreams>{
+        IfThenElse(second_smaller, second.hash, first.hash),
+        IfThenElse(
             second_smaller,
             second.left_position,
             IfThenElse(
                 second_leftmost,
                 second.left_position,
                 first.left_position)),
-        .right_position = IfThenElse(
+        IfThenElse(
             second_smaller,
             second.right_position,
             IfThenElse(
                 second_rightmost,
                 second.right_position,
                 first.right_position)),
-        .left_strand = IfThenElse(
+        IfThenElse(
             second_smaller,
             second.left_strand,
             IfThenElse(
                 second_leftmost,
                 second.left_strand,
                 first.left_strand)),
-        .right_strand = IfThenElse(
+        IfThenElse(
             second_smaller,
             second.right_strand,
             IfThenElse(
                 second_rightmost,
                 second.right_strand,
                 first.right_strand)),
-        .valid = Or(first.valid, second.valid),
+        Or(first.valid, second.valid),
     };
 }
 
@@ -400,12 +464,12 @@ struct packed_iteration_state {
             vec_stream_t::splat(d, 1u),
             vec_stream_t::splat_zero(d));
         const minimum_t entering{
-            .hash = canonical_hash,
-            .left_position = position,
-            .right_position = position,
-            .left_strand = strand,
-            .right_strand = strand,
-            .valid = live,
+            canonical_hash,
+            position,
+            position,
+            strand,
+            strand,
+            live,
         };
 
         const std::size_t written_slot = next_window_slot;
@@ -704,12 +768,12 @@ template<
     const auto zero = vec_stream_t::splat_zero(d);
     const auto false_masks = mask_stream_t::splat_false(d);
     const minimum_t empty_minimum{
-        .hash = zero,
-        .left_position = zero,
-        .right_position = zero,
-        .left_strand = zero,
-        .right_strand = zero,
-        .valid = false_masks,
+        zero,
+        zero,
+        zero,
+        zero,
+        zero,
+        false_masks,
     };
     state_t state{
         .forward_hash = zero,
