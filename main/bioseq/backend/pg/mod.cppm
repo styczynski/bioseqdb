@@ -19,6 +19,7 @@ module;
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 export module bioseq.mod;
 
@@ -1249,7 +1250,37 @@ struct AlignmentExecutorFrame {
 	bool finished = false;
 };
 
+extern ExecutorRun_hook_type PreviousExecutorRunHook;
+extern std::vector<AlignmentExecutorFrame*> alignment_start_in_progress;
+extern std::vector<AlignmentExecutorFrame*> alignment_current_run;
+
+void destroy_alignment_frame(AlignmentExecutorFrame* frame) noexcept;
+void ensure_alignment_frame_cleanup(
+	AlignmentExecutorFrame* frame,
+	EState* estate);
+[[nodiscard]] AlignmentExecutorFrame* find_alignment_frame(
+	QueryDesc* query_desc) noexcept;
+[[nodiscard]] AlignmentExecutorFrame* find_alignment_frame(
+	EState* estate) noexcept;
+void register_alignment_frame(AlignmentExecutorFrame* frame);
+void pop_exact_alignment_stack(
+	std::vector<AlignmentExecutorFrame*>& stack,
+	AlignmentExecutorFrame* frame,
+	const char* stack_name);
+[[nodiscard]] bioseq::pg::alignment_execution::AlignmentNodeRegistrationHandle
+bind_alignment_node_to_starting_frame(
+	EState* estate,
+	std::uint32_t scan_node_id);
+void retire_escaped_nested_bindings(AlignmentExecutorFrame* root) noexcept;
+void retire_alignment_frame(AlignmentExecutorFrame* frame) noexcept;
+
 void publish_alignment_root(AlignmentExecutorFrame* frame);
+
+void bioseq_alignment_executor_run(
+	QueryDesc* query_desc,
+	ScanDirection direction,
+	uint64 count,
+	bool execute_once);
 
 void install_alignment_execution_hooks();
 

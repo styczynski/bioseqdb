@@ -1180,6 +1180,8 @@ target_link_libraries(bioseq_runtime_core PUBLIC
   foonathan_memory
   TBB::tbb)
 target_sources(bioseq_runtime_core
+  PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging_specializations.cpp
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_RUNTIME_CORE_MODULES})
@@ -1784,6 +1786,7 @@ unset(_bioseq_typed_expected_count)
 set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_callbacks_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_publish_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_evidence_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_stats_impl.cppm"

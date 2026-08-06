@@ -2208,6 +2208,22 @@ export template<
       std::forward<Args>(args)...);
 }
 
+export {
+
+template<>
+void bioseq_log<
+    LoggingLevel::DBG,
+    LoggingTarget::FILE,
+    std::string_view&,
+    unsigned long long>(
+    bioseq_logging_detail::format_with_location<
+        std::string_view&,
+        unsigned long long> fmt_loc,
+    std::string_view& route,
+    unsigned long long&& total_rejections);
+
+}
+
 export template<typename... Args>
 [[gnu::always_inline]] inline void bioseq_log_pg(
     int pg_elevel,
