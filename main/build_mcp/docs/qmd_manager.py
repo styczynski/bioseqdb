@@ -206,6 +206,36 @@ class QmdManager:
             return ({"queued": 0, "running": 0, "state": "unknown"},) * 2 + (True,)
         try:
             value = cls._read_activity_registry_locked()
+            if isinstance(value, dict):
+                stale_idle_keys = []
+                expected_keys = {
+                    "pid", "initialized", "update_queued", "update_running",
+                    "embed_queued", "embed_running",
+                }
+                for key, raw in value.items():
+                    if not isinstance(raw, dict) or set(raw) != expected_keys:
+                        continue
+                    counters = (
+                        raw["update_queued"], raw["update_running"],
+                        raw["embed_queued"], raw["embed_running"],
+                    )
+                    if (
+                        isinstance(raw["pid"], int)
+                        and not isinstance(raw["pid"], bool)
+                        and raw["pid"] > 0
+                        and all(
+                            isinstance(counter, int)
+                            and not isinstance(counter, bool)
+                            and counter == 0
+                            for counter in counters
+                        )
+                        and not cls._pid_alive(raw["pid"])
+                    ):
+                        stale_idle_keys.append(key)
+                if stale_idle_keys:
+                    for key in stale_idle_keys:
+                        value.pop(key, None)
+                    cls._write_activity_registry_locked(value)
         finally:
             cls._unlock_file(registry_lock)
         unknown = value is None
