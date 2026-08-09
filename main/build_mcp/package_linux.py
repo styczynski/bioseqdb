@@ -251,7 +251,11 @@ def _git_porcelain_status(
     """Capture porcelain without stripping its significant leading columns."""
     return _run(
         ["git", "-C", str(repository), "status", "--porcelain=v1",
-         "--untracked-files=all", "--", "main"],
+         "--untracked-files=all", "--", "main",
+         ":(top,exclude,literal)main/papers",
+         ":(top,exclude,glob)main/papers/**",
+         ":(top,exclude,literal)papers",
+         ":(top,exclude,glob)papers/**"],
         log=log, deadline=deadline, capture=True,
     ).rstrip("\r\n")
 
@@ -467,6 +471,12 @@ def _safe_extract(archive: Path, destination: Path) -> Path:
         for member in members:
             relative = PurePosixPath(member.name)
             if (
+                relative.parts[:2] == ("main", "papers")
+                or relative.parts[:1] == ("papers",)
+            ):
+                raise PackageLinuxError(
+                    "committed source archive crossed the sealed source boundary")
+            if (
                 relative.is_absolute() or not relative.parts
                 or relative.parts[0] != "main" or ".." in relative.parts
                 or member.issym() or member.islnk() or member.isdev() or member.isfifo()
@@ -504,7 +514,11 @@ def _source_snapshot(
         # timestamp while retaining main/ as the sole archive root.
         _run(
             ["git", "-C", str(repository), "archive", "--format=tar",
-             f"--output={archive}", revision, "main"],
+             f"--output={archive}", revision, "--", "main",
+             ":(top,exclude,literal)main/papers",
+             ":(top,exclude,glob)main/papers/**",
+             ":(top,exclude,literal)papers",
+             ":(top,exclude,glob)papers/**"],
             log=log, deadline=deadline,
         )
         # Keeping main/ directly below source-*/ is intentional: the retained

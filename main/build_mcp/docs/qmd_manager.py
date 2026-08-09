@@ -5,6 +5,7 @@ or hash `docid`). Indexing runs in a single coalesced background worker; `reinde
 does a quick non-blocking `qmd update` so a new doc is immediately searchable."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -24,6 +25,24 @@ PORT = int(os.environ.get("BIOSEQ_QMD_PORT", "8181"))
 COL_CURRENT, COL_ARCHIVE = "bioseq-docs-current", "bioseq-docs-archive"
 SYNC_INTERVAL = 600.0
 EMBED_MAX_MB = os.environ.get("BIOSEQ_QMD_EMBED_MAX_MB")
+ACTIVITY_REGISTRY = Path(
+    os.environ.get(
+        "BIOSEQ_QMD_ACTIVITY_REGISTRY",
+        "/tmp/bioseq-build-qmd-activity.json",
+    )
+)
+ACTIVITY_REGISTRY_LOCK = Path(
+    os.environ.get(
+        "BIOSEQ_QMD_ACTIVITY_REGISTRY_LOCK",
+        "/tmp/bioseq-build-qmd-activity.lock",
+    )
+)
+QMD_OPERATION_LOCK = Path(
+    os.environ.get(
+        "BIOSEQ_QMD_OPERATION_LOCK",
+        "/tmp/bioseq-build-qmd-operation.lock",
+    )
+)
 DOCNUM = re.compile(r"DOC(\d{4})")
 ANYNUM = re.compile(r"(\d{4})")
 
@@ -41,9 +60,232 @@ class QmdManager:
         self.client = QmdHttpClient(f"http://localhost:{PORT}")
         self._ready_lock = threading.Lock()
         self._embed_lock = threading.Lock()     # held only during qmd embed
+        self._activity_lock = threading.Lock()
+        self._update_running = 0
+        self._embed_running = 0
+        self._external_update_running = 0
+        self._dirty_pending = False
         self._dirty = threading.Event()
         self._ready = False
         self._worker = None
+
+    @staticmethod
+    def _lock_file(path: Path, *, blocking: bool = True):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+", encoding="utf-8")
+        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(handle.fileno(), flags)
+        except BlockingIOError:
+            handle.close()
+            return None
+        return handle
+
+    @staticmethod
+    def _unlock_file(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+    @staticmethod
+    def _read_activity_registry_locked() -> dict | None:
+        try:
+            raw = ACTIVITY_REGISTRY.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except (OSError, UnicodeError):
+            return None
+        if not raw.strip():
+            return {}
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _write_activity_registry_locked(value: dict) -> None:
+        ACTIVITY_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+        with ACTIVITY_REGISTRY.open("w", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _publish_process_activity_locked(self) -> None:
+        """Publish this process's active phases under the cross-process lock.
+
+        The caller holds ``_activity_lock``. An invalid pre-existing registry is
+        preserved as an invalid sentinel so status remains fail closed.
+        """
+        registry_lock = self._lock_file(ACTIVITY_REGISTRY_LOCK)
+        if registry_lock is None:  # pragma: no cover - blocking acquisition
+            raise RuntimeError("could not acquire QMD activity registry lock")
+        try:
+            value = self._read_activity_registry_locked()
+            if value is None:
+                value = {"invalid": None}
+            key = str(os.getpid())
+            update_running = (
+                self._update_running + self._external_update_running
+            )
+            initialized = self._ready or self._worker is not None
+            if (
+                initialized
+                or self._dirty_pending
+                or update_running
+                or self._embed_running
+            ):
+                value[key] = {
+                    "pid": os.getpid(),
+                    "initialized": initialized,
+                    "update_queued": int(self._dirty_pending),
+                    "update_running": update_running,
+                    "embed_queued": int(
+                        self._dirty_pending or self._update_running
+                    ),
+                    "embed_running": self._embed_running,
+                }
+            else:
+                value.pop(key, None)
+            self._write_activity_registry_locked(value)
+        finally:
+            self._unlock_file(registry_lock)
+
+    def begin_external_update(self) -> None:
+        """Publish document-environment/readiness work before it starts."""
+        with self._activity_lock:
+            self._external_update_running += 1
+            self._publish_process_activity_locked()
+
+    def end_external_update(self) -> None:
+        """Finish a previously published document-environment operation."""
+        with self._activity_lock:
+            if self._external_update_running <= 0:
+                raise RuntimeError("QMD external update activity is unbalanced")
+            self._external_update_running -= 1
+            self._publish_process_activity_locked()
+
+    def _queue_index(self) -> None:
+        """Atomically publish queued work before waking the local worker."""
+        with self._activity_lock:
+            self._dirty_pending = True
+            self._publish_process_activity_locked()
+            self._dirty.set()
+
+    def unregister_idle_process(self) -> None:
+        """Remove a cleanly exiting idle MCP process from shared activity."""
+        with self._activity_lock:
+            if (
+                self._dirty_pending
+                or self._update_running
+                or self._embed_running
+                or self._external_update_running
+            ):
+                return
+            self._ready = False
+            self._worker = None
+            self._publish_process_activity_locked()
+
+    @staticmethod
+    def _pid_alive(pid: object) -> bool:
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @classmethod
+    def _shared_activity(cls) -> tuple[dict, dict, bool]:
+        """Aggregate all live MCP document workers without exposing identity."""
+        registry_lock = cls._lock_file(ACTIVITY_REGISTRY_LOCK)
+        if registry_lock is None:  # pragma: no cover - blocking acquisition
+            return ({"queued": 0, "running": 0, "state": "unknown"},) * 2 + (True,)
+        try:
+            value = cls._read_activity_registry_locked()
+        finally:
+            cls._unlock_file(registry_lock)
+        unknown = value is None
+        update_queued = update_running = 0
+        embed_queued = embed_running = 0
+        recognized = False
+        if value is not None:
+            for raw in value.values():
+                if not isinstance(raw, dict) or set(raw) != {
+                    "pid", "initialized", "update_queued", "update_running",
+                    "embed_queued", "embed_running",
+                }:
+                    unknown = True
+                    continue
+                counters = (
+                    raw["update_queued"], raw["update_running"],
+                    raw["embed_queued"], raw["embed_running"],
+                )
+                if (
+                    any(
+                        not isinstance(counter, int)
+                        or isinstance(counter, bool)
+                        or counter < 0
+                        for counter in counters
+                    )
+                    or not isinstance(raw["initialized"], bool)
+                    or not cls._pid_alive(raw["pid"])
+                ):
+                    unknown = True
+                    continue
+                recognized = True
+                update_queued += raw["update_queued"]
+                update_running += raw["update_running"]
+                embed_queued += raw["embed_queued"]
+                embed_running += raw["embed_running"]
+
+        def transient(queued: int, running: int) -> dict:
+            if unknown:
+                state = "unknown"
+            elif running:
+                state = "running"
+            elif queued:
+                state = "queued"
+            elif recognized:
+                state = "idle"
+            else:
+                state = "absent"
+            return {"queued": queued, "running": running, "state": state}
+
+        return (
+            transient(update_queued, update_running),
+            transient(embed_queued, embed_running),
+            unknown,
+        )
+
+    def activity_snapshot(self) -> dict:
+        """Return the path-free status payload consumed by builder ``status``."""
+        update, embed, registry_unknown = self._shared_activity()
+        persistent = self.client.health()
+        if registry_unknown:
+            qmd_state = "unknown"
+        elif persistent:
+            qmd_state = (
+                "busy"
+                if update["queued"] or embed["queued"]
+                or update["running"] or embed["running"]
+                else "idle"
+            )
+        elif update["state"] != "absent" or embed["state"] != "absent":
+            qmd_state = "unknown"
+        else:
+            qmd_state = "absent"
+        return {
+            "document_update": update,
+            "document_embed": embed,
+            "qmd_server": {
+                "persistent": persistent,
+                "state": qmd_state,
+            },
+        }
 
     def _cli(self, args: List[str], timeout: float = 1800.0):
         if not QMD_BIN.exists():
@@ -56,11 +298,23 @@ class QmdManager:
         with self._ready_lock:
             if self._ready:
                 return
-            self._ensure_collections()
-            self._ensure_server()
-            self._ready = True
-            self._start_worker()
-            self._dirty.set()           # request an initial index in the background
+            self.begin_external_update()
+            operation_lock = None
+            try:
+                operation_lock = self._lock_file(QMD_OPERATION_LOCK)
+                if operation_lock is None:  # pragma: no cover
+                    raise QmdUnavailable("could not acquire QMD operation lock")
+                self._ensure_collections()
+                self._ensure_server()
+                self._ready = True
+                self._start_worker()
+                self._queue_index()
+            finally:
+                try:
+                    if operation_lock is not None:
+                        self._unlock_file(operation_lock)
+                finally:
+                    self.end_external_update()
 
     def _has_collection(self, name: str) -> bool:
         try:
@@ -106,16 +360,43 @@ class QmdManager:
         def loop():
             while True:
                 self._dirty.wait()
-                self._dirty.clear()
                 with self._embed_lock:
+                    operation_lock = self._lock_file(QMD_OPERATION_LOCK)
+                    if operation_lock is None:  # pragma: no cover
+                        continue
                     try:
-                        self._cli(["update"], timeout=1800)
+                        with self._activity_lock:
+                            if not self._dirty_pending:
+                                self._dirty.clear()
+                                continue
+                            self._dirty_pending = False
+                            self._update_running = 1
+                            self._publish_process_activity_locked()
+                            self._dirty.clear()
+                        try:
+                            self._cli(["update"], timeout=1800)
+                        except Exception:
+                            with self._activity_lock:
+                                self._update_running = 0
+                                self._publish_process_activity_locked()
+                            raise
                         ea = ["embed"]
                         if EMBED_MAX_MB:
                             ea += ["--max-batch-mb", str(EMBED_MAX_MB)]
-                        self._cli(ea, timeout=7200)
+                        with self._activity_lock:
+                            self._update_running = 0
+                            self._embed_running = 1
+                            self._publish_process_activity_locked()
+                        try:
+                            self._cli(ea, timeout=7200)
+                        finally:
+                            with self._activity_lock:
+                                self._embed_running = 0
+                                self._publish_process_activity_locked()
                     except Exception as e:
                         _log(f"index error: {e}")
+                    finally:
+                        self._unlock_file(operation_lock)
 
         self._worker = threading.Thread(target=loop, daemon=True)
         self._worker.start()
@@ -124,20 +405,35 @@ class QmdManager:
     def _periodic(self) -> None:
         while True:
             time.sleep(SYNC_INTERVAL)
-            self._dirty.set()
+            self._queue_index()
 
     def reindex_after_write(self) -> bool:
         """Quick FTS `qmd update` now (non-blocking on embed) so the doc is immediately
         searchable; schedule a background embed. Returns True if FTS-indexed synchronously."""
         self.ensure_ready()
         if self._embed_lock.acquire(blocking=False):
-            try:
-                self._cli(["update"], timeout=600)
-            finally:
+            operation_lock = self._lock_file(QMD_OPERATION_LOCK, blocking=False)
+            if operation_lock is None:
                 self._embed_lock.release()
-            self._dirty.set()
+                self._queue_index()
+                return False
+            try:
+                with self._activity_lock:
+                    self._update_running = 1
+                    self._publish_process_activity_locked()
+                try:
+                    self._cli(["update"], timeout=600)
+                finally:
+                    with self._activity_lock:
+                        self._update_running = 0
+                        self._dirty_pending = True
+                        self._publish_process_activity_locked()
+                        self._dirty.set()
+            finally:
+                self._unlock_file(operation_lock)
+                self._embed_lock.release()
             return True
-        self._dirty.set()           # embed in progress; picked up next cycle
+        self._queue_index()         # embed in progress; picked up next cycle
         return False
 
     # ---- search ----
@@ -221,10 +517,12 @@ class QmdManager:
 
 
 _MANAGER = None
+_MANAGER_LOCK = threading.Lock()
 
 
 def get_manager() -> QmdManager:
     global _MANAGER
-    if _MANAGER is None:
-        _MANAGER = QmdManager()
+    with _MANAGER_LOCK:
+        if _MANAGER is None:
+            _MANAGER = QmdManager()
     return _MANAGER

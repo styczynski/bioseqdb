@@ -2412,11 +2412,20 @@ def _get_build_receipt(receipt_id: str) -> dict[str, object] | None:
 _SOURCE_GRAPH_EXCLUDED_PREFIXES = (
     ".codex/",
     ".git/",
+    "papers/",
     "main/DOCS/",
     "main/build/",
+    "main/papers/",
     "main/reporting/",
-    "main/papers/build/",
-    "main/papers/pdf/",
+)
+
+_SOURCE_GRAPH_EXCLUDED_PATHS = {"main/papers", "papers"}
+
+_PAPERS_EXCLUDED_PATHSPECS = (
+    ":(top,exclude,literal)main/papers",
+    ":(top,exclude,glob)main/papers/**",
+    ":(top,exclude,literal)papers",
+    ":(top,exclude,glob)papers/**",
 )
 
 
@@ -2433,6 +2442,7 @@ def _source_graph_fingerprint(workspace_root: Path) -> str:
         [
             "git", "-C", str(workspace_root), "ls-files", "-z",
             "--cached", "--others", "--exclude-standard",
+            "--", ".", *_PAPERS_EXCLUDED_PATHSPECS,
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -2448,7 +2458,10 @@ def _source_graph_fingerprint(workspace_root: Path) -> str:
         if not raw_path:
             continue
         relative = raw_path.decode("utf-8", errors="surrogateescape")
-        if relative.startswith(_SOURCE_GRAPH_EXCLUDED_PREFIXES):
+        if (
+            relative in _SOURCE_GRAPH_EXCLUDED_PATHS
+            or relative.startswith(_SOURCE_GRAPH_EXCLUDED_PREFIXES)
+        ):
             continue
         if "/__pycache__/" in f"/{relative}" or relative.endswith(".pyc"):
             continue
@@ -2499,6 +2512,82 @@ def _git_commit(workspace_root: Path, ref: str = "HEAD") -> str:
     return commit
 
 
+def _cleanup_partial_baseline_worktree(worktree: Path) -> None:
+    """Remove only an MCP-owned failed sparse baseline projection."""
+    root = BASELINE_WORKTREE_ROOT.resolve(strict=False)
+    candidate = worktree.resolve(strict=False)
+    if candidate == root or root not in candidate.parents:
+        raise RuntimeError("refusing to clean a baseline path outside its owner")
+    for command, timeout in (
+        ([
+            "git", "-C", str(WORKSPACE_ROOT), "worktree", "remove",
+            "--force", str(candidate),
+        ], 120),
+    ):
+        try:
+            subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        if candidate.is_symlink() or (
+            candidate.exists() and not candidate.is_dir()
+        ):
+            candidate.unlink()
+        elif candidate.exists():
+            shutil.rmtree(candidate)
+    except OSError as exc:
+        raise RuntimeError(
+            "failed to remove exact partial baseline directory"
+        ) from exc
+    try:
+        subprocess.run(
+            ["git", "-C", str(WORKSPACE_ROOT), "worktree", "prune"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+        listed = subprocess.run(
+            [
+                "git", "-C", str(WORKSPACE_ROOT), "worktree", "list",
+                "--porcelain",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "could not verify partial baseline worktree cleanup"
+        ) from exc
+    worktree_lines = [
+        line for line in listed.stdout.splitlines()
+        if line.startswith("worktree ")
+    ]
+    registered = {
+        Path(line.removeprefix("worktree ")).resolve(strict=False)
+        for line in worktree_lines
+    }
+    if (
+        listed.returncode != 0
+        or not worktree_lines
+        or candidate.exists()
+        or candidate.is_symlink()
+        or candidate in registered
+    ):
+        raise RuntimeError("partial baseline worktree cleanup was not verified")
+
+
 def _create_baseline_worktree(
         baseline_ref: str, run_token: str) -> tuple[Path, str]:
     """Create one detached, persistent MCP-owned baseline worktree."""
@@ -2511,38 +2600,81 @@ def _create_baseline_worktree(
     ).resolve(strict=False)
     BASELINE_WORKTREE_ROOT.mkdir(parents=True, exist_ok=True)
     worktree.parent.mkdir(parents=True, exist_ok=True)
-    completed = subprocess.run(
-        [
-            "git", "-C", str(WORKSPACE_ROOT), "worktree", "add",
-            "--detach", str(worktree), commit,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        text=True,
-        timeout=120,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(
-            "could not create detached baseline worktree: "
-            + completed.stderr.strip())
-    project_root = worktree / "main"
-    if not (project_root / "CMakePresets.json").is_file():
-        raise RuntimeError(
-            f"detached baseline is missing main/CMakePresets.json: {worktree}")
-    if _git_commit(worktree) != commit:
-        raise RuntimeError("detached baseline HEAD does not match the requested ref")
-    status = subprocess.run(
-        ["git", "-C", str(worktree), "status", "--porcelain"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    if status.returncode != 0 or status.stdout.strip():
-        raise RuntimeError("detached baseline worktree is not clean")
-    return project_root, commit
+    try:
+        completed = subprocess.run(
+            [
+                "git", "-C", str(WORKSPACE_ROOT), "worktree", "add",
+                "--detach", "--no-checkout", str(worktree), commit,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "could not create detached baseline worktree: "
+                + completed.stderr.strip())
+        sparse = subprocess.run(
+            [
+                "git", "-C", str(worktree), "sparse-checkout", "set",
+                "--no-cone", "/*", "!/main/papers/", "!/papers/",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=120,
+        )
+        if sparse.returncode != 0:
+            raise RuntimeError(
+                "could not configure papers-excluding baseline projection: "
+                + sparse.stderr.strip())
+        checkout = subprocess.run(
+            [
+                "git", "-C", str(worktree), "checkout", "--detach", commit,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+            timeout=120,
+        )
+        if checkout.returncode != 0:
+            raise RuntimeError(
+                "could not materialize papers-excluding baseline projection: "
+                + checkout.stderr.strip())
+        project_root = worktree / "main"
+        if not (project_root / "CMakePresets.json").is_file():
+            raise RuntimeError(
+                f"detached baseline is missing main/CMakePresets.json: {worktree}")
+        if _git_commit(worktree) != commit:
+            raise RuntimeError(
+                "detached baseline HEAD does not match the requested ref")
+        status = subprocess.run(
+            [
+                "git", "-C", str(worktree), "status", "--porcelain", "--",
+                ".", *_PAPERS_EXCLUDED_PATHSPECS,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if status.returncode != 0 or status.stdout.strip():
+            raise RuntimeError("detached baseline worktree is not clean")
+        return project_root, commit
+    except Exception as original:
+        try:
+            _cleanup_partial_baseline_worktree(worktree)
+        except Exception as cleanup_error:
+            raise RuntimeError(
+                f"baseline setup failed and cleanup was not verified: "
+                f"{cleanup_error}"
+            ) from original
+        raise
 
 
 def _build_configuration_evidence(build_dir: Path) -> dict[str, object]:
@@ -4049,6 +4181,7 @@ def _terminate_guarded_process_tree(
                         "snapshot_errors": list(tracker.snapshot_errors),
                         "completed_monotonic": clock(),
                         "within_hard_deadline": clock() <= hard_kill_deadline,
+                        "cleanup_verified": True,
                     })
                     return evidence
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -4080,6 +4213,7 @@ def _terminate_guarded_process_tree(
                     "snapshot_errors": list(tracker.snapshot_errors),
                     "completed_monotonic": clock(),
                     "within_hard_deadline": True,
+                    "cleanup_verified": True,
                 })
                 return evidence
         if live:
@@ -14049,7 +14183,222 @@ def tool_inspect(arguments: dict) -> str:
     return json.dumps(out, indent=2)
 
 
-def tool_status(mode: str) -> str:
+_ACTIVITY_VERIFIED_IDLE_STATES = {"completed", "failed"}
+
+
+def _activity_cleanup_is_unknown(entry: Mapping[str, object]) -> bool:
+    if (
+        "cleanup_unverified" in entry
+        and entry.get("cleanup_unverified") is not False
+    ):
+        return True
+    evidence = entry.get("termination_evidence")
+    if evidence is None:
+        return False
+    if not isinstance(evidence, dict) or evidence.get("cleanup_verified") is not True:
+        return True
+    for field in (
+        "survivor_pids", "marker_survivor_pids", "survivor_identities",
+    ):
+        survivors = evidence.get(field, [])
+        if not isinstance(survivors, list) or survivors:
+            return True
+    return False
+
+
+def _transient_activity(
+        entries: list[object], *, registry_present: bool = False) -> dict:
+    """Summarize registered detached work without leaking paths or commands."""
+    queued = 0
+    running = 0
+    unknown = False
+    recognized = False
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
+            unknown = True
+            continue
+        recognized = True
+        status = raw_entry.get("status")
+        if _activity_cleanup_is_unknown(raw_entry):
+            unknown = True
+        elif status == "queued":
+            queued += 1
+        elif status == "running":
+            if _is_pid_alive(raw_entry.get("pid")):
+                running += 1
+            else:
+                unknown = True
+        elif status in _ACTIVITY_VERIFIED_IDLE_STATES:
+            continue
+        elif status == "killed_timeout":
+            if raw_entry.get("termination_evidence") is None:
+                unknown = True
+        else:
+            unknown = True
+    if unknown:
+        state = "unknown"
+    elif running:
+        state = "running"
+    elif queued:
+        state = "queued"
+    elif recognized or registry_present:
+        state = "idle"
+    else:
+        state = "absent"
+    return {"queued": queued, "running": running, "state": state}
+
+
+def _read_activity_registry(path: Path) -> tuple[dict | None, bool]:
+    """Read an existing manager registry; malformed state remains unknown."""
+    if not path.exists():
+        return {}, False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, True
+    return (value, True) if isinstance(value, dict) else (None, True)
+
+
+def _unknown_document_activity() -> dict:
+    return {
+        "document_update": {
+            "queued": 0,
+            "running": 0,
+            "state": "unknown",
+        },
+        "document_embed": {
+            "queued": 0,
+            "running": 0,
+            "state": "unknown",
+        },
+        "qmd_server": {"persistent": False, "state": "unknown"},
+    }
+
+
+def _document_activity() -> dict:
+    """Read the existing QMD/document manager without starting an operation."""
+    try:
+        from docs.qmd_manager import get_manager
+
+        snapshot = get_manager().activity_snapshot()
+    except Exception:
+        return _unknown_document_activity()
+    required = {"document_update", "document_embed", "qmd_server"}
+    if not isinstance(snapshot, dict) or set(snapshot) != required:
+        return _unknown_document_activity()
+    for name in ("document_update", "document_embed"):
+        value = snapshot.get(name)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"queued", "running", "state"}
+            or any(
+                not isinstance(value[field], int)
+                or isinstance(value[field], bool)
+                or value[field] < 0
+                for field in ("queued", "running")
+            )
+            or value.get("state")
+            not in {"absent", "idle", "queued", "running", "unknown"}
+        ):
+            return _unknown_document_activity()
+    qmd = snapshot.get("qmd_server")
+    if (
+        not isinstance(qmd, dict)
+        or set(qmd) != {"persistent", "state"}
+        or not isinstance(qmd.get("persistent"), bool)
+        or qmd.get("state") not in {"absent", "idle", "busy", "unknown"}
+    ):
+        return _unknown_document_activity()
+    return snapshot
+
+
+def _local_activity() -> dict:
+    """Return the closed, path-free aggregate used at tree-freeze boundaries."""
+    with _global_lock():
+        build_state, build_registry_present = _read_activity_registry(STATE_FILE)
+    if build_state is None:
+        build_activity = _transient_activity([None])
+        papers_activity = _transient_activity([None])
+        other_activity = _transient_activity([None])
+    else:
+        build_activity = _transient_activity(
+            [build_state[key] for key in MODES if key in build_state],
+            registry_present=build_registry_present,
+        )
+        papers_entries = (
+            [build_state[PAPERS_BUILD_STATE_KEY]]
+            if PAPERS_BUILD_STATE_KEY in build_state else []
+        )
+        papers_activity = _transient_activity(papers_entries)
+        known_keys = set(MODES) | {PAPERS_BUILD_STATE_KEY}
+        other_activity = _transient_activity(
+            [value for key, value in build_state.items()
+             if key not in known_keys]
+        )
+
+    subagent_state, subagent_present = _read_activity_registry(
+        SUBAGENT_STATE_FILE)
+    subagent_activity = _transient_activity(
+        [subagent_state] if subagent_state else (
+            [None] if subagent_state is None else []),
+        registry_present=subagent_present,
+    )
+    remote_state, remote_present = _read_activity_registry(REMOTE_STATE_FILE)
+    remote_activity = _transient_activity(
+        [remote_state] if remote_state else (
+            [None] if remote_state is None else []),
+        registry_present=remote_present,
+    )
+    document_activity = _document_activity()
+    workers = {
+        "build": build_activity,
+        "document_update": document_activity["document_update"],
+        "document_embed": document_activity["document_embed"],
+        "mcp_subagent": subagent_activity,
+        "papers": papers_activity,
+        "remote_operation": remote_activity,
+        "other_detached": other_activity,
+        "qmd_server": document_activity["qmd_server"],
+    }
+    transient_names = (
+        "build",
+        "document_update",
+        "document_embed",
+        "mcp_subagent",
+        "papers",
+        "remote_operation",
+        "other_detached",
+    )
+    state_root = PROJECT_ROOT / "build"
+    disk_probe = state_root
+    while not disk_probe.exists() and disk_probe.parent != disk_probe:
+        disk_probe = disk_probe.parent
+    try:
+        free_disk_bytes = int(shutil.disk_usage(disk_probe.resolve()).free)
+    except OSError:
+        free_disk_bytes = 0
+        workers["other_detached"] = {
+            "queued": workers["other_detached"]["queued"],
+            "running": workers["other_detached"]["running"],
+            "state": "unknown",
+        }
+    quiescent = all(
+        workers[name]["queued"] == 0
+        and workers[name]["running"] == 0
+        and workers[name]["state"] in {"absent", "idle"}
+        for name in transient_names
+    ) and workers["qmd_server"]["state"] in {"absent", "idle"}
+    return {
+        "quiescent": quiescent,
+        "free_disk_bytes": free_disk_bytes,
+        "workers": workers,
+    }
+
+
+def tool_status(mode: str | None = None) -> str:
+    if mode is None:
+        return json.dumps({"local_activity": _local_activity()}, indent=2)
     if mode not in MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
@@ -15774,7 +16123,11 @@ def _run_remote_worker(op_id: str) -> int:
     state = {}
     for _ in range(100):  # ~10s — tolerate the benign spawn→write race
         state = _load_remote_state()
-        if state.get("op_id") == op_id and state.get("status") == "running":
+        if (
+            state.get("op_id") == op_id
+            and state.get("status") == "running"
+            and state.get("pid") == os.getpid()
+        ):
             break
         time.sleep(0.1)
     else:
@@ -15965,18 +16318,71 @@ def _start_or_poll_remote(kind: str, label: str, *,
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
         log_path = LOG_DIR / f"bioseq_remote_mcp_{kind}_{timestamp}.log"
         server_path = str(Path(__file__).resolve())
-        proc = subprocess.Popen(
-            [sys.executable, server_path, "--run-remote", op_id],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-        _save_remote_state({
+        reservation = {
             "op_id": op_id, "kind": kind, "label": label,
             "status": "running", "step": "spawning",
-            "started_at": started_at, "completed_at": None, "pid": proc.pid,
+            "started_at": started_at, "completed_at": None,
+            # Publish the live scheduling process before spawning so aggregate
+            # status can never observe an absent remote slot in this window.
+            "pid": os.getpid(),
             "log_file": str(log_path), "exit_code": None, "notes": None,
             "classification": None, "delivered": False,
             "timeout_sec": timeout_sec, "argv": argv, "payload": payload,
-        })
+        }
+        _save_remote_state(reservation)
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, server_path, "--run-remote", op_id],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+                close_fds=True)
+        except OSError as exc:
+            reservation.update({
+                "status": "failed",
+                "step": "spawn_failed",
+                "completed_at": time.time(),
+                "notes": str(exc),
+            })
+            _save_remote_state(reservation)
+            raise RuntimeError("could not start detached remote worker") from exc
+        reservation["pid"] = proc.pid
+        try:
+            _save_remote_state(reservation)
+        except BaseException as exc:
+            # The child cannot begin until it observes this exact PID handoff.
+            # Reap it before clearing the scheduler reservation so aggregate
+            # activity cannot be wedged on this long-lived server process.
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            except OSError:
+                pass
+            failed_reservation = dict(reservation)
+            failed_reservation.update({
+                "status": "failed",
+                "step": "handoff_failed",
+                "completed_at": time.time(),
+                "notes": str(exc),
+            })
+            try:
+                _save_remote_state(failed_reservation)
+            except BaseException:
+                current = _load_remote_state()
+                if (
+                    current.get("op_id") == op_id
+                    and current.get("status") == "running"
+                    and current.get("pid") == os.getpid()
+                ):
+                    try:
+                        REMOTE_STATE_FILE.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            raise RuntimeError(
+                "could not publish detached remote worker handoff"
+            ) from exc
         _log(f"remote op started: {label} kind={kind} op_id={op_id} "
              f"pid={proc.pid} log={log_path}")
 
@@ -16785,7 +17191,9 @@ TOOL_DEFINITIONS = [
     {
         "name": "status",
         "description": (
-            "Report the status of a previously scheduled run for `mode`. "
+            "With no arguments, report the closed path-free local activity "
+            "aggregate and free disk. With `mode`, report the status of a "
+            "previously scheduled run. "
             "While running, returns current step + predicted finish. After "
             "completion, returns total duration, log file path, and (for "
             "bench modes) the path to the new framework report_<N>.json under "
@@ -16794,15 +17202,25 @@ TOOL_DEFINITIONS = [
             "exact Catch2 args persisted for both executables."
         ),
         "inputSchema": {
-            "type": "object",
-            "properties": {
-                "mode": {
-                    "type": "string",
-                    "enum": sorted(VALID_MODES),
-                    "description": "Which run to query.",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {},
                 },
-            },
-            "required": ["mode"],
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": sorted(VALID_MODES),
+                            "description": "Which run to query.",
+                        },
+                    },
+                    "required": ["mode"],
+                },
+            ],
         },
     },
     {
@@ -17858,7 +18276,12 @@ def parse_bool(parameter_description: str, value: Any) -> bool:
 
 def _handle_tools_call(params: dict) -> dict:
     name = params.get("name")
-    args = params.get("arguments") or {}
+    if "arguments" not in params:
+        args = {}
+    else:
+        args = params["arguments"]
+        if not isinstance(args, dict):
+            raise RuntimeError("tool arguments must be an object")
     if name == "start_build":
         mode = args.get("mode", "")
         build_only: bool = parse_bool("build_only", args.get("build_only", False))
@@ -17898,8 +18321,20 @@ def _handle_tools_call(params: dict) -> dict:
                                 postgres_error_safety_review_waiver=(
                                     postgres_error_safety_review_waiver))
     elif name == "status":
-        mode = args.get("mode", "")
-        text = tool_status(mode)
+        unknown = sorted(set(args) - {"mode"})
+        if unknown:
+            raise RuntimeError(
+                "status does not accept unknown argument(s): "
+                + ", ".join(unknown))
+        if "mode" not in args:
+            text = tool_status()
+        else:
+            mode = args["mode"]
+            if not isinstance(mode, str):
+                raise RuntimeError("status mode must be a string when supplied")
+            if mode not in VALID_MODES:
+                raise RuntimeError("status mode must be a supported build mode")
+            text = tool_status(mode)
     elif name == "inspect":
         text = tool_inspect(args)
     elif name == "papers-build":
@@ -17935,7 +18370,14 @@ def _handle_tools_call(params: dict) -> dict:
     elif name in ("doc_create", "doc_archive", "doc_search", "doc_read"):
         # Doc-tool requests are JSON-Schema-validated server-side inside operations
         # (docs/schemas.py). ensure_doc_env() lazily provisions qmd + jsonschema on first use.
-        bootstrap.ensure_doc_env()
+        from docs.qmd_manager import get_manager
+
+        qmd_manager = get_manager()
+        qmd_manager.begin_external_update()
+        try:
+            bootstrap.ensure_doc_env()
+        finally:
+            qmd_manager.end_external_update()
         from docs import operations
         text = getattr(operations, name)(args)
     else:
@@ -18217,17 +18659,40 @@ def main() -> int:
     # tools. This also makes "keep QMD collections up to date periodically" run even in sessions
     # that never call a doc tool. Disable with BIOSEQ_DOCS_AUTOSTART=0.
     if os.environ.get("BIOSEQ_DOCS_AUTOSTART", "1") == "1":
+        from docs.qmd_manager import get_manager
+
+        qmd_manager = get_manager()
+        qmd_manager.begin_external_update()
+
         def _warm() -> None:
             try:
                 bootstrap.ensure_doc_env()
-                from docs.qmd_manager import get_manager
-                get_manager().ensure_ready()
+                qmd_manager.ensure_ready()
             except Exception as e:
                 print(f"[bioseq-build-mcp] autostart warm skipped: {e}",
                       file=sys.stderr, flush=True)
-        threading.Thread(target=_warm, daemon=True).start()
+            finally:
+                qmd_manager.end_external_update()
 
-    _serve()
+        try:
+            threading.Thread(target=_warm, daemon=True).start()
+        except Exception:
+            qmd_manager.end_external_update()
+            raise
+
+    try:
+        _serve()
+    finally:
+        try:
+            from docs.qmd_manager import get_manager
+
+            get_manager().unregister_idle_process()
+        except Exception as exc:
+            print(
+                f"[bioseq-build-mcp] QMD activity unregister skipped: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
     return 0
 
 

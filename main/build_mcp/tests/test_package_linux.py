@@ -68,11 +68,18 @@ class PackageLinuxPureContractTests(unittest.TestCase):
 
     def test_porcelain_capture_preserves_modified_worktree_column(self) -> None:
         status = " M main/cmake/__pycache__/sanitizer_runtime.cpython-310.pyc\n"
-        with mock.patch.object(subject, "_run", return_value=status):
+        with mock.patch.object(subject, "_run", return_value=status) as run:
             captured = subject._git_porcelain_status(
                 Path("/repository"), log=io.StringIO(), deadline=time.time() + 10)
         self.assertEqual(captured, status.rstrip("\n"))
         self.assertEqual(subject._material_dirty_rows(captured), [])
+        self.assertEqual(run.call_args.args[0][-5:], [
+            "main",
+            ":(top,exclude,literal)main/papers",
+            ":(top,exclude,glob)main/papers/**",
+            ":(top,exclude,literal)papers",
+            ":(top,exclude,glob)papers/**",
+        ])
 
     def test_native_x86_is_rejected(self) -> None:
         with mock.patch.object(subject.platform, "machine", return_value="x86_64"):
@@ -461,7 +468,15 @@ class ProvenanceAndStorageTests(unittest.TestCase):
             def archive_result(argv: list[str], **_kwargs: object) -> str:
                 output = next(value for value in argv if value.startswith("--output="))
                 Path(output.removeprefix("--output=")).write_bytes(b"archive")
-                self.assertEqual(argv[-2:], [revision, "main"])
+                self.assertEqual(argv[-7:], [
+                    revision,
+                    "--",
+                    "main",
+                    ":(top,exclude,literal)main/papers",
+                    ":(top,exclude,glob)main/papers/**",
+                    ":(top,exclude,literal)papers",
+                    ":(top,exclude,glob)papers/**",
+                ])
                 self.assertNotIn("--prefix=main/", argv)
                 return ""
 
@@ -590,6 +605,22 @@ class ProvenanceAndStorageTests(unittest.TestCase):
                 bundle.addfile(member)
             with self.assertRaisesRegex(subject.PackageLinuxError, "unsafe member"):
                 subject._safe_extract(archive, root / "out")
+
+    def test_source_archive_rejects_sealed_boundary_before_extraction(self) -> None:
+        for member_name in ("main/papers", "main/papers/hidden.md", "papers"):
+            with self.subTest(member_name=member_name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive = root / "source.tar"
+                with tarfile.open(archive, "w") as bundle:
+                    member = tarfile.TarInfo(member_name)
+                    member.size = 0
+                    bundle.addfile(member, io.BytesIO())
+                destination = root / "out"
+                with self.assertRaisesRegex(
+                    subject.PackageLinuxError, "sealed source boundary"
+                ):
+                    subject._safe_extract(archive, destination)
+                self.assertEqual(list(destination.iterdir()), [])
 
     def test_content_addressed_objects_are_not_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

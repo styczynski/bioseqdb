@@ -27,6 +27,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -85,6 +86,7 @@ DEFAULT_S3_PREFIX = "bioseq/packages"
 REMOTE_WORKSPACE = "/opt/bioseq-package-builder/workspace"
 REMOTE_ROOT = f"{REMOTE_WORKSPACE}/builds"
 REMOTE_POETRY_VENV_ROOT = f"{REMOTE_WORKSPACE}/caches/poetry-venvs"
+SOURCE_SCOPE_REVISION = "papers-excluded-v2"
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
@@ -1447,47 +1449,202 @@ def require_committed_paths(paths: Iterable[Path]) -> None:
             )
 
 
+def _remote_committed_source_path(revision: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise PackageBuilderError("committed source sync requires a full Git revision")
+    return (
+        f"{REMOTE_WORKSPACE}/source-{SOURCE_SCOPE_REVISION}-{revision}"
+    )
+
+
 def sync_committed_source(builder: Builder, key_path: Path, revision: str) -> str:
-    remote_source = f"/opt/bioseq-package-builder/workspace/source-{revision}"
-    ssh_run(
+    remote_source = _remote_committed_source_path(revision)
+    remote_staging = f"{remote_source}.tmp-{secrets.token_hex(16)}"
+    remote_lock = f"{remote_source}.lock"
+    marker = hashlib.sha256(
+        f"{SOURCE_SCOPE_REVISION}\0{revision}".encode("ascii")
+    ).hexdigest()
+    remote_source_q = shlex.quote(remote_source)
+    remote_staging_q = shlex.quote(remote_staging)
+    validation_body = (
+        "set -Eeuo pipefail\n"
+        f"destination={remote_source_q}\n"
+        f"revision={shlex.quote(revision)}\n"
+        f"marker={shlex.quote(marker)}\n"
+        f"lock={shlex.quote(remote_lock)}\n"
+        "exec 9>\"$lock\"\n"
+        "flock -x 9\n"
+        "if ! test -e \"$destination\" && ! test -L \"$destination\"; "
+        "then exit 3; fi\n"
+        "test -d \"$destination\"\n"
+        "test ! -L \"$destination\"\n"
+        "test -f \"$destination/main/CMakeLists.txt\"\n"
+        "cmp -s \"$destination/.bioseq-source-revision\" "
+        "<(printf '%s\\n' \"$revision\")\n"
+        "cmp -s \"$destination/.bioseq-source-marker\" "
+        "<(printf '%s\\n' \"$marker\")\n"
+    )
+    validation = f"bash -lc {shlex.quote(validation_body)}"
+    existing = ssh_run(
         builder,
         key_path,
-        f"install -d -m 0755 {shlex.quote(remote_source)}",
+        validation,
+        capture=True,
+        check=False,
     )
-    archive_argv = ["git", "archive", "--format=tar", revision]
-    extract_argv = ssh_argv(builder, key_path) + [
-        f"tar -xf - -C {shlex.quote(remote_source)}"
-    ]
-    info(
-        f"streaming committed source {revision} to {builder.architecture} "
-        f"at {remote_source}"
-    )
-    archive = subprocess.Popen(
-        archive_argv,
-        cwd=str(REPO_ROOT),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert archive.stdout is not None
-    extract = subprocess.Popen(extract_argv, stdin=archive.stdout)
-    archive.stdout.close()
-    extract_return = extract.wait()
-    _, archive_error = archive.communicate()
-    if archive.returncode != 0 or extract_return != 0:
+    if existing.returncode == 0:
+        return remote_source
+    if existing.returncode != 3:
         raise PackageBuilderError(
-            f"source transfer to {builder.architecture} failed: "
-            f"git={archive.returncode}, ssh={extract_return}, "
-            f"detail={archive_error.decode(errors='replace').strip()}"
+            f"remote committed source is present but invalid on "
+            f"{builder.architecture}"
         )
-    marker = hashlib.sha256(revision.encode("ascii")).hexdigest()
-    ssh_run(
-        builder,
-        key_path,
-        "set -eu; "
-        f"test -f {shlex.quote(remote_source + '/main/CMakeLists.txt')}; "
-        f"printf '%s\\n' {shlex.quote(revision)} > {shlex.quote(remote_source + '/.bioseq-source-revision')}; "
-        f"printf '%s\\n' {shlex.quote(marker)} > {shlex.quote(remote_source + '/.bioseq-source-marker')}",
-    )
+
+    def cleanup_staging() -> None:
+        try:
+            ssh_run(
+                builder,
+                key_path,
+                f"rm -rf -- {remote_staging_q}",
+                check=False,
+            )
+        except BaseException:
+            pass
+
+    def stop_transfer_process(process: subprocess.Popen[Any]) -> bool:
+        try:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            return process.poll() is not None
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    archive_argv = [
+        "git",
+        "archive",
+        "--format=tar",
+        revision,
+        "--",
+        ".",
+        ":(top,exclude,literal)main/papers",
+        ":(top,exclude,glob)main/papers/**",
+        ":(top,exclude,literal)papers",
+        ":(top,exclude,glob)papers/**",
+    ]
+    archive: subprocess.Popen[bytes] | None = None
+    extract: subprocess.Popen[bytes] | None = None
+    staging_cleanup_owned = True
+    transfer_quiescent = True
+    try:
+        ssh_run(
+            builder,
+            key_path,
+            f"mkdir -m 0755 -- {remote_staging_q}",
+        )
+        extract_argv = ssh_argv(builder, key_path) + [
+            f"tar -xf - -C {remote_staging_q}"
+        ]
+        info(
+            f"streaming committed source {revision} to {builder.architecture} "
+            f"at {remote_source}"
+        )
+        with tempfile.TemporaryFile() as archive_error_file:
+            archive = subprocess.Popen(
+                archive_argv,
+                cwd=str(REPO_ROOT),
+                stdout=subprocess.PIPE,
+                stderr=archive_error_file,
+            )
+            with ACTIVE_CHILDREN_LOCK:
+                ACTIVE_CHILDREN.add(archive)
+            assert archive.stdout is not None
+            extract = subprocess.Popen(extract_argv, stdin=archive.stdout)
+            with ACTIVE_CHILDREN_LOCK:
+                ACTIVE_CHILDREN.add(extract)
+            archive.stdout.close()
+            extract_return = extract.wait()
+            archive_return = archive.wait()
+            archive_error_file.seek(0)
+            archive_error = archive_error_file.read()
+        if archive_return != 0 or extract_return != 0:
+            raise PackageBuilderError(
+                f"source transfer to {builder.architecture} failed: "
+                f"git={archive_return}, ssh={extract_return}, "
+                f"detail={archive_error.decode(errors='replace').strip()}"
+            )
+        publication_body = (
+            "set -Eeuo pipefail\n"
+            f"staging={remote_staging_q}\n"
+            f"destination={remote_source_q}\n"
+            f"revision={shlex.quote(revision)}\n"
+            f"marker={shlex.quote(marker)}\n"
+            f"lock={shlex.quote(remote_lock)}\n"
+            "test -d \"$staging\"\n"
+            "test ! -L \"$staging\"\n"
+            "test -f \"$staging/main/CMakeLists.txt\"\n"
+            "rm -f -- \"$staging/.bioseq-source-revision\" "
+            "\"$staging/.bioseq-source-marker\"\n"
+            "printf '%s\\n' \"$revision\" >"
+            "\"$staging/.bioseq-source-revision\"\n"
+            "printf '%s\\n' \"$marker\" >"
+            "\"$staging/.bioseq-source-marker\"\n"
+            "exec 9>\"$lock\"\n"
+            "flock -x 9\n"
+            "valid_destination() {\n"
+            "  test -d \"$destination\" &&\n"
+            "  test ! -L \"$destination\" &&\n"
+            "  test -f \"$destination/main/CMakeLists.txt\" &&\n"
+            "  cmp -s \"$destination/.bioseq-source-revision\" "
+            "<(printf '%s\\n' \"$revision\") &&\n"
+            "  cmp -s \"$destination/.bioseq-source-marker\" "
+            "<(printf '%s\\n' \"$marker\")\n"
+            "}\n"
+            "if test -e \"$destination\" || test -L \"$destination\"; then\n"
+            "  valid_destination || exit 73\n"
+            "else\n"
+            "  mv -T -- \"$staging\" \"$destination\"\n"
+            "fi\n"
+        )
+        ssh_run(
+            builder,
+            key_path,
+            f"bash -lc {shlex.quote(publication_body)}",
+        )
+        verified = ssh_run(
+            builder,
+            key_path,
+            validation,
+            capture=True,
+            check=False,
+        )
+        if verified.returncode != 0:
+            raise PackageBuilderError(
+                f"published committed source failed validation on "
+                f"{builder.architecture}"
+            )
+    except BaseException:
+        stopped = [
+            stop_transfer_process(process)
+            for process in (extract, archive)
+            if process is not None
+        ]
+        transfer_quiescent = all(stopped)
+        raise
+    finally:
+        with ACTIVE_CHILDREN_LOCK:
+            for process in (extract, archive):
+                if process is not None:
+                    ACTIVE_CHILDREN.discard(process)
+        if archive is not None and archive.stdout is not None:
+            with contextlib.suppress(OSError):
+                archive.stdout.close()
+        if staging_cleanup_owned and transfer_quiescent:
+            cleanup_staging()
     return remote_source
 
 
@@ -2854,7 +3011,7 @@ def create_post_build_amis(
 
     matrix_fingerprint = complete_matrix_fingerprint(matrix, lock_sha256)
     key_path = ssh_key_path(outputs)
-    remote_source = f"{REMOTE_WORKSPACE}/source-{revision}"
+    remote_source = _remote_committed_source_path(revision)
     worker_argv_by_architecture = {
         name: remote_worker_argv(
             builder=builders[name],

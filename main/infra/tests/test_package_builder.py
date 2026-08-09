@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import io
 import json
 import signal
 import subprocess
@@ -20,6 +21,219 @@ assert SPEC is not None and SPEC.loader is not None
 package_builder = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = package_builder
 SPEC.loader.exec_module(package_builder)
+
+
+class SourceScopeTests(unittest.TestCase):
+    def test_committed_source_archive_excludes_sealed_paths_before_streaming(self) -> None:
+        builder = package_builder.Builder(
+            "arm64",
+            "i-0aaabbbcccdddeee1",
+            "c7g.xlarge",
+            "arm64",
+            "203.0.113.1",
+            "10.0.0.1",
+            "ami-0123456789abcdef0",
+        )
+        revision = "a" * 40
+        expected_remote_source = (
+            "/opt/bioseq-package-builder/workspace/"
+            f"source-{package_builder.SOURCE_SCOPE_REVISION}-{revision}"
+        )
+        token = "1" * 32
+        staging = expected_remote_source + f".tmp-{token}"
+        archive_process = mock.Mock(
+            stdout=io.BytesIO(), returncode=0)
+        archive_process.wait.return_value = 0
+        extract_process = mock.Mock()
+        extract_process.wait.return_value = 0
+        ssh_responses = iter((
+            subprocess.CompletedProcess([], 3, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ))
+        with mock.patch.object(
+            package_builder.secrets, "token_hex", return_value=token,
+        ), mock.patch.object(
+            package_builder, "ssh_run",
+            side_effect=lambda *_args, **_kwargs: next(ssh_responses),
+        ) as ssh_run, mock.patch.object(
+            package_builder, "ssh_argv", return_value=["ssh"],
+        ), mock.patch.object(
+            package_builder.subprocess,
+            "Popen",
+            side_effect=(archive_process, extract_process),
+        ) as popen:
+            remote_source = package_builder.sync_committed_source(
+                builder, Path("/tmp/key"), revision)
+
+        self.assertEqual(remote_source, expected_remote_source)
+        archive_argv = popen.call_args_list[0].args[0]
+        self.assertEqual(archive_argv, [
+            "git",
+            "archive",
+            "--format=tar",
+            revision,
+            "--",
+            ".",
+            ":(top,exclude,literal)main/papers",
+            ":(top,exclude,glob)main/papers/**",
+            ":(top,exclude,literal)papers",
+            ":(top,exclude,glob)papers/**",
+        ])
+        extract_argv = popen.call_args_list[1].args[0]
+        self.assertEqual(extract_argv, ["ssh", f"tar -xf - -C {staging}"])
+        commands = [call.args[2] for call in ssh_run.call_args_list]
+        self.assertNotIn("install -d", "\n".join(commands))
+        self.assertEqual(commands[1], f"mkdir -m 0755 -- {staging}")
+        self.assertIn(f"staging={staging}", commands[2])
+        self.assertIn(f"destination={expected_remote_source}", commands[2])
+        expected_marker = hashlib.sha256(
+            f"{package_builder.SOURCE_SCOPE_REVISION}\0{revision}".encode(
+                "ascii")
+        ).hexdigest()
+        self.assertIn(f"marker={expected_marker}", commands[2])
+        self.assertIn('mv -T -- "$staging" "$destination"', commands[2])
+        self.assertLess(
+            commands[2].index(".bioseq-source-marker"),
+            commands[2].index("flock -x 9"),
+        )
+        self.assertLess(
+            commands[2].index("flock -x 9"),
+            commands[2].index("valid_destination"),
+        )
+        self.assertIn(".bioseq-source-marker", commands[0])
+        self.assertIn("flock -x 9", commands[0])
+        self.assertIn("cmp -s", commands[0])
+        self.assertEqual(commands[0], commands[3])
+        self.assertEqual(commands[4], f"rm -rf -- {staging}")
+        self.assertTrue(all("main/papers" not in command for command in commands))
+        self.assertEqual(package_builder.SOURCE_SCOPE_REVISION, "papers-excluded-v2")
+        self.assertEqual(
+            package_builder._remote_committed_source_path(revision),
+            expected_remote_source,
+        )
+
+    def test_committed_source_reuses_only_validated_publication(self) -> None:
+        builder = package_builder.Builder(
+            "arm64", "i-0aaabbbcccdddeee1", "c7g.xlarge", "arm64",
+            "203.0.113.1", "10.0.0.1", "ami-0123456789abcdef0",
+        )
+        with mock.patch.object(
+            package_builder, "ssh_run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as ssh_run, mock.patch.object(
+            package_builder.subprocess, "Popen",
+        ) as popen:
+            remote_source = package_builder.sync_committed_source(
+                builder, Path("/tmp/key"), "b" * 40)
+
+        self.assertIn(package_builder.SOURCE_SCOPE_REVISION, remote_source)
+        self.assertEqual(ssh_run.call_count, 1)
+        self.assertIn(".bioseq-source-marker", ssh_run.call_args.args[2])
+        self.assertIn("flock -x 9", ssh_run.call_args.args[2])
+        self.assertIn("cmp -s", ssh_run.call_args.args[2])
+        popen.assert_not_called()
+
+    def test_committed_source_rejects_symbolic_revision_before_io(self) -> None:
+        builder = package_builder.Builder(
+            "arm64", "i-0aaabbbcccdddeee1", "c7g.xlarge", "arm64",
+            "203.0.113.1", "10.0.0.1", "ami-0123456789abcdef0",
+        )
+        with mock.patch.object(
+            package_builder, "ssh_run",
+        ) as ssh_run, mock.patch.object(
+            package_builder, "ssh_argv",
+        ) as ssh_argv, mock.patch.object(
+            package_builder.subprocess, "Popen",
+        ) as popen, self.assertRaisesRegex(
+            package_builder.PackageBuilderError, "full Git revision",
+        ):
+            package_builder.sync_committed_source(
+                builder, Path("/tmp/key"), "HEAD")
+
+        ssh_run.assert_not_called()
+        ssh_argv.assert_not_called()
+        popen.assert_not_called()
+
+    def test_committed_source_transfer_failures_never_publish(self) -> None:
+        builder = package_builder.Builder(
+            "arm64", "i-0aaabbbcccdddeee1", "c7g.xlarge", "arm64",
+            "203.0.113.1", "10.0.0.1", "ami-0123456789abcdef0",
+        )
+        revision = "c" * 40
+        for git_return, extract_return in ((1, 0), (0, 1)):
+            archive_process = mock.Mock(stdout=io.BytesIO())
+            archive_process.wait.return_value = git_return
+            archive_process.poll.return_value = git_return
+            extract_process = mock.Mock()
+            extract_process.wait.return_value = extract_return
+            extract_process.poll.return_value = extract_return
+            responses = iter((
+                subprocess.CompletedProcess([], 3, "", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+            ))
+            with self.subTest(
+                git_return=git_return, extract_return=extract_return,
+            ), mock.patch.object(
+                package_builder.secrets, "token_hex", return_value="2" * 32,
+            ), mock.patch.object(
+                package_builder, "ssh_run",
+                side_effect=lambda *_args, **_kwargs: next(responses),
+            ) as ssh_run, mock.patch.object(
+                package_builder, "ssh_argv", return_value=["ssh"],
+            ), mock.patch.object(
+                package_builder.subprocess,
+                "Popen",
+                side_effect=(archive_process, extract_process),
+            ), self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "source transfer",
+            ):
+                package_builder.sync_committed_source(
+                    builder, Path("/tmp/key"), revision)
+
+            commands = [call.args[2] for call in ssh_run.call_args_list]
+            self.assertEqual(len(commands), 3)
+            self.assertTrue(commands[-1].startswith("rm -rf -- "))
+            self.assertTrue(all("mv -T" not in command for command in commands))
+
+    def test_committed_source_interrupt_reaps_both_transfer_children(self) -> None:
+        builder = package_builder.Builder(
+            "arm64", "i-0aaabbbcccdddeee1", "c7g.xlarge", "arm64",
+            "203.0.113.1", "10.0.0.1", "ami-0123456789abcdef0",
+        )
+        archive_process = mock.Mock(stdout=io.BytesIO())
+        archive_process.poll.side_effect = (None, 0)
+        archive_process.wait.return_value = 0
+        extract_process = mock.Mock()
+        extract_process.poll.side_effect = (None, 0)
+        extract_process.wait.side_effect = (KeyboardInterrupt(), 0)
+        responses = iter((
+            subprocess.CompletedProcess([], 3, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ))
+        with mock.patch.object(
+            package_builder.secrets, "token_hex", return_value="3" * 32,
+        ), mock.patch.object(
+            package_builder, "ssh_run",
+            side_effect=lambda *_args, **_kwargs: next(responses),
+        ), mock.patch.object(
+            package_builder, "ssh_argv", return_value=["ssh"],
+        ), mock.patch.object(
+            package_builder.subprocess,
+            "Popen",
+            side_effect=(archive_process, extract_process),
+        ), self.assertRaises(KeyboardInterrupt):
+            package_builder.sync_committed_source(
+                builder, Path("/tmp/key"), "d" * 40)
+
+        archive_process.terminate.assert_called_once_with()
+        extract_process.terminate.assert_called_once_with()
+        self.assertNotIn(archive_process, package_builder.ACTIVE_CHILDREN)
+        self.assertNotIn(extract_process, package_builder.ACTIVE_CHILDREN)
 
 
 class MatrixTests(unittest.TestCase):

@@ -3,14 +3,141 @@
 from pathlib import Path
 import hashlib
 import json
+import os
 import socket
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 import server
+from docs import qmd_manager
+from docs.qmd_manager import QmdManager
+
+
+class DocumentActivityContractTests(unittest.TestCase):
+    def test_qmd_activity_snapshot_is_closed_and_phase_aware(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.object(
+                qmd_manager, "ACTIVITY_REGISTRY", root / "activity.json",
+            ), mock.patch.object(
+                qmd_manager,
+                "ACTIVITY_REGISTRY_LOCK",
+                root / "activity.lock",
+            ), mock.patch.object(
+                qmd_manager,
+                "QMD_OPERATION_LOCK",
+                root / "operation.lock",
+            ):
+                manager = QmdManager()
+                manager.client.health = mock.Mock(return_value=True)
+                self.assertEqual(manager.activity_snapshot(), {
+                    "document_update": {
+                        "queued": 0, "running": 0, "state": "absent"},
+                    "document_embed": {
+                        "queued": 0, "running": 0, "state": "absent"},
+                    "qmd_server": {"persistent": True, "state": "idle"},
+                })
+
+                manager.begin_external_update()
+                manager._queue_index()
+                snapshot = manager.activity_snapshot()
+                self.assertEqual(
+                    snapshot["document_update"],
+                    {"queued": 1, "running": 1, "state": "running"},
+                )
+                self.assertEqual(
+                    snapshot["document_embed"],
+                    {"queued": 1, "running": 0, "state": "queued"},
+                )
+                self.assertEqual(
+                    snapshot["qmd_server"],
+                    {"persistent": True, "state": "busy"},
+                )
+                with manager._activity_lock:
+                    manager._dirty_pending = False
+                    manager._dirty.clear()
+                    manager._external_update_running = 0
+                    manager._ready = True
+                    manager._publish_process_activity_locked()
+                idle = manager.activity_snapshot()
+                self.assertEqual(
+                    idle["document_update"],
+                    {"queued": 0, "running": 0, "state": "idle"},
+                )
+                self.assertEqual(
+                    idle["document_embed"],
+                    {"queued": 0, "running": 0, "state": "idle"},
+                )
+
+    def test_qmd_readiness_balances_activity_when_lock_setup_fails(self):
+        manager = QmdManager()
+        with mock.patch.object(
+            manager, "begin_external_update",
+        ) as begin, mock.patch.object(
+            manager, "end_external_update",
+        ) as end, mock.patch.object(
+            manager, "_lock_file", side_effect=OSError("lock failed"),
+        ), self.assertRaisesRegex(OSError, "lock failed"):
+            manager.ensure_ready()
+        begin.assert_called_once_with()
+        end.assert_called_once_with()
+
+    def test_qmd_readiness_balances_activity_when_unlock_fails(self):
+        manager = QmdManager()
+        handle = object()
+        with mock.patch.object(
+            manager, "begin_external_update",
+        ), mock.patch.object(
+            manager, "end_external_update",
+        ) as end, mock.patch.object(
+            manager, "_lock_file", return_value=handle,
+        ), mock.patch.object(
+            manager, "_unlock_file", side_effect=OSError("unlock failed"),
+        ), mock.patch.object(
+            manager, "_ensure_collections",
+        ), mock.patch.object(
+            manager, "_ensure_server",
+        ), mock.patch.object(
+            manager, "_start_worker",
+        ), mock.patch.object(
+            manager, "_queue_index",
+        ), self.assertRaisesRegex(OSError, "unlock failed"):
+            manager.ensure_ready()
+        end.assert_called_once_with()
+
+    def test_qmd_dead_process_presence_is_unknown(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            activity_path = root / "activity.json"
+            activity_path.write_text(json.dumps({
+                "99999999": {
+                    "pid": 99999999,
+                    "initialized": True,
+                    "update_queued": 0,
+                    "update_running": 0,
+                    "embed_queued": 0,
+                    "embed_running": 0,
+                },
+            }), encoding="utf-8")
+            with mock.patch.object(
+                qmd_manager, "ACTIVITY_REGISTRY", activity_path,
+            ), mock.patch.object(
+                qmd_manager,
+                "ACTIVITY_REGISTRY_LOCK",
+                root / "activity.lock",
+            ), mock.patch.object(
+                QmdManager, "_pid_alive", return_value=False,
+            ):
+                manager = QmdManager()
+                manager.client.health = mock.Mock(return_value=True)
+                snapshot = manager.activity_snapshot()
+        self.assertEqual(snapshot["document_update"]["state"], "unknown")
+        self.assertEqual(snapshot["document_embed"]["state"], "unknown")
+        self.assertEqual(snapshot["qmd_server"]["state"], "unknown")
 
 
 class BenchE2eConfigOverrideTests(unittest.TestCase):
@@ -1185,6 +1312,80 @@ class RemoteRunWebsiteRejectionTests(unittest.TestCase):
         self.assertIn("unit+integration", server.REMOTE_RUN_BUILD_MODES)
 
 
+class RemoteActivityReservationTests(unittest.TestCase):
+    def test_remote_slot_is_reserved_before_worker_spawn(self):
+        process = SimpleNamespace(pid=43210)
+        saved = []
+        running = {
+            "op_id": "observed",
+            "kind": "status",
+            "label": "status",
+            "status": "running",
+            "step": "running",
+            "started_at": time.time(),
+            "pid": process.pid,
+            "log_file": "/tmp/remote.log",
+        }
+        with mock.patch.object(
+            server, "_remote_global_lock",
+        ), mock.patch.object(
+            server, "_load_remote_state", return_value={},
+        ), mock.patch.object(
+            server, "_refresh_remote", side_effect=lambda value: value,
+        ), mock.patch.object(
+            server, "_save_remote_state",
+            side_effect=lambda value: saved.append(dict(value)),
+        ), mock.patch.object(
+            server.subprocess, "Popen", return_value=process,
+        ), mock.patch.object(
+            server, "_remote_grace_wait", return_value=running,
+        ):
+            server._start_or_poll_remote(
+                "status", "status", argv=["provisioner", "status"])
+
+        self.assertEqual(saved[0]["pid"], os.getpid())
+        self.assertEqual(saved[0]["step"], "spawning")
+        self.assertEqual(saved[1]["pid"], process.pid)
+
+    def test_remote_worker_waits_for_exact_pid_handoff(self):
+        op_id = "status-test"
+        started = time.time()
+        with tempfile.TemporaryDirectory() as temporary:
+            log_file = str(Path(temporary) / "remote.log")
+            scheduler_state = {
+                "op_id": op_id,
+                "status": "running",
+                "pid": os.getpid() + 100000,
+            }
+            worker_state = {
+                "op_id": op_id,
+                "kind": "status",
+                "label": "status",
+                "status": "running",
+                "step": "spawning",
+                "started_at": started,
+                "pid": os.getpid(),
+                "log_file": log_file,
+                "timeout_sec": 60,
+                "argv": ["provisioner", "status"],
+            }
+            with mock.patch.object(
+                server,
+                "_load_remote_state",
+                side_effect=(scheduler_state, worker_state),
+            ) as load, mock.patch.object(
+                server.time, "sleep",
+            ) as sleeper, mock.patch.object(
+                server, "_update_remote_entry",
+            ), mock.patch.object(
+                server, "_remote_exec", return_value=0,
+            ):
+                self.assertEqual(server._run_remote_worker(op_id), 0)
+
+        self.assertEqual(load.call_count, 2)
+        sleeper.assert_called_once_with(0.1)
+
+
 class BuildReceiptWorkflowTests(unittest.TestCase):
     @staticmethod
     def _write_receipted_bench_command(build_dir: Path) -> Path:
@@ -1221,6 +1422,135 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             "reuse_build_receipt", inspect_schema["properties"])
+
+    def test_status_schema_is_closed_and_accepts_empty_aggregate_request(self):
+        status_schema = next(
+            item for item in server.TOOL_DEFINITIONS
+            if item["name"] == "status"
+        )["inputSchema"]
+        self.assertEqual(len(status_schema["oneOf"]), 2)
+        aggregate, per_mode = status_schema["oneOf"]
+        self.assertFalse(aggregate["additionalProperties"])
+        self.assertEqual(aggregate["properties"], {})
+        self.assertFalse(per_mode["additionalProperties"])
+        self.assertEqual(per_mode["required"], ["mode"])
+        self.assertEqual(
+            per_mode["properties"]["mode"]["enum"],
+            sorted(server.VALID_MODES),
+        )
+
+    def test_status_aggregate_has_exact_path_free_closed_shape(self):
+        document = {
+            "document_update": {"queued": 0, "running": 0, "state": "idle"},
+            "document_embed": {"queued": 0, "running": 0, "state": "idle"},
+            "qmd_server": {"persistent": True, "state": "idle"},
+        }
+        registries = (
+            ({"bench": {"status": "completed"}}, True),
+            ({}, False),
+            ({}, False),
+        )
+        with mock.patch.object(
+            server, "_read_activity_registry", side_effect=registries,
+        ), mock.patch.object(
+            server, "_document_activity", return_value=document,
+        ), mock.patch.object(
+            server.shutil, "disk_usage", return_value=SimpleNamespace(free=12345),
+        ):
+            response = json.loads(server.tool_status())
+
+        self.assertEqual(set(response), {"local_activity"})
+        activity = response["local_activity"]
+        self.assertEqual(
+            set(activity), {"quiescent", "free_disk_bytes", "workers"})
+        self.assertTrue(activity["quiescent"])
+        self.assertEqual(activity["free_disk_bytes"], 12345)
+        self.assertEqual(
+            set(activity["workers"]),
+            {
+                "build", "document_update", "document_embed",
+                "mcp_subagent", "papers", "remote_operation",
+                "other_detached", "qmd_server",
+            },
+        )
+        for name in set(activity["workers"]) - {"qmd_server"}:
+            self.assertEqual(
+                set(activity["workers"][name]), {"queued", "running", "state"})
+        self.assertEqual(
+            set(activity["workers"]["qmd_server"]), {"persistent", "state"})
+        self.assertNotIn("/", json.dumps(response, sort_keys=True))
+
+    def test_status_aggregate_fails_closed_on_malformed_registry(self):
+        document = {
+            "document_update": {"queued": 0, "running": 0, "state": "absent"},
+            "document_embed": {"queued": 0, "running": 0, "state": "absent"},
+            "qmd_server": {"persistent": False, "state": "absent"},
+        }
+        with mock.patch.object(
+            server,
+            "_read_activity_registry",
+            side_effect=((None, True), ({}, False), ({}, False)),
+        ), mock.patch.object(
+            server, "_document_activity", return_value=document,
+        ), mock.patch.object(
+            server.shutil, "disk_usage", return_value=SimpleNamespace(free=1),
+        ):
+            activity = json.loads(server.tool_status())["local_activity"]
+        self.assertFalse(activity["quiescent"])
+        self.assertEqual(activity["workers"]["build"]["state"], "unknown")
+        self.assertEqual(activity["workers"]["papers"]["state"], "unknown")
+        self.assertEqual(
+            activity["workers"]["other_detached"]["state"], "unknown")
+
+    def test_status_dispatch_rejects_unknown_arguments(self):
+        with self.assertRaisesRegex(RuntimeError, "unknown argument"):
+            server._handle_tools_call({
+                "name": "status",
+                "arguments": {"unexpected": True},
+            })
+
+    def test_status_dispatch_enforces_the_closed_schema(self):
+        for arguments in (None, [], False, "", {"mode": None}):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(
+                RuntimeError, "arguments must be an object|mode must be a string"
+            ):
+                server._handle_tools_call({
+                    "name": "status",
+                    "arguments": arguments,
+                })
+        with self.assertRaisesRegex(RuntimeError, "supported build mode"):
+            server._handle_tools_call({
+                "name": "status",
+                "arguments": {"mode": "not-a-mode"},
+            })
+
+    def test_activity_marks_unverified_terminal_cleanup_unknown(self):
+        for entry in (
+            {"status": "aborted"},
+            {"status": "killed_timeout"},
+            {"status": "completed", "cleanup_unverified": True},
+            {
+                "status": "failed",
+                "termination_evidence": {"cleanup_verified": False},
+            },
+            {
+                "status": "completed",
+                "termination_evidence": {
+                    "cleanup_verified": True,
+                    "survivor_pids": [123],
+                },
+            },
+        ):
+            with self.subTest(entry=entry):
+                self.assertEqual(
+                    server._transient_activity([entry])["state"], "unknown")
+        verified_timeout = {
+            "status": "killed_timeout",
+            "termination_evidence": {"cleanup_verified": True},
+            "cleanup_unverified": False,
+        }
+        self.assertEqual(
+            server._transient_activity([verified_timeout])["state"], "idle")
 
     def test_public_input_matrix_fails_closed_before_scheduling(self):
         invalid = (
@@ -1319,6 +1649,196 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             (root / "main/bioseq/source.cppm").write_text(
                 "export module changed;\n", encoding="utf-8")
             self.assertNotEqual(first, server._source_graph_fingerprint(root))
+
+    def test_source_fingerprint_excludes_papers_in_git_argv(self):
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+                server.subprocess, "run", return_value=completed) as run:
+            server._source_graph_fingerprint(Path(temporary))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[-6:], [
+            "--",
+            ".",
+            ":(top,exclude,literal)main/papers",
+            ":(top,exclude,glob)main/papers/**",
+            ":(top,exclude,literal)papers",
+            ":(top,exclude,glob)papers/**",
+        ])
+
+    def test_baseline_worktree_is_sparse_before_checkout(self):
+        commit = "a" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_root = root / "baselines"
+            expected_worktree = baseline_root / commit[:16] / "run"
+            calls = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                if command[3:5] == ["worktree", "add"]:
+                    presets = expected_worktree / "main/CMakePresets.json"
+                    presets.parent.mkdir(parents=True)
+                    presets.write_text("{}\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with mock.patch.object(
+                server, "WORKSPACE_ROOT", root,
+            ), mock.patch.object(
+                server, "BASELINE_WORKTREE_ROOT", baseline_root,
+            ), mock.patch.object(
+                server, "_git_commit", return_value=commit,
+            ), mock.patch.object(server.subprocess, "run", side_effect=run):
+                project_root, observed = server._create_baseline_worktree(
+                    "refs/heads/main", "run")
+
+        self.assertEqual(observed, commit)
+        self.assertEqual(project_root, expected_worktree / "main")
+        self.assertIn("--no-checkout", calls[0])
+        self.assertEqual(calls[1][-4:], [
+            "--no-cone", "/*", "!/main/papers/", "!/papers/",
+        ])
+        self.assertEqual(calls[2][-3:], ["--detach", commit])
+        self.assertEqual(calls[3][-5:], [
+            ".",
+            ":(top,exclude,literal)main/papers",
+            ":(top,exclude,glob)main/papers/**",
+            ":(top,exclude,literal)papers",
+            ":(top,exclude,glob)papers/**",
+        ])
+
+    def test_failed_sparse_baseline_uses_exact_worktree_cleanup(self):
+        commit = "b" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_root = root / "baselines"
+            expected = baseline_root / commit[:16] / "run"
+            results = (
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 1, "", "sparse failed"),
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess(
+                    [], 0, f"worktree {root}\n", ""),
+            )
+            with mock.patch.object(
+                server, "WORKSPACE_ROOT", root,
+            ), mock.patch.object(
+                server, "BASELINE_WORKTREE_ROOT", baseline_root,
+            ), mock.patch.object(
+                server, "_git_commit", return_value=commit,
+            ), mock.patch.object(
+                server.subprocess, "run", side_effect=results,
+            ) as run, self.assertRaisesRegex(
+                RuntimeError, "papers-excluding baseline projection"):
+                server._create_baseline_worktree("refs/heads/main", "run")
+
+        remove = run.call_args_list[2].args[0]
+        prune = run.call_args_list[3].args[0]
+        self.assertEqual(remove[-3:], ["remove", "--force", str(expected)])
+        self.assertEqual(prune[-2:], ["worktree", "prune"])
+
+    def test_failed_worktree_add_still_verifies_exact_cleanup(self):
+        commit = "c" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_root = root / "baselines"
+            expected = baseline_root / commit[:16] / "run"
+            results = (
+                subprocess.CompletedProcess([], 1, "", "add failed"),
+                subprocess.CompletedProcess([], 1, "", "not registered"),
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess(
+                    [], 0, f"worktree {root}\n", ""),
+            )
+            with mock.patch.object(
+                server, "WORKSPACE_ROOT", root,
+            ), mock.patch.object(
+                server, "BASELINE_WORKTREE_ROOT", baseline_root,
+            ), mock.patch.object(
+                server, "_git_commit", return_value=commit,
+            ), mock.patch.object(
+                server.subprocess, "run", side_effect=results,
+            ) as run, self.assertRaisesRegex(
+                RuntimeError, "could not create detached baseline"):
+                server._create_baseline_worktree(
+                    "refs/heads/main", "run")
+
+        self.assertEqual(
+            run.call_args_list[1].args[0][-3:],
+            ["remove", "--force", str(expected)],
+        )
+        self.assertEqual(
+            run.call_args_list[-1].args[0][-3:],
+            ["worktree", "list", "--porcelain"],
+        )
+
+    def test_timed_out_worktree_add_still_verifies_exact_cleanup(self):
+        commit = "e" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_root = root / "baselines"
+            results = iter((
+                subprocess.TimeoutExpired(["git", "worktree", "add"], 120),
+                subprocess.CompletedProcess([], 1, "", "not registered"),
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess(
+                    [], 0, f"worktree {root}\n", ""),
+            ))
+
+            def run(*_args, **_kwargs):
+                value = next(results)
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+            with mock.patch.object(
+                server, "WORKSPACE_ROOT", root,
+            ), mock.patch.object(
+                server, "BASELINE_WORKTREE_ROOT", baseline_root,
+            ), mock.patch.object(
+                server, "_git_commit", return_value=commit,
+            ), mock.patch.object(
+                server.subprocess, "run", side_effect=run,
+            ), self.assertRaises(subprocess.TimeoutExpired):
+                server._create_baseline_worktree(
+                    "refs/heads/main", "run")
+
+    def test_unverified_worktree_cleanup_surfaces_combined_failure(self):
+        commit = "d" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_root = root / "baselines"
+            expected = baseline_root / commit[:16] / "run"
+            listed = f"worktree {expected}\n"
+            for remove_result in (
+                subprocess.CompletedProcess([], 1, "", "remove failed"),
+                subprocess.TimeoutExpired(["git", "worktree", "remove"], 120),
+            ):
+                results = iter((
+                    subprocess.CompletedProcess([], 1, "", "add failed"),
+                    remove_result,
+                    subprocess.CompletedProcess([], 0, "", ""),
+                    subprocess.CompletedProcess([], 0, listed, ""),
+                ))
+
+                def run(*_args, **_kwargs):
+                    value = next(results)
+                    if isinstance(value, Exception):
+                        raise value
+                    return value
+
+                with self.subTest(remove=type(remove_result).__name__), mock.patch.object(
+                    server, "WORKSPACE_ROOT", root,
+                ), mock.patch.object(
+                    server, "BASELINE_WORKTREE_ROOT", baseline_root,
+                ), mock.patch.object(
+                    server, "_git_commit", return_value=commit,
+                ), mock.patch.object(
+                    server.subprocess, "run", side_effect=run,
+                ), self.assertRaisesRegex(
+                    RuntimeError, "cleanup was not verified"):
+                    server._create_baseline_worktree(
+                        "refs/heads/main", "run")
 
     def test_descendant_capture_includes_new_sessions(self):
         root = server._ProcessIdentity(10, 1, 10, 10, "start-root", "cmake")
