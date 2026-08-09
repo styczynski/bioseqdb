@@ -1564,12 +1564,6 @@ def verify_sql_codegen_ast_proof_pool_wiring(
     require_command_pool(
         bioseq_cmake_path,
         bioseq_cmake,
-        'OUTPUT "${_bioseq_sql_final_prepare_stamp}"',
-        "profile FINAL PREPARE",
-    )
-    require_command_pool(
-        bioseq_cmake_path,
-        bioseq_cmake,
         'OUTPUT "${BIOSEQ_SQL_PRODUCTION_DETERMINISM_REPORT}"',
         "production determinism",
     )
@@ -1579,10 +1573,10 @@ def verify_sql_codegen_ast_proof_pool_wiring(
             "PostgreSQL safety must place only PREPARE and emit-facts "
             "in the SQL codegen AST proof pool"
         )
-    if bioseq_cmake.count("JOB_POOL sql_codegen_ast_proof") != 2:
+    if bioseq_cmake.count("JOB_POOL sql_codegen_ast_proof") != 1:
         fail(
-            "bioseq CMake must place only profile FINAL PREPARE and "
-            "production determinism in the SQL codegen AST proof pool"
+            "bioseq CMake must place only production determinism in "
+            "the SQL codegen AST proof pool"
         )
     all_cmake = root_cmake + bioseq_cmake + safety_cmake
     if re.search(
@@ -1656,17 +1650,6 @@ def run_sql_codegen_ast_proof_pool_mutation_self_tests(
             "            ${ARG_SOURCES}\n"
             "        VERBATIM\n"
             '        COMMENT "Emitting schema-v2',
-            1,
-        ),
-    )
-    expect_rejected(
-        "a profile FINAL PREPARE pool deletion",
-        mutated_bioseq=bioseq_cmake.replace(
-            "    JOB_POOL sql_codegen_ast_proof\n"
-            "    COMMENT\n"
-            '      "Preparing ${_bioseq_sql_profile} Clang SQL final closure"',
-            "    COMMENT\n"
-            '      "Preparing ${_bioseq_sql_profile} Clang SQL final closure"',
             1,
         ),
     )

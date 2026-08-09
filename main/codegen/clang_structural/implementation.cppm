@@ -6903,11 +6903,28 @@ void validate_owned_compile_database(
         "-o", "-MF", "-MT", "-MQ", "-MJ", "-resource-dir", "-x",
         "--serialize-diagnostics",
     };
+    static constexpr std::string_view builtin_headers_in_system_modules =
+        "-fbuiltin-headers-in-system-modules";
+    static constexpr std::string_view no_builtin_headers_in_system_modules =
+        "-fno-builtin-headers-in-system-modules";
     for (std::size_t index =
              compiler_argument_index(expanded) + 1;
          index < expanded.size();
          ++index) {
         const std::string& argument = expanded[index];
+        if (argument == "-Xclang"
+            && index + 1 < expanded.size()
+            && (expanded[index + 1]
+                    == builtin_headers_in_system_modules
+                || expanded[index + 1]
+                    == no_builtin_headers_in_system_modules)) {
+            ++index;
+            continue;
+        }
+        if (argument == builtin_headers_in_system_modules
+            || argument == no_builtin_headers_in_system_modules) {
+            continue;
+        }
         if (drop_with_value.contains(argument)) {
             ++index;
             continue;
@@ -6954,6 +6971,11 @@ void validate_owned_compile_database(
         "-fdebug-compilation-dir=/__bioseq_relocatable_root__");
     result.emplace_back("-x");
     result.emplace_back("c++-module");
+    // Linked-Clang structural actions enable builtin headers in system
+    // modules. Prepare every owned PCM under the same cc1 language mode so
+    // declaration probes can consume it without a module-configuration split.
+    result.emplace_back("-Xclang");
+    result.emplace_back(builtin_headers_in_system_modules);
     result.emplace_back("-Wno-unknown-attributes");
     result.emplace_back("-Wno-ignored-attributes");
     return result;

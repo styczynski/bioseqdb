@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <ranges>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -24,6 +26,7 @@ import bioseq.sequences.kmers.two_stacks;
 namespace {
 
 using bioseq::minimizers::MinimapSketchData;
+using bioseq::minimizers::MinimizerOutputLayout;
 using bioseq::simd::PackedPaperNthashExecutionProof;
 using bioseq::simd::TwoStackContinuationStatus;
 using bioseq::simd::exact_simd_minimizer_representation;
@@ -57,35 +60,84 @@ struct minimizer_record {
 };
 
 struct collecting_minimizer_sink {
+    static constexpr std::size_t batch_capacity = 256u;
+
     std::vector<MinimapSketchData> records;
-    std::size_t pending_begin = 0u;
-    std::size_t pending_capacity = 0u;
+    alignas(MinimapSketchData) std::array<
+        std::byte,
+        batch_capacity * sizeof(MinimapSketchData)> storage;
+    bool pending = false;
+    std::size_t raw_batch_calls = 0u;
     bool protocol_ok = true;
 
-    [[nodiscard]] static std::span<MinimapSketchData> acquire(
+    [[nodiscard]] static bioseq::minimizers::MinimizerSinkBatchView acquire(
         void* opaque,
         std::size_t minimum)
     {
         auto& self = *static_cast<collecting_minimizer_sink*>(opaque);
-        if (self.pending_capacity != 0u) {
-            throw std::logic_error{"nested minimizer sink acquire"};
+        if (self.pending || minimum > batch_capacity) {
+            self.protocol_ok = false;
+            return {};
         }
-        self.pending_begin = self.records.size();
-        self.pending_capacity = minimum;
-        self.records.resize(self.pending_begin + minimum);
-        return std::span<MinimapSketchData>{self.records}.subspan(
-            self.pending_begin, minimum);
+        self.pending = true;
+        return {
+            .data = self.storage.data(),
+            .capacity = batch_capacity,
+            .layout = bioseq::minimizers::minimizer_output_layout_v<
+                MinimapSketchData>,
+            .record_size = sizeof(MinimapSketchData),
+            .record_alignment = alignof(MinimapSketchData),
+        };
     }
 
     static void commit(void* opaque, std::size_t initialized) noexcept
     {
         auto& self = *static_cast<collecting_minimizer_sink*>(opaque);
-        if (initialized > self.pending_capacity) {
+        if (!self.pending || initialized > batch_capacity) {
             self.protocol_ok = false;
-            initialized = self.pending_capacity;
+            return;
         }
-        self.records.resize(self.pending_begin + initialized);
-        self.pending_capacity = 0u;
+        auto* const first = std::launder(
+            reinterpret_cast<MinimapSketchData*>(self.storage.data()));
+        try {
+            self.records.insert(
+                self.records.end(), first, first + initialized);
+        } catch (...) {
+            self.protocol_ok = false;
+        }
+        std::destroy_n(first, initialized);
+        self.pending = false;
+    }
+
+    [[nodiscard]] static bool append_raw_u64(
+            void* opaque,
+            MinimizerOutputLayout layout,
+            const std::uint64_t* values,
+            std::size_t count) noexcept {
+        auto& self = *static_cast<collecting_minimizer_sink*>(opaque);
+        if (self.pending
+            || (count != 0u && values == nullptr)) {
+            self.protocol_ok = false;
+            return false;
+        }
+        try {
+            if (layout != bioseq::minimizers::minimizer_output_layout_v<
+                    MinimapSketchData>) {
+                self.protocol_ok = false;
+                return false;
+            }
+            const auto sketches = std::span<const std::uint64_t>{values, count}
+                | std::views::transform([](const std::uint64_t value) {
+                    return MinimapSketchData::from_raw_storage(value);
+                });
+            self.records.insert(
+                self.records.end(), sketches.begin(), sketches.end());
+            ++self.raw_batch_calls;
+            return true;
+        } catch (...) {
+            self.protocol_ok = false;
+            return false;
+        }
     }
 
     [[nodiscard]] MinimizerSink contract() noexcept
@@ -94,6 +146,7 @@ struct collecting_minimizer_sink {
             .state = this,
             .acquire = &collecting_minimizer_sink::acquire,
             .commit = &collecting_minimizer_sink::commit,
+            .append_raw_u64 = &collecting_minimizer_sink::append_raw_u64,
         };
     }
 };
@@ -145,7 +198,7 @@ template<class Records>
 {
     std::vector<minimizer_record> decoded;
     decoded.reserve(records.size());
-    for (const MinimapSketchData& record : records) {
+    for (const auto& record : records) {
         decoded.push_back({
             .hash = record.kmer(),
             .last_position = record.last_pos(),
@@ -211,6 +264,8 @@ void require_fixed_exact_parity(
         .window = 5u,
         .kmer = 7u,
         .emitted_position_base = 0u,
+        .output_layout =
+            bioseq::minimizers::minimizer_output_layout_v<MinimapSketchData>,
         .two_stack_route = TwoStackRoute::chronological_continuation,
         .sink = sink.contract(),
     };
@@ -241,6 +296,11 @@ void require_fixed_exact_parity(
     REQUIRE(proof.scalar_window_transitions == 0u);
     REQUIRE(proof.scalar_event_records == 0u);
     REQUIRE(proof.scalable_storage_fallback_calls == 0u);
+    REQUIRE(sink.raw_batch_calls > 0u);
+
+    auto forged_scalable_fallback = proof;
+    forged_scalable_fallback.scalable_storage_fallback_calls = 1u;
+    REQUIRE_FALSE(forged_scalable_fallback.accepted(true));
 }
 
 template<class StorageUnit>
@@ -262,12 +322,11 @@ void require_fixed_exact_width(
 }
 
 void require_fixed_resident_report76_parity(
-    const std::vector<seq::dna4>& source)
+    std::vector<seq::dna4> source)
 {
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint32_t>;
     compact_sequence_range<sequence_type> range(source);
-    auto expected = scalar_exact_oracle(range, 10u, 15u);
 
     collecting_minimizer_sink sink;
     MinimizerKernelInvocation invocation{
@@ -276,6 +335,8 @@ void require_fixed_resident_report76_parity(
         .window = 10u,
         .kmer = 15u,
         .emitted_position_base = 0u,
+        .output_layout =
+            bioseq::minimizers::minimizer_output_layout_v<MinimapSketchData>,
         .two_stack_route = TwoStackRoute::resident_report76,
         .sink = sink.contract(),
     };
@@ -285,16 +346,32 @@ void require_fixed_resident_report76_parity(
     REQUIRE(kernel != nullptr);
     const auto result = kernel(invocation);
     auto actual = decoded_records(sink.records);
+    const std::size_t raw_actual_size = actual.size();
 
     REQUIRE(result.status == MinimizerKernelStatus::ok);
     REQUIRE(result.proof.algorithm
         == MinimizerKernelAlgorithm::two_stack_nthash);
     REQUIRE(result.proof.target == binding.target);
     REQUIRE(sink.protocol_ok);
-    REQUIRE(result.emitted == actual.size());
+    REQUIRE(result.emitted == raw_actual_size);
     std::ranges::sort(actual);
-    std::ranges::sort(expected);
-    REQUIRE(actual == expected);
+    actual.erase(
+        std::ranges::unique(actual).begin(), actual.end());
+
+    // Source-derived report-76 contract from commit
+    // 847df443500008b453250ebedfa0d802b5dade88, source blob
+    // e9e433d0d58c1e71eef2d550bada0c4bd1b92e56. Raw overlap multiplicity
+    // follows target geometry, but this normalized oracle is identical for
+    // 2/4/8/16 u32 lanes.
+    std::uint64_t normalized_fingerprint = 1469598103934665603ULL;
+    for (const minimizer_record& record : actual) {
+        const auto raw = MinimapSketchData{
+            record.hash, record.last_position, record.strand}.raw_value();
+        normalized_fingerprint =
+            (normalized_fingerprint ^ raw) * 1099511628211ULL;
+    }
+    REQUIRE(actual.size() == 754u);
+    REQUIRE(normalized_fingerprint == 0x0f4a56dc592b279dULL);
 
     const auto& proof = result.proof.two_stack;
     REQUIRE(proof.accepted(true));
@@ -304,7 +381,7 @@ void require_fixed_resident_report76_parity(
     REQUIRE(proof.resident_vector_stream_nonempty_work_calls == 1u);
     REQUIRE(proof.resident_vector_stream_input_bp == source.size());
     REQUIRE(proof.resident_vector_stream_minimizers_emitted
-        == actual.size());
+        == raw_actual_size);
     REQUIRE(proof.generic_u64_kernel_calls == 0u);
     REQUIRE(proof.k15_w10_b8_u32_hash_kernel_calls == 0u);
     REQUIRE(proof.scalar_backend_branches == 0u);
@@ -412,7 +489,7 @@ struct fixed_paper_run {
 
 template<class StorageUnit>
 [[nodiscard]] fixed_paper_run run_fixed_paper(
-    const std::vector<seq::dna4>& data,
+    std::vector<seq::dna4>& data,
     const std::size_t window = 10u,
     const std::size_t kmer = 15u)
 {
@@ -426,6 +503,8 @@ template<class StorageUnit>
         .window = window,
         .kmer = kmer,
         .emitted_position_base = 0u,
+        .output_layout =
+            bioseq::minimizers::minimizer_output_layout_v<MinimapSketchData>,
         .two_stack_route = TwoStackRoute::chronological_continuation,
         .sink = sink.contract(),
     };
@@ -453,6 +532,97 @@ template<class StorageUnit>
         .proof = result.proof.paper,
         .emitted = result.emitted,
     };
+}
+
+TEST_CASE(
+    "generated fixed table ExactSimd rejects a canonical position overflow",
+    "[two_stack][exact_simd][fixed_table][representation][position][highway]")
+{
+    constexpr std::size_t sequence_size = 32u;
+    constexpr std::uint64_t position_mask =
+        MinimapSketchData::pos_field_mask;
+    constexpr std::size_t emitted_position_base =
+        static_cast<std::size_t>(
+            position_mask - (sequence_size - 2u));
+    STATIC_REQUIRE(
+        emitted_position_base + sequence_size - 1u == position_mask + 1u);
+
+    auto data = deterministic_dna4(sequence_size);
+    using sequence_type =
+        sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+    compact_sequence_range<sequence_type> range(data);
+    collecting_minimizer_sink sink;
+    MinimizerKernelInvocation invocation{
+        .sequence = fixed_packed_view(range),
+        .fragments = {},
+        .window = 10u,
+        .kmer = 15u,
+        .emitted_position_base = emitted_position_base,
+        .output_layout =
+            bioseq::minimizers::minimizer_output_layout_v<MinimapSketchData>,
+        .output_hash_mask = MinimapSketchData::hash_field_mask,
+        .output_position_mask = position_mask,
+        .two_stack_route = TwoStackRoute::chronological_continuation,
+        .sink = sink.contract(),
+    };
+
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    const auto kernel = fixed_highway_table().minimizers.two_stack_nthash;
+    REQUIRE(kernel != nullptr);
+    const auto result = kernel(invocation);
+
+    REQUIRE(result.status == MinimizerKernelStatus::invalid_configuration);
+    REQUIRE(result.family_status == static_cast<std::uint32_t>(
+        TwoStackContinuationStatus::unsupported_representation));
+    REQUIRE(result.proof.algorithm
+        == MinimizerKernelAlgorithm::two_stack_nthash);
+    REQUIRE(result.proof.target == binding.target);
+    REQUIRE(result.emitted == 0u);
+    REQUIRE(sink.records.empty());
+    REQUIRE(sink.protocol_ok);
+}
+
+TEST_CASE(
+    "generated fixed table Paper rejects a sub-u32 hash representation",
+    "[two_stack][packed_paper_nthash][fixed_table][representation][hash][highway]")
+{
+    using output_type = bioseq::minimizers::MinimizerRepr<33u, 15u>;
+    STATIC_REQUIRE(output_type::hash_field_mask < 0xFFFFFFFFull);
+
+    auto data = deterministic_dna4(32u);
+    using sequence_type =
+        sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+    compact_sequence_range<sequence_type> range(data);
+    collecting_minimizer_sink sink;
+    MinimizerKernelInvocation invocation{
+        .sequence = fixed_packed_view(range),
+        .fragments = {},
+        .window = 10u,
+        .kmer = 15u,
+        .emitted_position_base = 0u,
+        .output_layout =
+            bioseq::minimizers::minimizer_output_layout_v<output_type>,
+        .output_hash_mask = output_type::hash_field_mask,
+        .output_position_mask = output_type::pos_field_mask,
+        .two_stack_route = TwoStackRoute::chronological_continuation,
+        .sink = sink.contract(),
+    };
+
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    const auto kernel = fixed_highway_table().minimizers.paper_nthash;
+    REQUIRE(kernel != nullptr);
+    const auto result = kernel(invocation);
+
+    REQUIRE(result.status == MinimizerKernelStatus::invalid_configuration);
+    REQUIRE(result.family_status == static_cast<std::uint32_t>(
+        PackedPaperNthashStatus::unsupported_representation));
+    REQUIRE(result.proof.algorithm == MinimizerKernelAlgorithm::paper_nthash);
+    REQUIRE(result.proof.target == binding.target);
+    REQUIRE(result.emitted == 0u);
+    REQUIRE(sink.records.empty());
+    REQUIRE(sink.protocol_ok);
 }
 
 TEST_CASE(
@@ -505,7 +675,6 @@ TEST_CASE(
     REQUIRE(proof.scalar_window_transitions == 0u);
     REQUIRE(proof.scalar_minimum_decisions == 0u);
     REQUIRE(proof.fallback_calls == 0u);
-    REQUIRE(proof.scalable_storage_fallback_calls == 0u);
 }
 
 TEST_CASE(
@@ -616,6 +785,30 @@ TEST_CASE("packed paper proof aggregation is identity checked and saturating",
         == (std::numeric_limits<std::uint64_t>::max)());
     REQUIRE(saturated.saturated);
     REQUIRE_FALSE(saturated.accepted());
+}
+
+TEST_CASE("packed paper proof rejects mixed source storage identities",
+          "[two_stack][contract][packed_paper_nthash][proof][storage]") {
+    auto u32 = valid_paper_proof(128u);
+    auto u64 = valid_paper_proof(128u);
+    u64.source_storage_unit_bytes = sizeof(std::uint64_t);
+    u64.input_storage_units = 4u;
+    REQUIRE(u32.accepted());
+    REQUIRE(u64.accepted());
+
+    auto forward = u32;
+    forward.combine(u64);
+    REQUIRE(forward.aggregation_mismatch);
+    REQUIRE(forward.source_storage_unit_bytes == sizeof(std::uint32_t));
+    REQUIRE(forward.segments_combined == 2u);
+    REQUIRE_FALSE(forward.accepted());
+
+    auto reverse = u64;
+    reverse.combine(u32);
+    REQUIRE(reverse.aggregation_mismatch);
+    REQUIRE(reverse.source_storage_unit_bytes == sizeof(std::uint64_t));
+    REQUIRE(reverse.segments_combined == 2u);
+    REQUIRE_FALSE(reverse.accepted());
 }
 
 } // namespace

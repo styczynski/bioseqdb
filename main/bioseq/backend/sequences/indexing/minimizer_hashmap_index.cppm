@@ -154,6 +154,8 @@ struct ExactSimdIndexPackedFragment {
 using ExactSimdIndexReadFragmentFn =
     ExactSimdIndexPackedFragment (*)(void*, std::size_t);
 using ExactSimdIndexReleaseFragmentFn = void (*)(void*, std::size_t) noexcept;
+using ExactSimdIndexAppendRecordsFn =
+    bool (*)(void*, const MinimapSketchData*, std::size_t);
 using ExactSimdIndexAppendRawFn =
     bool (*)(void*, const std::uint64_t*, std::size_t);
 
@@ -163,6 +165,7 @@ struct ExactSimdIndexBridgeRequest {
     ExactSimdIndexReadFragmentFn read_fragment = nullptr;
     ExactSimdIndexReleaseFragmentFn release_fragment = nullptr;
     void* collector_context = nullptr;
+    ExactSimdIndexAppendRecordsFn append_records = nullptr;
     ExactSimdIndexAppendRawFn append_raw = nullptr;
     std::uint8_t alphabet_code =
         bioseq::minimizers::unbound_packed_alphabet_code;
@@ -276,10 +279,11 @@ collect_exact_simd_index_range_or_throw(
         std::string_view operation) {
     static_assert(std::same_as<typename MinimapSketchData::storage_t, std::uint64_t>);
 
-        if (kernels == nullptr || kernels->two_stack_nthash == nullptr) {
-            throw ExactSimdIndexRuntimeError{
-                ExactSimdIndexStatus::invalid_state, operation};
-        }
+    if constexpr (!std::same_as<Alphabet, seq::dna4>
+                  && !std::same_as<Alphabet, seq::dna5>) {
+        throw ExactSimdIndexRuntimeError{
+            ExactSimdIndexStatus::unsupported_alphabet, operation};
+    } else {
         if (lo_bp > hi_bp || hi_bp > sequence.bp_size()
             || hi_bp - lo_bp
                 > static_cast<sequence_size_t>(
@@ -287,30 +291,26 @@ collect_exact_simd_index_range_or_throw(
             throw ExactSimdIndexRuntimeError{
                 ExactSimdIndexStatus::invalid_range, operation};
         }
-        constexpr std::uint8_t materialized_width = sizeof(std::uint32_t);
+        if (kernels == nullptr || kernels->two_stack_nthash == nullptr) {
+            throw ExactSimdIndexRuntimeError{
+                ExactSimdIndexStatus::invalid_state, operation};
+        }
+        constexpr std::uint8_t packed_width = sizeof(std::uint32_t);
+        const auto access = bioseq::storage::plan_sequence_access(
+            sequence,
+            bioseq::storage::sequence_access_requirement::
+                contiguous_resident,
+            lo_bp,
+            hi_bp,
+            packed_width);
         std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
         typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
             resident_packed_region descriptor{};
-        bool borrowed_native = false;
-        for (const std::uint8_t width :
-             std::array<std::uint8_t, 4>{1u, 2u, 4u, 8u}) {
-            auto resident = sequence.try_resident_packed(
-                lo_bp, hi_bp, width);
-            if (resident.has_value()
-                && resident->leading_symbol_offset == 0u) {
-                descriptor = *resident;
-                borrowed_native = true;
-                break;
-            }
-        }
-        if (!borrowed_native) {
-            const auto access = bioseq::storage::plan_sequence_access(
-                sequence,
-                bioseq::storage::sequence_access_requirement::
-                    contiguous_resident,
-                lo_bp,
-                hi_bp,
-                materialized_width);
+        if (access.route
+                == bioseq::storage::sequence_access_route::borrow_resident
+            && access.resident.has_value()) {
+            descriptor = *access.resident;
+        } else {
             auto permit =
                 bioseq::parallelism::MemoryAdmissionController::instance()
                     .try_reserve(access.admission_bytes);
@@ -319,16 +319,13 @@ collect_exact_simd_index_range_or_throw(
                     ExactSimdIndexStatus::non_contiguous_range, operation};
             }
             owner.emplace(bioseq::storage::materialize_packed_region(
-                sequence, lo_bp, hi_bp, materialized_width,
+                sequence, lo_bp, hi_bp, packed_width,
                 std::move(*permit)));
             descriptor = owner->descriptor();
         }
         if (descriptor.bp_length
                 != static_cast<std::size_t>(hi_bp - lo_bp)
-            || !(descriptor.storage_unit_byte_width == 1u
-                || descriptor.storage_unit_byte_width == 2u
-                || descriptor.storage_unit_byte_width == 4u
-                || descriptor.storage_unit_byte_width == 8u)
+            || descriptor.storage_unit_byte_width != packed_width
             || descriptor.bits_per_symbol
                 != bioseq::storage::lazy_rank_stream_traits<Alphabet>::
                     logical_bits_per_symbol
@@ -358,10 +355,61 @@ collect_exact_simd_index_range_or_throw(
         };
         const auto release_fragment = +[](void*, std::size_t) noexcept {
         };
+        const auto append_records = +[](void* opaque,
+                                        const MinimapSketchData* records,
+                                        std::size_t count) {
+            auto& collector = *static_cast<Collector*>(opaque);
+            if constexpr (requires {
+                { collector.append_records(
+                    std::span<const MinimapSketchData>{records, count}) }
+                    -> std::convertible_to<bool>;
+            }) {
+                return static_cast<bool>(collector.append_records(
+                    std::span<const MinimapSketchData>{records, count}));
+            } else if constexpr (requires (const MinimapSketchData& record) {
+                collector.collect(record);
+            }) {
+                for (std::size_t index = 0u; index < count; ++index) {
+                    collector.collect(records[index]);
+                }
+                if constexpr (requires {
+                    { std::as_const(collector).ok() }
+                        -> std::convertible_to<bool>;
+                }) {
+                    return static_cast<bool>(std::as_const(collector).ok());
+                }
+                return true;
+            } else {
+                return false;
+            }
+        };
         const auto append_raw = +[](void* opaque,
                                     const std::uint64_t* raw,
                                     std::size_t count) {
-            return static_cast<Collector*>(opaque)->append_raw_storage(raw, count);
+            auto& collector = *static_cast<Collector*>(opaque);
+            if constexpr (requires {
+                { collector.append_raw_storage(raw, count) }
+                    -> std::convertible_to<bool>;
+            }) {
+                return static_cast<bool>(
+                    collector.append_raw_storage(raw, count));
+            } else if constexpr (requires (const MinimapSketchData& record) {
+                collector.collect(record);
+            }) {
+                for (std::size_t index = 0u; index < count; ++index) {
+                    collector.collect(
+                        MinimapSketchData::from_raw_storage(raw[index]));
+                }
+                if constexpr (requires {
+                    { std::as_const(collector).ok() }
+                        -> std::convertible_to<bool>;
+                }) {
+                    return static_cast<bool>(std::as_const(collector).ok());
+                }
+                return true;
+            } else {
+                return false;
+            }
         };
 
         const ExactSimdIndexBridgeResult result = collect_exact_simd_index_erased(
@@ -371,11 +419,12 @@ collect_exact_simd_index_range_or_throw(
                 .read_fragment = read_fragment,
                 .release_fragment = release_fragment,
                 .collector_context = &collector,
+                .append_records = append_records,
                 .append_raw = append_raw,
                 .alphabet_code = alphabet_code,
                 .bits_per_symbol = descriptor.bits_per_symbol,
-                .storage_unit_bytes = descriptor.storage_unit_byte_width,
-                .letters_per_unit = descriptor.storage_unit_byte_width * 8u
+                .storage_unit_bytes = packed_width,
+                .letters_per_unit = packed_width * 8u
                     / bioseq::storage::lazy_rank_stream_traits<Alphabet>::
                         logical_bits_per_symbol,
                 .total_units = descriptor.unit_count,
@@ -393,6 +442,7 @@ collect_exact_simd_index_range_or_throw(
             throw ExactSimdIndexRuntimeError{result.status, operation};
         }
         return result.proof;
+    }
 }
 
 // Plain ABI mirror of the packed Paper-ntHash checked kernel plus one
@@ -629,54 +679,6 @@ struct PackedPaperNthashIndexExecutionProof {
 
     [[nodiscard]] constexpr bool accepted(
             bool require_nonempty_vector_work = true) const noexcept {
-        if (fallback_calls != 0u) {
-            const bool vector_payload_absent =
-                logical_streams == 0u
-                && physical_vector_lanes == 0u
-                && vector_registers_per_step == 0u
-                && packed_decode_batches == 0u
-                && packed_decode_lane_visits == 0u
-                && hash_initialization_batches == 0u
-                && rolling_hash_batches == 0u
-                && hash_table_lookup_batches == 0u
-                && canonical_sum_batches == 0u
-                && window_update_batches == 0u
-                && suffix_rebuild_batches == 0u
-                && emission_decision_batches == 0u
-                && emission_mask_store_batches == 0u
-                && stream_boundary_records_buffered == 0u
-                && stream_boundary_records_committed == 0u
-                && stream_boundary_duplicates_suppressed == 0u
-                && partial_chunk_callback_batches == 0u
-                && masked_tail_lane_visits == 0u;
-            const bool exact_scalar_accounting =
-                scalar_hash_symbols == input_symbols
-                && input_symbols >= kmer_size
-                && scalar_window_transitions
-                    == input_symbols - kmer_size + 1u
-                && scalar_window_transitions >= window_size
-                && scalar_minimum_decisions
-                    == scalar_window_transitions - window_size + 1u
-                && minimizers_emitted == scalar_collector_appends
-                && tied_endpoint_records_emitted <= minimizers_emitted;
-            return !saturated
-                && !aggregation_mismatch
-                && scheme_id == kPackedPaperNthashKernelSchemeId
-                && kmer_size > 0u
-                && window_size > 0u
-                && window_size <= kPackedPaperNthashMaximumWindow
-                && nthash_rotation == 7u
-                && (source_storage_unit_bytes == 1u
-                    || source_storage_unit_bytes == 2u
-                    || source_storage_unit_bytes == 4u
-                    || source_storage_unit_bytes == 8u)
-                && segments_combined > 0u
-                && positions_are_segment_local
-                && fail_closed_rejections == 0u
-                && vector_payload_absent
-                && exact_scalar_accounting
-                && (!require_nonempty_vector_work || input_symbols > 0u);
-        }
         const bool vector_work_ok = !require_nonempty_vector_work
             || (packed_decode_batches > 0
                 && packed_decode_lane_visits > 0
@@ -770,10 +772,10 @@ collect_bounded_packed_paper_nthash_index_lazy(
     if (materialized_window_bp_out != nullptr) {
         *materialized_window_bp_out = 0u;
     }
-        if (kernels == nullptr || kernels->paper_nthash == nullptr) {
-            return rejected_packed_paper_nthash_index_result(
-                PackedPaperNthashIndexStatus::invalid_state);
-        }
+    if constexpr (!std::same_as<Alphabet, seq::dna4>) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::unsupported_alphabet);
+    } else {
         if (lo_bp > hi_bp || hi_bp > sequence.bp_size()
             || local_bp_size != static_cast<std::uint64_t>(hi_bp - lo_bp)) {
             return rejected_packed_paper_nthash_index_result(
@@ -792,31 +794,27 @@ collect_bounded_packed_paper_nthash_index_lazy(
             return rejected_packed_paper_nthash_index_result(
                 PackedPaperNthashIndexStatus::input_too_large);
         }
+        if (kernels == nullptr || kernels->paper_nthash == nullptr) {
+            return rejected_packed_paper_nthash_index_result(
+                PackedPaperNthashIndexStatus::invalid_state);
+        }
 
-        constexpr std::uint8_t materialized_width = sizeof(std::uint32_t);
+        constexpr std::uint8_t packed_width = sizeof(std::uint32_t);
+        const auto access = bioseq::storage::plan_sequence_access(
+            sequence,
+            bioseq::storage::sequence_access_requirement::
+                contiguous_resident,
+            lo_bp,
+            hi_bp,
+            packed_width);
         std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
         typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
             resident_packed_region descriptor{};
-        bool borrowed_native = false;
-        for (const std::uint8_t width :
-             std::array<std::uint8_t, 2>{8u, 4u}) {
-            auto resident = sequence.try_resident_packed(
-                lo_bp, hi_bp, width);
-            if (resident.has_value()
-                && resident->leading_symbol_offset == 0u) {
-                descriptor = *resident;
-                borrowed_native = true;
-                break;
-            }
-        }
-        if (!borrowed_native) {
-            const auto access = bioseq::storage::plan_sequence_access(
-                sequence,
-                bioseq::storage::sequence_access_requirement::
-                    contiguous_resident,
-                lo_bp,
-                hi_bp,
-                materialized_width);
+        if (access.route
+                == bioseq::storage::sequence_access_route::borrow_resident
+            && access.resident.has_value()) {
+            descriptor = *access.resident;
+        } else {
             auto permit =
                 bioseq::parallelism::MemoryAdmissionController::instance()
                     .try_reserve(access.admission_bytes);
@@ -825,13 +823,12 @@ collect_bounded_packed_paper_nthash_index_lazy(
                     PackedPaperNthashIndexStatus::admission_denied);
             }
             owner.emplace(bioseq::storage::materialize_packed_region(
-                sequence, lo_bp, hi_bp, materialized_width,
+                sequence, lo_bp, hi_bp, packed_width,
                 std::move(*permit)));
             descriptor = owner->descriptor();
         }
         if (descriptor.bp_length != local_bp_size
-            || !(descriptor.storage_unit_byte_width == 4u
-                || descriptor.storage_unit_byte_width == 8u)
+            || descriptor.storage_unit_byte_width != packed_width
             || descriptor.bits_per_symbol
                 != bioseq::storage::lazy_rank_stream_traits<Alphabet>::
                     logical_bits_per_symbol
@@ -871,7 +868,7 @@ collect_bounded_packed_paper_nthash_index_lazy(
                 },
                 .sequence_context = std::addressof(descriptor),
                 .collector_context = std::addressof(collector),
-                .storage_unit_bytes = descriptor.storage_unit_byte_width,
+                .storage_unit_bytes = packed_width,
                 .letters_per_unit = descriptor.storage_unit_byte_width * 8u
                     / bioseq::storage::lazy_rank_stream_traits<Alphabet>::
                         logical_bits_per_symbol,
@@ -881,6 +878,7 @@ collect_bounded_packed_paper_nthash_index_lazy(
                 .kmer_size = kmer_size,
                 .sequence_context_is_resident_descriptor = true,
             });
+    }
 }
 
 // Revision-3 persisted minimizer codecs stay in this wire owner. Their shared

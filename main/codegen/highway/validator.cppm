@@ -916,6 +916,123 @@ inline void validate_inventories(
         }
     }
 
+    std::set<std::string, std::less<>> probe_keys;
+    std::set<std::filesystem::path> probe_paths;
+    const auto validate_probes = [&paths, &probe_keys, &probe_paths](
+        const std::vector<probe_spec>& probes,
+        const std::size_t maximum,
+        const std::string_view role) {
+        if (probes.size() > maximum) {
+            throw std::runtime_error(
+                "Highway " + std::string{role} + " probe owner cap exceeded");
+        }
+        for (const probe_spec& probe : probes) {
+            if (!detail::identifier(probe.key)
+                || !probe.path.is_absolute()
+                || !probe.path.filename().string().ends_with(".cppm.in")) {
+                throw std::runtime_error(
+                    "invalid Highway " + std::string{role}
+                    + " probe record '" + probe.key + "'");
+            }
+            detail::require_regular_file(probe.path, "Highway probe template");
+            const std::filesystem::path identity =
+                detail::path_identity(probe.path);
+            if (!identity.generic_string().contains("/main/")
+                || !probe_keys.insert(probe.key).second
+                || !probe_paths.insert(identity).second
+                || paths.contains(identity)) {
+                throw std::runtime_error(
+                    "duplicate, aliased, or out-of-tree Highway probe '"
+                    + probe.key + "'");
+            }
+        }
+    };
+    validate_probes(sources.unit_probes, 4u, "unit");
+    validate_probes(sources.bench_probes, 1u, "benchmark");
+
+    struct expected_repr_owner final {
+        std::string_view algorithm;
+        std::string_view source_key;
+        std::string_view representation_type;
+        bool u64_only{};
+        bool high_profile{};
+    };
+    static const std::map<std::string_view, expected_repr_owner, std::less<>>
+        expected_repr_owners{
+            {"reference_l15_k15", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<15u,15u>", false, false}},
+            {"reference_l28_k15", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<28u,15u>", false, false}},
+            {"reference_l33_k15", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<33u,15u>", false, false}},
+            {"reference_l63_k15", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<63u,15u>", false, false}},
+            {"paper_l15_k15", {"paper", "minimizer_paper", "::bioseq::minimizers::MinimizerRepr<15u,15u>", false, false}},
+            {"paper_l28_k15", {"paper", "minimizer_paper", "::bioseq::minimizers::MinimizerRepr<28u,15u>", false, false}},
+            {"paper_l63_k15", {"paper", "minimizer_paper", "::bioseq::minimizers::MinimizerRepr<63u,15u>", false, false}},
+            {"reference_l7_k7", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<7u,7u>", false, true}},
+            {"reference_l17_k7", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<17u,7u>", false, true}},
+            {"reference_l49_k7", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<49u,7u>", false, true}},
+            {"reference_l63_k7", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<63u,7u>", false, true}},
+            {"reference_l27_k27", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<27u,27u>", true, true}},
+            {"reference_l63_k27", {"reference", "minimizer_reference", "::bioseq::minimizers::MinimizerRepr<63u,27u>", true, true}},
+        };
+    if (!sources.minimizer_repr_instances.empty()) {
+        const bool high_profile =
+            sources.minimizer_repr_instances.size() == 13u;
+        if (!high_profile && sources.minimizer_repr_instances.size() != 7u) {
+            throw std::runtime_error(
+                "Highway minimizer representation owners must contain "
+                "exactly 7 K15-only or 13 high-profile identities");
+        }
+        std::set<std::string, std::less<>> observed_owners;
+        std::size_t typed_instantiations = 0u;
+        std::size_t reference_instantiations = 0u;
+        std::size_t paper_instantiations = 0u;
+        for (const minimizer_repr_instance_spec& instance :
+             sources.minimizer_repr_instances) {
+            const auto expected = expected_repr_owners.find(instance.owner_key);
+            if (expected == expected_repr_owners.end()
+                || expected->second.algorithm != instance.algorithm
+                || expected->second.source_key != instance.source_key
+                || expected->second.representation_type
+                    != instance.representation_type
+                || (expected->second.high_profile && !high_profile)
+                || !by_key.contains(instance.source_key)
+                || !observed_owners.insert(instance.owner_key).second) {
+                throw std::runtime_error(
+                    "invalid or duplicate Highway minimizer representation "
+                    "owner '" + instance.owner_key + "'");
+            }
+            const std::vector<std::string> expected_storages =
+                expected->second.u64_only
+                ? std::vector<std::string>{"u64"}
+                : std::vector<std::string>{"u32", "u64"};
+            if (instance.storage_types != expected_storages) {
+                throw std::runtime_error(
+                    "Highway minimizer representation owner '"
+                    + instance.owner_key
+                    + "' has an invalid input-storage instantiation set");
+            }
+            typed_instantiations += instance.storage_types.size();
+            (instance.algorithm == "reference"
+                 ? reference_instantiations
+                 : paper_instantiations) += instance.storage_types.size();
+        }
+        for (const auto& [owner, expected] : expected_repr_owners) {
+            if ((!expected.high_profile || high_profile)
+                && !observed_owners.contains(std::string{owner})) {
+                throw std::runtime_error(
+                    "Highway minimizer representation owner set omits '"
+                    + std::string{owner} + "'");
+            }
+        }
+        const std::size_t expected_total = high_profile ? 24u : 14u;
+        const std::size_t expected_reference = high_profile ? 18u : 8u;
+        if (typed_instantiations != expected_total
+            || reference_instantiations != expected_reference
+            || paper_instantiations != 6u) {
+            throw std::runtime_error(
+                "Highway minimizer representation instantiation caps diverged");
+        }
+    }
+
     enum class visit_state : std::uint8_t { unseen, active, complete };
     std::map<std::string, visit_state, std::less<>> states;
     std::function<void(const source_spec&)> visit = [&](const source_spec& source) {

@@ -58,9 +58,10 @@ if(NOT _bioseq_namespace_materialization_canary_instance_count EQUAL 4)
     "namespace-materialization canary must generate exactly four 2x2 units")
 endif()
 
-set(_bioseq_namespace_materialization_canary_implementations
+set(_bioseq_namespace_materialization_canary_partitions
   "${_bioseq_namespace_materialization_canary_api}"
-  "${_bioseq_namespace_materialization_canary_selector}"
+  "${_bioseq_namespace_materialization_canary_selector}")
+set(_bioseq_namespace_materialization_canary_implementations
   ${_bioseq_namespace_materialization_canary_instances}
   "${_bioseq_namespace_materialization_canary_dir}/driver.cppm")
 
@@ -71,15 +72,20 @@ target_sources(bioseq_namespace_materialization_module_canary
   PRIVATE
     FILE_SET CXX_MODULES
     TYPE CXX_MODULES
-    BASE_DIRS "${_bioseq_namespace_materialization_canary_dir}"
-    FILES "${_bioseq_namespace_materialization_canary_primary}")
+    BASE_DIRS
+      "${_bioseq_namespace_materialization_canary_dir}"
+      "${_bioseq_namespace_materialization_canary_generated_root}"
+    FILES
+      "${_bioseq_namespace_materialization_canary_primary}"
+      ${_bioseq_namespace_materialization_canary_partitions})
 add_dependencies(
   bioseq_namespace_materialization_module_canary
   "${_bioseq_namespace_materialization_canary_codegen}")
 
 # A .cppm suffix normally denotes an interface to compiler drivers. These are
-# intentionally private implementation partitions/units and must remain
-# ordinary module-scanned C++ sources, matching generated production units.
+# intentionally implementation units and must remain ordinary module-scanned
+# C++ sources, matching generated production units. The generated private
+# partitions above provide modules and therefore belong to CXX_MODULES.
 set_source_files_properties(
   ${_bioseq_namespace_materialization_canary_implementations}
   PROPERTIES COMPILE_OPTIONS "-x;c++" CXX_SCAN_FOR_MODULES ON)

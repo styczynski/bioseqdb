@@ -787,8 +787,49 @@ inline void run_safety_contract_self_tests() {
             target_symbols.emplace_back(entry.target_symbol);
         }
     }
+    if (target_identities.size() != 272
+        || target_symbols.size() != 270) {
+        throw std::runtime_error(
+            "DOC0388 production fmgr target cardinality changed");
+    }
     validate_doc0388_fmgr_target(
         target_identities, target_symbols);
+    detail::require_failure(
+        [&target_identities, &target_symbols] {
+            validate_doc0388_fmgr_target(
+                target_identities,
+                target_symbols,
+                "test_indexes");
+        },
+        "missing identities");
+    for (const fmgr_profile_target_entry& entry :
+         test_indexes_only_fmgr_target_delta) {
+        target_identities.emplace_back(entry.sql_identity);
+        target_symbols.emplace_back(entry.target_symbol);
+    }
+    if (target_identities.size() != 273
+        || target_symbols.size() != 271) {
+        throw std::runtime_error(
+            "test-indexes fmgr target cardinality changed");
+    }
+    validate_doc0388_fmgr_target(
+        target_identities, target_symbols, "test_indexes");
+    detail::require_failure(
+        [&target_identities, &target_symbols] {
+            validate_doc0388_fmgr_target(
+                target_identities,
+                target_symbols,
+                "production");
+        },
+        "unexpected identities");
+    detail::require_failure(
+        [&target_identities, &target_symbols] {
+            validate_doc0388_fmgr_target(
+                target_identities,
+                target_symbols,
+                "unsupported_profile");
+        },
+        "unknown compiler profile");
 
     const provenance_bundle provenance = detail::fixture_provenance();
     {

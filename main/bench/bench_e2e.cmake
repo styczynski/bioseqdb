@@ -230,6 +230,35 @@ AddCommonTargetX(
     ${BENCH_E2E_MOD_FILES}
   HWY 1.3.0)
 
+# Both E2E executables compile the shared routing-POC source. Give them the
+# generator-proven fixed target used by standalone benchmarks and unit tests;
+# production runtime target selection remains owned by postgresql_bioseq.
+set_source_files_properties(
+  "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
+  "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
+  ${BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS}
+  PROPERTIES GENERATED TRUE)
+set_source_files_properties(
+  ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS}
+  PROPERTIES COMPILE_OPTIONS "-x;c++")
+foreach(_bioseq_e2e_target IN ITEMS
+    bioseq_bench_e2e
+    bioseq_bench_e2e_tests_exec)
+  target_sources(${_bioseq_e2e_target}
+    PRIVATE ${BIOSEQ_HIGHWAY_GENERATED_TEST_ORDINARY_IMPLEMENTATIONS}
+    PRIVATE FILE_SET "${_bioseq_e2e_target}_highway_fixed_target_modules"
+      TYPE CXX_MODULES
+      BASE_DIRS "${BIOSEQ_HIGHWAY_GENERATED_ROOT}"
+      FILES
+        "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
+        "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
+        ${BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS})
+  target_link_libraries(${_bioseq_e2e_target} PRIVATE
+    bioseq_highway_target_policy)
+  add_dependencies(${_bioseq_e2e_target}
+    bioseq_highway_target_modules)
+endforeach()
+
 # Match the project's generated Catch2 targets: ThinLTO can drop TLS init
 # wrappers for module-attached mlogging state in test executables.
 set_target_properties(bioseq_bench_e2e_tests_exec PROPERTIES

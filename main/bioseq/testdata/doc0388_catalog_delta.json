@@ -60,7 +60,7 @@
     },
     {
       "legacy": "function:bioseq_internal.rev3_test_build_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
-      "candidate": "function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)"
+      "candidate": "function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)"
     },
     {
       "legacy": "function:bioseq_internal.rev3_test_build_ready_mpf_generation(regclass,text,bigint,text)",
@@ -567,7 +567,7 @@
       "candidate": "batch_join_projection_guard_probe"
     },
     {
-      "identity": "function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
+      "identity": "function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)",
       "legacy": "bioseq_internal_rev3_test_build_fixture",
       "candidate": "build_minimizer_fixture"
     },
@@ -2974,7 +2974,7 @@
       "candidate": "Reports BatchJoin base ProjectionPath eligibility and wrapper-cost ownership decisions."
     },
     {
-      "identity": "comment:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
+      "identity": "comment:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)",
       "legacy": "Integration-only live revision-3/4 writer/token/publisher fixture for one explicit sketch backend; opens no read session and does not activate ordinal 2.",
       "candidate": "Builds and publishes an authenticated minimizer generation for one explicit sketch backend without opening a read session."
     },

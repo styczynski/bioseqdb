@@ -3230,7 +3230,7 @@ REVOKE EXECUTE ON FUNCTION bioseq_internal.format6_parallel_scan_probe(regclass,
 
 COMMENT ON FUNCTION bioseq_internal.format6_parallel_scan_probe(regclass, text, bigint, integer) IS 'Validates a ready generation row, plain payload, and address checksum using a serial scan when requested_workers is zero or a shared parallel heap scan when it is positive.';
 
-CREATE OR REPLACE FUNCTION bioseq_internal.build_minimizer_fixture(source_table regclass, index_name text, sequence_rowno bigint, kmer_size smallint, window_size smallint, selected_wire_format smallint, requested_backend text DEFAULT 'scalar')
+CREATE OR REPLACE FUNCTION bioseq_internal.build_minimizer_fixture(source_table regclass, index_name text, sequence_rowno bigint, kmer_size smallint, window_size smallint, selected_wire_format smallint, requested_backend text DEFAULT 'scalar', position_segment_span_bp bigint DEFAULT 0)
 RETURNS TABLE (sidecar_table text, wire_format smallint, generation_id bigint, source_identity text, source_content_checksum text, compatibility_checksum text, source_num_fragments bigint, source_total_bp bigint, source_padding_letters bigint, writer_rows bigint, writer_batches bigint, published_head_bytes bigint, control_count bigint, position_count bigint, directory_entries bigint, position_segment_count bigint, control_encoded_bytes bigint, position_encoded_bytes bigint, control_chunks bigint, position_chunks bigint)
 AS 'MODULE_PATHNAME', 'build_minimizer_fixture'
 LANGUAGE C
@@ -3239,9 +3239,9 @@ PARALLEL UNSAFE
 SECURITY INVOKER
 STRICT;
 
-REVOKE ALL ON FUNCTION bioseq_internal.build_minimizer_fixture(regclass, text, bigint, smallint, smallint, smallint, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION bioseq_internal.build_minimizer_fixture(regclass, text, bigint, smallint, smallint, smallint, text, bigint) FROM PUBLIC;
 
-COMMENT ON FUNCTION bioseq_internal.build_minimizer_fixture(regclass, text, bigint, smallint, smallint, smallint, text) IS 'Builds and publishes an authenticated minimizer generation for one explicit sketch backend without opening a read session.';
+COMMENT ON FUNCTION bioseq_internal.build_minimizer_fixture(regclass, text, bigint, smallint, smallint, smallint, text, bigint) IS 'Builds and publishes an authenticated minimizer generation for one explicit sketch backend without opening a read session.';
 
 CREATE OR REPLACE FUNCTION bioseq_internal.read_minimizer_fixture(source_table regclass, index_name text, sequence_rowno bigint, kmer_size smallint, window_size smallint, selected_wire_format smallint, requested_backend text DEFAULT 'scalar')
 RETURNS TABLE (sidecar_table text, wire_format smallint, generation_id bigint, source_identity text, source_content_checksum text, compatibility_checksum text, source_num_fragments bigint, source_total_bp bigint, source_padding_letters bigint, validated_control_bytes bigint, validated_position_bytes bigint, validated_control_checksum text, validated_position_checksum text, lookup_count bigint, lookup_bp bigint, lookup_reverse boolean, lookup_positions_complete boolean, relation_opens bigint, index_scans bigint, head_scans bigint, manifest_directory_scans bigint, planned_request_groups bigint, executed_request_groups bigint, bulk_read_calls bigint, range_scan_calls bigint, payload_wanted_extents bigint, payload_read_extents bigint, payload_wanted_chunks bigint, payload_delivered_chunks bigint, payload_delivered_bytes bigint, payload_heap_rows_read bigint, payload_skipped_rows bigint, toast_values_read bigint, detoast_bytes bigint, cache_lookups bigint, selective_cold_index_preparation jsonb)

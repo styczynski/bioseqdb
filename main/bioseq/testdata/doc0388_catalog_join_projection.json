@@ -3163,7 +3163,7 @@
     },
     {
       "legacy_symbol": "bioseq_internal_rev3_test_build_fixture",
-      "routine_identity": "function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
+      "routine_identity": "function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)",
       "source_id": "S443",
       "target_cpp_identifier": "build_minimizer_fixture",
       "target_sql_name": "build_minimizer_fixture"
@@ -3352,8 +3352,8 @@
     }
   ],
   "inputs": {
-    "approved_delta_semantic_sha256": "c266a0619995980c8ac89065d3f59eceb203b97674d4445797827bcf655a2600",
-    "candidate_manifest_semantic_sha256": "d3bc289ea28d93a75fe0fb3e469e3ed00c75a4484f90cb64eb534951802b82bf",
+    "approved_delta_semantic_sha256": "a9b8190451c1f7150d4aed52ec69621342e6ec59c8c2adc1af1bbf1bc8d273f8",
+    "candidate_manifest_semantic_sha256": "93569570d8d26594045da4a344b4588a553be32f48c00bd2b4dd5ff29b2b4986",
     "legacy_sql_sha256": "0eb3aa6da75d80fc07c92dc1f6213ef27ddf1da7f4eaed33e6c69e6c8a7dfa71"
   },
   "schema": "bioseq_doc0388_catalog_join_projection/v1"

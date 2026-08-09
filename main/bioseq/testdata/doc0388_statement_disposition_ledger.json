@@ -11237,7 +11237,7 @@
       "reason": "retained catalog or install-script authority",
       "replacement_or_absorbing_source_ids": [],
       "semantic_target_identities": [
-        "sql:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)"
+        "sql:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)"
       ],
       "source_id": "S443",
       "statement_kind": "create_function",
@@ -11261,7 +11261,7 @@
       "reason": "retained catalog or install-script authority",
       "replacement_or_absorbing_source_ids": [],
       "semantic_target_identities": [
-        "sql:revoke:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text):execute:public:ordinary"
+        "sql:revoke:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint):execute:public:ordinary"
       ],
       "source_id": "S444",
       "statement_kind": "revoke",
@@ -11285,7 +11285,7 @@
       "reason": "retained catalog or install-script authority",
       "replacement_or_absorbing_source_ids": [],
       "semantic_target_identities": [
-        "sql:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)"
+        "sql:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)"
       ],
       "source_id": "S445",
       "statement_kind": "comment",

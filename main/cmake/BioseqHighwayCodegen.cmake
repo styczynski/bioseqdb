@@ -1373,6 +1373,12 @@ endfunction()
 #     "owner|family_field|slot_field|qualified::{target_namespace}::symbol"
 #   REQUIRED_SLOT_RECORDS
 #     "family_field|slot_field"
+#   UNIT_PROBE_RECORDS
+#     "key|/absolute/test_probe.cppm.in"
+#   BENCH_PROBE_RECORDS
+#     "key|/absolute/bench_probe.cppm.in"
+#   MINIMIZER_REPR_INSTANCE_RECORDS
+#     "owner|reference_or_paper|source_key|representation_type|u32,u64"
 #   OUTPUT_MODULES generated_modules
 #   OUTPUT_PRIMARY_MODULES generated_target_primaries
 #   OUTPUT_TARGET_IMPLEMENTATIONS generated_target_implementations
@@ -1381,6 +1387,9 @@ endfunction()
 #   OUTPUT_TEST_PRIMARY_MODULE generated_static_test_primary
 #   OUTPUT_TEST_IMPLEMENTATIONS generated_static_test_implementations
 #   OUTPUT_TEST_SUPPORT generated_static_test_support
+#   OUTPUT_UNIT_PROBE_IMPLEMENTATIONS generated_static_unit_probes
+#   OUTPUT_BENCH_PROBE_IMPLEMENTATIONS generated_static_bench_probes
+#   OUTPUT_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS generated_repr_instances
 #   OUTPUT_POLICY_TARGET highway_policy_target
 #   OUTPUT_PREPARE_TARGET highway_prepare_target
 #   OUTPUT_PREPARED_COMPILE_DATABASE highway_owned_compile_database
@@ -1411,6 +1420,9 @@ function(bioseq_add_highway_codegen)
     OUTPUT_TEST_PRIMARY_MODULE
     OUTPUT_TEST_IMPLEMENTATIONS
     OUTPUT_TEST_SUPPORT
+    OUTPUT_UNIT_PROBE_IMPLEMENTATIONS
+    OUTPUT_BENCH_PROBE_IMPLEMENTATIONS
+    OUTPUT_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS
     OUTPUT_POLICY_TARGET
     OUTPUT_PREPARE_TARGET
     OUTPUT_PREPARED_COMPILE_DATABASE
@@ -1426,6 +1438,9 @@ function(bioseq_add_highway_codegen)
     SOURCE_RECORDS
     SLOT_RECORDS
     REQUIRED_SLOT_RECORDS
+    UNIT_PROBE_RECORDS
+    BENCH_PROBE_RECORDS
+    MINIMIZER_REPR_INSTANCE_RECORDS
     DOMAIN_TOPOLOGY_MANIFESTS
     POLICY_DEFINITIONS
     POLICY_COMPILE_OPTIONS)
@@ -1956,6 +1971,143 @@ function(bioseq_add_highway_codegen)
     endif()
   endif()
 
+  set(_normalized_unit_probe_records)
+  set(_normalized_bench_probe_records)
+  set(_probe_template_keys)
+  set(_probe_template_paths)
+  foreach(_probe_kind IN ITEMS unit bench)
+    if(_probe_kind STREQUAL "unit")
+      set(_probe_records ${ARG_UNIT_PROBE_RECORDS})
+      set(_probe_cap 4)
+    else()
+      set(_probe_records ${ARG_BENCH_PROBE_RECORDS})
+      set(_probe_cap 1)
+    endif()
+    list(LENGTH _probe_records _probe_count)
+    if(_probe_count GREATER _probe_cap)
+      _bioseq_highway_fail(
+        "${_probe_kind} probe owner cap ${_probe_cap} exceeded")
+    endif()
+    foreach(_record IN LISTS _probe_records)
+      _bioseq_highway_reject_control_characters(
+        "${_probe_kind} probe record" "${_record}")
+      if(NOT _record MATCHES "^([^|]+)\\|([^|]+)$")
+        _bioseq_highway_fail(
+          "malformed ${_probe_kind} probe record '${_record}'; expected "
+          "key|absolute_template_path")
+      endif()
+      set(_probe_key "${CMAKE_MATCH_1}")
+      get_filename_component(_probe_path "${CMAKE_MATCH_2}" ABSOLUTE)
+      if(NOT _probe_key MATCHES "^[a-z][a-z0-9_]*$")
+        _bioseq_highway_fail(
+          "invalid ${_probe_kind} probe key '${_probe_key}'")
+      endif()
+      if(NOT EXISTS "${_probe_path}"
+          OR IS_DIRECTORY "${_probe_path}"
+          OR IS_SYMLINK "${_probe_path}"
+          OR NOT _probe_path MATCHES "\\.cppm\\.in$")
+        _bioseq_highway_fail(
+          "${_probe_kind} probe must be a regular non-symlink .cppm.in "
+          "template: '${_probe_path}'")
+      endif()
+      cmake_path(IS_PREFIX CMAKE_SOURCE_DIR "${_probe_path}"
+        NORMALIZE _probe_in_source_tree)
+      if(NOT _probe_in_source_tree)
+        _bioseq_highway_fail(
+          "${_probe_kind} probe template is outside the source tree: "
+          "'${_probe_path}'")
+      endif()
+      list(FIND _probe_template_keys "${_probe_key}" _duplicate_probe_key)
+      list(FIND _probe_template_paths "${_probe_path}" _duplicate_probe_path)
+      if(NOT _duplicate_probe_key EQUAL -1
+          OR NOT _duplicate_probe_path EQUAL -1)
+        _bioseq_highway_fail(
+          "duplicate or cross-role Highway probe '${_probe_key}'")
+      endif()
+      list(APPEND _probe_template_keys "${_probe_key}")
+      list(APPEND _probe_template_paths "${_probe_path}")
+      list(APPEND _normalized_${_probe_kind}_probe_records
+        "${_probe_key}|${_probe_path}")
+    endforeach()
+    list(SORT _normalized_${_probe_kind}_probe_records)
+  endforeach()
+  unset(_duplicate_probe_key)
+  unset(_duplicate_probe_path)
+  unset(_probe_count)
+  unset(_probe_cap)
+  unset(_probe_in_source_tree)
+  unset(_probe_key)
+  unset(_probe_kind)
+  unset(_probe_path)
+  unset(_probe_records)
+
+  set(_normalized_minimizer_repr_instance_records)
+  set(_minimizer_repr_owner_keys)
+  set(_minimizer_repr_typed_count 0)
+  set(_minimizer_repr_reference_count 0)
+  set(_minimizer_repr_paper_count 0)
+  foreach(_record IN LISTS ARG_MINIMIZER_REPR_INSTANCE_RECORDS)
+    _bioseq_highway_reject_control_characters(
+      "minimizer representation instance record" "${_record}")
+    if(NOT _record MATCHES
+        "^([^|]+)\\|(reference|paper)\\|([^|]+)\\|([^|]+)\\|([^|]+)$")
+      _bioseq_highway_fail(
+        "malformed minimizer representation instance '${_record}'; "
+        "expected owner|reference_or_paper|source_key|representation_type|"
+        "u32[,u64]")
+    endif()
+    set(_repr_owner "${CMAKE_MATCH_1}")
+    set(_repr_algorithm "${CMAKE_MATCH_2}")
+    set(_repr_source "${CMAKE_MATCH_3}")
+    set(_repr_type "${CMAKE_MATCH_4}")
+    set(_repr_storage_csv "${CMAKE_MATCH_5}")
+    if(NOT _repr_owner MATCHES "^[a-z][a-z0-9_]*$")
+      _bioseq_highway_fail(
+        "invalid minimizer representation owner '${_repr_owner}'")
+    endif()
+    list(FIND _source_keys "${_repr_source}" _repr_source_index)
+    list(FIND _minimizer_repr_owner_keys "${_repr_owner}"
+      _repr_owner_index)
+    if(_repr_source_index EQUAL -1 OR NOT _repr_owner_index EQUAL -1)
+      _bioseq_highway_fail(
+        "duplicate or unowned minimizer representation '${_repr_owner}'")
+    endif()
+    if(NOT _repr_storage_csv STREQUAL "u32"
+        AND NOT _repr_storage_csv STREQUAL "u64"
+        AND NOT _repr_storage_csv STREQUAL "u32,u64")
+      _bioseq_highway_fail(
+        "invalid minimizer representation storage set for '${_repr_owner}'")
+    endif()
+    string(REPLACE "," ";" _repr_storages "${_repr_storage_csv}")
+    list(LENGTH _repr_storages _repr_storage_count)
+    math(EXPR _minimizer_repr_typed_count
+      "${_minimizer_repr_typed_count} + ${_repr_storage_count}")
+    if(_repr_algorithm STREQUAL "reference")
+      math(EXPR _minimizer_repr_reference_count
+        "${_minimizer_repr_reference_count} + ${_repr_storage_count}")
+    else()
+      math(EXPR _minimizer_repr_paper_count
+        "${_minimizer_repr_paper_count} + ${_repr_storage_count}")
+    endif()
+    list(APPEND _minimizer_repr_owner_keys "${_repr_owner}")
+    list(APPEND _normalized_minimizer_repr_instance_records
+      "${_repr_owner}|${_repr_algorithm}|${_repr_source}|${_repr_type}|${_repr_storage_csv}")
+  endforeach()
+  list(SORT _normalized_minimizer_repr_instance_records)
+  list(SORT _minimizer_repr_owner_keys)
+  list(LENGTH _minimizer_repr_owner_keys _minimizer_repr_owner_count)
+  if(_minimizer_repr_owner_count GREATER 13
+      OR _minimizer_repr_typed_count GREATER 24
+      OR _minimizer_repr_reference_count GREATER 18
+      OR _minimizer_repr_paper_count GREATER 6)
+    _bioseq_highway_fail(
+      "minimizer representation owner/instantiation cap exceeded: "
+      "owners=${_minimizer_repr_owner_count}, "
+      "typed=${_minimizer_repr_typed_count}, "
+      "reference=${_minimizer_repr_reference_count}, "
+      "paper=${_minimizer_repr_paper_count}")
+  endif()
+
   set(_source_manifest_contents "bioseq-highway-sources-v1\n")
   string(APPEND _source_manifest_contents
     "contract\t${ARG_CONTRACT_MODULE}\n"
@@ -1978,6 +2130,19 @@ function(bioseq_add_highway_codegen)
     string(APPEND _source_manifest_contents
       "required-slot\t${_tsv_record}\n")
   endforeach()
+  foreach(_record IN LISTS _normalized_unit_probe_records)
+    string(REPLACE "|" "\t" _tsv_record "${_record}")
+    string(APPEND _source_manifest_contents "unit-probe\t${_tsv_record}\n")
+  endforeach()
+  foreach(_record IN LISTS _normalized_bench_probe_records)
+    string(REPLACE "|" "\t" _tsv_record "${_record}")
+    string(APPEND _source_manifest_contents "bench-probe\t${_tsv_record}\n")
+  endforeach()
+  foreach(_record IN LISTS _normalized_minimizer_repr_instance_records)
+    string(REPLACE "|" "\t" _tsv_record "${_record}")
+    string(APPEND _source_manifest_contents
+      "minimizer-repr-instance\t${_tsv_record}\n")
+  endforeach()
   _bioseq_highway_write_if_different(
     "${_source_manifest}" "${_source_manifest_contents}")
 
@@ -1993,13 +2158,16 @@ function(bioseq_add_highway_codegen)
       BIOSEQ_HIGHWAY_GENERATOR_INPUT TRUE)
   endforeach()
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    ${_source_paths})
+    ${_source_paths} ${_probe_template_paths})
 
   set(_generated_modules)
   set(_generated_primary_modules)
   set(_generated_target_implementations)
   set(_generated_test_primary_module)
   set(_generated_test_implementations)
+  set(_generated_unit_probe_implementations)
+  set(_generated_bench_probe_implementations)
+  set(_generated_minimizer_repr_instance_implementations)
   foreach(_target_record IN LISTS _target_records)
     if(NOT _target_record MATCHES
         "^([^|]+)\\|([^|]+)\\|([^|]+)\\|([^|]+)\\|([0-9]+)$")
@@ -2023,6 +2191,16 @@ function(bioseq_add_highway_codegen)
           "${_target_dir}/instances/${_slot_owner}.cppm")
       endif()
     endforeach()
+    foreach(_repr_owner IN LISTS _minimizer_repr_owner_keys)
+      set(_repr_output
+        "${_target_dir}/instances/minimizer_repr_${_repr_owner}.cppm")
+      list(APPEND _generated_target_implementations "${_repr_output}")
+      list(APPEND _generated_minimizer_repr_instance_implementations
+        "${_repr_output}")
+      if(_target_record STREQUAL _static_target_record)
+        list(APPEND _generated_test_implementations "${_repr_output}")
+      endif()
+    endforeach()
     foreach(_partition IN LISTS _partitions)
       list(APPEND _generated_target_implementations
         "${_target_dir}/${_partition}.cppm")
@@ -2031,6 +2209,24 @@ function(bioseq_add_highway_codegen)
           "${_target_dir}/${_partition}.cppm")
       endif()
     endforeach()
+    if(_target_record STREQUAL _static_target_record)
+      foreach(_record IN LISTS _normalized_unit_probe_records)
+        if(NOT _record MATCHES "^([^|]+)\\|([^|]+)$")
+          _bioseq_highway_fail(
+            "internal malformed normalized unit probe '${_record}'")
+        endif()
+        list(APPEND _generated_unit_probe_implementations
+          "${_target_dir}/probes/unit_${CMAKE_MATCH_1}.cppm")
+      endforeach()
+      foreach(_record IN LISTS _normalized_bench_probe_records)
+        if(NOT _record MATCHES "^([^|]+)\\|([^|]+)$")
+          _bioseq_highway_fail(
+            "internal malformed normalized benchmark probe '${_record}'")
+        endif()
+        list(APPEND _generated_bench_probe_implementations
+          "${_target_dir}/probes/bench_${CMAKE_MATCH_1}.cppm")
+      endforeach()
+    endif()
   endforeach()
   set(_dispatch_registry "${_output_root}/highway_registry.cppm")
   set(_dispatch_inventory "${_output_root}/dispatch_inventory.cppm")
@@ -2043,6 +2239,8 @@ function(bioseq_add_highway_codegen)
   list(APPEND _generated_modules
     ${_generated_primary_modules}
     ${_generated_target_implementations}
+    ${_generated_unit_probe_implementations}
+    ${_generated_bench_probe_implementations}
     "${_dispatch_registry}"
     "${_dispatch_inventory}"
     "${_test_support}")
@@ -2151,6 +2349,7 @@ function(bioseq_add_highway_codegen)
       "${_signature_source}"
       ${_domain_topology_paths}
       ${_source_paths}
+      ${_probe_template_paths}
     COMMENT
       "Generating ${_platform} Highway target module graph "
       "(compiled mask ${_compiled_mask})"
@@ -2177,6 +2376,9 @@ function(bioseq_add_highway_codegen)
       "${ARG_OUTPUT_TEST_PRIMARY_MODULE}|${_generated_test_primary_module}"
       "${ARG_OUTPUT_TEST_IMPLEMENTATIONS}|${_generated_test_implementations}"
       "${ARG_OUTPUT_TEST_SUPPORT}|${_test_support}"
+      "${ARG_OUTPUT_UNIT_PROBE_IMPLEMENTATIONS}|${_generated_unit_probe_implementations}"
+      "${ARG_OUTPUT_BENCH_PROBE_IMPLEMENTATIONS}|${_generated_bench_probe_implementations}"
+      "${ARG_OUTPUT_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS}|${_generated_minimizer_repr_instance_implementations}"
       "${ARG_OUTPUT_POLICY_TARGET}|${ARG_POLICY_TARGET}"
       "${ARG_OUTPUT_PREPARE_TARGET}|${_prepare_target}"
       "${ARG_OUTPUT_PREPARED_COMPILE_DATABASE}|${_owned_compile_database}"

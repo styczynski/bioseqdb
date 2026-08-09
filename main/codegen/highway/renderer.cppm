@@ -101,6 +101,21 @@ build_target_coordinates(const target_manifest& inventory) {
     return output.str();
 }
 
+[[nodiscard]] inline std::string debug_assert_fragment(
+    const extracted_source& source) {
+    if (!source.body.contains("DEBUG_ASSERT")) {
+        return {};
+    }
+    return
+        "#ifdef NDEBUG\n"
+        "#ifndef DEBUG_ASSERT\n"
+        "#define DEBUG_ASSERT(...) (void)0\n"
+        "#endif\n"
+        "#else\n"
+        "#include <libassert/assert.hpp>\n"
+        "#endif\n\n";
+}
+
 [[nodiscard]] inline std::string dispatch_fragment(
     const target_manifest& inventory) {
     std::ostringstream output;
@@ -196,6 +211,108 @@ build_target_coordinates(const target_manifest& inventory) {
     }
     expression.replace(position, marker.size(), name_space);
     return expression;
+}
+
+inline void replace_all(
+    std::string& text,
+    const std::string_view needle,
+    const std::string_view replacement) {
+    if (needle.empty()) return;
+    std::size_t position = 0u;
+    while ((position = text.find(needle, position)) != std::string::npos) {
+        text.replace(position, needle.size(), replacement);
+        position += replacement.size();
+    }
+}
+
+[[nodiscard]] inline std::string render_probe_implementation(
+    const generation_plan& plan,
+    const target_spec& target,
+    const namespace_materialization::materialization_coordinate& coordinate,
+    const probe_spec& probe,
+    const std::string_view role) {
+    std::string body = read_file(probe.path);
+    replace_all(
+        body, "@BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@", coordinate.module_name);
+    replace_all(
+        body, "@BIOSEQ_HIGHWAY_PROBE_TARGET_TOKEN@", target.token);
+    replace_all(
+        body,
+        "@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@",
+        coordinate.identity_namespace);
+    replace_all(body, "@BIOSEQ_HIGHWAY_PROBE_KEY@", probe.key);
+    if (body.contains("@BIOSEQ_HIGHWAY_PROBE_")
+        || body.contains("export module")
+        || !body.contains("module " + coordinate.module_name + ";")
+        || body.contains("HWY_DYNAMIC_DISPATCH")
+        || body.contains("HWY_STATIC_DISPATCH")
+        || body.contains("HWY_EXPORT(")) {
+        throw std::runtime_error(
+            std::string{role} + " probe template '" + probe.key
+            + "' did not materialize as a private ordinary implementation "
+              "unit of the fixed-target primary");
+    }
+    std::ostringstream output;
+    output << fixed_target_fragment(plan.target_inventory, target)
+           << "// Generated " << role << " probe from "
+           << diagnostic_source_path(probe.path) << "; do not edit.\n"
+           << body;
+    if (body.empty() || body.back() != '\n') output << '\n';
+    return output.str();
+}
+
+[[nodiscard]] inline std::string render_minimizer_repr_instantiation(
+    const generation_plan& plan,
+    const target_spec& target,
+    const namespace_materialization::materialization_coordinate& coordinate,
+    const minimizer_repr_instance_spec& instance,
+    const source_spec& source) {
+    const std::string prefix = instance.algorithm == "reference"
+        ? "reference_minimap_int_repr_"
+        : "paper_nthash_repr_";
+    const std::string algorithm_prefix = instance.algorithm + "_";
+    if (!instance.owner_key.starts_with(algorithm_prefix)) {
+        throw std::runtime_error(
+            "minimizer representation owner lost its algorithm prefix: "
+            + instance.owner_key);
+    }
+    const std::string identity =
+        instance.owner_key.substr(algorithm_prefix.size());
+    std::ostringstream output;
+    output << fixed_target_fragment(plan.target_inventory, target)
+           << "// Generated bounded minimizer representation owner; do not edit.\n"
+           << "module " << coordinate.module_name << ";\n\n"
+           << "import std;\n"
+           << "import bioseq.common.sequan_compat;\n"
+           << "import bioseq.sequences.kmers.highway_contract;\n"
+           << "import :" << source.partition << ";\n\n"
+           << "namespace bioseq::simd::" << coordinate.identity_namespace
+           << " {\n\n";
+    for (const std::string& storage : instance.storage_types) {
+        const std::string cpp_storage = storage == "u32"
+            ? "::std::uint32_t"
+            : "::std::uint64_t";
+        output
+            << "[[nodiscard]] HWY_ATTR bool " << prefix << identity << "_"
+            << storage << "(\n"
+            << "    ::bioseq::minimizers::MinimizerKernelInvocation& invocation,\n"
+            << "    ::bioseq::minimizers::MinimizerKernelResult& result)\n"
+            << "{\n    return ";
+        if (instance.algorithm == "reference") {
+            output << "minimizer_kernel_detail::run_reference<\n"
+                   << "        " << instance.representation_type
+                   << ", ::seq::dna4, " << cpp_storage
+                   << ">(invocation, result);\n";
+        } else {
+            output << "coarse_paper_detail::run_paper<\n"
+                   << "        " << instance.representation_type << ", "
+                   << cpp_storage << ">(invocation, result);\n";
+        }
+        output << "}\n\n";
+    }
+    output << "}  // namespace bioseq::simd::"
+           << coordinate.identity_namespace << "\n";
+    return output.str();
 }
 
 inline constexpr std::string_view alignment_family_prefix = "alignment_";
@@ -947,6 +1064,7 @@ collect_slot_owners(const source_manifest& inventory) {
     const std::map<std::string, const source_spec*, std::less<>>& by_key) {
     std::ostringstream output;
     output << fixed_target_fragment(plan.target_inventory, target)
+           << debug_assert_fragment(source)
            << "// Generated from " << source.source.key << "; do not edit.\n"
            << "module " << coordinate.module_name << ":"
            << source.source.partition << ";\n\n";
@@ -1194,7 +1312,11 @@ collect_slot_owners(const source_manifest& inventory) {
         for (const alignment_family_binding& family : alignment_families) {
             const auto code = static_cast<unsigned int>(family.alphabet_code);
             output << "        {.alphabet_code = " << code
-                   << "u, .typed_table = &alignment_" << code << "},\n";
+                   << "u, .typed_table_complete = "
+                      "::bioseq::simd::alignment_kernels_complete("
+                      "alignment_"
+                   << code << "), .typed_table = &alignment_" << code
+                   << "},\n";
         }
         output << "    };\n"
                << "    table.alignment_by_alphabet = "
@@ -1395,7 +1517,7 @@ inline void validate_rendered_artifact(
     const generation_plan& plan) {
     if (artifact.relative_path.extension() != ".cppm") {
         throw std::runtime_error(
-            "Highway generator attempted non-.cppm production output: "
+            "Highway generator attempted non-.cppm output: "
             + artifact.relative_path.string());
     }
     static constexpr std::array<std::string_view, 5> universally_forbidden{
@@ -1466,6 +1588,34 @@ inline void validate_rendered_artifact(
             artifact.relative_path.string()
             + ": kernel instantiation must own one target/partition binding");
     }
+    if (artifact.kind == artifact_kind::minimizer_repr_instantiation
+        && (!artifact.content.contains("#define HWY_TARGET ")
+            || !artifact.content.contains("import :minimizer_")
+            || !artifact.content.contains("_repr_")
+            || artifact.content.contains("Populate_")
+            || artifact.content.contains("BindHighwayTarget"))) {
+        throw std::runtime_error(
+            artifact.relative_path.string()
+            + ": minimizer representation owner must remain one bounded "
+              "ordinary target implementation");
+    }
+    if ((artifact.kind == artifact_kind::unit_probe_implementation
+         || artifact.kind == artifact_kind::bench_probe_implementation)
+        && (!artifact.content.contains("#define HWY_TARGET ")
+            || !artifact.content.contains("import :")
+            || artifact.content.contains("export module")
+            || artifact.content.contains("BindHighwayTarget"))) {
+        throw std::runtime_error(
+            artifact.relative_path.string()
+            + ": target-private probe escaped its ordinary implementation "
+              "ownership boundary");
+    }
+    if (artifact.kind == artifact_kind::unit_probe_implementation
+        && !artifact.content.contains("BIOSEQ_TEST_INDEXES")) {
+        throw std::runtime_error(
+            artifact.relative_path.string()
+            + ": unit probe lacks the BIOSEQ_TEST_INDEXES seam guard");
+    }
 }
 
 }  // namespace detail
@@ -1526,6 +1676,26 @@ inline void validate_rendered_artifact(
                     *source->second),
             });
         }
+        for (const minimizer_repr_instance_spec& instance :
+             plan.source_inventory.minimizer_repr_instances) {
+            const auto source = sources_by_key.find(instance.source_key);
+            if (source == sources_by_key.end()) {
+                throw std::runtime_error(
+                    "renderer cannot resolve minimizer representation owner '"
+                    + instance.owner_key + "' source '" + instance.source_key
+                    + "'");
+            }
+            result.artifacts.push_back(generated_artifact{
+                .relative_path = root / "instances"
+                    / ("minimizer_repr_" + instance.owner_key + ".cppm"),
+                .module_name = coordinate.module_name,
+                .target_token = target.token,
+                .source_key = instance.source_key,
+                .kind = artifact_kind::minimizer_repr_instantiation,
+                .content = detail::render_minimizer_repr_instantiation(
+                    plan, target, coordinate, instance, *source->second),
+            });
+        }
         for (const extracted_source& source : plan.extracted_sources) {
             result.artifacts.push_back(generated_artifact{
                 .relative_path = root / (source.source.partition + ".cppm"),
@@ -1537,6 +1707,34 @@ inline void validate_rendered_artifact(
                 .content = detail::render_partition(
                     plan, target, coordinate, source, sources_by_key),
             });
+        }
+        if (target.token == plan.target_inventory.static_target_token) {
+            for (const probe_spec& probe :
+                 plan.source_inventory.unit_probes) {
+                result.artifacts.push_back(generated_artifact{
+                    .relative_path = root / "probes"
+                        / ("unit_" + probe.key + ".cppm"),
+                    .module_name = coordinate.module_name,
+                    .target_token = target.token,
+                    .source_key = probe.key,
+                    .kind = artifact_kind::unit_probe_implementation,
+                    .content = detail::render_probe_implementation(
+                        plan, target, coordinate, probe, "unit"),
+                });
+            }
+            for (const probe_spec& probe :
+                 plan.source_inventory.bench_probes) {
+                result.artifacts.push_back(generated_artifact{
+                    .relative_path = root / "probes"
+                        / ("bench_" + probe.key + ".cppm"),
+                    .module_name = coordinate.module_name,
+                    .target_token = target.token,
+                    .source_key = probe.key,
+                    .kind = artifact_kind::bench_probe_implementation,
+                    .content = detail::render_probe_implementation(
+                        plan, target, coordinate, probe, "benchmark"),
+                });
+            }
         }
     }
     result.artifacts.push_back(generated_artifact{

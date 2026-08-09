@@ -22,15 +22,17 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 using std::size_t;
 using std::uint64_t;
-using ::bioseq::minimizers::MinimapSketchData;
 using ::bioseq::minimizers::MinimizerKernelAlgorithm;
 using ::bioseq::minimizers::MinimizerKernelInvocation;
 using ::bioseq::minimizers::MinimizerKernelResult;
 using ::bioseq::minimizers::MinimizerKernelStatus;
+using ::bioseq::minimizers::MinimizerOutputLayout;
+using ::bioseq::minimizers::MinimizerRepr;
 using ::bioseq::minimizers::MinimizerSink;
 using ::bioseq::minimizers::PackedSequenceKernelView;
 
 using ::bioseq::minimizers::minimizer_sink_collector;
+using ::bioseq::minimizers::minimizer_output_layout_v;
 
 template<class D, std::size_t Capacity>
 class reference_minimizer_ring {
@@ -562,27 +564,37 @@ inline void collect_minimizers_simd_constexpr(
 
 namespace minimizer_kernel_detail {
 
-template<sequence_alphabet Alphabet, class StorageUnit>
+template<class MinimizerT, sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] bool run_reference(
     MinimizerKernelInvocation& invocation,
     MinimizerKernelResult& result)
 {
+    static_assert(
+        minimizer_output_layout_v<MinimizerT>
+            != MinimizerOutputLayout::unsupported);
+    if (invocation.output_hash_mask
+            != static_cast<std::uint64_t>(MinimizerT::hash_field_mask)
+        || invocation.output_position_mask
+            != static_cast<std::uint64_t>(MinimizerT::pos_field_mask)) {
+        result.status = MinimizerKernelStatus::invalid_configuration;
+        return false;
+    }
     return ::bioseq::minimizers::kernel_detail::
         with_borrowed_compact_range<Alphabet, StorageUnit>(
         invocation.sequence,
         [&invocation, &result]<class Range>(Range& range) {
-            minimizer_sink_collector<MinimapSketchData> collector{
+            minimizer_sink_collector<MinimizerT> collector{
                 invocation.sink};
 #ifdef BIOSEQ_TEST_INDEXES
             reset_reference_simd_minimizer_test_receipt();
 #endif
             if (invocation.window == 10u && invocation.kmer == 15u) {
                 collect_minimizers_simd_constexpr<
-                    10u, 15u, minimap_int_hasher, MinimapSketchData>(
+                    10u, 15u, minimap_int_hasher, MinimizerT>(
                         collector, range, range.begin(), range.end());
             } else {
                 collect_minimizers_simd<
-                    minimap_int_hasher, MinimapSketchData>(
+                    minimap_int_hasher, MinimizerT>(
                         collector, range, range.begin(), range.end(),
                     invocation.window, invocation.kmer);
             }
@@ -612,6 +624,47 @@ template<sequence_alphabet Alphabet, class StorageUnit>
 }
 
 } // namespace minimizer_kernel_detail
+
+// Definitions live in generated per-representation owners so the coarse
+// scheduler leaf does not instantiate the algorithm body for every layout.
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l15_k15_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l15_k15_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l28_k15_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l28_k15_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l33_k15_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l33_k15_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l63_k15_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l63_k15_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 4
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l7_k7_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l7_k7_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l17_k7_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l17_k7_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l49_k7_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l49_k7_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l63_k7_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l63_k7_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l27_k27_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool reference_minimap_int_repr_l63_k27_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+#endif
 
 /**
  * One topology-materialized reference-minimizer case.
@@ -643,6 +696,8 @@ requires (
         result.status = MinimizerKernelStatus::invalid_configuration;
         return result;
     } else {
+        constexpr std::size_t source_lane_max_kmer =
+            std::same_as<StorageUnit, std::uint32_t> ? 15u : 31u;
         if (!invocation.sequence.final_segment
             || invocation.fragments.present()
             || invocation.emitted_position_base != 0u
@@ -650,10 +705,7 @@ requires (
             || invocation.window == 0u
             || invocation.window > 256u
             || invocation.kmer == 0u
-            || invocation.kmer > 15u
-            || invocation.sequence.end_symbol
-                > static_cast<std::size_t>(
-                    MinimapSketchData::pos_field_mask) + 1u
+            || invocation.kmer > source_lane_max_kmer
             || invocation.window
                 > (std::numeric_limits<std::size_t>::max)()
                     - invocation.kmer) {
@@ -661,8 +713,105 @@ requires (
             return result;
         }
 
-        const bool accepted = minimizer_kernel_detail::run_reference<
-            Alphabet, StorageUnit>(invocation, result);
+        bool accepted = false;
+        switch (invocation.output_layout) {
+            case MinimizerOutputLayout::repr_l15_k15_u64:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = reference_minimap_int_repr_l15_k15_u32(
+                        invocation, result);
+                } else {
+                    accepted = reference_minimap_int_repr_l15_k15_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l28_k15_u64:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = reference_minimap_int_repr_l28_k15_u32(
+                        invocation, result);
+                } else {
+                    accepted = reference_minimap_int_repr_l28_k15_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l33_k15_u64:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = reference_minimap_int_repr_l33_k15_u32(
+                        invocation, result);
+                } else {
+                    accepted = reference_minimap_int_repr_l33_k15_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l63_k15_u128:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = reference_minimap_int_repr_l63_k15_u32(
+                        invocation, result);
+                } else {
+                    accepted = reference_minimap_int_repr_l63_k15_u64(
+                        invocation, result);
+                }
+                break;
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 4
+            case MinimizerOutputLayout::repr_l7_k7_u32:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = reference_minimap_int_repr_l7_k7_u32(
+                        invocation, result);
+                } else {
+                    accepted = reference_minimap_int_repr_l7_k7_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l17_k7_u32:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = reference_minimap_int_repr_l17_k7_u32(
+                        invocation, result);
+                } else {
+                    accepted = reference_minimap_int_repr_l17_k7_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l49_k7_u64:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = reference_minimap_int_repr_l49_k7_u32(
+                        invocation, result);
+                } else {
+                    accepted = reference_minimap_int_repr_l49_k7_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l63_k7_u128:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = reference_minimap_int_repr_l63_k7_u32(
+                        invocation, result);
+                } else {
+                    accepted = reference_minimap_int_repr_l63_k7_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l27_k27_u128:
+                if constexpr (std::same_as<StorageUnit, std::uint64_t>) {
+                    accepted = reference_minimap_int_repr_l27_k27_u64(
+                        invocation, result);
+                } else {
+                    result.status =
+                        MinimizerKernelStatus::invalid_configuration;
+                }
+                break;
+            case MinimizerOutputLayout::repr_l63_k27_u128:
+                if constexpr (std::same_as<StorageUnit, std::uint64_t>) {
+                    accepted = reference_minimap_int_repr_l63_k27_u64(
+                        invocation, result);
+                } else {
+                    result.status =
+                        MinimizerKernelStatus::invalid_configuration;
+                }
+                break;
+#endif
+            case MinimizerOutputLayout::unsupported:
+            default:
+                result.status = MinimizerKernelStatus::invalid_configuration;
+                break;
+        }
         if (!accepted && result.status == MinimizerKernelStatus::ok) {
             result.status = MinimizerKernelStatus::invalid_sequence_view;
         }

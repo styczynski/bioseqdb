@@ -10,10 +10,14 @@ module;
 #include <boost/version.hpp>
 
 #include <algorithm>
+#include <array>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
+#include <new>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -219,51 +223,117 @@ using ExactProof = bioseq::minimizers::TwoStackExecutionProof;
 
 struct KernelSinkAdapter {
     using sketch_type = bioseq::minimizers::MinimapSketchData;
+    static constexpr std::size_t batch_capacity = 256u;
+    static constexpr auto output_layout =
+        bioseq::minimizers::minimizer_output_layout_v<sketch_type>;
     static_assert(sizeof(sketch_type) == sizeof(std::uint64_t));
     static_assert(std::is_trivially_copyable_v<sketch_type>);
+    static_assert(std::is_trivially_destructible_v<sketch_type>);
+    static_assert(std::is_standard_layout_v<sketch_type>);
+    static_assert(std::same_as<sketch_type::storage_t, std::uint64_t>);
+
+    explicit KernelSinkAdapter(
+            void* context,
+            ExactSimdIndexAppendRecordsFn records_callback,
+            ExactSimdIndexAppendRawFn raw_callback) noexcept
+        : collector_context(context),
+          append_records(records_callback),
+          append_raw(raw_callback) {}
 
     void* collector_context = nullptr;
+    ExactSimdIndexAppendRecordsFn append_records = nullptr;
     ExactSimdIndexAppendRawFn append_raw = nullptr;
-    std::vector<sketch_type> sketches;
-    std::vector<std::uint64_t> raw;
+    alignas(sketch_type)
+        std::array<std::byte, batch_capacity * sizeof(sketch_type)> batch;
+    std::exception_ptr exception{};
+    std::size_t committed = 0u;
     bool accepted = true;
+    bool acquired = false;
 
-    [[nodiscard]] static std::span<sketch_type> acquire(
+    void validate(
+            const bioseq::minimizers::MinimizerKernelResult& result) {
+        if (exception != nullptr) {
+            std::rethrow_exception(exception);
+        }
+        if (acquired || result.emitted != committed) {
+            accepted = false;
+        }
+    }
+
+    [[nodiscard]] static bioseq::minimizers::MinimizerSinkBatchView acquire(
             void* opaque,
             std::size_t minimum) {
         auto& self = *static_cast<KernelSinkAdapter*>(opaque);
-        if (!self.accepted) return {};
-        try {
-            self.sketches.resize(minimum);
-            self.raw.resize(minimum);
-        } catch (...) {
+        if (!self.accepted || self.acquired || minimum > batch_capacity) {
             self.accepted = false;
             return {};
         }
-        return self.sketches;
+        self.acquired = true;
+        return {
+            .data = self.batch.data(),
+            .capacity = batch_capacity,
+            .layout = output_layout,
+            .record_size = sizeof(sketch_type),
+            .record_alignment = alignof(sketch_type),
+        };
     }
 
     static void commit(void* opaque, std::size_t initialized) noexcept {
         auto& self = *static_cast<KernelSinkAdapter*>(opaque);
-        if (!self.accepted
-            || self.append_raw == nullptr
-            || initialized > self.sketches.size()
-            || initialized > self.raw.size()) {
+        if (!self.acquired || initialized > batch_capacity) {
             self.accepted = false;
             return;
         }
-        if (initialized != 0u) {
-            std::memcpy(
-                self.raw.data(),
-                self.sketches.data(),
-                initialized * sizeof(std::uint64_t));
+        auto* records = std::launder(
+            reinterpret_cast<sketch_type*>(self.batch.data()));
+        const auto destroy_records =
+            [&self, records, initialized]() noexcept {
+                std::destroy_n(records, initialized);
+                self.acquired = false;
+            };
+        if (!self.accepted || self.append_records == nullptr) {
+            destroy_records();
+            self.accepted = false;
+            return;
+        }
+        try {
+            self.accepted = self.append_records(
+                self.collector_context, records, initialized);
+        } catch (...) {
+            self.exception = std::current_exception();
+            self.accepted = false;
+        }
+        destroy_records();
+        if (self.accepted) {
+            self.committed += initialized;
+        }
+    }
+
+    [[nodiscard]] static bool append_raw_u64(
+            void* opaque,
+            bioseq::minimizers::MinimizerOutputLayout layout,
+            const std::uint64_t* values,
+            std::size_t count) noexcept {
+        auto& self = *static_cast<KernelSinkAdapter*>(opaque);
+        if (!self.accepted || self.acquired
+            || self.append_raw == nullptr
+            || layout != bioseq::minimizers::MinimizerOutputLayout::
+                repr_l28_k15_u64
+            || (count != 0u && values == nullptr)) {
+            self.accepted = false;
+            return false;
         }
         try {
             self.accepted = self.append_raw(
-                self.collector_context, self.raw.data(), initialized);
+                self.collector_context, values, count);
         } catch (...) {
+            self.exception = std::current_exception();
             self.accepted = false;
         }
+        if (self.accepted) {
+            self.committed += count;
+        }
+        return self.accepted;
     }
 
     [[nodiscard]] bioseq::minimizers::MinimizerSink sink() noexcept {
@@ -271,6 +341,7 @@ struct KernelSinkAdapter {
             .state = this,
             .acquire = acquire,
             .commit = commit,
+            .append_raw_u64 = append_raw_u64,
         };
     }
 };
@@ -432,6 +503,15 @@ bridge_paper_proof(const PackedPaperProof& proof) noexcept {
         ->append_raw_storage(raw, count);
 }
 
+[[nodiscard]] bool append_paper_records(
+        void* opaque,
+        const bioseq::minimizers::MinimapSketchData* records,
+        std::size_t count) {
+    return static_cast<bioseq::minimizers::sketch_collector*>(opaque)
+        ->append_records(std::span<const bioseq::minimizers::MinimapSketchData>{
+            records, count});
+}
+
 [[nodiscard]] constexpr PackedPaperNthashIndexStatus paper_status_from_kernel(
         const bioseq::minimizers::MinimizerKernelResult& result,
         bool sink_accepted) noexcept {
@@ -462,16 +542,13 @@ bridge_paper_proof(const PackedPaperProof& proof) noexcept {
 
 ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
         const ExactSimdIndexBridgeRequest& request) {
-    if (request.kernels == nullptr
-        || request.kernels->two_stack_nthash == nullptr
-        || request.read_fragment == nullptr
-        || request.release_fragment == nullptr
-        || request.append_raw == nullptr
-        || request.sequence_context == nullptr
-        || request.collector_context == nullptr) {
-        return rejected_bridge_result(ExactSimdIndexStatus::invalid_state);
+    // Preserve the typed facade's fail-closed boundary order: the source
+    // alphabet and packed storage identity are observable input semantics,
+    // while missing callbacks/table state is an orchestration failure.
+    if (request.alphabet_code > 1u) {
+        return rejected_bridge_result(
+            ExactSimdIndexStatus::unsupported_alphabet);
     }
-
     if (request.storage_unit_bytes != 1u
         && request.storage_unit_bytes != 2u
         && request.storage_unit_bytes != 4u
@@ -479,9 +556,20 @@ ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
         return rejected_bridge_result(
             ExactSimdIndexStatus::unsupported_storage);
     }
+    if (request.kernels == nullptr
+        || request.kernels->two_stack_nthash == nullptr
+        || request.read_fragment == nullptr
+        || request.release_fragment == nullptr
+        || request.append_records == nullptr
+        || request.append_raw == nullptr
+        || request.sequence_context == nullptr
+        || request.collector_context == nullptr) {
+        return rejected_bridge_result(ExactSimdIndexStatus::invalid_state);
+    }
     const std::size_t storage_bits = request.storage_unit_bytes * 8u;
-    if (request.bits_per_symbol == 0u
-        || request.bits_per_symbol > 8u) {
+    const std::uint8_t expected_bits_per_symbol =
+        request.alphabet_code == 0u ? 2u : 3u;
+    if (request.bits_per_symbol != expected_bits_per_symbol) {
         return rejected_bridge_result(
             ExactSimdIndexStatus::unsupported_alphabet);
     }
@@ -538,9 +626,9 @@ ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
             request.hi_unit * letters_per_unit, request.total_bp),
     };
     KernelSinkAdapter sink{
-        .collector_context = request.collector_context,
-        .append_raw = request.append_raw,
-    };
+        request.collector_context,
+        request.append_records,
+        request.append_raw};
     bioseq::minimizers::MinimizerKernelInvocation invocation{
         .sequence = {
             .storage = nullptr,
@@ -563,12 +651,20 @@ ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
         .window = request.window_size,
         .kmer = request.kmer_size,
         .emitted_position_base = request.emitted_position_base,
+        .output_layout =
+            bioseq::minimizers::minimizer_output_layout_v<
+                bioseq::minimizers::MinimapSketchData>,
+        .output_hash_mask =
+            bioseq::minimizers::MinimapSketchData::hash_field_mask,
+        .output_position_mask =
+            bioseq::minimizers::MinimapSketchData::pos_field_mask,
         .two_stack_route = bioseq::minimizers::TwoStackRoute::
             chronological_continuation,
         .sink = sink.sink(),
     };
     const bioseq::minimizers::MinimizerKernelResult kernel_result =
         request.kernels->two_stack_nthash(invocation);
+    sink.validate(kernel_result);
     if (kernel_result.proof.algorithm
         != bioseq::minimizers::MinimizerKernelAlgorithm::two_stack_nthash) {
         return rejected_bridge_result(ExactSimdIndexStatus::invalid_state);
@@ -582,22 +678,38 @@ ExactSimdIndexBridgeResult collect_exact_simd_index_erased(
 PackedPaperNthashIndexBridgeResult
 collect_packed_paper_nthash_index_erased(
         const PackedPaperNthashIndexBridgeRequest& request) {
-    if (request.kernels == nullptr
-        || request.kernels->paper_nthash == nullptr
-        || request.collector_context == nullptr) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::invalid_state);
-    }
     if (request.window_size != 10u || request.kmer_size != 15u) {
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::invalid_configuration);
     }
-    if (request.storage_unit_bytes != sizeof(std::uint8_t)
-        && request.storage_unit_bytes != sizeof(std::uint16_t)
-        && request.storage_unit_bytes != sizeof(std::uint32_t)
+    if (request.sequence.alphabet_code != 0u) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::unsupported_alphabet);
+    }
+    if (request.storage_unit_bytes != sizeof(std::uint32_t)
         && request.storage_unit_bytes != sizeof(std::uint64_t)) {
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_storage);
+    }
+    if (request.sequence.storage_unit_bytes != request.storage_unit_bytes
+        || request.sequence.bits_per_symbol != 2u
+        || request.letters_per_unit
+            != request.storage_unit_bytes * 8u / 2u) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::unsupported_storage);
+    }
+    const std::size_t letters_per_unit = request.letters_per_unit;
+    if (request.storage_units
+            > (std::numeric_limits<std::size_t>::max)()
+                / letters_per_unit
+        || request.local_bp_size
+            > request.storage_units * letters_per_unit
+        || request.sequence.storage_units != request.storage_units
+        || request.sequence.end_symbol != request.local_bp_size
+        || request.sequence.begin_symbol != 0u
+        || !request.sequence.final_segment) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::invalid_range);
     }
     if (request.local_bp_size
         > static_cast<std::size_t>(
@@ -612,45 +724,34 @@ collect_packed_paper_nthash_index_erased(
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_representation);
     }
-    const std::uint8_t bits_per_symbol =
-        request.sequence.bits_per_symbol;
-    if (bits_per_symbol == 0u || bits_per_symbol > 8u) {
+    if (request.kernels == nullptr
+        || request.kernels->paper_nthash == nullptr
+        || request.sequence_context == nullptr
+        || request.collector_context == nullptr) {
         return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::unsupported_alphabet);
-    }
-    const std::size_t letters_per_unit =
-        request.storage_unit_bytes * 8u / bits_per_symbol;
-    if (letters_per_unit == 0u
-        || request.storage_units
-            > (std::numeric_limits<std::size_t>::max)()
-                / letters_per_unit
-        || request.local_bp_size
-            > request.storage_units * letters_per_unit) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::invalid_range);
-    }
-    if (request.sequence.storage_units != request.storage_units
-        || request.sequence.end_symbol != request.local_bp_size
-        || request.sequence.begin_symbol != 0u
-        || request.sequence.storage_unit_bytes != request.storage_unit_bytes
-        || request.letters_per_unit != letters_per_unit
-        || !request.sequence.final_segment) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::invalid_range);
+            PackedPaperNthashIndexStatus::invalid_state);
     }
 
     KernelSinkAdapter sink{
-        .collector_context = request.collector_context,
-        .append_raw = append_paper_raw,
-    };
+        request.collector_context,
+        append_paper_records,
+        append_paper_raw};
     bioseq::minimizers::MinimizerKernelInvocation invocation{
         .sequence = request.sequence,
         .window = request.window_size,
         .kmer = request.kmer_size,
+        .output_layout =
+            bioseq::minimizers::minimizer_output_layout_v<
+                bioseq::minimizers::MinimapSketchData>,
+        .output_hash_mask =
+            bioseq::minimizers::MinimapSketchData::hash_field_mask,
+        .output_position_mask =
+            bioseq::minimizers::MinimapSketchData::pos_field_mask,
         .sink = sink.sink(),
     };
     const bioseq::minimizers::MinimizerKernelResult kernel_result =
         request.kernels->paper_nthash(invocation);
+    sink.validate(kernel_result);
     if (kernel_result.proof.algorithm
         != bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash) {
         return rejected_packed_paper_nthash_index_result(

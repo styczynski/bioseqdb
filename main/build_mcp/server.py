@@ -41,6 +41,7 @@ from typing import List, Dict, Set, Optional, Any, Mapping
 import argparse
 import base64
 import contextlib
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -62,7 +63,7 @@ import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ElementTree
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # inspect tool — see inspect_tool.py docstring for design.
@@ -93,7 +94,10 @@ from postgres_error_safety_promotion import (  # noqa: E402
 
 # --------------------------- configuration ---------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
+_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
+PROJECT_ROOT = Path(
+    os.environ.get("BIOSEQ_BUILD_PROJECT_ROOT", str(_DEFAULT_PROJECT_ROOT))
+).resolve(strict=False)
 WORKSPACE_ROOT = PROJECT_ROOT.parent
 CMAKE_PRESETS_FILE = PROJECT_ROOT / "CMakePresets.json"
 _CMAKE_CONFIGURE_STAMP_NAME = ".bioseq-build-mcp-configure.json"
@@ -353,6 +357,8 @@ BIN_DIR = BUILD_DIR / "bioseq"
 
 STATE_FILE = Path("/tmp/bioseq_build_mcp_state.json")
 LOCK_FILE = Path("/tmp/bioseq_build_mcp.lock")
+BUILD_RECEIPT_FILE = Path("/tmp/bioseq_build_mcp_receipts.json")
+BASELINE_WORKTREE_ROOT = Path("/tmp/bioseq_build_mcp_baselines")
 SQL_GUARDRAIL_PUBLICATION_LEDGER = Path(
     "/tmp/bioseq_sql_guardrail_publications.json")
 LOG_DIR = Path("/tmp")
@@ -464,7 +470,25 @@ def _safe_parallel_jobs() -> int:
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
+MAX_BUILD_PHASE_TIMEOUT_SEC = 55 * 60
+BUILD_TIMEOUT_TERM_LEAD_SEC = 60
+BUILD_TIMEOUT_TERM_GRACE_SEC = 10
+BUILD_GUARD_TRACKER_POLL_SEC = 2.0
+BUILD_GUARD_WORKER_ARM_TIMEOUT_SEC = 15.0
+BUILD_GUARD_ENV_KEY = "BIOSEQ_BUILD_GUARD_TOKEN"
 CACHE_EXACT2G_FINALIZATION_RESERVE_SEC = 10 * 60.0
+
+
+def _build_phase_deadlines(
+        started_at: float, timeout_sec: int) -> tuple[float, float]:
+    if (
+        not isinstance(timeout_sec, int)
+        or isinstance(timeout_sec, bool)
+        or not 60 <= timeout_sec <= MAX_BUILD_PHASE_TIMEOUT_SEC
+    ):
+        raise ValueError("invalid guarded build timeout")
+    hard_deadline = started_at + timeout_sec
+    return hard_deadline - BUILD_TIMEOUT_TERM_LEAD_SEC, hard_deadline
 
 
 def _safe_heavy_jobs() -> int:
@@ -1199,7 +1223,11 @@ def _run_cmake_preset_configure(
         build_dir: Path,
         log_handle,
         deadline: float,
-        environment: Mapping[str, str]) -> int:
+        environment: Mapping[str, str],
+        hard_kill_deadline: float | None = None,
+        state_mode: str | None = None,
+        require_verified_termination: bool = False,
+        deadline_clock=None) -> int:
     """Run the sole MCP configure path after retiring any older seal."""
     if len(arguments) < 3 or arguments[:2] != ["cmake", "--preset"]:
         raise ValueError(
@@ -1212,6 +1240,11 @@ def _run_cmake_preset_configure(
         deadline,
         cwd=PROJECT_ROOT,
         env=dict(environment),
+        hard_kill_deadline=hard_kill_deadline,
+        state_mode=state_mode,
+        phase="configure",
+        require_verified_termination=require_verified_termination,
+        deadline_clock=deadline_clock,
     )
 
 
@@ -1224,6 +1257,10 @@ def _ensure_cmake_preset_tree_fresh(
         log_handle,
         deadline: float,
         environment: Mapping[str, str],
+        hard_kill_deadline: float | None = None,
+        state_mode: str | None = None,
+        require_verified_termination: bool = False,
+        deadline_clock=None,
         failure_label: str = "cmake configure") -> bool:
     """Fresh-configure a tree iff Ninja and the MCP input seal disagree."""
     build_ninja = build_dir / "build.ninja"
@@ -1263,6 +1300,10 @@ def _ensure_cmake_preset_tree_fresh(
         log_handle=log_handle,
         deadline=deadline,
         environment=environment,
+        hard_kill_deadline=hard_kill_deadline,
+        state_mode=state_mode,
+        require_verified_termination=require_verified_termination,
+        deadline_clock=deadline_clock,
     )
     if rc != 0:
         raise RuntimeError(f"{failure_label} exited with code {rc}")
@@ -1429,6 +1470,13 @@ class ModeDefinition:
     commands: List[List[str]]
     """Extra documentation"""
     docs: str
+    """Submit every ordinary target to one CMake/Ninja invocation.
+
+    This lets independent target/module DAGs share the same global parallel-job
+    budget.  It changes compilation scheduling only: installation, PostgreSQL
+    restart, and runtime commands still begin after the complete build group.
+    """
+    build_targets_together: bool = False
     """Optional subdirectory within REPORTING_DIR for a native run report."""
     reporting_subdir_name: Optional[str] = None
     """This applies only to benchmark. Is this benchmark target?"""
@@ -1611,6 +1659,7 @@ MODES: Dict[str, ModeDefinition] = {
                  "bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec",
                  "bioseq_bench_e2e_tests_exec",
                  "bioseq_bench_framework_example_tests_exec"],
+        build_targets_together=True,
         install_extension=True,
         commands=[
             ["bioseq_aligner_tests_exec",
@@ -2045,15 +2094,31 @@ def _inspect_artifact_candidates(
     *,
     system_name: str | None = None,
 ) -> tuple[str, ...]:
-    if definition.profiled_artifact_directory is None:
-        return definition.artifact_names
-
     suffix = _native_shared_library_suffix(
         system_name or host_platform.system())
     native_names = tuple(
         name for name in definition.artifact_names
         if Path(name).suffix == suffix
     )
+    shared_library_names = tuple(
+        name for name in definition.artifact_names
+        if Path(name).suffix in {".dylib", ".dll", ".so"}
+    )
+    if definition.profiled_artifact_directory is None:
+        # A DSO target may list candidates for all supported hosts. Never let
+        # an old foreign-platform file win merely because it appears first.
+        if shared_library_names:
+            if not native_names:
+                raise RuntimeError(
+                    "inspect target has no artifact for native suffix "
+                    f"{suffix}")
+            non_library_names = tuple(
+                name for name in definition.artifact_names
+                if name not in shared_library_names
+            )
+            return non_library_names + native_names
+        return definition.artifact_names
+
     if not native_names:
         raise RuntimeError(
             f"inspect target has no artifact for native suffix {suffix}")
@@ -2076,7 +2141,7 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
         mode="bench", artifact_names=("bioseq_bench",),
         shared_target_names=("bioseq_modules_nopg",)),
     "bioseq_io_bench": InspectTargetDefinition(
-        mode="bench", artifact_names=("bioseq_io_bench",),
+        mode="bench-io", artifact_names=("bioseq_io_bench",),
         shared_target_names=("bioseq_modules_nopg",)),
     "bioseq_aligner_tests_exec": InspectTargetDefinition(
         mode="unit+integration", artifact_names=("bioseq_aligner_tests_exec",),
@@ -2134,6 +2199,27 @@ def post_build_targets_for(mode: str, build_only: bool) -> tuple[str, ...]:
     if build_only:
         return ()
     return MODES[mode].post_build_targets
+
+
+def _build_target_groups_for(mode: str) -> tuple[tuple[str, ...], ...]:
+    """Return the CMake invocations that own a mode's ordinary targets."""
+    targets = tuple(MODES[mode].targets)
+    if not targets:
+        return ()
+    if MODES[mode].build_targets_together:
+        return (targets,)
+    return tuple((target,) for target in targets)
+
+
+def _cmake_build_argv(
+        build_dir: Path, target_group: tuple[str, ...]) -> list[str]:
+    """Build one non-empty target group under the global memory-safe job cap."""
+    if not target_group:
+        raise ValueError("CMake build target group must not be empty")
+    return [
+        "cmake", "--build", str(build_dir), "--target", *target_group,
+        "--parallel", str(CMAKE_PARALLEL_JOBS),
+    ]
 
 
 def supports_bench_cli_options(mode: str) -> bool:
@@ -2256,6 +2342,1189 @@ def _update_entry(mode: str, **fields) -> None:
         _save_state_locked(state)
 
 
+def _load_build_receipts() -> dict[str, dict[str, object]]:
+    """Load persistent successful build receipts.
+
+    Receipt ids are intentionally opaque.  Malformed top-level or individual
+    entries are ignored rather than becoming authority for a run-only or
+    inspection request.
+    """
+    if not BUILD_RECEIPT_FILE.exists():
+        return {}
+    try:
+        with BUILD_RECEIPT_FILE.open("r", encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: entry
+        for key, entry in value.items()
+        if isinstance(key, str) and isinstance(entry, dict)
+    }
+
+
+def _save_build_receipts_locked(
+        receipts: Mapping[str, Mapping[str, object]]) -> None:
+    """Durably replace the receipt ledger while the global lock is held."""
+    if getattr(_STATE_LOCK_CONTEXT, "depth", 0) <= 0:
+        raise RuntimeError(
+            "_save_build_receipts_locked requires the global state lock")
+    BUILD_RECEIPT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=f".{BUILD_RECEIPT_FILE.name}.",
+                suffix=".tmp",
+                dir=BUILD_RECEIPT_FILE.parent,
+                delete=False) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(receipts, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, BUILD_RECEIPT_FILE)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _store_build_receipt(receipt: Mapping[str, object]) -> None:
+    receipt_id = receipt.get("build_receipt_id")
+    if not isinstance(receipt_id, str) or not receipt_id:
+        raise RuntimeError("build receipt is missing its opaque id")
+    with _global_lock():
+        receipts = _load_build_receipts()
+        if receipt_id in receipts:
+            raise RuntimeError(
+                f"build receipt id collision for {receipt_id!r}")
+        receipts[receipt_id] = dict(receipt)
+        _save_build_receipts_locked(receipts)
+
+
+def _get_build_receipt(receipt_id: str) -> dict[str, object] | None:
+    if not isinstance(receipt_id, str) or not receipt_id:
+        return None
+    with _global_lock():
+        receipt = _load_build_receipts().get(receipt_id)
+        return dict(receipt) if isinstance(receipt, dict) else None
+
+
+_SOURCE_GRAPH_EXCLUDED_PREFIXES = (
+    ".codex/",
+    ".git/",
+    "main/DOCS/",
+    "main/build/",
+    "main/reporting/",
+    "main/papers/build/",
+    "main/papers/pdf/",
+)
+
+
+def _source_graph_fingerprint(workspace_root: Path) -> str:
+    """Hash the checked-out build inputs without hashing generated outputs.
+
+    Documentation is deliberately excluded so an implementation-log append
+    cannot invalidate a successful binary receipt.  Tracked deletions are
+    represented explicitly, while ignored build/cache output never enters the
+    digest.
+    """
+    workspace_root = workspace_root.resolve(strict=True)
+    completed = subprocess.run(
+        [
+            "git", "-C", str(workspace_root), "ls-files", "-z",
+            "--cached", "--others", "--exclude-standard",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=60,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "could not enumerate source graph: "
+            + completed.stderr.decode("utf-8", errors="replace").strip())
+    digest = hashlib.sha256()
+    for raw_path in sorted(completed.stdout.split(b"\0")):
+        if not raw_path:
+            continue
+        relative = raw_path.decode("utf-8", errors="surrogateescape")
+        if relative.startswith(_SOURCE_GRAPH_EXCLUDED_PREFIXES):
+            continue
+        if "/__pycache__/" in f"/{relative}" or relative.endswith(".pyc"):
+            continue
+        path = workspace_root / relative
+        digest.update(relative.encode("utf-8", errors="surrogateescape"))
+        digest.update(b"\0")
+        try:
+            metadata = path.lstat()
+        except OSError:
+            digest.update(b"<missing>\0")
+            continue
+        digest.update(f"{stat.S_IMODE(metadata.st_mode):o}".encode("ascii"))
+        digest.update(b"\0")
+        if stat.S_ISLNK(metadata.st_mode):
+            digest.update(b"<symlink>\0")
+            digest.update(os.readlink(path).encode(
+                "utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            digest.update(b"<nonregular>\0")
+            continue
+        file_digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                file_digest.update(chunk)
+        digest.update(file_digest.digest())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _git_commit(workspace_root: Path, ref: str = "HEAD") -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(workspace_root), "rev-parse", "--verify",
+         f"{ref}^{{commit}}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"cannot resolve git ref {ref!r}: {completed.stderr.strip()}")
+    commit = completed.stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        raise RuntimeError(f"git returned malformed commit id {commit!r}")
+    return commit
+
+
+def _create_baseline_worktree(
+        baseline_ref: str, run_token: str) -> tuple[Path, str]:
+    """Create one detached, persistent MCP-owned baseline worktree."""
+    if baseline_ref != "refs/heads/main":
+        raise RuntimeError(
+            "baseline_ref must be the exact local ref refs/heads/main")
+    commit = _git_commit(WORKSPACE_ROOT, baseline_ref)
+    worktree = (
+        BASELINE_WORKTREE_ROOT / commit[:16] / run_token
+    ).resolve(strict=False)
+    BASELINE_WORKTREE_ROOT.mkdir(parents=True, exist_ok=True)
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [
+            "git", "-C", str(WORKSPACE_ROOT), "worktree", "add",
+            "--detach", str(worktree), commit,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "could not create detached baseline worktree: "
+            + completed.stderr.strip())
+    project_root = worktree / "main"
+    if not (project_root / "CMakePresets.json").is_file():
+        raise RuntimeError(
+            f"detached baseline is missing main/CMakePresets.json: {worktree}")
+    if _git_commit(worktree) != commit:
+        raise RuntimeError("detached baseline HEAD does not match the requested ref")
+    status = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if status.returncode != 0 or status.stdout.strip():
+        raise RuntimeError("detached baseline worktree is not clean")
+    return project_root, commit
+
+
+def _build_configuration_evidence(build_dir: Path) -> dict[str, object]:
+    """Return the stable compiler/configuration identity of a built tree."""
+    cache_path = build_dir / "CMakeCache.txt"
+    ninja_path = build_dir / "build.ninja"
+    stamp_path = build_dir / _CMAKE_CONFIGURE_STAMP_NAME
+    if not cache_path.is_file() or not ninja_path.is_file():
+        raise RuntimeError(
+            f"build tree is incomplete and cannot be receipted: {build_dir}")
+    cache_keys = (
+        "CMAKE_CXX_COMPILER",
+        "CMAKE_CXX_COMPILER_ID",
+        "CMAKE_CXX_COMPILER_VERSION",
+        "CMAKE_CXX_FLAGS",
+        "CMAKE_BUILD_TYPE",
+        "BIOSEQ_TEST_INDEXES",
+        "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE",
+    )
+    return {
+        "cmake_cache_sha256": _sha256_file(cache_path),
+        "build_ninja_sha256": _sha256_file(ninja_path),
+        "compile_commands_sha256": (
+            _sha256_file(build_dir / "compile_commands.json")
+            if (build_dir / "compile_commands.json").is_file()
+            else None
+        ),
+        "configure_stamp_sha256": (
+            _sha256_file(stamp_path) if stamp_path.is_file() else None
+        ),
+        "compiler_contract": {
+            key: _cmake_cache_value(build_dir, key)
+            for key in cache_keys
+        },
+    }
+
+
+def _stable_artifact_digest(path: Path) -> tuple[os.stat_result, str]:
+    """Hash one non-symlink artifact and reject replacement while reading."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise RuntimeError(f"cannot open artifact safely: {path}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise RuntimeError(f"artifact is not a regular file: {path}")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        final_path = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            f"artifact disappeared while it was hashed: {path}: {exc}") from exc
+    stable_fields_before = (
+        before.st_dev, before.st_ino, before.st_mode, before.st_size,
+        before.st_mtime_ns,
+    )
+    stable_fields_after = (
+        after.st_dev, after.st_ino, after.st_mode, after.st_size,
+        after.st_mtime_ns,
+    )
+    stable_fields_path = (
+        final_path.st_dev, final_path.st_ino, final_path.st_mode,
+        final_path.st_size, final_path.st_mtime_ns,
+    )
+    if (
+        stable_fields_before != stable_fields_after
+        or stable_fields_after != stable_fields_path
+        or stat.S_ISLNK(final_path.st_mode)
+    ):
+        raise RuntimeError(f"artifact changed while it was hashed: {path}")
+    return after, digest.hexdigest()
+
+
+def _runtime_artifact_evidence(
+        mode: str, build_dir: Path) -> list[dict[str, object]]:
+    """Seal every directly executed mode command for no-rebuild reuse."""
+    bin_dir = build_dir / MODES[mode].binary_subdir
+    evidence: list[dict[str, object]] = []
+    for command in MODES[mode].commands:
+        if not command:
+            continue
+        path = bin_dir / command[0]
+        try:
+            metadata, digest = _stable_artifact_digest(path)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"required runtime artifact is unavailable: {path}: "
+                f"{exc}") from exc
+        if not (metadata.st_mode & 0o111):
+            raise RuntimeError(
+                f"required runtime artifact is not executable: {path}")
+        resolved_path = path.resolve(strict=True)
+        try:
+            resolved_path.relative_to(build_dir.resolve(strict=True))
+        except ValueError as exc:
+            raise RuntimeError(
+                f"runtime artifact escapes the receipted tree: {path}") from exc
+        evidence.append({
+            "path": str(resolved_path),
+            "size": metadata.st_size,
+            "sha256": digest,
+            "executable": True,
+        })
+    return evidence
+
+
+_RECEIPT_SHARED_LIBRARY_SUFFIXES = {".dylib", ".dll", ".so"}
+_RECEIPT_EXTENSION_TARGET_NAMES = {
+    "postgresql_bioseq": ("bioseq.dylib", "bioseq.dll", "bioseq.so"),
+    "postgresql_bioseq_cache": (
+        "bioseq_cache.dylib", "bioseq_cache.dll", "bioseq_cache.so"),
+}
+
+
+def _receipt_extension_target_candidates(
+        target: str,
+        name: str,
+        build_dir: Path,
+) -> tuple[Path, ...]:
+    """Return only CMake-owned output locations for an extension target."""
+    if target == "postgresql_bioseq":
+        return (build_dir / "bioseq" / name,)
+    if target != "postgresql_bioseq_cache":
+        return ()
+
+    output_root = (
+        build_dir
+        / "bioseq_caching"
+        / "artifacts"
+        / "cache_production"
+    )
+    current = build_dir
+    for part in output_root.relative_to(build_dir).parts:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            return (output_root / name,)
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot inspect extension output directory {current}: "
+                f"{exc}") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(
+                "extension output parent must be a real non-symlink "
+                f"directory: {current}")
+
+    configuration = _cmake_cache_value(build_dir, "CMAKE_BUILD_TYPE")
+    if configuration is None:
+        raise RuntimeError(
+            "cannot resolve CMAKE_BUILD_TYPE for extension output receipt")
+    output_parent = output_root
+    if configuration:
+        configuration_path = Path(configuration)
+        if (
+            configuration_path.is_absolute()
+            or configuration_path.parent != Path(".")
+            or configuration_path.name != configuration
+            or configuration_path.name in {"", ".", ".."}
+        ):
+            raise RuntimeError(
+                f"CMAKE_BUILD_TYPE is not a safe configuration basename: "
+                f"{configuration!r}")
+        output_parent /= configuration
+        try:
+            metadata = output_parent.lstat()
+        except FileNotFoundError:
+            return (output_parent / name,)
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot inspect extension output directory {output_parent}: "
+                f"{exc}") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(
+                "extension output configuration must be a real non-symlink "
+                f"directory: {output_parent}")
+    return (output_parent / name,)
+
+
+def _is_receipt_shared_library(path: Path) -> bool:
+    name = path.name
+    return (
+        path.suffix.lower() in _RECEIPT_SHARED_LIBRARY_SUFFIXES
+        or ".so." in name
+    )
+
+
+def _receipt_lstat_identity(
+        metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    """Return fields that expose replacement during one receipt capture."""
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+@dataclass(frozen=True)
+class _ReceiptSymlinkHop:
+    path: Path
+    identity: tuple[int, int, int, int, int, int]
+    link_target: str
+
+
+@dataclass(frozen=True)
+class _ReceiptVcpkgLibraryAliasSnapshot:
+    alias_path: Path
+    parent_identities: tuple[
+        tuple[Path, tuple[int, int, int, int, int, int]], ...
+    ]
+    chain: tuple[_ReceiptSymlinkHop, ...]
+    terminal_path: Path
+
+
+def _stable_receipt_symlink(path: Path) -> _ReceiptSymlinkHop:
+    """Read one symlink without accepting replacement around ``readlink``."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISLNK(before.st_mode):
+            raise RuntimeError(
+                f"receipted library alias is not a symlink: {path}")
+        link_target = os.readlink(path)
+        after = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot inspect receipted library alias {path}: {exc}") from exc
+    before_identity = _receipt_lstat_identity(before)
+    after_identity = _receipt_lstat_identity(after)
+    if (
+        before_identity != after_identity
+        or not stat.S_ISLNK(after.st_mode)
+    ):
+        raise RuntimeError(
+            f"receipted library alias changed while inspected: {path}")
+    return _ReceiptSymlinkHop(path, after_identity, link_target)
+
+
+def _receipt_vcpkg_parent_identities(
+        alias_path: Path,
+        build_dir: Path,
+) -> tuple[tuple[Path, tuple[int, int, int, int, int, int]], ...]:
+    """Prove that every lexical parent of an admitted alias is a directory."""
+    try:
+        relative_parent = alias_path.parent.relative_to(build_dir)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"receipted vcpkg library alias escapes its build tree: "
+            f"{alias_path}") from exc
+    identities: list[
+        tuple[Path, tuple[int, int, int, int, int, int]]
+    ] = []
+    current = build_dir
+    for part in (Path("."), *relative_parent.parts):
+        if part != Path("."):
+            current /= part
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot inspect vcpkg alias parent {current}: {exc}") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(
+                "receipted vcpkg library alias has a non-directory or "
+                f"symlink parent: {current}")
+        identities.append((current, _receipt_lstat_identity(metadata)))
+    return tuple(identities)
+
+
+def _is_receipt_vcpkg_library_parent_path(
+        path: Path, build_dir: Path) -> bool:
+    """Whether ``path`` is a lexical parent of an admitted alias directory."""
+    try:
+        parts = path.relative_to(build_dir).parts
+    except ValueError:
+        return False
+    return (
+        parts == ("vcpkg_installed",)
+        or (
+            len(parts) == 2
+            and parts[0] == "vcpkg_installed"
+            and bool(parts[1])
+        )
+        or (
+            len(parts) == 3
+            and parts[0] == "vcpkg_installed"
+            and bool(parts[1])
+            and parts[2] in {"lib", "debug"}
+        )
+        or (
+            len(parts) == 4
+            and parts[0] == "vcpkg_installed"
+            and bool(parts[1])
+            and parts[2:] == ("debug", "lib")
+        )
+    )
+
+
+def _receipt_vcpkg_library_alias_snapshot(
+        path: Path,
+        build_dir: Path,
+) -> Optional[_ReceiptVcpkgLibraryAliasSnapshot]:
+    """Capture one narrowly admitted vcpkg shared-library alias chain.
+
+    vcpkg installs versioned shared libraries as relative aliases.  Only its
+    exact release/debug library directories are admitted here; commands,
+    extension DSOs, install inputs, and aliases elsewhere remain regular-file
+    only.  The volatile identities are used to detect races but are not
+    serialized into the portable receipt evidence.
+    """
+    build_dir = build_dir.resolve(strict=True)
+    alias_path = Path(os.path.abspath(path))
+    try:
+        relative = alias_path.relative_to(build_dir)
+    except ValueError:
+        return None
+    parts = relative.parts
+    is_release_library = (
+        len(parts) == 4
+        and parts[0] == "vcpkg_installed"
+        and bool(parts[1])
+        and parts[2] == "lib"
+    )
+    is_debug_library = (
+        len(parts) == 5
+        and parts[0] == "vcpkg_installed"
+        and bool(parts[1])
+        and parts[2] == "debug"
+        and parts[3] == "lib"
+    )
+    if not (is_release_library or is_debug_library):
+        return None
+
+    parent_identities = _receipt_vcpkg_parent_identities(
+        alias_path, build_dir)
+    current = alias_path
+    seen: set[Path] = set()
+    chain: list[_ReceiptSymlinkHop] = []
+    while True:
+        if current in seen:
+            raise RuntimeError(
+                f"receipted vcpkg library alias cycle at {current}")
+        if len(seen) >= 64:
+            raise RuntimeError(
+                f"receipted vcpkg library alias chain is too long: "
+                f"{alias_path}")
+        seen.add(current)
+        try:
+            metadata = current.lstat()
+        except OSError as exc:
+            raise RuntimeError(
+                f"receipted vcpkg library alias is broken at {current}: "
+                f"{exc}") from exc
+        if not stat.S_ISLNK(metadata.st_mode):
+            if current == alias_path:
+                raise RuntimeError(
+                    f"receipted vcpkg library alias is no longer a symlink: "
+                    f"{alias_path}")
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or not _is_receipt_shared_library(current)
+            ):
+                raise RuntimeError(
+                    "receipted vcpkg library alias does not terminate at a "
+                    f"regular shared library: {current}")
+            terminal_path = current
+            break
+
+        if not _is_receipt_shared_library(current):
+            raise RuntimeError(
+                "receipted vcpkg library alias has a non-library hop: "
+                f"{current}")
+        hop = _stable_receipt_symlink(current)
+        target = Path(hop.link_target)
+        if (
+            not hop.link_target
+            or target.is_absolute()
+            or target.parent != Path(".")
+            or target.name in {"", ".", ".."}
+            or target.name != hop.link_target
+            or not _is_receipt_shared_library(target)
+        ):
+            raise RuntimeError(
+                "receipted vcpkg library alias target must be a relative "
+                f"same-directory shared-library basename: {current} -> "
+                f"{hop.link_target!r}")
+        chain.append(hop)
+        current = current.parent / hop.link_target
+
+    final_parent_identities = _receipt_vcpkg_parent_identities(
+        alias_path, build_dir)
+    if final_parent_identities != parent_identities:
+        raise RuntimeError(
+            "receipted vcpkg library alias parent changed while inspected: "
+            f"{alias_path}")
+    return _ReceiptVcpkgLibraryAliasSnapshot(
+        alias_path=alias_path,
+        parent_identities=parent_identities,
+        chain=tuple(chain),
+        terminal_path=terminal_path,
+    )
+
+
+def _receipt_authorized_artifact_evidence(
+        mode: str,
+        build_dir: Path,
+        *,
+        debug: bool) -> list[dict[str, object]]:
+    """Seal every build-tree artifact a receipt can execute/install/inspect.
+
+    Command binaries alone are insufficient authority: receipt-pinned runs
+    may install extension DSOs through CMake, while receipt-pinned inspection
+    may consume linked DSOs and pre-LTO ``.s``/``.bc`` listings.  Keep the
+    selection intentionally broader than the immediate command list so a
+    changed install plan or locally linked dependency also invalidates reuse.
+    """
+    build_dir = build_dir.resolve(strict=True)
+    bin_dir = (build_dir / MODES[mode].binary_subdir).resolve(strict=False)
+    selected: set[Path] = set()
+    library_aliases: dict[
+        Path, _ReceiptVcpkgLibraryAliasSnapshot
+    ] = {}
+
+    def select_regular(path: Path, *, required: bool = False) -> bool:
+        try:
+            metadata = path.lstat()
+        except OSError:
+            if required:
+                raise RuntimeError(
+                    f"required receipted artifact is missing: {path}")
+            return False
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            if required:
+                raise RuntimeError(
+                    "required receipted artifact is not a regular "
+                    f"non-symlink file: {path}")
+            return False
+        resolved = path.resolve(strict=True)
+        try:
+            resolved.relative_to(build_dir)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"receipted artifact escapes its build tree: {path}") from exc
+        selected.add(resolved)
+        return True
+
+    def select_vcpkg_library_alias(
+            snapshot: _ReceiptVcpkgLibraryAliasSnapshot) -> None:
+        """Register every alias hop and its regular terminal exactly once."""
+        for index, hop in enumerate(snapshot.chain):
+            hop_snapshot = _ReceiptVcpkgLibraryAliasSnapshot(
+                alias_path=hop.path,
+                parent_identities=snapshot.parent_identities,
+                chain=snapshot.chain[index:],
+                terminal_path=snapshot.terminal_path,
+            )
+            previous = library_aliases.get(hop.path)
+            if previous is not None and previous != hop_snapshot:
+                raise RuntimeError(
+                    "receipted vcpkg library alias changed while selected: "
+                    f"{hop.path}")
+            library_aliases[hop.path] = hop_snapshot
+        select_regular(snapshot.terminal_path, required=True)
+
+    # Every directly executed command is mandatory.
+    for command in MODES[mode].commands:
+        if command:
+            select_regular(bin_dir / command[0], required=True)
+
+    # CMake target names commonly coincide with linked output basenames.  A
+    # target may also be a phony/custom target, so only the two extension
+    # targets have a mandatory native linked output contract.
+    for target in MODES[mode].targets:
+        select_regular(bin_dir / target)
+        extension_names = _RECEIPT_EXTENSION_TARGET_NAMES.get(target)
+        if extension_names is None:
+            continue
+        native_suffix = _native_shared_library_suffix(
+            host_platform.system())
+        native_names = tuple(
+            name for name in extension_names
+            if Path(name).suffix == native_suffix)
+        found_native = False
+        for name in native_names:
+            for candidate in _receipt_extension_target_candidates(
+                    target, name, build_dir):
+                found_native = select_regular(candidate) or found_native
+        if not found_native:
+            raise RuntimeError(
+                f"built target {target!r} has no native {native_suffix} "
+                f"artifact below {build_dir}")
+
+    # Seal every install plan/payload and linked library.  This covers the
+    # component-recursive cmake_install.cmake graph, generated extension SQL,
+    # the cache/provider DSOs, and platform-local helper executables.
+    if build_dir.is_dir():
+        for path in build_dir.rglob("*"):
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot inspect receipted artifact {path}: {exc}") from exc
+            suffix = path.suffix.lower()
+            strict_authority_name = (
+                path.name == "cmake_install.cmake"
+                or suffix in {".control", ".sql"}
+                or (debug and suffix in {".bc", ".s"})
+            )
+            shared_library_name = _is_receipt_shared_library(path)
+            authority_name = shared_library_name or strict_authority_name
+            if (
+                _is_receipt_vcpkg_library_parent_path(path, build_dir)
+                and not stat.S_ISDIR(metadata.st_mode)
+            ):
+                raise RuntimeError(
+                    "receipted vcpkg library parent must be a real "
+                    f"non-symlink directory: {path}")
+            if stat.S_ISLNK(metadata.st_mode):
+                if authority_name:
+                    snapshot = (
+                        _receipt_vcpkg_library_alias_snapshot(path, build_dir)
+                        if shared_library_name and not strict_authority_name
+                        else None
+                    )
+                    if snapshot is None:
+                        raise RuntimeError(
+                            "receipted install/inspect artifact must not be a "
+                            f"symlink: {path}")
+                    select_vcpkg_library_alias(snapshot)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            relative_to_bin = False
+            try:
+                path.relative_to(bin_dir)
+                relative_to_bin = True
+            except ValueError:
+                pass
+            is_linked_or_install_payload = (
+                shared_library_name
+                or path.name == "cmake_install.cmake"
+                or suffix in {".control", ".sql"}
+                or (
+                    relative_to_bin
+                    and bool(metadata.st_mode & 0o111)
+                )
+            )
+            is_debug_inspect_input = (
+                debug and suffix in {".bc", ".s"}
+            )
+            if is_linked_or_install_payload or is_debug_inspect_input:
+                select_regular(path)
+
+    if not selected:
+        raise RuntimeError(
+            f"build receipt for mode {mode!r} has no authorized artifacts")
+    evidence: list[dict[str, object]] = []
+    regular_evidence: dict[Path, dict[str, object]] = {}
+    for path in sorted(selected, key=lambda item: str(item)):
+        metadata, digest = _stable_artifact_digest(path)
+        item: dict[str, object] = {
+            "relative_path": str(path.relative_to(build_dir)),
+            "size": metadata.st_size,
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "sha256": digest,
+        }
+        evidence.append(item)
+        regular_evidence[path] = item
+
+    for alias_path in sorted(library_aliases, key=str):
+        expected = library_aliases[alias_path]
+        before = _receipt_vcpkg_library_alias_snapshot(
+            alias_path, build_dir)
+        if before is None or before != expected:
+            raise RuntimeError(
+                "receipted vcpkg library alias changed while sealed: "
+                f"{alias_path}")
+        target_metadata, target_digest = _stable_artifact_digest(
+            before.terminal_path)
+        after = _receipt_vcpkg_library_alias_snapshot(alias_path, build_dir)
+        if after is None or after != before or after != expected:
+            raise RuntimeError(
+                "receipted vcpkg library alias changed while sealed: "
+                f"{alias_path}")
+        target_evidence = regular_evidence.get(before.terminal_path)
+        if target_evidence != {
+            "relative_path": str(before.terminal_path.relative_to(build_dir)),
+            "size": target_metadata.st_size,
+            "mode": stat.S_IMODE(target_metadata.st_mode),
+            "sha256": target_digest,
+        }:
+            raise RuntimeError(
+                "receipted vcpkg library alias target changed while sealed: "
+                f"{before.terminal_path}")
+        evidence.append({
+            "artifact_kind": "vcpkg-shared-library-alias",
+            "relative_path": str(alias_path.relative_to(build_dir)),
+            "mode": stat.S_IMODE(before.chain[0].identity[2]),
+            "size": before.chain[0].identity[3],
+            "link_target": before.chain[0].link_target,
+            "symlink_chain": [
+                {
+                    "relative_path": str(
+                        hop.path.relative_to(build_dir)),
+                    "mode": stat.S_IMODE(hop.identity[2]),
+                    "size": hop.identity[3],
+                    "link_target": hop.link_target,
+                }
+                for hop in before.chain
+            ],
+            "target_relative_path": str(
+                before.terminal_path.relative_to(build_dir)),
+            "target_size": target_metadata.st_size,
+            "target_mode": stat.S_IMODE(target_metadata.st_mode),
+            "target_sha256": target_digest,
+        })
+    return sorted(evidence, key=lambda item: str(item["relative_path"]))
+
+
+def _build_artifact_counts(build_dir: Path, mode: str) -> dict[str, int]:
+    compile_commands_path = build_dir / "compile_commands.json"
+    compile_commands_count = 0
+    if compile_commands_path.is_file():
+        try:
+            commands = json.loads(
+                compile_commands_path.read_text(encoding="utf-8"))
+            if isinstance(commands, list):
+                compile_commands_count = len(commands)
+        except (OSError, json.JSONDecodeError):
+            compile_commands_count = 0
+    generated_root = build_dir / "bioseq" / "generated" / "highway"
+    generated_sources = 0
+    if generated_root.is_dir():
+        generated_sources = sum(
+            1
+            for path in generated_root.rglob("*")
+            if path.is_file() and path.suffix in {".cppm", ".cpp"}
+        )
+    compiled_objects = 0
+    linked_artifacts = 0
+    install_scripts = 0
+    inspect_listings = 0
+    runtime_artifacts = 0
+    bin_dir = (build_dir / MODES[mode].binary_subdir).resolve(strict=False)
+    if build_dir.is_dir():
+        for path in build_dir.rglob("*"):
+            try:
+                metadata = path.lstat()
+            except OSError:
+                continue
+            if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+                continue
+            suffix = path.suffix.lower()
+            if suffix in {".o", ".obj"}:
+                compiled_objects += 1
+            if _is_receipt_shared_library(path):
+                linked_artifacts += 1
+            else:
+                try:
+                    inside_bin = path.resolve(strict=False).is_relative_to(
+                        bin_dir)
+                except OSError:
+                    inside_bin = False
+                if inside_bin and bool(metadata.st_mode & 0o111):
+                    linked_artifacts += 1
+            if path.name == "cmake_install.cmake":
+                install_scripts += 1
+            if suffix in {".bc", ".s"}:
+                inspect_listings += 1
+    for command in MODES[mode].commands:
+        if not command:
+            continue
+        path = bin_dir / command[0]
+        try:
+            metadata = path.lstat()
+        except OSError:
+            continue
+        if not path.is_symlink() and stat.S_ISREG(metadata.st_mode):
+            runtime_artifacts += 1
+    return {
+        "compile_commands": compile_commands_count,
+        "generated_highway_sources": generated_sources,
+        "compiled_objects": compiled_objects,
+        "linked_artifacts": linked_artifacts,
+        "install_scripts": install_scripts,
+        "inspect_listings": inspect_listings,
+        "runtime_artifacts": runtime_artifacts,
+        "targets": len(MODES[mode].targets),
+    }
+
+
+def _validate_build_receipt(
+        receipt_id: str,
+        *,
+        expected_mode: str | None = None,
+        expected_debug: bool | None = None,
+        verify_source: bool = True,
+) -> tuple[dict[str, object] | None, str | None]:
+    receipt = _get_build_receipt(receipt_id)
+    if receipt is None:
+        return None, f"unknown build receipt {receipt_id!r}"
+    required_keys = {
+        "kind", "schema_version", "build_receipt_id", "status",
+        "exit_code", "created_at", "mode", "debug", "fresh", "preset",
+        "preset_family", "binary_subdir", "targets", "build_dir",
+        "source_project_root", "source_workspace_root", "source_commit",
+        "source_graph_fingerprint", "baseline_ref", "baseline_commit",
+        "build_timeout_sec", "build_phase_started_at",
+        "configure_completed_at", "configure_duration_sec",
+        "build_phase_completed_at", "build_phase_duration_sec",
+        "target_timings", "termination_evidence", "host",
+        "configuration", "runtime_artifacts", "authorized_artifacts",
+        "artifact_counts", "content_sha256",
+    }
+    if set(receipt) != required_keys:
+        return None, (
+            f"build receipt {receipt_id!r} has an unexpected schema: "
+            f"missing={sorted(required_keys - set(receipt))} "
+            f"extra={sorted(set(receipt) - required_keys)}")
+    if (
+        receipt.get("kind") != "bioseq-build-receipt-v1"
+        or receipt.get("schema_version") != 1
+        or receipt.get("status") != "completed"
+        or receipt.get("exit_code") != 0
+    ):
+        return None, f"build receipt {receipt_id!r} is not successful authority"
+    sealed_receipt = dict(receipt)
+    claimed_content_sha256 = sealed_receipt.pop("content_sha256", None)
+    if (
+        not isinstance(claimed_content_sha256, str)
+        or claimed_content_sha256
+        != _canonical_json_sha256(sealed_receipt)
+    ):
+        return None, f"build receipt {receipt_id!r} content seal is invalid"
+    if expected_mode is not None and receipt.get("mode") != expected_mode:
+        return None, (
+            f"build receipt mode mismatch: expected {expected_mode!r}, "
+            f"got {receipt.get('mode')!r}")
+    if not isinstance(receipt.get("debug"), bool):
+        return None, "build receipt debug field is not boolean"
+    if not isinstance(receipt.get("fresh"), bool):
+        return None, "build receipt fresh field is not boolean"
+    if expected_debug is not None and receipt["debug"] != expected_debug:
+        return None, (
+            "build receipt debug-tree mismatch: expected "
+            f"{expected_debug}, got {receipt['debug']}")
+    if not isinstance(receipt.get("targets"), list) or not all(
+            isinstance(target, str) and target
+            for target in receipt["targets"]):
+        return None, "build receipt targets are malformed"
+    if not isinstance(receipt.get("source_project_root"), str) or not (
+            receipt["source_project_root"]):
+        return None, "build receipt source_project_root is malformed"
+    if not isinstance(receipt.get("build_dir"), str) or not receipt[
+            "build_dir"]:
+        return None, "build receipt build_dir is malformed"
+    if not isinstance(receipt.get("source_workspace_root"), str) or not (
+            receipt["source_workspace_root"]):
+        return None, "build receipt source_workspace_root is malformed"
+    source_project_root = Path(receipt["source_project_root"])
+    build_dir = Path(receipt["build_dir"])
+    try:
+        source_project_root = source_project_root.resolve(strict=True)
+        source_workspace_root = source_project_root.parent.resolve(strict=True)
+        declared_workspace_root = Path(
+            receipt["source_workspace_root"]).resolve(strict=True)
+        if declared_workspace_root != source_workspace_root:
+            return None, "build receipt source workspace fields disagree"
+        build_dir = build_dir.resolve(strict=True)
+        build_dir.relative_to(source_project_root / "build")
+    except (OSError, ValueError):
+        return None, "build receipt paths are missing or outside the owned tree"
+    if verify_source:
+        try:
+            observed_source = _source_graph_fingerprint(source_workspace_root)
+        except RuntimeError as exc:
+            return None, f"cannot validate build receipt source graph: {exc}"
+        if observed_source != receipt.get("source_graph_fingerprint"):
+            return None, "build receipt source graph no longer matches"
+    try:
+        observed_commit = _git_commit(source_workspace_root)
+    except RuntimeError as exc:
+        return None, f"cannot validate build receipt commit: {exc}"
+    if observed_commit != receipt.get("source_commit"):
+        return None, "build receipt source commit no longer matches"
+    baseline_ref = receipt.get("baseline_ref")
+    if baseline_ref is not None:
+        if receipt.get("baseline_commit") != receipt.get("source_commit"):
+            return None, "baseline receipt commit fields disagree"
+        try:
+            live_baseline_commit = _git_commit(WORKSPACE_ROOT, str(baseline_ref))
+        except RuntimeError as exc:
+            return None, f"cannot re-resolve baseline ref: {exc}"
+        if live_baseline_commit != receipt.get("baseline_commit"):
+            return None, "baseline ref moved since the receipt was created"
+    mode = receipt.get("mode")
+    if not isinstance(mode, str) or mode not in MODES:
+        return None, "build receipt names an unknown mode"
+    if receipt["targets"] != list(MODES[mode].targets):
+        return None, "build receipt target set no longer matches the mode"
+    try:
+        observed_configuration = _build_configuration_evidence(build_dir)
+    except RuntimeError as exc:
+        return None, str(exc)
+    if observed_configuration != receipt.get("configuration"):
+        return None, "build receipt compiler/configuration evidence no longer matches"
+    try:
+        observed_artifacts = _runtime_artifact_evidence(mode, build_dir)
+    except RuntimeError as exc:
+        return None, str(exc)
+    if observed_artifacts != receipt.get("runtime_artifacts"):
+        return None, "build receipt runtime artifacts no longer match"
+    try:
+        observed_authorized_artifacts = (
+            _receipt_authorized_artifact_evidence(
+                mode,
+                build_dir,
+                debug=receipt["debug"],
+            )
+        )
+    except RuntimeError as exc:
+        return None, str(exc)
+    if observed_authorized_artifacts != receipt.get(
+            "authorized_artifacts"):
+        return None, (
+            "build receipt authorized install/inspect artifacts no longer "
+            "match")
+    if _build_artifact_counts(build_dir, mode) != receipt.get(
+            "artifact_counts"):
+        return None, "build receipt artifact counts no longer match"
+    observed_host = {
+        "node": host_platform.node(),
+        "system": host_platform.system(),
+        "machine": host_platform.machine(),
+        "release": host_platform.release(),
+    }
+    if receipt.get("host") != observed_host:
+        return None, "build receipt host identity no longer matches"
+    receipt["source_project_root"] = str(source_project_root)
+    receipt["build_dir"] = str(build_dir)
+    return receipt, None
+
+
+def _seal_successful_build_receipt(
+        *,
+        mode: str,
+        entry: Mapping[str, object],
+        build_dir: Path,
+        preset: str,
+        debug: bool,
+) -> dict[str, object]:
+    receipt_id = entry.get("pending_build_receipt_id")
+    if not isinstance(receipt_id, str) or not receipt_id:
+        raise RuntimeError("build-only run has no reserved receipt id")
+    source_fingerprint = _source_graph_fingerprint(WORKSPACE_ROOT)
+    if source_fingerprint != entry.get("source_graph_fingerprint"):
+        raise RuntimeError(
+            "source graph changed during build; refusing to seal receipt")
+    source_commit = _git_commit(WORKSPACE_ROOT)
+    if source_commit != entry.get("source_commit"):
+        raise RuntimeError(
+            "source commit changed during build; refusing to seal receipt")
+    receipt: dict[str, object] = {
+        "kind": "bioseq-build-receipt-v1",
+        "schema_version": 1,
+        "build_receipt_id": receipt_id,
+        "status": "completed",
+        "exit_code": 0,
+        "created_at": time.time(),
+        "mode": mode,
+        "debug": debug,
+        "fresh": bool(entry.get("fresh")),
+        "preset": preset,
+        "preset_family": MODES[mode].preset_family,
+        "binary_subdir": MODES[mode].binary_subdir,
+        "targets": list(MODES[mode].targets),
+        "build_dir": str(build_dir.resolve(strict=True)),
+        "source_project_root": str(PROJECT_ROOT.resolve(strict=True)),
+        "source_workspace_root": str(WORKSPACE_ROOT.resolve(strict=True)),
+        "source_commit": source_commit,
+        "source_graph_fingerprint": source_fingerprint,
+        "baseline_ref": entry.get("baseline_ref"),
+        "baseline_commit": entry.get("baseline_commit"),
+        "build_timeout_sec": entry.get("build_timeout_sec"),
+        "build_phase_started_at": entry.get("build_phase_started_at"),
+        "configure_completed_at": entry.get("configure_completed_at"),
+        "configure_duration_sec": entry.get("configure_duration_sec"),
+        "build_phase_completed_at": entry.get("build_phase_completed_at"),
+        "build_phase_duration_sec": entry.get("build_phase_duration_sec"),
+        "target_timings": entry.get("target_timings") or [],
+        "termination_evidence": entry.get("termination_evidence"),
+        "host": {
+            "node": host_platform.node(),
+            "system": host_platform.system(),
+            "machine": host_platform.machine(),
+            "release": host_platform.release(),
+        },
+        "configuration": _build_configuration_evidence(build_dir),
+        "runtime_artifacts": _runtime_artifact_evidence(mode, build_dir),
+        "authorized_artifacts": _receipt_authorized_artifact_evidence(
+            mode, build_dir, debug=debug),
+        "artifact_counts": _build_artifact_counts(build_dir, mode),
+    }
+    receipt["content_sha256"] = _canonical_json_sha256(receipt)
+    _store_build_receipt(receipt)
+    return receipt
+
+
+def _seal_run_receipt(
+        *,
+        mode: str,
+        build_receipt: Mapping[str, object],
+        report_files: list[Path],
+        bench_flags: list[str],
+        test_flags: list[str],
+        bench_e2e_config: str | None,
+) -> dict[str, object]:
+    report_evidence: list[dict[str, object]] = []
+    for path in report_files:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+        report_evidence.append({
+            "path": str(resolved),
+            "size": metadata.st_size,
+            "sha256": _sha256_file(resolved),
+        })
+    config_evidence = None
+    if bench_e2e_config is not None:
+        config_path = Path(bench_e2e_config).resolve(strict=True)
+        config_evidence = {
+            "path": str(config_path),
+            "sha256": _sha256_file(config_path),
+        }
+    receipt: dict[str, object] = {
+        "kind": "bioseq-run-receipt-v1",
+        "schema_version": 1,
+        "build_receipt_id": f"rr_{secrets.token_hex(16)}",
+        "status": "completed",
+        "exit_code": 0,
+        "created_at": time.time(),
+        "mode": mode,
+        "reused_build_receipt": build_receipt["build_receipt_id"],
+        "reused_build_receipt_content_sha256": build_receipt[
+            "content_sha256"],
+        "source_commit": build_receipt["source_commit"],
+        "source_graph_fingerprint": build_receipt[
+            "source_graph_fingerprint"],
+        "baseline_ref": build_receipt.get("baseline_ref"),
+        "host": build_receipt["host"],
+        "runtime_artifacts": build_receipt["runtime_artifacts"],
+        "authorized_artifacts_sha256": _canonical_json_sha256(
+            build_receipt["authorized_artifacts"]),
+        "bench_flags": list(bench_flags),
+        "test_flags": list(test_flags),
+        "bench_e2e_config": config_evidence,
+        "reports": report_evidence,
+    }
+    receipt["content_sha256"] = _canonical_json_sha256(receipt)
+    _store_build_receipt(receipt)
+    return receipt
+
+
 # --------------------------- pid liveness ----------------------------------
 
 def _is_pid_alive(pid) -> bool:
@@ -2281,16 +3550,47 @@ def _refresh(state: dict, mode: str) -> dict | None:
 
     A "running" entry whose pid is dead means the worker was killed without
     getting a chance to write its terminal status (OOM, SIGKILL from outside,
-    machine reboot, etc.) — promote it to "aborted" so the slot is free for
-    a fresh start_build call.
+    machine reboot, etc.) is promoted to "aborted". Guarded fresh workers first
+    sweep their unique build directory; an unverified orphan cleanup keeps the
+    next build fail-closed.
     """
     entry = state.get(mode)
     if not entry:
         return None
-    if entry.get("status") == "running" and not _is_pid_alive(entry.get("pid")):
+    worker_identity_value = entry.get("worker_process_identity")
+    worker_identity: _ProcessIdentity | None = None
+    if isinstance(worker_identity_value, dict):
+        try:
+            worker_identity = _ProcessIdentity(**worker_identity_value)
+        except (TypeError, ValueError):
+            worker_identity = None
+    worker_identity_mismatch = False
+    worker_pid_alive = _is_pid_alive(entry.get("pid"))
+    if entry.get("status") == "running" and worker_identity is not None:
+        observed_worker = _capture_process_identity(worker_identity.pid)
+        # A transient process-table failure must not misclassify a live worker
+        # and kill its healthy build. A successful mismatching observation is
+        # PID reuse; an actually dead PID enters orphan recovery below.
+        worker_identity_mismatch = (
+            observed_worker is not None
+            and not _same_process(observed_worker, worker_identity)
+        )
+    if entry.get("status") == "running" and (
+        worker_identity_mismatch or not worker_pid_alive
+    ):
         entry = dict(entry)
         entry["status"] = "aborted"
         entry["step"] = "aborted"
+        if entry.get("build_timeout_sec") is not None:
+            recovery_evidence, cleanup_unverified = (
+                _recover_guarded_worker_descendants(entry)
+            )
+            entry["termination_evidence"] = recovery_evidence
+            entry["cleanup_unverified"] = cleanup_unverified
+        if worker_identity_mismatch:
+            entry["notes"] = (
+                "recorded worker PID no longer has the reserved start identity"
+            )
         if not entry.get("completed_at"):
             entry["completed_at"] = time.time()
         state[mode] = entry
@@ -2298,6 +3598,741 @@ def _refresh(state: dict, mode: str) -> dict | None:
     return entry
 
 # --------------------------- subprocess streaming --------------------------
+
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    pid: int
+    ppid: int
+    pgid: int
+    session: int
+    started: str
+    command: str
+
+
+def _process_snapshot() -> dict[int, _ProcessIdentity]:
+    """Capture one bounded process table used for identity-safe termination."""
+    completed = subprocess.run(
+        [
+            "ps", "-axo",
+            "pid=,ppid=,pgid=,sess=,lstart=,command=",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "could not capture process identities: "
+            + completed.stderr.strip())
+    snapshot: dict[int, _ProcessIdentity] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.strip().split(None, 9)
+        if len(fields) != 10:
+            continue
+        try:
+            pid, ppid, parsed_pgid, parsed_session = map(int, fields[:4])
+        except ValueError:
+            continue
+        try:
+            # BSD/macOS `ps -o sess` reports zero for ordinary processes.
+            # Kernel queries provide the actual session/group identity needed
+            # to validate start_new_session=True.
+            pgid = os.getpgid(pid)
+            session = os.getsid(pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            if parsed_pgid <= 0 or parsed_session <= 0:
+                continue
+            pgid = parsed_pgid
+            session = parsed_session
+        snapshot[pid] = _ProcessIdentity(
+            pid=pid,
+            ppid=ppid,
+            pgid=pgid,
+            session=session,
+            started=" ".join(fields[4:9]),
+            command=fields[9],
+        )
+    return snapshot
+
+
+def _capture_process_identity(pid: int) -> _ProcessIdentity | None:
+    try:
+        return _process_snapshot().get(pid)
+    except RuntimeError:
+        return None
+
+
+def _same_process(
+        observed: _ProcessIdentity | None,
+        expected: _ProcessIdentity | None) -> bool:
+    # PPID, process group, session and argv can legitimately change while a
+    # process survives TERM. PID plus the kernel-reported start identity is the
+    # immutable pair used to reject PID reuse.
+    return (
+        observed is not None
+        and expected is not None
+        and observed.pid == expected.pid
+        and observed.started == expected.started
+    )
+
+
+def _same_process_context(
+        observed: _ProcessIdentity | None,
+        expected: _ProcessIdentity) -> bool:
+    """Match one exact process and its immutable build-worker session."""
+    return (
+        _same_process(observed, expected)
+        and observed is not None
+        and observed.session == expected.session
+    )
+
+
+def _valid_detached_worker_identity(
+        identity: _ProcessIdentity | None,
+        *,
+        child_pid: int,
+        parent_pid: int) -> bool:
+    """Validate the exact topology promised by ``start_new_session=True``."""
+    return (
+        identity is not None
+        and identity.pid == child_pid
+        and identity.ppid == parent_pid
+        and identity.pgid == child_pid
+        and identity.session == child_pid
+        and bool(identity.started)
+    )
+
+
+class _GuardedTerminationError(RuntimeError):
+    """A guarded subprocess could not prove that all descendants exited."""
+
+    def __init__(self, message: str, evidence: Mapping[str, object]):
+        super().__init__(message)
+        self.evidence = dict(evidence)
+
+
+_DARWIN_LIBPROC = None
+
+
+def _process_current_working_directory(pid: int) -> Path | None:
+    """Return a same-user process cwd without shelling out per PID."""
+    if sys.platform.startswith("linux"):
+        try:
+            return Path(os.readlink(f"/proc/{pid}/cwd"))
+        except (OSError, ValueError):
+            return None
+    if sys.platform == "darwin":
+        # proc_vnodepathinfo is two 1,176-byte vnode_info_path records;
+        # vip_path begins at byte 152 (MacOSX SDK sys/proc_info.h).
+        global _DARWIN_LIBPROC
+        try:
+            if _DARWIN_LIBPROC is None:
+                _DARWIN_LIBPROC = ctypes.CDLL(
+                    "/usr/lib/libproc.dylib", use_errno=True)
+                _DARWIN_LIBPROC.proc_pidinfo.argtypes = [
+                    ctypes.c_int,
+                    ctypes.c_int,
+                    ctypes.c_uint64,
+                    ctypes.c_void_p,
+                    ctypes.c_int,
+                ]
+                _DARWIN_LIBPROC.proc_pidinfo.restype = ctypes.c_int
+            buffer_size = 2352
+            buffer = ctypes.create_string_buffer(buffer_size)
+            returned = _DARWIN_LIBPROC.proc_pidinfo(
+                pid, 9, 0, buffer, buffer_size)
+            if returned < 1176:
+                return None
+            raw_path = buffer.raw[152:1176].split(b"\0", 1)[0]
+            if not raw_path:
+                return None
+            return Path(os.fsdecode(raw_path))
+        except (AttributeError, OSError, ValueError):
+            return None
+    return None
+
+
+def _process_inherits_guard_marker(pid: int, marker: str) -> bool:
+    """Read the inherited guard token where the host exposes proc environ."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        body = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    needle = f"{BUILD_GUARD_ENV_KEY}={marker}".encode("ascii")
+    return needle in body.split(b"\0")
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.absolute().relative_to(root.absolute())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _guarded_process_snapshot(
+        marker: str,
+        ownership_root: Path | None = None,
+) -> tuple[dict[int, _ProcessIdentity], set[int]]:
+    """Capture identities plus processes inheriting one private guard marker.
+
+    Linux exposes the inherited marker through ``/proc``. macOS deliberately
+    omits process environments from ``ps`` and KERN_PROCARGS2 on current
+    releases, so fresh guarded runs also use their unique MCP build directory:
+    a detached Ninja/compiler/linker remains discoverable by argv or cwd even
+    after reparenting and ``setsid``. Returned command text stays redacted.
+    """
+    completed = subprocess.run(
+        [
+            "ps", "-axo",
+            "pid=,ppid=,pgid=,sess=,lstart=,command=",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        text=True,
+        timeout=5,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "could not capture guarded process identities: "
+            + completed.stderr.strip())
+    marker_text = f"{BUILD_GUARD_ENV_KEY}={marker}"
+    snapshot: dict[int, _ProcessIdentity] = {}
+    marked: set[int] = set()
+    for line in completed.stdout.splitlines():
+        fields = line.strip().split(None, 9)
+        if len(fields) != 10:
+            continue
+        try:
+            pid, ppid, parsed_pgid, parsed_session = map(int, fields[:4])
+        except ValueError:
+            continue
+        try:
+            pgid = os.getpgid(pid)
+            session = os.getsid(pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            if parsed_pgid <= 0 or parsed_session <= 0:
+                continue
+            pgid = parsed_pgid
+            session = parsed_session
+        snapshot[pid] = _ProcessIdentity(
+            pid=pid,
+            ppid=ppid,
+            pgid=pgid,
+            session=session,
+            started=" ".join(fields[4:9]),
+            command="<redacted guarded process>",
+        )
+        owned_by_command = (
+            ownership_root is not None
+            and str(ownership_root) in fields[9]
+        )
+        cwd = _process_current_working_directory(pid)
+        owned_by_cwd = (
+            ownership_root is not None
+            and cwd is not None
+            and _path_is_within(cwd, ownership_root)
+        )
+        if (
+            marker_text in fields[9]
+            or _process_inherits_guard_marker(pid, marker)
+            or owned_by_command
+            or owned_by_cwd
+        ):
+            marked.add(pid)
+    return snapshot, marked
+
+
+@dataclass
+class _GuardedProcessTracker:
+    """Retain exact descendants even after reparenting or session changes."""
+
+    root: _ProcessIdentity
+    marker: str
+    ownership_root: Path | None = None
+    members: dict[tuple[int, str], _ProcessIdentity] = field(
+        default_factory=dict)
+    last_snapshot: dict[int, _ProcessIdentity] = field(default_factory=dict)
+    last_live: dict[tuple[int, str], _ProcessIdentity] = field(
+        default_factory=dict)
+    snapshot_errors: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        key = (self.root.pid, self.root.started)
+        self.members[key] = self.root
+        # Even if the first global snapshot fails, the Popen-captured root is
+        # exact and its new process group remains a safe TERM/KILL fallback.
+        self.last_snapshot[self.root.pid] = self.root
+        self.last_live[key] = self.root
+
+    def refresh(self) -> dict[tuple[int, str], _ProcessIdentity]:
+        snapshot, marked_pids = _guarded_process_snapshot(
+            self.marker, self.ownership_root)
+        selected: set[int] = set(marked_pids)
+        for identity in self.members.values():
+            if _same_process(snapshot.get(identity.pid), identity):
+                selected.add(identity.pid)
+        if _same_process(snapshot.get(self.root.pid), self.root):
+            selected.add(self.root.pid)
+
+        changed = True
+        while changed:
+            changed = False
+            selected_sessions = {
+                snapshot[pid].session
+                for pid in selected
+                if pid in snapshot and snapshot[pid].session > 0
+            }
+            for process in snapshot.values():
+                if process.pid in selected:
+                    continue
+                if (
+                    process.ppid in selected
+                    or (
+                        process.session > 0
+                        and process.session in selected_sessions
+                    )
+                ):
+                    selected.add(process.pid)
+                    changed = True
+
+        for pid in selected:
+            process = snapshot.get(pid)
+            if process is None:
+                continue
+            key = (process.pid, process.started)
+            self.members[key] = process
+
+        live = {
+            key: observed
+            for key, identity in self.members.items()
+            if (
+                (observed := snapshot.get(identity.pid)) is not None
+                and _same_process(observed, identity)
+            )
+        }
+        self.last_snapshot = snapshot
+        self.last_live = live
+        return dict(live)
+
+    def record_snapshot_error(self, exc: BaseException) -> None:
+        message = f"{type(exc).__name__}: {exc}"
+        if not self.snapshot_errors or self.snapshot_errors[-1] != message:
+            self.snapshot_errors.append(message)
+        if len(self.snapshot_errors) > 16:
+            del self.snapshot_errors[:-16]
+
+
+def _guarded_worker_validation(
+        state_mode: str | None) -> tuple[dict[str, object], str | None]:
+    if state_mode is None:
+        return {}, "guarded termination has no state mode"
+    entry = _load_state().get(state_mode)
+    value = entry.get("worker_process_identity") if isinstance(entry, dict) else None
+    if not isinstance(value, dict):
+        return {}, "guarded worker identity is absent from state"
+    try:
+        expected = _ProcessIdentity(**value)
+    except (TypeError, ValueError) as exc:
+        return {}, f"guarded worker identity is malformed: {exc}"
+    observed = _capture_process_identity(expected.pid)
+    evidence = {
+        "expected": expected.__dict__,
+        "observed": observed.__dict__ if observed is not None else None,
+    }
+    if not _same_process_context(observed, expected):
+        return evidence, "guarded worker pid/start/session did not revalidate"
+    return evidence, None
+
+
+def _signal_guarded_processes(
+        live: Mapping[tuple[int, str], _ProcessIdentity],
+        sig: signal.Signals,
+        *,
+        snapshot: Mapping[int, _ProcessIdentity]) -> dict[str, object]:
+    groups = sorted({process.pgid for process in live.values() if process.pgid > 0})
+    live_by_pid = {process.pid: process for process in live.values()}
+    signaled_groups: list[int] = []
+    skipped_groups: list[int] = []
+    signaled_pids: list[int] = []
+    errors: list[str] = []
+    for pgid in groups:
+        observed_group = [
+            process for process in snapshot.values()
+            if process.pgid == pgid
+        ]
+        group_is_owned = bool(observed_group) and all(
+            _same_process(process, live_by_pid.get(process.pid))
+            for process in observed_group
+        )
+        if not group_is_owned:
+            skipped_groups.append(pgid)
+            continue
+        try:
+            os.killpg(pgid, sig)
+            signaled_groups.append(pgid)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            errors.append(f"pgid {pgid}: {exc}")
+    # Exact-PID signals are a backstop for a process that moved groups after
+    # the snapshot and avoid killpg when the group contains an unowned member.
+    for process in live.values():
+        try:
+            os.kill(process.pid, sig)
+            signaled_pids.append(process.pid)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            errors.append(f"pid {process.pid}: {exc}")
+    return {
+        "signal": int(sig),
+        "groups": signaled_groups,
+        "skipped_unowned_groups": skipped_groups,
+        "direct_pids": sorted(signaled_pids),
+        "candidate_pids": sorted(process.pid for process in live.values()),
+        "errors": errors,
+    }
+
+
+def _terminate_guarded_process_tree(
+        tracker: _GuardedProcessTracker,
+        *,
+        hard_kill_deadline: float,
+        state_mode: str | None,
+        clock=time.monotonic,
+        sleeper=time.sleep,
+        validate_worker: bool = True,
+) -> dict[str, object]:
+    """TERM, rescan, and KILL every exact guarded identity by the deadline."""
+    evidence: dict[str, object] = {
+        "root": tracker.root.__dict__,
+        "term_started_monotonic": clock(),
+        "hard_kill_deadline_monotonic": hard_kill_deadline,
+    }
+    if validate_worker:
+        worker_evidence, worker_error = _guarded_worker_validation(state_mode)
+        evidence["worker_validation"] = worker_evidence
+        if worker_error is not None:
+            evidence["worker_validation_error"] = worker_error
+    else:
+        worker_evidence, worker_error = {}, None
+        evidence["worker_validation"] = {
+            "skipped": "recovering descendants after worker death",
+        }
+
+    try:
+        live = tracker.refresh()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        tracker.record_snapshot_error(exc)
+        live = dict(tracker.last_live)
+    evidence["term"] = _signal_guarded_processes(
+        live, signal.SIGTERM, snapshot=tracker.last_snapshot)
+
+    grace_deadline = min(
+        hard_kill_deadline,
+        clock() + BUILD_TIMEOUT_TERM_GRACE_SEC,
+    )
+    latest_successful_refresh = False
+    while clock() < grace_deadline:
+        try:
+            live = tracker.refresh()
+            latest_successful_refresh = True
+            if not live:
+                if validate_worker and worker_error is not None:
+                    worker_evidence, worker_error = (
+                        _guarded_worker_validation(state_mode))
+                    evidence["worker_validation"] = worker_evidence
+                    if worker_error is None:
+                        evidence.pop("worker_validation_error", None)
+                if worker_error is None:
+                    evidence.update({
+                        "kill": [],
+                        "survivor_pids": [],
+                        "snapshot_errors": list(tracker.snapshot_errors),
+                        "completed_monotonic": clock(),
+                        "within_hard_deadline": clock() <= hard_kill_deadline,
+                    })
+                    return evidence
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            tracker.record_snapshot_error(exc)
+            latest_successful_refresh = False
+            live = dict(tracker.last_live)
+        sleeper(min(0.1, max(0.0, grace_deadline - clock())))
+
+    kill_records: list[dict[str, object]] = []
+    while clock() < hard_kill_deadline:
+        try:
+            live = tracker.refresh()
+            latest_successful_refresh = True
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            tracker.record_snapshot_error(exc)
+            latest_successful_refresh = False
+            live = dict(tracker.last_live)
+        if not live and latest_successful_refresh:
+            if validate_worker and worker_error is not None:
+                worker_evidence, worker_error = _guarded_worker_validation(
+                    state_mode)
+                evidence["worker_validation"] = worker_evidence
+                if worker_error is None:
+                    evidence.pop("worker_validation_error", None)
+            if worker_error is None:
+                evidence.update({
+                    "kill": kill_records,
+                    "survivor_pids": [],
+                    "snapshot_errors": list(tracker.snapshot_errors),
+                    "completed_monotonic": clock(),
+                    "within_hard_deadline": True,
+                })
+                return evidence
+        if live:
+            kill_records.append(
+                _signal_guarded_processes(
+                    live,
+                    signal.SIGKILL,
+                    snapshot=tracker.last_snapshot,
+                ))
+        remaining = hard_kill_deadline - clock()
+        if remaining <= 0.25:
+            break
+        sleeper(min(0.1, remaining))
+
+    evidence.update({
+        "kill": kill_records,
+        "survivor_pids": sorted(
+            process.pid for process in tracker.last_live.values()),
+        "survivor_identities": [
+            process.__dict__
+            for process in sorted(
+                tracker.last_live.values(), key=lambda value: value.pid)
+        ],
+        "snapshot_errors": list(tracker.snapshot_errors),
+        "completed_monotonic": clock(),
+        "within_hard_deadline": clock() <= hard_kill_deadline,
+        "cleanup_verified": False,
+    })
+    if worker_error is not None:
+        evidence["worker_validation_error"] = worker_error
+    raise _GuardedTerminationError(
+        "guarded subprocess cleanup was not proven before the hard deadline",
+        evidence,
+    )
+
+
+def _recover_guarded_worker_descendants(
+        entry: Mapping[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Sweep a dead guarded worker's unique fresh build directory."""
+    build_dir_value = entry.get("build_dir")
+    if not isinstance(build_dir_value, str) or not build_dir_value:
+        return ({"recovery_error": "guarded entry has no build directory"}, True)
+    ownership_root = Path(build_dir_value).resolve(strict=False)
+    recovery_marker = "worker-death-ownership-sweep"
+    try:
+        snapshot, owned_pids = _guarded_process_snapshot(
+            recovery_marker, ownership_root)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        return ({
+            "recovery_error": f"{type(exc).__name__}: {exc}",
+            "ownership_root": str(ownership_root),
+            "cleanup_verified": False,
+        }, True)
+    owned = [
+        snapshot[pid] for pid in sorted(owned_pids)
+        if pid in snapshot
+    ]
+    if not owned:
+        return ({
+            "ownership_root": str(ownership_root),
+            "survivor_pids": [],
+            "survivor_identities": [],
+            "cleanup_verified": True,
+            "recovery": "worker died; ownership sweep found no descendants",
+        }, False)
+
+    active_value = entry.get("active_process_identity")
+    active_identity: _ProcessIdentity | None = None
+    if isinstance(active_value, dict):
+        try:
+            candidate = _ProcessIdentity(**active_value)
+            if any(_same_process(process, candidate) for process in owned):
+                active_identity = candidate
+        except (TypeError, ValueError):
+            pass
+    root = active_identity or owned[0]
+    tracker = _GuardedProcessTracker(
+        root, recovery_marker, ownership_root)
+    tracker.last_snapshot = dict(snapshot)
+    tracker.last_live = {}
+    for process in owned:
+        key = (process.pid, process.started)
+        tracker.members[key] = process
+        tracker.last_live[key] = process
+    try:
+        evidence = _terminate_guarded_process_tree(
+            tracker,
+            hard_kill_deadline=(
+                time.monotonic() + 2 * BUILD_TIMEOUT_TERM_GRACE_SEC),
+            state_mode=None,
+            validate_worker=False,
+        )
+        evidence["recovery"] = "worker died; descendants terminated"
+        evidence["ownership_root"] = str(ownership_root)
+        evidence["cleanup_verified"] = True
+        return evidence, False
+    except _GuardedTerminationError as exc:
+        evidence = dict(exc.evidence)
+        evidence["recovery"] = "worker died; cleanup remained unverified"
+        evidence["ownership_root"] = str(ownership_root)
+        return evidence, True
+
+
+def _await_guarded_worker_arm(mode: str) -> dict[str, object]:
+    """Wait until the parent records this detached worker's exact identity."""
+    deadline = time.monotonic() + BUILD_GUARD_WORKER_ARM_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        entry = _load_state().get(mode)
+        if not isinstance(entry, dict):
+            raise RuntimeError("guarded worker state disappeared before arming")
+        if entry.get("status") != "running":
+            raise RuntimeError("guarded worker was cancelled before arming")
+        value = entry.get("worker_process_identity")
+        if (
+            entry.get("step") == "armed"
+            and entry.get("pid") == os.getpid()
+            and isinstance(value, dict)
+        ):
+            try:
+                expected = _ProcessIdentity(**value)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"guarded worker identity is malformed: {exc}") from exc
+            observed = _capture_process_identity(os.getpid())
+            if not _same_process_context(observed, expected):
+                raise RuntimeError(
+                    "guarded worker pid/start/session does not match its arm")
+            return dict(entry)
+        time.sleep(0.02)
+    raise RuntimeError("guarded worker identity arm timed out")
+
+
+def _validated_process_tree(
+        root: _ProcessIdentity,
+) -> tuple[dict[int, list[_ProcessIdentity]], dict[str, object]]:
+    snapshot = _process_snapshot()
+    if not _same_process(snapshot.get(root.pid), root):
+        raise RuntimeError(
+            "subprocess identity changed before timeout termination")
+    descendants = {root.pid}
+    changed = True
+    while changed:
+        changed = False
+        for process in snapshot.values():
+            if (
+                process.pid not in descendants
+                and process.ppid in descendants
+            ):
+                descendants.add(process.pid)
+                changed = True
+    groups: dict[int, list[_ProcessIdentity]] = {}
+    for pid in descendants:
+        process = snapshot[pid]
+        groups.setdefault(process.pgid, []).append(process)
+    evidence = {
+        "root": root.__dict__,
+        "descendant_pids": sorted(descendants),
+        "process_groups": sorted(groups),
+    }
+    return groups, evidence
+
+
+def _terminate_validated_process_tree(
+        root: _ProcessIdentity,
+        *,
+        hard_kill_deadline: float,
+) -> dict[str, object]:
+    """TERM every validated descendant group, then KILL exact survivors."""
+    groups, evidence = _validated_process_tree(root)
+    term_groups: list[int] = []
+    for pgid in sorted(groups, reverse=True):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            term_groups.append(pgid)
+        except ProcessLookupError:
+            continue
+    evidence["term_groups"] = term_groups
+
+    grace_deadline = min(
+        hard_kill_deadline,
+        time.time() + BUILD_TIMEOUT_TERM_GRACE_SEC,
+    )
+    while time.time() < grace_deadline:
+        try:
+            snapshot = _process_snapshot()
+        except RuntimeError:
+            break
+        if not any(
+            _same_process(snapshot.get(process.pid), process)
+            for processes in groups.values()
+            for process in processes
+        ):
+            evidence["kill_groups"] = []
+            evidence["survivor_pids"] = []
+            evidence["completed_at"] = time.time()
+            return evidence
+        time.sleep(min(0.1, max(0.0, grace_deadline - time.time())))
+
+    try:
+        snapshot = _process_snapshot()
+    except RuntimeError:
+        snapshot = {}
+    kill_groups: list[int] = []
+    survivor_pids: list[int] = []
+    for pgid, processes in sorted(groups.items(), reverse=True):
+        exact_survivors = [
+            process
+            for process in processes
+            if (
+                _same_process(snapshot.get(process.pid), process)
+                and snapshot[process.pid].pgid == pgid
+            )
+        ]
+        if not exact_survivors:
+            continue
+        survivor_pids.extend(process.pid for process in exact_survivors)
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            kill_groups.append(pgid)
+        except ProcessLookupError:
+            continue
+    evidence["kill_groups"] = kill_groups
+    evidence["survivor_pids"] = sorted(survivor_pids)
+    evidence["completed_at"] = time.time()
+    evidence["within_hard_deadline"] = time.time() <= hard_kill_deadline
+    return evidence
+
+
+def _latest_ninja_edge(log_handle) -> str | None:
+    """Return the last bounded Ninja progress line from the active log."""
+    try:
+        log_handle.flush()
+        path = Path(str(log_handle.name))
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - 256 * 1024))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except (AttributeError, OSError):
+        return None
+    progress = re.compile(r"^\[[0-9]+/[0-9]+\].*$")
+    return next(
+        (line for line in reversed(tail.splitlines()) if progress.match(line)),
+        None,
+    )
 
 def _kill_pgroup(pid: int) -> None:
     """SIGTERM then SIGKILL the entire process group rooted at pid.
@@ -2324,6 +4359,81 @@ def _kill_pgroup(pid: int) -> None:
                 return
 
 
+def _terminate_unarmed_popen_group(
+        proc: subprocess.Popen,
+        *,
+        grace_sec: float = 1.0,
+        guard_marker: str | None = None,
+        ownership_root: Path | None = None) -> dict[str, object]:
+    """Stop the exact new process group owned by a just-created Popen.
+
+    This is the only safe fallback before a process-table identity has been
+    captured: ``start_new_session=True`` makes the child PID its process-group
+    id, while the live Popen handle proves which just-created child we own.
+    """
+    evidence: dict[str, object] = {
+        "root_pid": proc.pid,
+        "process_group": proc.pid,
+        "term_sent": False,
+        "kill_sent": False,
+    }
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        evidence["term_sent"] = True
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        evidence["term_error"] = str(exc)
+    deadline = time.monotonic() + max(0.0, grace_sec)
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(proc.pid, 0)
+        except (ProcessLookupError, OSError):
+            break
+        time.sleep(min(0.05, deadline - time.monotonic()))
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+        evidence["kill_sent"] = True
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        evidence["kill_error"] = str(exc)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        evidence["wait_error"] = str(exc)
+    evidence["root_returncode"] = proc.poll()
+    if guard_marker is not None:
+        try:
+            snapshot, marked_pids = _guarded_process_snapshot(
+                guard_marker, ownership_root)
+            exact_marked = [
+                snapshot[pid] for pid in sorted(marked_pids)
+                if pid in snapshot
+            ]
+            for process in exact_marked:
+                try:
+                    os.kill(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    continue
+            remaining_snapshot, remaining_marked = _guarded_process_snapshot(
+                guard_marker, ownership_root)
+            evidence["marker_survivor_pids"] = sorted(remaining_marked)
+            evidence["survivor_identities"] = [
+                remaining_snapshot[pid].__dict__
+                for pid in sorted(remaining_marked)
+                if pid in remaining_snapshot
+            ]
+            evidence["cleanup_verified"] = (
+                proc.poll() is not None and not remaining_marked)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            evidence["marker_scan_error"] = str(exc)
+            evidence["cleanup_verified"] = False
+    else:
+        evidence["cleanup_verified"] = proc.poll() is not None
+    return evidence
+
+
 def _stream_subprocess(
         cmd: list[str],
         log_handle,
@@ -2332,6 +4442,11 @@ def _stream_subprocess(
         env: dict | None = None,
         *,
         verified_executable: Path | None = None,
+        hard_kill_deadline: float | None = None,
+        state_mode: str | None = None,
+        phase: str | None = None,
+        require_verified_termination: bool = False,
+        deadline_clock=None,
 ) -> int:
     """Run cmd, tee combined stdout/stderr to log_handle and stderr, enforce
     deadline. Returns the process return code on clean exit. Raises
@@ -2340,12 +4455,48 @@ def _stream_subprocess(
     The subprocess runs in its own session so the whole tree can be killed
     with killpg(); cmake/ninja/clang++ do not all live under cmake's pid.
     """
+    clock = deadline_clock or time.time
     pretty = " ".join(cmd)
     header = f"\n+ {pretty}\n"
     log_handle.write(header)
     log_handle.flush()
     sys.stderr.write(header)
     sys.stderr.flush()
+
+    if clock() >= deadline:
+        raise TimeoutError(
+            f"deadline reached before subprocess launch: {pretty}")
+    if require_verified_termination and (
+        hard_kill_deadline is None or hard_kill_deadline <= deadline
+    ):
+        raise RuntimeError(
+            "guarded subprocess requires a hard deadline after TERM")
+
+    guard_marker: str | None = None
+    guard_ownership_root: Path | None = None
+    popen_env = env
+    if require_verified_termination:
+        guard_marker = secrets.token_hex(16)
+        guarded_entry = (
+            _load_state().get(state_mode)
+            if state_mode is not None else None
+        )
+        guarded_build_dir = (
+            guarded_entry.get("build_dir")
+            if isinstance(guarded_entry, dict) else None
+        )
+        if not isinstance(guarded_build_dir, str) or not guarded_build_dir:
+            raise RuntimeError(
+                "guarded subprocess has no isolated build-directory owner")
+        guard_ownership_root = Path(guarded_build_dir).resolve(strict=False)
+        # Fail before launching CMake/Ninja when this host cannot provide the
+        # process/cwd snapshot needed to find detached groups.
+        _guarded_process_snapshot(guard_marker, guard_ownership_root)
+        popen_env = dict(os.environ if env is None else env)
+        popen_env[BUILD_GUARD_ENV_KEY] = guard_marker
+        if clock() >= deadline:
+            raise TimeoutError(
+                f"deadline reached during subprocess guard preflight: {pretty}")
 
     proc = subprocess.Popen(
         cmd,
@@ -2356,37 +4507,192 @@ def _stream_subprocess(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         cwd=str(cwd) if cwd else None,
-        env=env,
+        env=popen_env,
         bufsize=0,
         start_new_session=True,
     )
+    process_identity = _capture_process_identity(proc.pid)
+    if require_verified_termination and process_identity is None:
+        # The Popen handle still identifies the just-created root exactly. Stop
+        # it before allowing configure/Ninja to create an unverifiable tree.
+        unarmed_termination = _terminate_unarmed_popen_group(
+            proc,
+            guard_marker=guard_marker,
+            ownership_root=guard_ownership_root,
+        )
+        if state_mode is not None:
+            cleanup_unverified = not bool(
+                unarmed_termination.get("cleanup_verified"))
+            _update_entry(
+                state_mode,
+                termination_evidence=unarmed_termination,
+                cleanup_unverified=cleanup_unverified,
+            )
+        if proc.stdout is not None:
+            proc.stdout.close()
+        raise RuntimeError(
+            "guarded subprocess identity capture failed before execution")
+    tracker = (
+        _GuardedProcessTracker(
+            process_identity,
+            guard_marker,
+            guard_ownership_root,
+        )
+        if (
+            require_verified_termination
+            and process_identity is not None
+            and guard_marker is not None
+        )
+        else None
+    )
+    if tracker is not None:
+        try:
+            tracker.refresh()
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            tracker.record_snapshot_error(exc)
+            try:
+                try:
+                    evidence = _terminate_guarded_process_tree(
+                        tracker,
+                        hard_kill_deadline=min(
+                            hard_kill_deadline,
+                            clock() + 2 * BUILD_TIMEOUT_TERM_GRACE_SEC,
+                        ),
+                        state_mode=state_mode,
+                        clock=clock,
+                    )
+                except _GuardedTerminationError as cleanup_error:
+                    if state_mode is not None:
+                        _update_entry(
+                            state_mode,
+                            termination_evidence=cleanup_error.evidence,
+                            cleanup_unverified=True,
+                        )
+                    raise cleanup_error from exc
+                if state_mode is not None:
+                    _update_entry(
+                        state_mode,
+                        termination_evidence=evidence,
+                        cleanup_unverified=False,
+                    )
+            finally:
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                if proc.stdout is not None:
+                    proc.stdout.close()
+            raise RuntimeError(
+                "guarded subprocess initial descendant capture failed") from exc
+    if state_mode is not None:
+        _update_entry(
+            state_mode,
+            active_command=pretty,
+            active_phase=phase,
+            active_pid=proc.pid,
+            active_process_identity=(
+                process_identity.__dict__
+                if process_identity is not None else None
+            ),
+        )
 
     fd = proc.stdout.fileno()
+    cleanup_attempted = False
+    cleanup_verified = False
+    stdout_eof = False
+    next_tracker_refresh = clock() + BUILD_GUARD_TRACKER_POLL_SEC
     try:
         while True:
-            remaining = deadline - time.time()
+            now = clock()
+            remaining = deadline - now
             if remaining <= 0:
-                _kill_pgroup(proc.pid)
+                active_edge = _latest_ninja_edge(log_handle)
+                if state_mode is not None:
+                    _update_entry(
+                        state_mode,
+                        active_edge=active_edge,
+                        timeout_term_started_at=time.time(),
+                        timeout_term_started_monotonic=now,
+                    )
+                termination_evidence: dict[str, object]
+                if tracker is not None:
+                    cleanup_attempted = True
+                    try:
+                        termination_evidence = _terminate_guarded_process_tree(
+                            tracker,
+                            hard_kill_deadline=hard_kill_deadline,
+                            state_mode=state_mode,
+                            clock=clock,
+                        )
+                        cleanup_verified = True
+                    except _GuardedTerminationError as exc:
+                        termination_evidence = exc.evidence
+                        if state_mode is not None:
+                            _update_entry(
+                                state_mode,
+                                termination_evidence=termination_evidence,
+                                cleanup_unverified=True,
+                            )
+                        raise
+                elif process_identity is not None:
+                    termination_evidence = _terminate_validated_process_tree(
+                        process_identity,
+                        hard_kill_deadline=(
+                            hard_kill_deadline
+                            if hard_kill_deadline is not None
+                            else time.time()
+                            + BUILD_TIMEOUT_TERM_GRACE_SEC
+                        ),
+                    )
+                else:
+                    _kill_pgroup(proc.pid)
+                    termination_evidence = {
+                        "fallback_process_group": proc.pid,
+                        "reason": "process identity capture unavailable",
+                    }
+                if state_mode is not None:
+                    _update_entry(
+                        state_mode,
+                        termination_evidence=termination_evidence,
+                    )
                 raise TimeoutError(f"hard timeout reached during: {pretty}")
 
-            ready, _, _ = select.select([fd], [], [], min(remaining, 1.0))
+            select_timeout = min(remaining, 1.0)
+            if tracker is not None:
+                select_timeout = min(
+                    select_timeout,
+                    max(0.0, next_tracker_refresh - now),
+                )
+            if stdout_eof:
+                time.sleep(select_timeout)
+                ready = []
+            else:
+                ready, _, _ = select.select(
+                    [fd], [], [], select_timeout)
             if ready:
                 try:
                     chunk = os.read(fd, 65536)
                 except OSError:
                     chunk = b""
                 if not chunk:
-                    break
-                text = chunk.decode("utf-8", errors="replace")
-                log_handle.write(text)
-                log_handle.flush()
-                sys.stderr.write(text)
-                sys.stderr.flush()
-                continue
-            if proc.poll() is not None:
-                # Drain whatever is buffered after the process exited.
+                    stdout_eof = True
+                else:
+                    text = chunk.decode("utf-8", errors="replace")
+                    log_handle.write(text)
+                    log_handle.flush()
+                    sys.stderr.write(text)
+                    sys.stderr.flush()
+            if tracker is not None and clock() >= next_tracker_refresh:
                 try:
-                    while True:
+                    tracker.refresh()
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    tracker.record_snapshot_error(exc)
+                next_tracker_refresh = clock() + BUILD_GUARD_TRACKER_POLL_SEC
+            if proc.poll() is not None:
+                # Drain only bytes already ready. A detached child may retain
+                # the pipe; a blocking drain would otherwise defeat the guard.
+                try:
+                    while select.select([fd], [], [], 0)[0]:
                         chunk = os.read(fd, 65536)
                         if not chunk:
                             break
@@ -2398,14 +4704,94 @@ def _stream_subprocess(
                 except OSError:
                     pass
                 break
-        return proc.wait()
+        return_code = proc.wait()
+        if tracker is not None:
+            try:
+                live = tracker.refresh()
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                tracker.record_snapshot_error(exc)
+                live = dict(tracker.last_live)
+            if live:
+                cleanup_attempted = True
+                cleanup_deadline = min(
+                    hard_kill_deadline,
+                    clock() + 2 * BUILD_TIMEOUT_TERM_GRACE_SEC,
+                )
+                try:
+                    evidence = _terminate_guarded_process_tree(
+                        tracker,
+                        hard_kill_deadline=cleanup_deadline,
+                        state_mode=state_mode,
+                        clock=clock,
+                    )
+                    cleanup_verified = True
+                    if state_mode is not None:
+                        _update_entry(
+                            state_mode, termination_evidence=evidence)
+                except _GuardedTerminationError as exc:
+                    if state_mode is not None:
+                        _update_entry(
+                            state_mode,
+                            termination_evidence=exc.evidence,
+                            cleanup_unverified=True,
+                        )
+                    raise
+                raise RuntimeError(
+                    "guarded subprocess exited while descendants remained")
+            cleanup_verified = True
+        return return_code
     finally:
+        if tracker is not None and not cleanup_verified and not cleanup_attempted:
+            cleanup_attempted = True
+            cleanup_deadline = min(
+                hard_kill_deadline,
+                clock() + 2 * BUILD_TIMEOUT_TERM_GRACE_SEC,
+            )
+            try:
+                evidence = _terminate_guarded_process_tree(
+                    tracker,
+                    hard_kill_deadline=cleanup_deadline,
+                    state_mode=state_mode,
+                    clock=clock,
+                )
+                cleanup_verified = True
+                if state_mode is not None:
+                    _update_entry(state_mode, termination_evidence=evidence)
+            except _GuardedTerminationError as exc:
+                if state_mode is not None:
+                    _update_entry(
+                        state_mode,
+                        termination_evidence=exc.evidence,
+                        cleanup_unverified=True,
+                    )
+                raise
+        elif tracker is None and proc.poll() is None:
+            if process_identity is not None:
+                try:
+                    _terminate_validated_process_tree(
+                        process_identity,
+                        hard_kill_deadline=time.time()
+                        + BUILD_TIMEOUT_TERM_GRACE_SEC,
+                    )
+                except RuntimeError:
+                    # Identity changed: fail closed rather than signaling an
+                    # unverified process. The caller's timeout/failure record
+                    # preserves the diagnostic.
+                    pass
+            else:
+                _kill_pgroup(proc.pid)
         if proc.poll() is None:
-            _kill_pgroup(proc.pid)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                pass
+                if tracker is not None:
+                    raise _GuardedTerminationError(
+                        "guarded subprocess root did not exit after cleanup",
+                        {
+                            "root": tracker.root.__dict__,
+                            "cleanup_verified": False,
+                        },
+                    )
         if proc.stdout is not None:
             proc.stdout.close()
 
@@ -8581,11 +10967,161 @@ def _run_package_linux_worker(entry: Mapping[str, object]) -> int:
         log_handle.close()
 
 
+_RUN_ONLY_RECEIPT_MODES = {
+    "unit+integration",
+    "bench",
+    "bench-fast",
+    "bench-io",
+    "bench-e2e",
+}
+
+
+def _build_receipt_required(mode: str, build_only: bool) -> bool:
+    # The specialized two-tree PostgreSQL error-safety worker owns separate
+    # qualification receipts and bypasses the ordinary single-tree sealer.
+    return build_only and mode != POSTGRES_ERROR_SAFETY_MODE
+
+
+def _run_only_from_build_receipt(
+        *,
+        mode: str,
+        entry: Mapping[str, object],
+        receipt: Mapping[str, object],
+        active_build_dir: Path,
+        active_bin_dir: Path,
+        active_preset: str,
+        bench_flags: list[str],
+        test_flags: list[str],
+        bench_e2e_config: str | None,
+        log_handle,
+        deadline: float,
+) -> int:
+    """Run install/tests/benchmarks from a validated tree without building."""
+    mode_details = MODES[mode]
+    if mode not in _RUN_ONLY_RECEIPT_MODES:
+        raise RuntimeError(
+            f"mode {mode!r} does not support receipt-pinned run_only")
+    if mode_details.post_build_targets:
+        raise RuntimeError(
+            "run_only cannot invoke a CMake post-build target because that "
+            "could compile implicitly")
+    env = _build_worker_descendant_environment()
+    env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
+    _ensure_local_toolchain_environment(env, active_build_dir)
+    if _is_aws_clang_preset(active_preset):
+        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
+    elif _is_aws_gcc_preset(active_preset):
+        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
+
+    pre_reports: set[Path] = set()
+    if (
+        mode_details.reporting_subdir_name
+        and mode_details.reporting_dir.exists()
+    ):
+        pre_reports = _report_paths(mode_details.reporting_dir)
+
+    if mode_details.install_extension:
+        install_receipt, install_receipt_error = _validate_build_receipt(
+            str(receipt["build_receipt_id"]),
+            expected_mode=mode,
+            expected_debug=bool(receipt["debug"]),
+        )
+        if install_receipt_error is not None or install_receipt is None:
+            raise RuntimeError(
+                "build receipt changed before extension install: "
+                f"{install_receipt_error}")
+        if not install_receipt.get("authorized_artifacts"):
+            raise RuntimeError(
+                "build receipt has no sealed extension install artifacts")
+        _update_entry(mode, step="installing receipted extension")
+        rc = _stream_subprocess(
+            _cmake_install_cmd(active_build_dir, active_preset),
+            log_handle,
+            deadline,
+            cwd=PROJECT_ROOT,
+            env=env,
+            state_mode=mode,
+            phase="run_only_install",
+        )
+        if rc != 0:
+            raise RuntimeError(
+                "receipt-pinned extension install exited with code "
+                f"{rc}")
+        _restart_postgresql(
+            active_build_dir, active_preset, log_handle, deadline)
+        _prepare_aws_postgresql_test_database(
+            active_preset, log_handle, deadline)
+
+    _update_entry(mode, step="running from build receipt")
+    run_env = env
+    if mode == "bench-e2e":
+        env.setdefault(
+            "BIOSEQ_E2E_PG_RESTART_CMD",
+            _postgresql_e2e_restart_shell_command(
+                active_build_dir, active_preset),
+        )
+        if bench_e2e_config is not None:
+            run_env = env.copy()
+            run_env["BIOSEQ_E2E_CONFIG_OVERRIDE"] = bench_e2e_config
+    report_path, report_files, _, _ = _run_mode_commands(
+        mode,
+        active_bin_dir,
+        active_build_dir,
+        run_env,
+        log_handle,
+        deadline,
+        pre_reports,
+        bench_flags=bench_flags,
+        test_flags=test_flags,
+    )
+    revalidated_receipt, receipt_error = _validate_build_receipt(
+        str(receipt["build_receipt_id"]),
+        expected_mode=mode,
+        expected_debug=bool(receipt["debug"]),
+    )
+    if receipt_error is not None or revalidated_receipt is None:
+        raise RuntimeError(
+            "build receipt changed during run_only execution: "
+            f"{receipt_error}")
+    run_receipt = _seal_run_receipt(
+        mode=mode,
+        build_receipt=revalidated_receipt,
+        report_files=report_files,
+        bench_flags=bench_flags,
+        test_flags=test_flags,
+        bench_e2e_config=bench_e2e_config,
+    )
+    completed_at = time.time()
+    _update_entry(
+        mode,
+        status="completed",
+        step="completed",
+        completed_at=completed_at,
+        exit_code=0,
+        report_file=str(report_path) if report_path else None,
+        report_files=[str(path) for path in report_files],
+        build_only=False,
+        run_only=True,
+        reused_build_receipt=receipt["build_receipt_id"],
+        run_receipt_id=run_receipt["build_receipt_id"],
+    )
+    log_handle.write(
+        "\n# receipt-pinned run_only completed without configure/generate/"
+        "compile/link at "
+        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n"
+    )
+    return 0
+
+
 def _run_build_worker(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
                       test_flags=None, bench_e2e_config=None,
                       sql_guardrail_request_json=None,
-                      postgres_error_safety_review_waiver_json=None) -> int:
+                      postgres_error_safety_review_waiver_json=None,
+                      run_only: bool = False,
+                      reuse_build_receipt: str | None = None,
+                      build_timeout_sec: int | None = None,
+                      fresh: bool = False) -> int:
     """Worker entry point — runs detached from the MCP server.
 
     Reads the slot the server reserved in state, walks configure → build →
@@ -8620,14 +11156,54 @@ def _run_build_worker(mode: str, build_only: bool = False,
         return 1
     bench_flags = bench_flags or []
     test_flags = test_flags or []
-    state = _load_state()
-    entry = state.get(mode)
+    if build_timeout_sec is not None and (
+        not isinstance(build_timeout_sec, int)
+        or isinstance(build_timeout_sec, bool)
+        or not 60 <= build_timeout_sec <= MAX_BUILD_PHASE_TIMEOUT_SEC
+    ):
+        _log("worker received invalid build_timeout_sec")
+        return 1
+    try:
+        entry = (
+            _await_guarded_worker_arm(mode)
+            if build_timeout_sec is not None
+            else _load_state().get(mode)
+        )
+    except RuntimeError as exc:
+        _log(f"guarded worker arm failed: {exc}")
+        try:
+            _update_entry(
+                mode,
+                status="failed",
+                step="worker_identity_failed",
+                completed_at=time.time(),
+                notes=str(exc),
+            )
+        except RuntimeError:
+            pass
+        return 1
     if not entry:
         _log(f"worker for {mode}: no state entry, exiting")
         return 1
+    reserved_arguments = {
+        "build_only": build_only,
+        "debug": debug,
+        "fresh": fresh,
+        "run_only": run_only,
+        "build_timeout_sec": build_timeout_sec,
+        "reuse_build_receipt": reuse_build_receipt,
+    }
+    for field_name, observed_value in reserved_arguments.items():
+        if field_name in entry and entry.get(field_name) != observed_value:
+            _log(
+                "detached worker arguments differ from the reserved request: "
+                f"{field_name} scheduled={entry.get(field_name)!r} "
+                f"worker={observed_value!r}")
+            return 1
     mode_details = MODES[mode]
     if mode_details.requires_build_only and (
         not build_only
+        or run_only
         or debug
         or bench_flags
         or test_flags
@@ -8641,7 +11217,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
         return 1
     if mode == PACKAGE_LINUX_MODE:
         if (
-            build_only or debug or bench_flags or test_flags
+            build_only or run_only or fresh or build_timeout_sec is not None
+            or reuse_build_receipt is not None
+            or debug or bench_flags or test_flags
             or bench_e2e_config or sql_guardrail_request_json
             or postgres_error_safety_review_waiver_json
         ):
@@ -8649,6 +11227,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
             return 1
         return _run_package_linux_worker(entry)
     if mode == POSTGRES_ERROR_SAFETY_MODE:
+        if run_only or fresh or build_timeout_sec is not None:
+            _log(
+                "postgres-error-safety does not accept receipt/fresh inputs")
+            return 1
         return _run_postgres_error_safety_worker(
             entry,
             build_only,
@@ -8675,10 +11257,29 @@ def _run_build_worker(mode: str, build_only: bool = False,
         )
     )
     deadline = started_at + mode_timeout_sec
+    if build_timeout_sec is not None:
+        build_soft_deadline, build_hard_deadline = (
+            _build_phase_deadlines(time.monotonic(), build_timeout_sec)
+        )
+        build_deadline_clock = time.monotonic
+    else:
+        build_hard_deadline = deadline
+        build_soft_deadline = deadline
+        build_deadline_clock = time.time
 
-    active_preset = preset_for(mode, debug)
-    active_build_dir = build_dir_for(mode, debug)
-    active_bin_dir = bin_dir_for(mode, debug)
+    active_preset = str(entry.get("preset") or preset_for(mode, debug))
+    active_build_dir = Path(
+        str(entry.get("build_dir") or build_dir_for(mode, debug))
+    ).resolve(strict=False)
+    active_bin_dir = active_build_dir / mode_details.binary_subdir
+    recorded_project_root = Path(
+        str(entry.get("source_project_root") or PROJECT_ROOT)
+    ).resolve(strict=False)
+    if recorded_project_root != PROJECT_ROOT.resolve(strict=False):
+        _log(
+            "worker project-root override does not match the reserved source "
+            f"tree: worker={PROJECT_ROOT} reserved={recorded_project_root}")
+        return 1
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("w", buffering=1)
@@ -8689,6 +11290,12 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# build_dir={active_build_dir}\n"
         f"# preset={active_preset}\n"
         f"# debug={debug}\n"
+        f"# fresh={fresh}\n"
+        f"# run_only={run_only}\n"
+        f"# reuse_build_receipt={reuse_build_receipt or ''}\n"
+        f"# build_timeout_sec={build_timeout_sec or ''}\n"
+        f"# build_soft_timeout_at={build_soft_deadline}\n"
+        f"# build_hard_timeout_at={build_hard_deadline}\n"
         f"# bench_flags={json.dumps(bench_flags, ensure_ascii=True)}\n"
         f"# focused_test_args={json.dumps(test_flags, ensure_ascii=True)}\n"
         f"# bench_e2e_config={bench_e2e_config or ''}\n"
@@ -8711,6 +11318,45 @@ def _run_build_worker(mode: str, build_only: bool = False,
         pre_reports = _report_paths(mode_details.reporting_dir)
 
     try:
+        if run_only:
+            if not reuse_build_receipt:
+                raise RuntimeError(
+                    "run_only requires reuse_build_receipt")
+            receipt, receipt_error = _validate_build_receipt(
+                reuse_build_receipt,
+                expected_mode=mode,
+                expected_debug=debug,
+            )
+            if receipt_error is not None or receipt is None:
+                raise RuntimeError(
+                    f"receipt validation failed: {receipt_error}")
+            if Path(str(receipt["build_dir"])) != active_build_dir:
+                raise RuntimeError(
+                    "reserved run_only tree differs from the receipt tree")
+            return _run_only_from_build_receipt(
+                mode=mode,
+                entry=entry,
+                receipt=receipt,
+                active_build_dir=active_build_dir,
+                active_bin_dir=active_bin_dir,
+                active_preset=active_preset,
+                bench_flags=bench_flags,
+                test_flags=test_flags,
+                bench_e2e_config=bench_e2e_config,
+                log_handle=log_handle,
+                deadline=deadline,
+            )
+
+        if reuse_build_receipt is not None:
+            raise RuntimeError(
+                "reuse_build_receipt is valid only with run_only=true")
+        expected_source_fingerprint = entry.get("source_graph_fingerprint")
+        if expected_source_fingerprint is not None:
+            observed_source_fingerprint = _source_graph_fingerprint(
+                WORKSPACE_ROOT)
+            if observed_source_fingerprint != expected_source_fingerprint:
+                raise RuntimeError(
+                    "source graph changed between scheduling and worker start")
         # Bind qualification to the source that enters configure/build, then
         # compare again after every native command. Development runs in
         # mapped/mixed phases remain usable from a dirty tree.
@@ -8817,6 +11463,11 @@ def _run_build_worker(mode: str, build_only: bool = False,
             f"-D{name}={value}"
             for name, value in configure_cache_contract.items()
         ]
+        isolated_tree_args = (
+            ["-S", str(PROJECT_ROOT), "-B", str(active_build_dir)]
+            if fresh else []
+        )
+        guarded_build = build_timeout_sec is not None
         initial_clang_rt_args = _initial_clang_rt_cmake_args(
             active_preset, machine_rt_priority)
         cmake_identity = _cmake_executable_identity(env)
@@ -8828,6 +11479,40 @@ def _run_build_worker(mode: str, build_only: bool = False,
             cmake_executable_identity=cmake_identity,
         )
         build_ninja = active_build_dir / "build.ninja"
+        build_phase_started_at = time.time()
+        build_phase_started_monotonic = time.monotonic()
+        if build_timeout_sec is not None:
+            build_soft_deadline, build_hard_deadline = (
+                _build_phase_deadlines(
+                    build_phase_started_monotonic, build_timeout_sec)
+            )
+            build_soft_deadline_wall, build_hard_deadline_wall = (
+                _build_phase_deadlines(
+                    build_phase_started_at, build_timeout_sec)
+            )
+            _update_entry(
+                mode,
+                build_phase_started_at=build_phase_started_at,
+                build_phase_started_monotonic=build_phase_started_monotonic,
+                build_soft_deadline=build_soft_deadline_wall,
+                build_hard_deadline=build_hard_deadline_wall,
+                build_soft_deadline_monotonic=build_soft_deadline,
+                build_hard_deadline_monotonic=build_hard_deadline,
+                timeout_guard_armed=True,
+            )
+            log_handle.write(
+                "# guarded build phase armed: "
+                f"TERM-at={build_soft_deadline_wall} "
+                f"KILL-by={build_hard_deadline_wall} "
+                f"TERM-monotonic={build_soft_deadline} "
+                f"KILL-monotonic={build_hard_deadline}\n")
+            log_handle.flush()
+        else:
+            _update_entry(
+                mode,
+                build_phase_started_at=build_phase_started_at,
+                timeout_guard_armed=False,
+            )
         configured_fresh = _ensure_cmake_preset_tree_fresh(
             build_dir=active_build_dir,
             preset=active_preset,
@@ -8836,12 +11521,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 "cmake",
                 "--preset",
                 active_preset,
+                *isolated_tree_args,
                 *required_cache_args,
                 *initial_clang_rt_args,
             ],
             log_handle=log_handle,
-            deadline=deadline,
+            deadline=build_soft_deadline,
             environment=env,
+            hard_kill_deadline=build_hard_deadline,
+            state_mode=mode,
+            require_verified_termination=guarded_build,
+            deadline_clock=build_deadline_clock,
         )
         expected_test_indexes = mode_details.preset_family == "test"
         cached_test_indexes = _cmake_cache_bool(
@@ -8860,11 +11550,16 @@ def _run_build_worker(mode: str, build_only: bool = False,
             log_handle.flush()
             rc = _run_cmake_preset_configure(
                 ["cmake", "--preset", active_preset,
+                 *isolated_tree_args,
                  *required_cache_args, *initial_clang_rt_args],
                 build_dir=active_build_dir,
                 log_handle=log_handle,
-                deadline=deadline,
+                deadline=build_soft_deadline,
                 environment=env,
+                hard_kill_deadline=build_hard_deadline,
+                state_mode=mode,
+                require_verified_termination=guarded_build,
+                deadline_clock=build_deadline_clock,
             )
             if rc != 0:
                 raise RuntimeError(
@@ -8911,12 +11606,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
             _invalidate_cmake_configure_stamp(active_build_dir)
             rc = _run_cmake_preset_configure(
                 ["cmake", "--preset", active_preset,
+                 *isolated_tree_args,
                  *postgresql_reset_args,
                  *(f"-D{name}={value}" for name, value in cache_repairs.items())],
                 build_dir=active_build_dir,
                 log_handle=log_handle,
-                deadline=deadline,
+                deadline=build_soft_deadline,
                 environment=env,
+                hard_kill_deadline=build_hard_deadline,
+                state_mode=mode,
+                require_verified_termination=guarded_build,
+                deadline_clock=build_deadline_clock,
             )
             if rc != 0:
                 raise RuntimeError(
@@ -9038,11 +11738,16 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 _invalidate_cmake_configure_stamp(active_build_dir)
                 rc = _run_cmake_preset_configure(
                     ["cmake", "--preset", active_preset,
+                     *isolated_tree_args,
                      *dict.fromkeys(repair_unset_args), *repair_args],
                     build_dir=active_build_dir,
                     log_handle=log_handle,
-                    deadline=deadline,
+                    deadline=build_soft_deadline,
                     environment=env,
+                    hard_kill_deadline=build_hard_deadline,
+                    state_mode=mode,
+                    require_verified_termination=guarded_build,
+                    deadline_clock=build_deadline_clock,
                 )
                 if rc != 0:
                     raise RuntimeError(
@@ -9062,11 +11767,16 @@ def _run_build_worker(mode: str, build_only: bool = False,
             log_handle.flush()
             _invalidate_cmake_configure_stamp(active_build_dir)
             rc = _run_cmake_preset_configure(
-                ["cmake", "--preset", active_preset, *clang_rt_repairs],
+                ["cmake", "--preset", active_preset,
+                 *isolated_tree_args, *clang_rt_repairs],
                 build_dir=active_build_dir,
                 log_handle=log_handle,
-                deadline=deadline,
+                deadline=build_soft_deadline,
                 environment=env,
+                hard_kill_deadline=build_hard_deadline,
+                state_mode=mode,
+                require_verified_termination=guarded_build,
+                deadline_clock=build_deadline_clock,
             )
             if rc != 0:
                 raise RuntimeError(
@@ -9123,18 +11833,62 @@ def _run_build_worker(mode: str, build_only: bool = False,
             "# verified CMake configure input seal="
             f"{configure_seal}.\n")
         log_handle.flush()
+        configure_completed_at = time.time()
+        _update_entry(
+            mode,
+            configure_completed_at=configure_completed_at,
+            configure_duration_sec=(
+                configure_completed_at - build_phase_started_at),
+        )
 
         _update_entry(mode, step="building", build_only=build_only,
                       debug=debug,
                       bioseq_test_indexes=verified_test_indexes)
-        for tgt in mode_details.targets:
+        target_timings: list[dict[str, object]] = []
+        for target_group in _build_target_groups_for(mode):
+            target_label = (
+                target_group[0]
+                if len(target_group) == 1
+                else " + ".join(target_group)
+            )
+            target_started_at = time.time()
             rc = _stream_subprocess(
-                ["cmake", "--build", str(active_build_dir), "--target", tgt,
-                 "--parallel", str(CMAKE_PARALLEL_JOBS)],
-                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                _cmake_build_argv(active_build_dir, target_group),
+                log_handle, build_soft_deadline,
+                cwd=PROJECT_ROOT,
+                env=env,
+                hard_kill_deadline=build_hard_deadline,
+                state_mode=mode,
+                phase=f"build:{target_label}",
+                require_verified_termination=guarded_build,
+                deadline_clock=build_deadline_clock,
             )
             if rc != 0:
-                raise RuntimeError(f"build of target '{tgt}' exited with code {rc}")
+                if len(target_group) == 1:
+                    raise RuntimeError(
+                        f"build of target '{target_label}' exited with code {rc}")
+                raise RuntimeError(
+                    "build of concurrent target group "
+                    f"'{target_label}' exited with code {rc}")
+            target_completed_at = time.time()
+            target_timings.append({
+                "target": target_label,
+                "targets": list(target_group),
+                "co_scheduled": len(target_group) > 1,
+                "started_at": target_started_at,
+                "completed_at": target_completed_at,
+                "duration_sec": target_completed_at - target_started_at,
+            })
+            _update_entry(mode, target_timings=list(target_timings))
+
+        build_phase_completed_at = time.time()
+        _update_entry(
+            mode,
+            build_phase_completed_at=build_phase_completed_at,
+            build_phase_duration_sec=(
+                build_phase_completed_at - build_phase_started_at),
+            target_timings=target_timings,
+        )
 
         if mode in _CACHE_BIOSEQ_DSO_QUALIFICATION_MODES:
             _update_entry(
@@ -9169,6 +11923,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 pass
 
         if build_only:
+            receipt_entry = dict(_load_state().get(mode) or entry)
+            receipt = (
+                _seal_successful_build_receipt(
+                    mode=mode,
+                    entry=receipt_entry,
+                    build_dir=active_build_dir,
+                    preset=active_preset,
+                    debug=debug,
+                )
+                if entry.get("receipt_required") else None
+            )
             completed_at = time.time()
             _update_entry(
                 mode,
@@ -9180,6 +11945,12 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 report_files=[],
                 build_only=True,
                 debug=debug,
+                build_receipt_id=(
+                    receipt["build_receipt_id"] if receipt else None),
+                configuration=(receipt["configuration"] if receipt else None),
+                artifact_counts=(
+                    receipt["artifact_counts"] if receipt else
+                    _build_artifact_counts(active_build_dir, mode)),
             )
         else:
             # Install the freshly-built extension into the running PostgreSQL
@@ -9378,6 +12149,18 @@ def _run_build_worker(mode: str, build_only: bool = False,
 
     except TimeoutError as e:
         completed_at = time.time()
+        timeout_seconds = (
+            build_timeout_sec
+            if build_timeout_sec is not None
+            else mode_timeout_sec
+        )
+        try:
+            partial_artifact_counts = _build_artifact_counts(
+                active_build_dir, mode)
+            artifact_count_error = None
+        except (OSError, RuntimeError) as artifact_error:
+            partial_artifact_counts = None
+            artifact_count_error = str(artifact_error)
         _update_entry(
             mode,
             status="killed_timeout",
@@ -9387,10 +12170,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
             notes=str(e),
             build_only=build_only,
             debug=debug,
+            artifact_counts=partial_artifact_counts,
+            artifact_count_error=artifact_count_error,
         )
         log_handle.write(
-            f"\n# killed by {mode_timeout_sec / 60.0}-min "
-            f"mode hard timeout: {e}\n")
+            f"\n# killed by {timeout_seconds}-second "
+            f"{'build-phase' if build_timeout_sec is not None else 'mode'} "
+            f"hard timeout: {e}\n")
         return 124
 
     except Exception as e:
@@ -9425,6 +12211,53 @@ def _format_minutes(minutes: float, *, plural_int: bool = False) -> str:
     if plural_int:
         return f"{round(minutes)} minutes"
     return f"{minutes:.2f} min"
+
+
+def _unverified_guard_cleanup(
+        state: Mapping[str, object]) -> str | None:
+    """Re-sweep unique build roots before clearing an unverified cleanup."""
+    for entry in state.values():
+        if not isinstance(entry, dict) or not entry.get("cleanup_unverified"):
+            continue
+        build_dir_value = entry.get("build_dir")
+        if not isinstance(build_dir_value, str) or not build_dir_value:
+            return "a previous guarded cleanup has no ownership root"
+        ownership_root = Path(build_dir_value).resolve(strict=False)
+        try:
+            snapshot, owned_pids = _guarded_process_snapshot(
+                "cleanup-revalidation-sweep", ownership_root)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return f"cannot revalidate previous guarded cleanup: {exc}"
+        live = set(owned_pids)
+        evidence = entry.get("termination_evidence")
+        identities = (
+            evidence.get("survivor_identities")
+            if isinstance(evidence, dict) else None
+        )
+        if identities is not None:
+            if not isinstance(identities, list):
+                return (
+                    "a previous guarded cleanup has malformed identity "
+                    "evidence")
+            for value in identities:
+                if not isinstance(value, dict):
+                    return (
+                        "a previous guarded cleanup has malformed identity "
+                        "evidence")
+                try:
+                    identity = _ProcessIdentity(**value)
+                except (TypeError, ValueError):
+                    return (
+                        "a previous guarded cleanup has malformed identity "
+                        "evidence")
+                if _same_process(snapshot.get(identity.pid), identity):
+                    live.add(identity.pid)
+        if live:
+            return (
+                "previous guarded build descendants remain live: "
+                + ", ".join(str(pid) for pid in sorted(live))
+            )
+    return None
 
 
 def _running_in_same_group(
@@ -10326,7 +13159,12 @@ def tool_start_build(mode: str, build_only: bool = False,
                      debug_supplied: bool = False,
                      filter_supplied: bool = False,
                      bench_e2e_config=None,
-                     postgres_error_safety_review_waiver=None) -> str:
+                     postgres_error_safety_review_waiver=None,
+                     fresh: bool = False,
+                     build_timeout_sec: int | None = None,
+                     baseline_ref: str | None = None,
+                     run_only: bool = False,
+                     reuse_build_receipt: str | None = None) -> str:
     identity_error = _refuse_root_build_identity("start_build")
     if identity_error is not None:
         return f"Build worker identity error: {identity_error}"
@@ -10342,9 +13180,45 @@ def tool_start_build(mode: str, build_only: bool = False,
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
+    if build_timeout_sec is not None and (
+        not isinstance(build_timeout_sec, int)
+        or isinstance(build_timeout_sec, bool)
+        or not 60 <= build_timeout_sec <= MAX_BUILD_PHASE_TIMEOUT_SEC
+    ):
+        return (
+            "build_timeout_sec must be an integer between 60 and "
+            f"{MAX_BUILD_PHASE_TIMEOUT_SEC} seconds")
+    if run_only:
+        if build_only:
+            return "run_only and build_only are mutually exclusive"
+        if fresh or build_timeout_sec is not None or baseline_ref is not None:
+            return (
+                "run_only rejects fresh, build_timeout_sec, and baseline_ref; "
+                "the receipt pins those values")
+        if not isinstance(reuse_build_receipt, str) or not reuse_build_receipt:
+            return "run_only requires reuse_build_receipt"
+        if mode not in _RUN_ONLY_RECEIPT_MODES:
+            return f"mode {mode!r} does not support receipt-pinned run_only"
+    else:
+        if reuse_build_receipt is not None:
+            return "reuse_build_receipt is valid only with run_only=true"
+        if fresh and not build_only:
+            return "fresh=true requires build_only=true"
+        if build_timeout_sec is not None and not build_only:
+            return "build_timeout_sec is accepted only for build_only runs"
+        if build_timeout_sec is not None and not fresh:
+            return (
+                "build_timeout_sec requires fresh=true so detached-process "
+                "ownership is isolated to one MCP build directory")
+        if baseline_ref is not None and (not build_only or not fresh):
+            return "baseline_ref requires build_only=true and fresh=true"
+
     mode_details = MODES[mode]
     if mode_details.requires_build_only and (
         not build_only
+        or run_only
+        or baseline_ref is not None
+        or reuse_build_receipt is not None
         or debug_supplied or debug
         or filter_supplied or bench_filter is not None
         or debug_report_supplied or debug_report
@@ -10355,8 +13229,12 @@ def tool_start_build(mode: str, build_only: bool = False,
             f"{mode} is a fixed local compile gate: it requires "
             "build_only=true and accepts no debug, filter, debug_report, "
             "bench_e2e_config, or review-waiver inputs.")
+    if baseline_ref is not None and not mode_details.is_bench_mode:
+        return "baseline_ref is accepted only for benchmark modes"
     if mode == PACKAGE_LINUX_MODE and (
         build_only
+        or run_only or fresh or build_timeout_sec is not None
+        or baseline_ref is not None or reuse_build_receipt is not None
         or debug_supplied or debug
         or filter_supplied or bench_filter is not None
         or debug_report_supplied or debug_report
@@ -10401,6 +13279,12 @@ def tool_start_build(mode: str, build_only: bool = False,
         dict[str, object] | None
     ) = None
     if mode == POSTGRES_ERROR_SAFETY_MODE:
+        if (
+            run_only or fresh or build_timeout_sec is not None
+            or baseline_ref is not None or reuse_build_receipt is not None
+        ):
+            return (
+                "postgres-error-safety does not accept receipt/fresh inputs")
         if debug_supplied or debug:
             return (
                 "postgres-error-safety owns two fixed isolated presets and "
@@ -10446,10 +13330,60 @@ def tool_start_build(mode: str, build_only: bool = False,
         return (
             "postgres_error_safety_review_waiver is accepted only for mode "
             f"{POSTGRES_ERROR_SAFETY_MODE!r}.")
+    run_token = secrets.token_hex(16)
+    selected_receipt: dict[str, object] | None = None
+    baseline_commit: str | None = None
     try:
-        selected_preset = preset_for(mode, debug)
-    except RuntimeError as exc:
-        return f"Build preset isolation error: {exc}"
+        if run_only:
+            selected_receipt, receipt_error = _validate_build_receipt(
+                str(reuse_build_receipt),
+                expected_mode=mode,
+                expected_debug=(debug if debug_supplied else None),
+            )
+            if receipt_error is not None or selected_receipt is None:
+                return f"Build receipt validation error: {receipt_error}"
+            debug = bool(selected_receipt["debug"])
+            selected_preset = str(selected_receipt["preset"])
+            source_project_root = Path(
+                str(selected_receipt["source_project_root"])
+            ).resolve(strict=True)
+            selected_build_dir = Path(
+                str(selected_receipt["build_dir"])
+            ).resolve(strict=True)
+            source_commit = str(selected_receipt["source_commit"])
+            source_graph_fingerprint = str(
+                selected_receipt["source_graph_fingerprint"])
+            baseline_ref = (
+                str(selected_receipt["baseline_ref"])
+                if selected_receipt.get("baseline_ref") is not None
+                else None
+            )
+            baseline_commit = (
+                str(selected_receipt["baseline_commit"])
+                if selected_receipt.get("baseline_commit") is not None
+                else None
+            )
+        else:
+            selected_preset = preset_for(mode, debug)
+            if baseline_ref is not None:
+                source_project_root, baseline_commit = (
+                    _create_baseline_worktree(baseline_ref, run_token)
+                )
+            else:
+                source_project_root = PROJECT_ROOT
+            source_project_root = source_project_root.resolve(strict=True)
+            source_workspace_root = source_project_root.parent
+            source_commit = _git_commit(source_workspace_root)
+            source_graph_fingerprint = _source_graph_fingerprint(
+                source_workspace_root)
+            selected_build_dir = (
+                source_project_root / "build" / "mcp" / run_token
+                / selected_preset
+                if fresh
+                else source_project_root / "build" / selected_preset
+            ).resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        return f"Build context isolation error: {exc}"
 
     # Validate + translate runtime selection before spawning the long-running
     # worker. CLI benchmark modes retain their filter CLI. unit+integration
@@ -10482,9 +13416,23 @@ def tool_start_build(mode: str, build_only: bool = False,
 
     with _global_lock():
         state = _load_state()
+        cleanup_blocker = _unverified_guard_cleanup(state)
+        if cleanup_blocker is not None:
+            return (
+                "Build guard cleanup error: " + cleanup_blocker
+                + "; refusing to start another build")
         running_mode, running_entry = _running_in_same_group(
             state, mode, build_only,
-            PROJECT_ROOT / "build" / selected_preset)
+            selected_build_dir)
+        # Refreshing running entries can be the operation that discovers a
+        # dead guarded worker and records fail-closed cleanup evidence.  Do
+        # not let this same scheduling request pass the cleanup gate using
+        # the pre-refresh state.
+        cleanup_blocker = _unverified_guard_cleanup(state)
+        if cleanup_blocker is not None:
+            return (
+                "Build guard cleanup error: " + cleanup_blocker
+                + "; refusing to start another build")
         if running_entry:
             elapsed_min = (time.time() - running_entry["started_at"]) / 60.0
             eta_min = max(
@@ -10500,6 +13448,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             worker_env = _build_worker_descendant_environment()
         except RuntimeError as exc:
             return f"Build worker environment error: {exc}"
+        worker_env["BIOSEQ_BUILD_PROJECT_ROOT"] = str(source_project_root)
 
         # Validate the machine-owned compiler policy only after request
         # validation and conflict detection.  The preflight creates one
@@ -10557,6 +13506,7 @@ def tool_start_build(mode: str, build_only: bool = False,
             if sql_guardrail_workflow is not None
             else resolved_e2e_config
         )
+        receipt_required = _build_receipt_required(mode, build_only)
         state[mode] = {
             "mode": mode,
             "status": "running",
@@ -10574,11 +13524,24 @@ def tool_start_build(mode: str, build_only: bool = False,
             "notes": None,
             "debug": debug,
             "build_only": build_only,
+            "run_only": run_only,
+            "fresh": fresh,
+            "build_timeout_sec": build_timeout_sec,
+            "timeout_guard_armed": False,
+            "reuse_build_receipt": reuse_build_receipt,
+            "receipt_required": receipt_required,
+            "pending_build_receipt_id": (
+                f"br_{run_token}" if receipt_required else None
+            ),
             "preset": selected_preset,
-            "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
-            "build_dirs": [
-                str(path) for path in build_dirs_for(mode, debug)
-            ],
+            "build_dir": str(selected_build_dir),
+            "build_dirs": [str(selected_build_dir)],
+            "source_project_root": str(source_project_root),
+            "source_workspace_root": str(source_project_root.parent),
+            "source_commit": source_commit,
+            "source_graph_fingerprint": source_graph_fingerprint,
+            "baseline_ref": baseline_ref,
+            "baseline_commit": baseline_commit,
             "preset_family": mode_details.preset_family,
             "binary_subdir": mode_details.binary_subdir,
             "uses_private_cluster": mode_details.uses_private_cluster,
@@ -10607,6 +13570,12 @@ def tool_start_build(mode: str, build_only: bool = False,
                  "--run-build", mode,
                  "--build-only", ("true" if build_only else "false"),
                  "--debug", ("true" if debug else "false"),
+                 "--fresh", ("true" if fresh else "false"),
+                 "--run-only", ("true" if run_only else "false"),
+                 "--build-timeout-sec", (
+                     str(build_timeout_sec)
+                     if build_timeout_sec is not None else ""),
+                 "--reuse-build-receipt", reuse_build_receipt or "",
                  "--bench-flags", json.dumps(bench_flags),
                  "--test-flags", json.dumps(test_flags),
                  "--bench-e2e-config", worker_e2e_config or "",
@@ -10628,6 +13597,43 @@ def tool_start_build(mode: str, build_only: bool = False,
 
         state = _load_state()
         state[mode]["pid"] = proc.pid
+        worker_identity = _capture_process_identity(proc.pid)
+        guarded_identity_missing = (
+            build_timeout_sec is not None
+            and not _valid_detached_worker_identity(
+                worker_identity,
+                child_pid=proc.pid,
+                parent_pid=os.getpid(),
+            )
+        )
+        if guarded_identity_missing:
+            state[mode].update({
+                "status": "failed",
+                "step": "worker_identity_failed",
+                "completed_at": time.time(),
+                "worker_process_identity": None,
+                "notes": (
+                    "guarded worker exact pid/start/session capture failed "
+                    "before arming"
+                ),
+            })
+            _save_state(state)
+            unarmed_termination = _terminate_unarmed_popen_group(proc)
+            state = _load_state()
+            if mode in state:
+                cleanup_unverified = not bool(
+                    unarmed_termination.get("cleanup_verified"))
+                state[mode]["termination_evidence"] = unarmed_termination
+                state[mode]["cleanup_unverified"] = cleanup_unverified
+                _save_state(state)
+            return (
+                "Build worker identity error: guarded worker could not be "
+                "armed before configure/build")
+        state[mode]["worker_process_identity"] = (
+            worker_identity.__dict__ if worker_identity is not None else None
+        )
+        if build_timeout_sec is not None:
+            state[mode]["step"] = "armed"
         _save_state(state)
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
              f"rt_priority={configured_rt_priority} "
@@ -10638,7 +13644,24 @@ def tool_start_build(mode: str, build_only: bool = False,
              f"log={log_path}")
 
     return (f"{mode_details.label} {mode_details.verb_is} scheduled "
-            f"(preset={selected_preset})"
+            f"(preset={selected_preset}, build_dir={selected_build_dir})"
+            + (
+                f" from build receipt {reuse_build_receipt} with no build"
+                if run_only else ""
+            )
+            + (
+                f"; pending build receipt br_{run_token} becomes valid only "
+                "after successful build-only completion"
+                if receipt_required else ""
+            )
+            + (
+                f"; guarded build timeout={build_timeout_sec}s"
+                if build_timeout_sec is not None else ""
+            )
+            + (
+                f"; detached baseline={baseline_ref}@{baseline_commit}"
+                if baseline_ref is not None else ""
+            )
             + (f" with bench flags {' '.join(bench_flags)}" if bench_flags else "")
             + (f" with focused Catch2 args {shlex.join(test_flags)}"
                if test_flags else "")
@@ -10955,15 +13978,43 @@ def tool_inspect(arguments: dict) -> str:
     # explicit override; without it, prefer that family's debug tree if built.
     inspect_mode = target_definition.mode
     debug_raw = arguments.get("debug")
+    receipt_id = arguments.get("reuse_build_receipt")
     try:
-        if debug_raw is None:
+        selected_receipt: dict[str, object] | None = None
+        if receipt_id is not None:
+            if not isinstance(receipt_id, str) or not receipt_id:
+                raise RuntimeError(
+                    "reuse_build_receipt must be a non-empty string")
+            explicit_debug = (
+                parse_bool("debug", debug_raw)
+                if debug_raw is not None else None
+            )
+            selected_receipt, receipt_error = _validate_build_receipt(
+                receipt_id,
+                expected_mode=inspect_mode,
+                expected_debug=explicit_debug,
+            )
+            if receipt_error is not None or selected_receipt is None:
+                raise RuntimeError(
+                    f"inspect receipt validation failed: {receipt_error}")
+            debug_chosen = bool(selected_receipt["debug"])
+            if not debug_chosen:
+                raise RuntimeError(
+                    "receipt-selected inspect requires a debug build receipt")
+            inspect_build_dir = Path(
+                str(selected_receipt["build_dir"])
+            )
+            inspect_preset = str(selected_receipt["preset"])
+        elif debug_raw is None:
             debug_chosen = (
                 build_dir_for(inspect_mode, True) / "build.ninja"
             ).exists()
+            inspect_build_dir = build_dir_for(inspect_mode, debug_chosen)
+            inspect_preset = preset_for(inspect_mode, debug_chosen)
         else:
             debug_chosen = parse_bool("debug", debug_raw)
-        inspect_build_dir = build_dir_for(inspect_mode, debug_chosen)
-        inspect_preset = preset_for(inspect_mode, debug_chosen)
+            inspect_build_dir = build_dir_for(inspect_mode, debug_chosen)
+            inspect_preset = preset_for(inspect_mode, debug_chosen)
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -10997,6 +14048,12 @@ def tool_inspect(arguments: dict) -> str:
         MODES[inspect_mode].preset_family == "test")
     out["build_metadata"]["preset_family"] = (
         MODES[inspect_mode].preset_family)
+    if selected_receipt is not None:
+        out["build_metadata"]["build_receipt_id"] = receipt_id
+        out["build_metadata"]["source_graph_fingerprint"] = (
+            selected_receipt["source_graph_fingerprint"])
+        out["build_metadata"]["baseline_ref"] = selected_receipt.get(
+            "baseline_ref")
     return json.dumps(out, indent=2)
 
 
@@ -11051,6 +14108,40 @@ def tool_status(mode: str) -> str:
         if isinstance(qualification, dict) and qualification
         else ""
     )
+    receipt_suffix = (
+        f". Build receipt: {entry['build_receipt_id']}"
+        if entry.get("build_receipt_id") else ""
+    )
+    if entry.get("run_receipt_id"):
+        receipt_suffix += f". Run receipt: {entry['run_receipt_id']}"
+    artifact_counts = entry.get("artifact_counts")
+    artifact_suffix = (
+        ". Artifact counts: " + json.dumps(
+            artifact_counts, sort_keys=True)
+        if isinstance(artifact_counts, dict)
+        else ""
+    )
+    guard_suffix = ""
+    if entry.get("build_timeout_sec") is not None:
+        guard_suffix = (
+            ". Build guard: "
+            f"timeout={entry['build_timeout_sec']}s "
+            f"armed={bool(entry.get('timeout_guard_armed'))} "
+            f"active_phase={entry.get('active_phase')} "
+            f"active_command={entry.get('active_command')} "
+            f"active_edge={entry.get('active_edge')} "
+            f"TERM-at={entry.get('build_soft_deadline')} "
+            f"KILL-by={entry.get('build_hard_deadline')} "
+            "worker_identity="
+            f"{json.dumps(entry.get('worker_process_identity'), sort_keys=True)}"
+        )
+    termination_suffix = (
+        ". Termination evidence: "
+        + json.dumps(entry.get("termination_evidence"), sort_keys=True)
+        + f" cleanup_unverified={bool(entry.get('cleanup_unverified'))}"
+        if entry.get("termination_evidence") is not None
+        else ""
+    )
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
@@ -11061,7 +14152,8 @@ def tool_status(mode: str) -> str:
                 f"Current step: {step}. "
                 f"Predicted finish in {_format_minutes(eta_min)}. "
                 f"{focus_suffix} "
-                f"Log: {log_path}{report_suffix}{qualification_suffix}")
+                f"Log: {log_path}{report_suffix}{qualification_suffix}"
+                f"{guard_suffix}{artifact_suffix}")
 
     completed_at = entry.get("completed_at") or time.time()
     duration_min = (completed_at - entry["started_at"]) / 60.0
@@ -11100,13 +14192,18 @@ def tool_status(mode: str) -> str:
                     f"{entry.get('build_dir', str(build_dir_for(mode, True)))} for the "
                     "`inspect` tool.")
         msg += qualification_suffix
+        msg += receipt_suffix
+        msg += guard_suffix
+        msg += artifact_suffix
         return msg
 
     if status == "killed_timeout":
         return ("Last run was forcefully killed due to timeout. "
                 f"{focus_suffix} "
                 f"Logs for inspection are available here: "
-                f"{log_path}{report_suffix}{qualification_suffix}")
+                f"{log_path}{report_suffix}{qualification_suffix}"
+                f"{guard_suffix}{artifact_suffix}. Termination evidence: "
+                f"{json.dumps(entry.get('termination_evidence'), sort_keys=True)}")
 
     if status == "failed":
         notes = entry.get("notes") or "(no notes)"
@@ -11119,13 +14216,15 @@ def tool_status(mode: str) -> str:
                 f"{_format_minutes(duration_min)}: {notes}. "
                 f"{focus_suffix} "
                 f"Log: {log_path}{report_suffix}{qualification_suffix}."
-                f"{private_note}")
+                f"{private_note}{guard_suffix}{artifact_suffix}"
+                f"{termination_suffix}")
 
     if status == "aborted":
         return (f"{mode_details.label} run was aborted (worker process died "
                 f"unexpectedly after {_format_minutes(duration_min)}). "
                 f"{focus_suffix} "
-                f"Log: {log_path}{report_suffix}{qualification_suffix}")
+                f"Log: {log_path}{report_suffix}{qualification_suffix}"
+                f"{guard_suffix}{artifact_suffix}{termination_suffix}")
 
     return (f"{mode_details.label} status: {status}."
             f"{focus_suffix} Log: {log_path}{report_suffix}"
@@ -13280,7 +16379,7 @@ def tool_remote_run(arguments: dict) -> str:
         if mode in REMOTE_RUN_REJECTED_MODES:
             return (
                 f"Mode '{mode}' is local-only and is not supported by "
-                "remote-run. Use the local start_build tool instead.")
+                f"remote-run. Use local start_build mode={mode} instead.")
         build_only = parse_bool("build_only", arguments.get("build_only", False))
         debug = parse_bool("debug", arguments.get("debug", False))
         bench_filter = arguments.get("filter")
@@ -13406,7 +16505,10 @@ TOOL_DEFINITIONS = [
             f"test-spec expressions in filter.tags. They are OR-combined and "
             f"applied to both test executables; a binary with no matching test "
             f"is allowed so tags local to one executable work as intended."
-            f"\nHard timeout: ~{int(HARD_TIMEOUT_MIN)} min."
+            f"\nGuarded build-only calls may set fresh=true and "
+            f"build_timeout_sec up to {MAX_BUILD_PHASE_TIMEOUT_SEC}; "
+            "TERM begins one minute before that hard cutoff. Runtime-only "
+            "calls require a matching successful build receipt."
         ),
         "inputSchema": {
             "type": "object",
@@ -13425,6 +16527,52 @@ TOOL_DEFINITIONS = [
                        f"{', '.join(sorted(FIXED_BUILD_ONLY_MODES))}."
                    ),
                    "default": False,
+                },
+                "fresh": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Build-only. Configure a new isolated MCP-owned tree "
+                        "under main/build/mcp without deleting or reusing the "
+                        "canonical build tree."
+                    ),
+                },
+                "build_timeout_sec": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": MAX_BUILD_PHASE_TIMEOUT_SEC,
+                    "description": (
+                        "Build-only configure/generate/compile/link cutoff. "
+                        "At one minute before the cutoff the exact worker "
+                        "descendant groups receive TERM; validated survivors "
+                        "receive KILL by the cutoff."
+                    ),
+                },
+                "baseline_ref": {
+                    "type": "string",
+                    "const": "refs/heads/main",
+                    "description": (
+                        "Fresh build-only baseline. Create a detached "
+                        "MCP-owned local worktree from the exact local main "
+                        "branch ref; never changes the user's worktree."
+                    ),
+                },
+                "run_only": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Skip configure/generate/compile/link completely and "
+                        "run only install/tests/benchmarks from the exact "
+                        "tree pinned by reuse_build_receipt."
+                    ),
+                },
+                "reuse_build_receipt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Opaque id returned by a successful build-only call. "
+                        "Required with run_only and rejected otherwise."
+                    ),
                 },
                 "debug": {
                    "type": "boolean",
@@ -13503,6 +16651,54 @@ TOOL_DEFINITIONS = [
                 }
             },
             "allOf": [
+                {
+                    "if": {
+                        "properties": {"run_only": {"const": True}},
+                        "required": ["run_only"],
+                    },
+                    "then": {
+                        "required": ["reuse_build_receipt"],
+                        "not": {
+                            "anyOf": [
+                                {
+                                    "properties": {
+                                        "build_only": {"const": True},
+                                    },
+                                    "required": ["build_only"],
+                                },
+                                {"required": ["fresh"]},
+                                {"required": ["build_timeout_sec"]},
+                                {"required": ["baseline_ref"]},
+                            ],
+                        },
+                    },
+                    "else": {
+                        "not": {"required": ["reuse_build_receipt"]},
+                    },
+                },
+                {
+                    "if": {
+                        "anyOf": [
+                            {
+                                "properties": {"fresh": {"const": True}},
+                                "required": ["fresh"],
+                            },
+                            {"required": ["build_timeout_sec"]},
+                            {"required": ["baseline_ref"]},
+                        ],
+                    },
+                    "then": {
+                        "properties": {"build_only": {"const": True}},
+                        "required": ["build_only"],
+                    },
+                },
+                {
+                    "if": {"required": ["baseline_ref"]},
+                    "then": {
+                        "properties": {"fresh": {"const": True}},
+                        "required": ["fresh"],
+                    },
+                },
                 {
                     "if": {
                         "properties": {"mode": {"const": "unit+integration"}},
@@ -13783,6 +16979,15 @@ TOOL_DEFINITIONS = [
                         "prefer the debug tree when available, fall back "
                         "to fast. Set this explicitly only when you need "
                         "to pin the tree (e.g. compare debug vs fast).",
+                },
+                "reuse_build_receipt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Select and validate the exact successful debug build "
+                        "tree instead of auto-discovering a recent tree. The "
+                        "receipt mode must own the requested target."
+                    ),
                 },
             },
             "required": ["function_name"],
@@ -14668,7 +17873,22 @@ def _handle_tools_call(params: dict) -> dict:
         debug: bool = parse_bool("debug", args.get("debug", False))
         bench_filter = args.get("filter")                       # dict | None
         debug_report: bool = parse_bool("debug_report", args.get("debug_report", False))
+        fresh: bool = parse_bool("fresh", args.get("fresh", False))
+        run_only: bool = parse_bool("run_only", args.get("run_only", False))
+        build_timeout_raw = args.get("build_timeout_sec")
+        if build_timeout_raw is None:
+            build_timeout_sec = None
+        elif (
+            isinstance(build_timeout_raw, int)
+            and not isinstance(build_timeout_raw, bool)
+        ):
+            build_timeout_sec = build_timeout_raw
+        else:
+            raise RuntimeError(
+                "build_timeout_sec must be an integer when supplied")
         bench_e2e_config = args.get("bench_e2e_config")
+        baseline_ref = args.get("baseline_ref")
+        reuse_build_receipt = args.get("reuse_build_receipt")
         postgres_error_safety_review_waiver = args.get(
             "postgres_error_safety_review_waiver")
         text = tool_start_build(mode, build_only=build_only, debug=debug,
@@ -14678,6 +17898,11 @@ def _handle_tools_call(params: dict) -> dict:
                                 debug_supplied="debug" in args,
                                 filter_supplied="filter" in args,
                                 bench_e2e_config=bench_e2e_config,
+                                fresh=fresh,
+                                build_timeout_sec=build_timeout_sec,
+                                baseline_ref=baseline_ref,
+                                run_only=run_only,
+                                reuse_build_receipt=reuse_build_receipt,
                                 postgres_error_safety_review_waiver=(
                                     postgres_error_safety_review_waiver))
     elif name == "status":
@@ -14840,6 +18065,28 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--fresh",
+        choices=['true', 'false'],
+        default='false',
+        help="(internal) configure an isolated MCP-owned build tree",
+    )
+    parser.add_argument(
+        "--run-only",
+        choices=['true', 'false'],
+        default='false',
+        help="(internal) skip every configure/build phase and reuse a receipt",
+    )
+    parser.add_argument(
+        "--build-timeout-sec",
+        default="",
+        help="(internal) guarded configure/compile/link hard cutoff in seconds",
+    )
+    parser.add_argument(
+        "--reuse-build-receipt",
+        default="",
+        help="(internal) opaque successful build receipt id",
+    )
+    parser.add_argument(
         "--bench-flags",
         default="[]",
         metavar="JSON",
@@ -14902,6 +18149,16 @@ def main() -> int:
     if args.run_build is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)
+        fresh: bool = parse_bool("fresh", args.fresh)
+        run_only: bool = parse_bool("run_only", args.run_only)
+        try:
+            build_timeout_sec = (
+                int(args.build_timeout_sec)
+                if args.build_timeout_sec else None
+            )
+        except ValueError:
+            _log("--build-timeout-sec must be an integer")
+            return 2
         try:
             bench_flags = json.loads(args.bench_flags)
             if not isinstance(bench_flags, list) or not all(isinstance(x, str) for x in bench_flags):
@@ -14922,7 +18179,12 @@ def main() -> int:
                                  postgres_error_safety_review_waiver_json=(
                                      args
                                      .postgres_error_safety_review_waiver_snapshot
-                                     or None))
+                                     or None),
+                                 fresh=fresh,
+                                 run_only=run_only,
+                                 build_timeout_sec=build_timeout_sec,
+                                 reuse_build_receipt=(
+                                     args.reuse_build_receipt or None))
     if args.run_build_sync is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)

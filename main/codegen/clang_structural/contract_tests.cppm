@@ -1705,6 +1705,9 @@ inline int invoke() {
                 "--save-temps=obj",
                 "-DKEEP_SAVE_TEMPS=1",
                 "-g",
+                "-Xclang",
+                "-fno-builtin-headers-in-system-modules",
+                "-fbuiltin-headers-in-system-modules",
             }),
         make_command(
             toolchain, root, production_only),
@@ -1766,6 +1769,48 @@ inline int invoke() {
             && first.compile_database_json.contains("\"-g\""),
         "owned compile database retained a non-semantic compiler temporary "
         "emission flag or removed an independent debug flag");
+    const auto count_occurrences = [](
+        std::string_view document,
+        std::string_view token) {
+        std::size_t count = 0;
+        for (std::size_t position = 0;
+             (position = document.find(token, position))
+                 != std::string_view::npos;
+             position += token.size()) {
+            ++count;
+        }
+        return count;
+    };
+    const auto has_canonical_builtin_header_modes =
+        [&count_occurrences](
+            std::string_view document,
+            std::string_view argument_vector_key) {
+        static constexpr std::string_view canonical_mode =
+            "\"-Xclang\", \"-fbuiltin-headers-in-system-modules\"";
+        static constexpr std::string_view enabled_mode =
+            "\"-fbuiltin-headers-in-system-modules\"";
+        static constexpr std::string_view disabled_mode =
+            "\"-fno-builtin-headers-in-system-modules\"";
+        const std::size_t vector_count =
+            count_occurrences(document, argument_vector_key);
+        const std::size_t canonical_count =
+            count_occurrences(document, canonical_mode);
+        return vector_count != 0
+            && canonical_count == vector_count
+            && count_occurrences(document, enabled_mode)
+                == canonical_count
+            && count_occurrences(document, disabled_mode) == 0;
+    };
+    require(
+        has_canonical_builtin_header_modes(
+            first.compile_database_json,
+            "\"arguments\": [")
+            && has_canonical_builtin_header_modes(
+                first.pcm_manifest_json,
+                "\"base_arguments\": ["),
+        "owned compile database or PCM manifest did not canonicalize the "
+        "linked-Clang builtin-header system-module mode exactly once per "
+        "argument vector");
     require(
         first.pcm_manifest_json.contains(
             production_profile.string())

@@ -10,12 +10,14 @@ module;
 
 #include <hwy/highway.h>
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <span>
+#include <utility>
 
 export module bioseq.highway.sources.indexing;
 
@@ -60,17 +62,88 @@ template <class D>
     }
 }
 
-}  // namespace grouped32_target_detail
+template <class D8, class D32, std::size_t... Slots>
+[[nodiscard]] inline std::array<hn::Vec<D32>, sizeof...(Slots)>
+load_local_position_streams(
+        D8 d8,
+        D32 d32,
+        const std::uint8_t* span_bytes,
+        std::size_t position_index,
+        std::size_t lanes,
+        std::index_sequence<Slots...>) noexcept {
+    return {{
+        hn::BitCast(
+            d32,
+            hn::LoadU(
+                d8,
+                span_bytes + (position_index + Slots * lanes)
+                    * kMinimizerGrouped32PositionEncodedBytes))...
+    }};
+}
 
-/// Validate one already-bounds-qualified non-scatter grouped32 position span.
-/// Short spans and unsupported shapes deliberately request the reader's exact
-/// scalar replay; a SIMD rejection likewise replays scalar to identify the
-/// canonical first wire error.
+template <class D, std::size_t... Slots>
+[[nodiscard]] inline std::array<hn::Mask<D>, sizeof...(Slots)>
+make_false_masks(D d, std::index_sequence<Slots...>) noexcept {
+    return {{
+        (static_cast<void>(Slots), hn::MaskFalse(d))...
+    }};
+}
+
+template <std::size_t Slot, class D, std::size_t StreamWidth>
+inline void accumulate_invalid_local_positions(
+        D d,
+        const std::array<hn::Vec<D>, StreamWidth>& current,
+        hn::Vec<D> previous_vector,
+        hn::Vec<D> widths,
+        std::array<hn::Mask<D>, StreamWidth>& invalid_masks) noexcept {
+    const auto predecessor = [&]() noexcept {
+        if constexpr (Slot == 0u) {
+            return lanes_shift_left_1_borrow(
+                d, current[Slot], previous_vector);
+        } else {
+            return lanes_shift_left_1_borrow(
+                d, current[Slot], current[Slot - 1u]);
+        }
+    }();
+    invalid_masks[Slot] = hn::Or(
+        invalid_masks[Slot],
+        hn::Or(
+            hn::Le(current[Slot], predecessor),
+            hn::Ge(hn::ShiftRight<1>(current[Slot]), widths)));
+}
+
+template <class D, std::size_t StreamWidth, std::size_t... Slots>
+inline void accumulate_invalid_local_position_streams(
+        D d,
+        const std::array<hn::Vec<D>, StreamWidth>& current,
+        hn::Vec<D> previous_vector,
+        hn::Vec<D> widths,
+        std::array<hn::Mask<D>, StreamWidth>& invalid_masks,
+        std::index_sequence<Slots...>) noexcept {
+    (accumulate_invalid_local_positions<Slots>(
+        d, current, previous_vector, widths, invalid_masks), ...);
+}
+
+template <class D, std::size_t StreamWidth, std::size_t... Slots>
+[[nodiscard]] inline bool any_invalid_local_position_stream(
+        D d,
+        const std::array<hn::Mask<D>, StreamWidth>& invalid_masks,
+        std::index_sequence<Slots...>) noexcept {
+    return (... || !hn::AllFalse(d, invalid_masks[Slots]));
+}
+
+/// Compile-time stream-width form of the production W2 loop.  The public
+/// production entry point below remains fixed at W2; W1/W4 are instantiated
+/// only by the benchmark-owned fixed-target probe.
+template <std::size_t StreamWidth>
 [[nodiscard]] inline MinimizerGrouped32NonScatterValidationResult
-validate_non_scatter_local32_w2(
+validate_non_scatter_local32_core(
         std::span<const std::byte> encoded_bytes,
         const MinimizerGrouped32Control& control,
         const MinimizerPositionSegmentCore& core) noexcept {
+    static_assert(
+        StreamWidth == 1u || StreamWidth == 2u || StreamWidth == 4u,
+        "grouped32 stream width is deliberately bounded to W1/W2/W4");
     MinimizerGrouped32NonScatterValidationResult result{
         .selected_hwy_target = static_cast<std::uint64_t>(HWY_TARGET),
     };
@@ -91,14 +164,13 @@ validate_non_scatter_local32_w2(
 
         using D8 = hn::ScalableTag<std::uint8_t>;
         using D32 = hn::Repartition<std::uint32_t, D8>;
-        constexpr std::size_t stream_width = 2u;
         const D8 d8;
         const D32 d32;
         const std::size_t lanes = hn::Lanes(d32);
         const std::size_t count = static_cast<std::size_t>(
             control.position_count);
         if (count == 0u
-            || count - 1u < stream_width * lanes
+            || count - 1u < StreamWidth * lanes
             || core.begin_bp >= core.end_bp
             || core.end_bp - core.begin_bp
                 > static_cast<std::uint64_t>(
@@ -118,9 +190,8 @@ validate_non_scatter_local32_w2(
             * kMinimizerGrouped32PositionEncodedBytes;
         const auto segment_width = static_cast<std::uint32_t>(
             core.end_bp - core.begin_bp);
-        const std::uint32_t first =
-            grouped32_target_detail::read_local_position(
-                encoded_bytes, first_byte);
+        const std::uint32_t first = read_local_position(
+            encoded_bytes, first_byte);
         if ((first >> 1u) >= segment_width) {
             result.validation =
                 MinimizerGrouped32NonScatterValidation::rejected;
@@ -131,48 +202,36 @@ validate_non_scatter_local32_w2(
             encoded_bytes.data() + first_byte);
         std::size_t position_index = 1u;
         auto previous_vector = hn::Set(d32, first);
-        auto invalid_0 = hn::MaskFalse(d32);
-        auto invalid_1 = hn::MaskFalse(d32);
+        auto invalid_masks = make_false_masks(
+            d32, std::make_index_sequence<StreamWidth>{});
         const auto widths = hn::Set(d32, segment_width);
-        const std::size_t words_per_iteration = stream_width * lanes;
+        const std::size_t words_per_iteration = StreamWidth * lanes;
         result.selected_vector_stream_width =
-            static_cast<std::uint8_t>(stream_width);
+            static_cast<std::uint8_t>(StreamWidth);
         do {
-            const auto current_0 = hn::BitCast(
+            const auto current = load_local_position_streams(
+                d8,
                 d32,
-                hn::LoadU(
-                    d8,
-                    span_bytes + position_index
-                        * kMinimizerGrouped32PositionEncodedBytes));
-            const auto current_1 = hn::BitCast(
+                span_bytes,
+                position_index,
+                lanes,
+                std::make_index_sequence<StreamWidth>{});
+            accumulate_invalid_local_position_streams(
                 d32,
-                hn::LoadU(
-                    d8,
-                    span_bytes + (position_index + lanes)
-                        * kMinimizerGrouped32PositionEncodedBytes));
-            const auto predecessor_0 =
-                grouped32_target_detail::lanes_shift_left_1_borrow(
-                    d32, current_0, previous_vector);
-            const auto predecessor_1 =
-                grouped32_target_detail::lanes_shift_left_1_borrow(
-                    d32, current_1, current_0);
-            invalid_0 = hn::Or(
-                invalid_0,
-                hn::Or(
-                    hn::Le(current_0, predecessor_0),
-                    hn::Ge(hn::ShiftRight<1>(current_0), widths)));
-            invalid_1 = hn::Or(
-                invalid_1,
-                hn::Or(
-                    hn::Le(current_1, predecessor_1),
-                    hn::Ge(hn::ShiftRight<1>(current_1), widths)));
-            previous_vector = current_1;
+                current,
+                previous_vector,
+                widths,
+                invalid_masks,
+                std::make_index_sequence<StreamWidth>{});
+            previous_vector = current.back();
             position_index += words_per_iteration;
             result.vectorized_words += words_per_iteration;
         } while (count - position_index >= words_per_iteration);
 
-        if (!hn::AllFalse(d32, invalid_0)
-            || !hn::AllFalse(d32, invalid_1)) {
+        if (any_invalid_local_position_stream(
+                d32,
+                invalid_masks,
+                std::make_index_sequence<StreamWidth>{})) {
             result.validation =
                 MinimizerGrouped32NonScatterValidation::rejected;
             return result;
@@ -181,11 +240,10 @@ validate_non_scatter_local32_w2(
         std::uint32_t previous = hn::ExtractLane(
             previous_vector, hn::Lanes(d32) - 1u);
         while (position_index < count) {
-            const std::uint32_t encoded =
-                grouped32_target_detail::read_local_position(
-                    encoded_bytes,
-                    first_byte + position_index
-                        * kMinimizerGrouped32PositionEncodedBytes);
+            const std::uint32_t encoded = read_local_position(
+                encoded_bytes,
+                first_byte + position_index
+                    * kMinimizerGrouped32PositionEncodedBytes);
             if (encoded <= previous
                 || (encoded >> 1u) >= segment_width) {
                 result.validation =
@@ -199,6 +257,21 @@ validate_non_scatter_local32_w2(
             MinimizerGrouped32NonScatterValidation::accepted;
         return result;
     }
+}
+
+}  // namespace grouped32_target_detail
+
+/// Validate one already-bounds-qualified non-scatter grouped32 position span.
+/// Short spans and unsupported shapes deliberately request the reader's exact
+/// scalar replay; a SIMD rejection likewise replays scalar to identify the
+/// canonical first wire error.
+[[nodiscard]] inline MinimizerGrouped32NonScatterValidationResult
+validate_non_scatter_local32_w2(
+        std::span<const std::byte> encoded_bytes,
+        const MinimizerGrouped32Control& control,
+        const MinimizerPositionSegmentCore& core) noexcept {
+    return grouped32_target_detail::validate_non_scatter_local32_core<2u>(
+        encoded_bytes, control, core);
 }
 
 }  // namespace target

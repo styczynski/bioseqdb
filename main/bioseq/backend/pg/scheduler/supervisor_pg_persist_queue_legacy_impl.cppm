@@ -11,6 +11,7 @@ module;
 #include <string>
 
 module bioseq.scheduler.supervisor_pg;
+import :persist_queue_publish;
 
 namespace bioseq::parallelism::pg {
 

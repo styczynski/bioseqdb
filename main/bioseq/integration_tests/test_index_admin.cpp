@@ -2992,6 +2992,25 @@ TEST_CASE("DOC0371 live PG fixture compares format-3 and format-4 physical stora
     constexpr long long position_extent_base = 1LL << 61;
     const long long builder_pid = query_scalar_int(ctx, "SELECT pg_backend_pid();");
 
+    constexpr std::array invalid_position_segment_spans{
+        std::pair{std::int16_t{4}, -1LL},
+        std::pair{std::int16_t{3}, 1LL},
+        std::pair{std::int16_t{4}, 2'147'483'649LL},
+    };
+    for (const auto& [wire_format, position_segment_span_bp] :
+         invalid_position_segment_spans) {
+        const auto error = sql_error(ctx, fmt::format(
+            "SELECT * FROM bioseq_internal.build_minimizer_fixture("
+            "'doc0371_rev3_live'::regclass, 'minimizers_per_fragment', "
+            "{}, 15::smallint, 10::smallint, {}::smallint, "
+            "'scalar', {}::bigint);",
+            rowno, wire_format, position_segment_span_bp));
+        REQUIRE(error.sqlstate == "22023");
+        REQUIRE(error.contains("position segment span"));
+        REQUIRE(query_scalar_int(ctx, "SELECT pg_backend_pid();")
+            == builder_pid);
+    }
+
     for (std::size_t format_index = 0;
          format_index < wire_formats.size(); ++format_index) {
         const std::int16_t wire_format = wire_formats[format_index];

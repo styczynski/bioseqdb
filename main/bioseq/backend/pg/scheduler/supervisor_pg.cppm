@@ -24,6 +24,7 @@ extern "C" {
 
 export module bioseq.scheduler.supervisor_pg;
 
+export import :persist_queue_publish;
 import bioseq.indexing.type;
 import bioseq.sequences.kmers.highway_contract;
 import bioseq.gpu.vulkan.shader_variants;
@@ -121,18 +122,6 @@ struct AsyncMpsWorkerBoundaryStatsSnapshot {
         AsyncMpsWorkerPgFailure::none;
 };
 
-struct PersistTarget {
-    Oid db_oid = InvalidOid;
-    Oid user_relid = InvalidOid;
-    Oid tablespace_oid = InvalidOid;
-    Oid main_relfilenode = InvalidOid;
-    std::int16_t column_attno = 0;
-    std::uint8_t bucket_idx = 0;
-    std::uint32_t shard_idx = 0;
-    std::uint64_t sequence_rowno = 0;
-    std::string_view index_name{};
-};
-
 enum class AsyncMpsStagePgFailure : std::uint8_t {
     none = 0,
     register_xact_callback = 1,
@@ -219,23 +208,6 @@ struct PgSchedulerStats {
     pg_atomic_uint64 inflight_submit_ns[kInflightSlots];
     pg_atomic_uint32 inflight_generation[kInflightSlots];
     pg_atomic_uint64 inflight_seq;
-};
-
-struct PgPersistQueueSlot {
-    pg_atomic_uint32 state;
-    pg_atomic_uint32 generation;
-    Oid db_oid;
-    Oid user_relid;
-    Oid tablespace_oid;
-    Oid main_relfilenode;
-    std::int16_t column_attno;
-    std::uint8_t bucket_idx;
-    std::uint32_t shard_idx;
-    std::uint64_t sequence_rowno;
-    std::uint64_t payload_bytes;
-    dsm_handle dsm;
-    std::uint32_t payload_kind;
-    std::int32_t requested_provider;
 };
 
 enum class RuntimeInitState : std::uint32_t {
@@ -337,13 +309,6 @@ inline BioseqSchedulerShared* g_shared = nullptr;
 
 static_assert(alignof(BioseqSchedulerShared) <= MAXIMUM_ALIGNOF);
 
-enum class PersistPayloadKind : std::uint32_t {
-    none = 0,
-    prohibited_legacy_dsm = 1,
-    prohibited_legacy_file = 2,
-    mps_build_identity = 3,
-};
-
 inline constexpr std::uint32_t kIndexBuildMpsDsmMagic = 0xB1051D5Au;
 inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 5;
 
@@ -379,16 +344,6 @@ void init_mps_build_stats(PgMpsBuildStats& stats);
 void init_async_mps_worker_boundary_stats(
     PgAsyncMpsWorkerBoundaryStats& stats);
 void release_pinned_dsm(dsm_handle handle) noexcept;
-void record_prohibited_legacy_persist_rejection(
-    std::string_view route) noexcept;
-void remove_temp_file_noexcept(std::string_view path) noexcept;
-[[nodiscard]] bool publish_persist_job_to_shared_queue(
-    const PersistTarget& target,
-    std::string_view index_name,
-    dsm_handle dsm,
-    std::uint64_t payload_bytes,
-    PersistPayloadKind payload_kind,
-    IndexPayloadStorageBackend requested_provider) noexcept;
 void register_persist_xact_callback_pg_leaf();
 void enqueue_pending_mps_build(
     const PersistTarget& target,

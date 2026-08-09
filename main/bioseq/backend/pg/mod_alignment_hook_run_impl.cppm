@@ -1,6 +1,6 @@
 /**
  * @file mod_alignment_hook_run_impl.cppm
- * @brief PostgreSQL ExecutorRun hook and QueryDesc registry lookup.
+ * @brief PostgreSQL ExecutorRun hook.
  */
 module;
 
@@ -11,13 +11,12 @@ extern "C" {
 #include "utils/memutils.h"
 }
 
-#include <algorithm>
 #include <cstdint>
 #include <vector>
 
-module bioseq.mod;
+module bioseq.mod:alignment_hook_run_impl;
 
-import bioseq.table.scan_state;
+import :alignment_hook_contract;
 
 namespace bioseq::pg::detail {
 
@@ -47,51 +46,7 @@ static_assert(!executor_run_output_fully_drained(
 ExecutorRun_hook_type PreviousExecutorRunHook = nullptr;
 std::vector<AlignmentExecutorFrame*> alignment_current_run{};
 
-[[nodiscard]] AlignmentExecutorFrame* find_alignment_frame(
-		QueryDesc* query_desc) noexcept
-{
-	for (const AlignmentQueryRegistryEntry& entry : alignment_query_registry) {
-		if (entry.key == query_desc) {
-			return entry.frame;
-		}
-	}
-	return nullptr;
-}
-
-void pop_exact_alignment_stack(
-		std::vector<AlignmentExecutorFrame*>& stack,
-		AlignmentExecutorFrame* frame,
-		const char* stack_name)
-{
-	if (stack.empty() || stack.back() != frame) {
-		ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("bioseq executor lifecycle stack is not LIFO"),
-			 errdetail("stack=%s depth=%zu", stack_name, stack.size())));
-	}
-	stack.pop_back();
-}
-
 namespace {
-
-template<class T>
-void erase_frame_pointer(std::vector<T*>& frames, T* frame) noexcept
-{
-	frames.erase(
-		std::remove(frames.begin(), frames.end(), frame),
-		frames.end());
-}
-
-void pop_alignment_stack_on_error(
-		std::vector<AlignmentExecutorFrame*>& stack,
-		AlignmentExecutorFrame* frame) noexcept
-{
-	if (!stack.empty() && stack.back() == frame) {
-		stack.pop_back();
-		return;
-	}
-	erase_frame_pointer(stack, frame);
-}
 
 void call_previous_or_standard_executor_run(
 		QueryDesc* query_desc,

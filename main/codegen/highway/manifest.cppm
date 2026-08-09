@@ -226,6 +226,12 @@ inline void require_field_count(
         case artifact_kind::dispatch_inventory_implementation:
             return "dispatch_inventory_implementation";
         case artifact_kind::test_support: return "test_support";
+        case artifact_kind::unit_probe_implementation:
+            return "unit_probe_implementation";
+        case artifact_kind::bench_probe_implementation:
+            return "bench_probe_implementation";
+        case artifact_kind::minimizer_repr_instantiation:
+            return "minimizer_repr_instantiation";
     }
     return "unknown";
 }
@@ -369,6 +375,27 @@ inline void require_field_count(
                 .family_field = std::string{fields[1]},
                 .slot_field = std::string{fields[2]},
             });
+        } else if (fields.front() == "unit-probe"
+                   || fields.front() == "bench-probe") {
+            detail::require_field_count(path, fields.front(), fields.size(), 3);
+            probe_spec probe{
+                .key = std::string{fields[1]},
+                .path = std::filesystem::path{fields[2]},
+            };
+            (fields.front() == "unit-probe"
+                 ? result.unit_probes
+                 : result.bench_probes)
+                .push_back(std::move(probe));
+        } else if (fields.front() == "minimizer-repr-instance") {
+            detail::require_field_count(path, fields.front(), fields.size(), 6);
+            result.minimizer_repr_instances.push_back(
+                minimizer_repr_instance_spec{
+                    .owner_key = std::string{fields[1]},
+                    .algorithm = std::string{fields[2]},
+                    .source_key = std::string{fields[3]},
+                    .representation_type = std::string{fields[4]},
+                    .storage_types = detail::split_dependencies(fields[5]),
+                });
         } else if (fields.front() == "domain-topology") {
             result.domain_topologies.push_back(
                 detail::parse_domain_topology_record(
@@ -403,6 +430,18 @@ inline void require_field_count(
         [](const required_slot_spec& slot) {
             return slot.family_field + "." + slot.slot_field;
         });
+    const auto sort_probes = [](std::vector<probe_spec>& probes) {
+        std::ranges::sort(
+            probes, {}, [](const probe_spec& probe) { return probe.key; });
+    };
+    sort_probes(result.unit_probes);
+    sort_probes(result.bench_probes);
+    std::ranges::sort(
+        result.minimizer_repr_instances,
+        {},
+        [](const minimizer_repr_instance_spec& instance) {
+            return instance.owner_key;
+        });
     return result;
 }
 
@@ -418,8 +457,10 @@ inline void require_field_count(
     }
     const std::size_t expected_artifact_count =
         plan.target_inventory.targets.size()
-            * (2u + plan.extracted_sources.size() + slot_owners.size())
-        + 3u;
+            * (2u + plan.extracted_sources.size() + slot_owners.size()
+               + plan.source_inventory.minimizer_repr_instances.size())
+        + 3u + plan.source_inventory.unit_probes.size()
+        + plan.source_inventory.bench_probes.size();
     if (plan.target_inventory.targets.empty()
         || artifacts.size() != expected_artifact_count
         || plan.clang_version.empty()
@@ -450,7 +491,7 @@ inline void require_field_count(
             || artifact->content.empty()) {
             throw std::runtime_error(
                 "Highway policy evidence contains an invalid or duplicate "
-                "production artifact: " + path);
+                "generated artifact: " + path);
         }
         previous_path = path;
     }

@@ -28,12 +28,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.common.context;
+import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
 import bioseq.sequences;
 import bioseq.sequences.minimap_port;   // Minimap2Params / MatchResult(Collection)
 import bioseq.sequences.pipe;           // minimap_port entry
@@ -55,6 +58,23 @@ namespace gv = ::bioseq::gpu::vulkan;
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t  = compact_sequence_range<dna4_u64>;
+
+void bind_fixed_highway(Minimap2Params& params) {
+    const auto& binding =
+        ::bioseq::simd_dispatch::highway_test_target_binding();
+    params.highway_kernels = binding.kernels;
+    params.highway_executed_target = binding.target;
+    const auto* identity = binding.kernels == nullptr
+            || !binding.kernels->complete()
+        ? nullptr : binding.kernels->resolve_alphabet_identity<seq::dna4>();
+    if (identity == nullptr
+        || binding.kernels->resolve_alphabet_identity(
+               identity->alphabet_code) != identity) {
+        throw std::logic_error{
+            "generated fixed-target test binding lacks DNA4 identity"};
+    }
+    params.alphabet_code = identity->alphabet_code;
+}
 
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
     std::vector<seq::dna4> v(n);
@@ -211,6 +231,7 @@ TEST_CASE("DOC0304 §10.1 — VULKAN_TILED_DP with vulkan_enabled=false fails",
     Minimap2Params vulkan_params;
     vulkan_params.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
     vulkan_params.vulkan_enabled = false;
+    bind_fixed_highway(vulkan_params);
 
     SECTION("direct chaining backend rejects disabled Vulkan") {
         ch::ChainingParams cp;
@@ -353,6 +374,7 @@ TEST_CASE("DOC0304 §10.3 — end-to-end GPU chaining smoke",
     params.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
     params.vulkan_enabled = true;
     params.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    bind_fixed_highway(params);
 
     auto qd = make_dna4(300, 0x6A5A);
     auto td = make_dna4(1500, 0x9C9C);

@@ -12,10 +12,11 @@ module;
 #include <optional>
 #include <utility>
 
-module bioseq.mod;
+module bioseq.mod:alignment_hook_publish_impl;
 
+import :alignment_hook_contract;
 import bioseq.pipeline.stats;
-import bioseq.table.scan_state;
+import bioseq.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 

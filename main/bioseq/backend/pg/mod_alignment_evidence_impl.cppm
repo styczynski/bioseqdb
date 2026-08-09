@@ -17,7 +17,7 @@ module bioseq.mod;
 
 import bioseq.pipeline.stats;
 import bioseq.pg_utils;
-import bioseq.table.scan_state;
+import bioseq.table.alignment_execution;
 
 namespace {
 

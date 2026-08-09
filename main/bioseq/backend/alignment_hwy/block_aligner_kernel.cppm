@@ -42,7 +42,6 @@ import bioseq.highway.sources.simd_utils;
 import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
 import bioseq.highway.sources.alignment_utils;
-import bioseq.highway.sources.alignment_lanes;
 import bioseq.common.context;
 import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
 import bioseq.storage.lazy;      // DOC0263 — canonical erased lazy view

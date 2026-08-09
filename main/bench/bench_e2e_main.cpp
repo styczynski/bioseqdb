@@ -44,6 +44,8 @@
 import bioseq.common.mlogging;
 import bench_framework;
 import bioseq.common.templating;           // CompTimeStr for alphabet_entry
+import bioseq.highway.dispatch_contract;   // fixed table identity contract
+import bioseq.highway.test_support;        // generated fixed-target benchmark table
 import bioseq.instr;                       // region(), register_region_static
 import bioseq.integration_tests.common;           // connection_test_context, exec_sqlf, query_rows
 import bioseq.common.sequan_compat;                      // seq::dna4 / seq::dna5
@@ -9564,6 +9566,8 @@ void routing_poc_add_hash_group(
 template <class Sequence>
 [[nodiscard]] std::vector<std::uint64_t> routing_poc_collect_core_hashes(
         Sequence& sequence,
+        std::uint8_t alphabet_code,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         std::uint64_t core_begin_bp,
         std::uint64_t core_end_bp,
         std::uint16_t window_size,
@@ -9585,11 +9589,13 @@ template <class Sequence>
     const auto proof = bioseq::indexing::collect_exact_simd_index_range_or_throw(
         collector,
         bioseq::storage::as_lazy_sequence_view(sequence),
+        alphabet_code,
         collect_begin,
         collect_end,
         window_size,
         kmer_size,
         0u,
+        kernels,
         "routing POC target segment");
     if (!proof.accepted(/*require_nonempty_vector_work=*/true)) {
         throw std::runtime_error(
@@ -9625,6 +9631,8 @@ template <class Sequence>
 template <class Sequence>
 [[nodiscard]] std::vector<std::uint64_t> routing_poc_collect_query_hashes(
         Sequence& sequence,
+        std::uint8_t alphabet_code,
+        const bioseq::minimizers::MinimizerKernels* kernels,
         std::uint16_t window_size,
         std::uint16_t kmer_size,
         std::uint64_t& peak_transient_bytes,
@@ -9633,11 +9641,13 @@ template <class Sequence>
     const auto proof = bioseq::indexing::collect_exact_simd_index_range_or_throw(
         collector,
         bioseq::storage::as_lazy_sequence_view(sequence),
+        alphabet_code,
         0u,
         sequence.bp_size(),
         window_size,
         kmer_size,
         0u,
+        kernels,
         "routing POC query");
     if (!proof.accepted(/*require_nonempty_vector_work=*/true)) {
         throw std::runtime_error(
@@ -9994,6 +10004,19 @@ template <sequence_alphabet A>
             backend));
     }
 
+    const auto& highway_table =
+        ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* alphabet_identity =
+        highway_table.template resolve_alphabet_identity<A>();
+    if (alphabet_identity == nullptr
+        || highway_table.resolve_alphabet_identity(
+            alphabet_identity->alphabet_code) != alphabet_identity) {
+        throw std::logic_error{
+            "generated fixed-target benchmark table has no requested alphabet identity"};
+    }
+    const std::uint8_t alphabet_code = alphabet_identity->alphabet_code;
+    const auto* minimizer_kernels = &highway_table.minimizers;
+
     const std::uint64_t reference_length = routing_poc_positive_integer(
         data, "reference_length", kDefaultReferenceLengthBp);
     const std::uint64_t fragment_count_u64 = routing_poc_positive_integer(
@@ -10159,6 +10182,8 @@ template <sequence_alphabet A>
             .expects_fallback = fixture_specs[pair_index].expects_fallback,
             .raw_hashes = routing_poc_collect_query_hashes(
                 pair.query,
+                alphabet_code,
+                minimizer_kernels,
                 window_size,
                 kmer_size,
                 input.peak_transient_hash_bytes,
@@ -10273,6 +10298,8 @@ template <sequence_alphabet A>
                 kRoutingPocSegmentBp, reference_length - begin_bp));
         std::vector<std::uint64_t> hashes = routing_poc_collect_core_hashes(
             target_read_view,
+            alphabet_code,
+            minimizer_kernels,
             begin_bp,
             end_bp,
             window_size,

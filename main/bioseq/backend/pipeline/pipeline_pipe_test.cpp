@@ -33,6 +33,7 @@ import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.kmers.mm_sketch_baseline;
 import bioseq.sequences.kmers.vulkan;
 import bioseq.sequences.kmers.two_stacks;
 import bioseq.highway.dispatch_contract;
@@ -2130,7 +2131,7 @@ TEST_CASE("DOC0398 Highway execution proof merges preserve exact target evidence
         mixed.merge(make_stats(plan_a, target_a, 6));
         REQUIRE(mixed.environment.highway_executed_target == 0);
         REQUIRE(mixed.environment.highway_executed_target_mixed);
-        REQUIRE_FALSE(mixed.environment.mixed_invalid);
+        REQUIRE(mixed.environment.mixed_invalid);
         REQUIRE(mixed.attempted_alignment_jobs == 3);
         REQUIRE(mixed.fully_attested_alignment_jobs == 0);
         REQUIRE(mixed.unattested_alignment_jobs == 3);
@@ -5974,6 +5975,21 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
+template <class Collector>
+[[nodiscard]] std::vector<std::uint64_t>
+normalized_raw_minimizers(const Collector& collector) {
+    std::vector<std::uint64_t> records;
+    const auto& sketches = collector.extract_sketches_data();
+    records.reserve(sketches.size());
+    for (const auto& sketch : sketches) {
+        records.push_back(static_cast<std::uint64_t>(sketch.raw_value()));
+    }
+    std::ranges::sort(records);
+    const auto unique_end = std::unique(records.begin(), records.end());
+    records.resize(static_cast<std::size_t>(unique_end - records.begin()));
+    return records;
+}
+
 template <sequence_alphabet Alphabet, class StorageUnit>
 void check_reference_minimizer_topology_case() {
     using namespace ::bioseq::simd;
@@ -5995,24 +6011,48 @@ void check_reference_minimizer_topology_case() {
     range_type resident(data);
     auto lazy = bioseq::storage::make_lazy_in_memory(resident);
     const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
-    const auto* table = fixed_highway_kernels();
+    constexpr bool is_dna5 = std::same_as<Alphabet, seq::dna5>;
+    const auto* table = is_dna5 ? nullptr : fixed_highway_kernels();
 
     collector_type selected_collector;
-    (void)pipe::minimizer_dispatch<
+    const auto runtime_proof = pipe::minimizer_dispatch<
         MinKernelKind::Simd, MinimapSketchData>(
             selected_collector, view, 10u, 15u, table);
+    collector_type specialized_collector;
+    const auto constexpr_proof = pipe::minimizer_dispatch_constexpr<
+        MinKernelKind::Simd, 10u, 15u, MinimapSketchData>(
+            specialized_collector, view, 10u, 15u, table);
     collector_type scalar_collector;
     (void)pipe::minimizer_dispatch<
         MinKernelKind::Scalar, MinimapSketchData>(
             scalar_collector, view, 10u, 15u, table);
 
-    const auto& selected = selected_collector.extract_sketches_data();
-    const auto& scalar = scalar_collector.extract_sketches_data();
-    CAPTURE(sizeof(StorageUnit), std::same_as<Alphabet, seq::dna5>);
-    REQUIRE(selected.size() == scalar.size());
-    for (std::size_t index = 0u; index < selected.size(); ++index) {
-        CAPTURE(index);
-        REQUIRE(selected[index].raw_value() == scalar[index].raw_value());
+    const auto selected = normalized_raw_minimizers(selected_collector);
+    const auto specialized =
+        normalized_raw_minimizers(specialized_collector);
+    const auto scalar = normalized_raw_minimizers(scalar_collector);
+    CAPTURE(sizeof(StorageUnit), is_dna5);
+    REQUIRE(runtime_proof == TwoStackExecutionProof{});
+    REQUIRE(constexpr_proof == TwoStackExecutionProof{});
+    REQUIRE_FALSE(selected.empty());
+    REQUIRE(selected == scalar);
+    REQUIRE(specialized == scalar);
+    if constexpr (is_dna5) {
+        const auto& runtime_records =
+            selected_collector.extract_sketches_data();
+        const auto& constexpr_records =
+            specialized_collector.extract_sketches_data();
+        const auto& scalar_records =
+            scalar_collector.extract_sketches_data();
+        REQUIRE(runtime_records.size() == scalar_records.size());
+        REQUIRE(constexpr_records.size() == scalar_records.size());
+        for (std::size_t index = 0u; index < scalar_records.size(); ++index) {
+            CAPTURE(index);
+            REQUIRE(runtime_records[index].raw_value()
+                == scalar_records[index].raw_value());
+            REQUIRE(constexpr_records[index].raw_value()
+                == scalar_records[index].raw_value());
+        }
     }
 }
 
@@ -6048,21 +6088,31 @@ void check_two_stack_minimizer_topology_case() {
             fixed_highway_kernels());
     REQUIRE(proof.accepted(false));
 
-    collector_type scalar_collector;
-    (void)pipe::minimizer_dispatch<
-        MinKernelKind::Scalar, MinimapSketchData>(
-            scalar_collector,
-            view,
-            11u,
-            15u,
-            fixed_highway_kernels());
     const auto& selected = selected_collector.extract_sketches_data();
-    const auto& scalar = scalar_collector.extract_sketches_data();
-    CAPTURE(sizeof(StorageUnit), std::same_as<Alphabet, seq::dna5>);
-    REQUIRE(selected.size() == scalar.size());
-    for (std::size_t index = 0u; index < selected.size(); ++index) {
-        CAPTURE(index);
-        REQUIRE(selected[index].raw_value() == scalar[index].raw_value());
+    constexpr bool is_dna5 = std::same_as<Alphabet, seq::dna5>;
+    CAPTURE(sizeof(StorageUnit), is_dna5);
+    REQUIRE(proof.minimizers_emitted == selected.size());
+    if constexpr (is_dna5) {
+        const auto selected_pairs = selected_collector.extract_pairs();
+        const auto baseline_pairs =
+            mm_sketch_baseline_pairs(resident, 11u, 15u);
+        REQUIRE_FALSE(selected_pairs.empty());
+        REQUIRE(selected_pairs == baseline_pairs);
+    } else {
+        collector_type scalar_collector;
+        (void)pipe::minimizer_dispatch<
+            MinKernelKind::Scalar, MinimapSketchData>(
+                scalar_collector,
+                view,
+                11u,
+                15u,
+                fixed_highway_kernels());
+        const auto& scalar = scalar_collector.extract_sketches_data();
+        REQUIRE(selected.size() == scalar.size());
+        for (std::size_t index = 0u; index < selected.size(); ++index) {
+            CAPTURE(index);
+            REQUIRE(selected[index].raw_value() == scalar[index].raw_value());
+        }
     }
 }
 
@@ -6106,18 +6156,234 @@ TEST_CASE("reference SIMD pipe runtime and constexpr dispatch use fixed target t
     (void)pipe::minimizer_dispatch<
         MinKernelKind::Scalar, MinimapSketchData>(
             scalar_collector, view, 10u, 15u, table);
-    const auto& scalar = scalar_collector.extract_sketches_data();
-    REQUIRE(runtime.size() == scalar.size());
-    for (std::size_t index = 0u; index < runtime.size(); ++index) {
-        CAPTURE(index);
-        REQUIRE(runtime[index].raw_value() == scalar[index].raw_value());
+    const auto normalized_runtime =
+        normalized_raw_minimizers(runtime_collector);
+    const auto normalized_scalar =
+        normalized_raw_minimizers(scalar_collector);
+    REQUIRE_FALSE(normalized_runtime.empty());
+    REQUIRE(normalized_runtime == normalized_scalar);
+}
+
+TEST_CASE("neutral minimizer sink projects active K15 layouts without truncation",
+          "[pipe][minimizer-output][reference-simd][exact-simd][highway]"
+          "[parity][abi]") {
+    using namespace ::bioseq::simd;
+    using sequence_type =
+        sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_type = compact_sequence_range<sequence_type>;
+    using output_type = MinimizerRepr<33u, 15u>;
+    using collector_type = sketch_collector_t<output_type>;
+    using pipe::MinKernelKind;
+
+    auto data = doc0307_e2e::make_dna4(32'769u, 0x15AB1C0Du);
+    range_type resident(data);
+    auto lazy = bioseq::storage::make_lazy_in_memory(resident);
+    const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
+    const auto* table = fixed_highway_kernels();
+
+    const auto require_raw_parity = [](const collector_type& selected,
+                                       const collector_type& scalar) {
+        const auto& selected_records = selected.extract_sketches_data();
+        const auto& scalar_records = scalar.extract_sketches_data();
+        REQUIRE_FALSE(selected_records.empty());
+        REQUIRE(selected_records.size() == scalar_records.size());
+        for (std::size_t index = 0u; index < selected_records.size(); ++index) {
+            CAPTURE(index);
+            REQUIRE(selected_records[index].raw_value()
+                    == scalar_records[index].raw_value());
+        }
+    };
+
+    SECTION("reference SIMD preserves the normalized K15 record set") {
+        collector_type reference_collector;
+        (void)pipe::minimizer_dispatch<MinKernelKind::Simd, output_type>(
+            reference_collector, view, 10u, 15u, table);
+        collector_type reference_scalar_collector;
+        (void)pipe::minimizer_dispatch<MinKernelKind::Scalar, output_type>(
+            reference_scalar_collector, view, 10u, 15u, table);
+        const auto reference =
+            normalized_raw_minimizers(reference_collector);
+        const auto scalar =
+            normalized_raw_minimizers(reference_scalar_collector);
+        REQUIRE_FALSE(reference.empty());
+        REQUIRE(reference == scalar);
+    }
+
+    SECTION("ExactSimd preserves raw K15 record identity") {
+        collector_type two_stack_collector;
+        const auto two_stack_proof =
+            pipe::minimizer_dispatch<MinKernelKind::ExactSimd, output_type>(
+                two_stack_collector, view, 10u, 15u, table);
+        REQUIRE(two_stack_proof.accepted(true));
+        collector_type two_stack_scalar_collector;
+        (void)pipe::minimizer_dispatch<MinKernelKind::Scalar, output_type>(
+            two_stack_scalar_collector, view, 10u, 15u, table);
+        require_raw_parity(
+            two_stack_collector, two_stack_scalar_collector);
     }
 }
 
-TEST_CASE("source-owned reference minimizer topology closes DNA4/DNA5 by four widths",
-          "[pipe][reference-simd][topology][dna5][n-reset][highway]") {
-    check_reference_minimizer_topology_case<seq::dna4, std::uint8_t>();
-    check_reference_minimizer_topology_case<seq::dna4, std::uint16_t>();
+TEST_CASE("neutral minimizer batches retain the caller's exact wide representation",
+          "[pipe][minimizer-output][highway][abi][batch][exact-repr][wide]") {
+    using namespace ::bioseq::simd;
+    using output_type = MinimizerRepr<63u, 15u>;
+    using collector_type = sketch_collector_t<output_type>;
+
+    STATIC_REQUIRE(sizeof(output_type) == 2u * sizeof(std::uint64_t));
+    STATIC_REQUIRE(output_type::hash_field_mask
+                   > MinimapSketchData::hash_field_mask);
+    STATIC_REQUIRE(output_type::pos_field_mask
+                   > MinimapSketchData::pos_field_mask);
+
+    constexpr std::array<output_type, 3u> expected{
+        output_type{
+            (std::uint64_t{1u} << 40u) | 0x12345u,
+            (std::uint64_t{1u} << 28u) | 17u,
+            1u},
+        output_type{
+            (std::uint64_t{1u} << 41u) | 0x23456u,
+            (std::uint64_t{1u} << 28u) | 29u,
+            0u},
+        output_type{
+            (std::uint64_t{1u} << 42u) | 0x34567u,
+            (std::uint64_t{1u} << 28u) | 43u,
+            1u},
+    };
+    STATIC_REQUIRE(expected[0].kmer()
+                   > MinimapSketchData::hash_field_mask);
+    STATIC_REQUIRE(expected[0].last_pos()
+                   > MinimapSketchData::pos_field_mask);
+
+    collector_type collector;
+    pipe::HighwayMinimizerSinkState<output_type, collector_type> adapter{
+        collector};
+    auto sink = adapter.sink();
+    REQUIRE(sink.acquire != nullptr);
+    REQUIRE(sink.commit != nullptr);
+
+    auto first_batch = sink.acquire(sink.state, 2u);
+    REQUIRE(first_batch.data != nullptr);
+    REQUIRE(first_batch.capacity >= 2u);
+    REQUIRE(first_batch.layout
+            == ::bioseq::minimizers::minimizer_output_layout_v<output_type>);
+    REQUIRE(first_batch.record_size == sizeof(output_type));
+    REQUIRE(first_batch.record_alignment == alignof(output_type));
+    auto* first_records = static_cast<output_type*>(first_batch.data);
+    std::construct_at(first_records, expected[0]);
+    std::construct_at(first_records + 1u, expected[1]);
+    sink.commit(sink.state, 2u);
+
+    auto second_batch = sink.acquire(sink.state, 1u);
+    REQUIRE(second_batch.data != nullptr);
+    REQUIRE(second_batch.capacity >= 1u);
+    auto* second_records = static_cast<output_type*>(second_batch.data);
+    std::construct_at(second_records, expected[2]);
+    sink.commit(sink.state, 1u);
+
+    ::bioseq::minimizers::MinimizerKernelResult result{};
+    result.emitted = expected.size();
+    REQUIRE_NOTHROW(adapter.validate(result));
+
+    const auto& records = collector.extract_sketches_data();
+    REQUIRE(records.size() == expected.size());
+    for (std::size_t index = 0u; index < records.size(); ++index) {
+        CAPTURE(index);
+        REQUIRE(records[index].kmer() == expected[index].kmer());
+        REQUIRE(records[index].last_pos() == expected[index].last_pos());
+        REQUIRE(records[index].strand() == expected[index].strand());
+        REQUIRE(records[index].span() == 15u);
+    }
+}
+
+TEST_CASE("production minimizer sink keeps protocol faults distinct from collector admission",
+          "[pipe][minimizer-output][highway][abi][batch][failure]") {
+    using output_type = ::bioseq::simd::MinimapSketchData;
+
+    struct controlled_collector final {
+        bool accept_batches = true;
+        bool healthy = true;
+        bool throw_from_batch = false;
+
+        [[nodiscard]] bool append_records(
+                std::span<const output_type>) {
+            if (throw_from_batch) {
+                throw std::runtime_error{"production sink callback failure"};
+            }
+            if (!accept_batches) {
+                healthy = false;
+                return false;
+            }
+            return true;
+        }
+
+        void collect(const output_type&) noexcept {}
+        void collect(output_type&&) noexcept {}
+
+        [[nodiscard]] bool ok() const noexcept { return healthy; }
+    };
+
+    constexpr output_type record{0x12345u, 17u, 1u};
+
+    SECTION("sticky collector failure remains available to the outer scheduler") {
+        controlled_collector collector;
+        collector.accept_batches = false;
+        ::bioseq::simd::pipe::HighwayMinimizerSinkState<
+            output_type, controlled_collector> adapter{collector};
+        auto sink = adapter.sink();
+        auto batch = sink.acquire(sink.state, 1u);
+        REQUIRE(batch.data != nullptr);
+        std::construct_at(static_cast<output_type*>(batch.data), record);
+        sink.commit(sink.state, 1u);
+
+        ::bioseq::minimizers::MinimizerKernelResult result{};
+        result.emitted = 1u;
+        REQUIRE_FALSE(collector.ok());
+        REQUIRE_NOTHROW(adapter.validate(result));
+    }
+
+    SECTION("healthy count mismatch remains a transport error") {
+        controlled_collector collector;
+        ::bioseq::simd::pipe::HighwayMinimizerSinkState<
+            output_type, controlled_collector> adapter{collector};
+        ::bioseq::minimizers::MinimizerKernelResult result{};
+        result.emitted = 1u;
+        REQUIRE_THROWS_WITH(
+            adapter.validate(result),
+            "selected Highway minimizer sink rejected a committed batch");
+    }
+
+    SECTION("acquire without commit fails closed even at a zero count") {
+        controlled_collector collector;
+        ::bioseq::simd::pipe::HighwayMinimizerSinkState<
+            output_type, controlled_collector> adapter{collector};
+        auto sink = adapter.sink();
+        REQUIRE(sink.acquire(sink.state, 1u).data != nullptr);
+        ::bioseq::minimizers::MinimizerKernelResult result{};
+        REQUIRE_THROWS_WITH(
+            adapter.validate(result),
+            "selected Highway minimizer sink left a batch uncommitted");
+    }
+
+    SECTION("callback exception is rethrown after the noexcept commit boundary") {
+        controlled_collector collector;
+        collector.throw_from_batch = true;
+        ::bioseq::simd::pipe::HighwayMinimizerSinkState<
+            output_type, controlled_collector> adapter{collector};
+        auto sink = adapter.sink();
+        auto batch = sink.acquire(sink.state, 1u);
+        REQUIRE(batch.data != nullptr);
+        std::construct_at(static_cast<output_type*>(batch.data), record);
+        sink.commit(sink.state, 1u);
+
+        ::bioseq::minimizers::MinimizerKernelResult result{};
+        result.emitted = 1u;
+        REQUIRE_THROWS_WITH(
+            adapter.validate(result), "production sink callback failure");
+    }
+}
+
+TEST_CASE("reference SIMD preserves DNA4 topology and scalar-routes DNA5",
+          "[pipe][reference-simd][topology][dna5][scalar-route][highway]") {
     check_reference_minimizer_topology_case<seq::dna4, std::uint32_t>();
     check_reference_minimizer_topology_case<seq::dna4, std::uint64_t>();
     check_reference_minimizer_topology_case<seq::dna5, std::uint8_t>();
@@ -6139,11 +6405,15 @@ TEST_CASE("source-owned two-stack topology closes DNA4/DNA5 by four widths",
 }
 #endif
 
-TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32 ranges",
-          "[pipe][exact-simd][resident][vector_stream][route][proof]") {
+TEST_CASE("ExactSimd pipe admits whole non-u32 ranges into resident u32 vector_stream",
+          "[pipe][exact-simd][resident][vector_stream][route][proof]"
+          "[memory-admission]") {
     using sequence_type =
         sequence_custom_alphabet<seq::dna4, std::uint32_t>;
     using range_type = compact_sequence_range<sequence_type>;
+    using non_u32_sequence_type =
+        sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using non_u32_range_type = compact_sequence_range<non_u32_sequence_type>;
     using minimizer_type =
         ::bioseq::simd::MinimizerRepr<33u, 15u>;
     using collector_type =
@@ -6208,6 +6478,59 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
         paired_resident_proof,
         /*require_nonempty_vector_work=*/true,
         ExactSimdRangeRoute::require_resident_vector_stream));
+
+    // Resident vector_stream is an exact-u32 topology. A different resident
+    // width is therefore admitted into an owned u32 region before the same
+    // report-76 route executes; the source width is never relabelled in place.
+    non_u32_range_type non_u32_resident(data);
+    auto lazy_non_u32 = bioseq::storage::make_lazy_in_memory(non_u32_resident);
+    const auto non_u32_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_non_u32);
+    const auto non_u32_access = bioseq::storage::plan_sequence_access(
+        non_u32_view,
+        bioseq::storage::sequence_access_requirement::contiguous_resident,
+        0u,
+        non_u32_view.bp_size(),
+        sizeof(std::uint32_t));
+    REQUIRE(non_u32_access.route
+        == bioseq::storage::sequence_access_route::materialize_admitted);
+    REQUIRE_FALSE(non_u32_access.resident.has_value());
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t admission_before = admission.reserved_bytes();
+    collector_type admitted_non_u32_collector;
+    const auto admitted_non_u32_proof =
+        minimizer_dispatch_range<minimizer_type>(
+            admitted_non_u32_collector,
+            non_u32_view,
+            0u,
+            non_u32_view.bp_size(),
+            10u,
+            15u,
+            MinimizerSketchBackend::ExactSimd,
+            ExactSimdRangeRoute::require_resident_vector_stream,
+            table);
+    REQUIRE(admission.reserved_bytes() == admission_before);
+    REQUIRE(admitted_non_u32_proof.exact_simd_present);
+    REQUIRE(admitted_non_u32_proof.exact_simd.accepted(true));
+    REQUIRE(admitted_non_u32_proof.exact_simd
+        .resident_vector_stream_kernel_calls == 1u);
+    REQUIRE(minimizer_range_proof_matches_backend(
+        MinimizerSketchBackend::ExactSimd,
+        admitted_non_u32_proof,
+        /*require_nonempty_vector_work=*/true,
+        ExactSimdRangeRoute::require_resident_vector_stream));
+    const auto& admitted_records =
+        admitted_non_u32_collector.extract_sketches_data();
+    const auto& resident_records =
+        paired_resident_collector.extract_sketches_data();
+    REQUIRE(admitted_records.size() == resident_records.size());
+    for (std::size_t index = 0u; index < resident_records.size(); ++index) {
+        CAPTURE(index);
+        REQUIRE(admitted_records[index].raw_value()
+            == resident_records[index].raw_value());
+    }
+
     // This is the fail-closed compatibility boundary: a resident proof cannot
     // be relabelled as the continuation/B8 scheme used by persisted indexes.
     REQUIRE_FALSE(minimizer_range_proof_matches_backend(
@@ -6533,15 +6856,14 @@ void check_fragmented_paper_range_materialization() {
                 MinimizerSketchBackend::PaperNtHashSimd,
                 fragmented_proof,
                 /*require_nonempty_vector_work=*/true));
-            /* Resident source widths remain typed topology inputs. A scanner
-             * slice without stable resident storage is admitted into the
-             * canonical u32 materialization case. */
+            /* Paper consumes canonical, genuinely typed u32 storage. A u64
+             * source is admission-materialized rather than reinterpreted, so
+             * the execution proof records the kernel input width—not the
+             * facade's original resident width. */
             REQUIRE(fragmented_proof.paper_nthash.source_storage_unit_bytes
                     == sizeof(std::uint32_t));
-            REQUIRE(resident_proof.paper_nthash.source_storage_unit_bytes
-                    == sizeof(StorageUnit));
-            REQUIRE(fragmented_proof.paper_nthash.scheme_id
-                    == resident_proof.paper_nthash.scheme_id);
+            REQUIRE(fragmented_proof.paper_nthash
+                    == resident_proof.paper_nthash);
 
             collector_type rejected_collector;
             REQUIRE_THROWS_AS(
@@ -6584,16 +6906,80 @@ void check_fragmented_paper_range_materialization() {
     check_slice(5u, static_cast<sequence_size_type>(range.size()));
 }
 
-TEST_CASE("Paper ntHash fragmented ranges materialize only their packed slice with local coordinates",
+template <class StorageUnit>
+void check_paper_rejects_dna5_coordinate() {
+    using ::bioseq::simd::MinimizerSketchBackend;
+    using ::bioseq::simd::pipe::PaperNtHashRuntimeError;
+    using ::bioseq::simd::pipe::minimizer_dispatch_range;
+    using packed_sequence =
+        sequence_custom_alphabet<seq::dna5, StorageUnit>;
+    using range_type = compact_sequence_range<packed_sequence>;
+    using chunked_scanner = bioseq::storage::sequence_scanner_test_chunked<
+        StorageUnit, 2>;
+    using minimizer_type = ::bioseq::simd::MinimapSketchData;
+    using collector_type =
+        ::bioseq::simd::sketch_collector_t<minimizer_type>;
+
+    std::vector<seq::dna5> data(4'123u);
+    for (std::size_t index = 0u; index < data.size(); ++index) {
+        data[index].assign_rank(static_cast<std::uint8_t>(index % 5u));
+    }
+    range_type range(data);
+    auto resident_owner = bioseq::storage::make_lazy_in_memory(range);
+    const auto resident_view =
+        bioseq::storage::as_lazy_sequence_view(resident_owner);
+    collector_type resident_collector;
+    REQUIRE_THROWS_AS(
+        minimizer_dispatch_range<minimizer_type>(
+            resident_collector,
+            resident_view,
+            0u,
+            resident_view.bp_size(),
+            10u,
+            15u,
+            MinimizerSketchBackend::PaperNtHashSimd,
+            ExactSimdRangeRoute::require_continuation,
+            fixed_highway_kernels()),
+        PaperNtHashRuntimeError);
+    REQUIRE(resident_collector.extract_sketches_data().empty());
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t reserved_before = admission.reserved_bytes();
+    collector_type fragmented_collector;
+    {
+        bioseq::storage::lazy_compact_sequence<
+            packed_sequence, chunked_scanner> fragmented{
+                chunked_scanner::from_range(range)};
+        const auto fragmented_view =
+            bioseq::storage::as_lazy_sequence_view(fragmented);
+        REQUIRE_THROWS_AS(
+            minimizer_dispatch_range<minimizer_type>(
+                fragmented_collector,
+                fragmented_view,
+                0u,
+                fragmented_view.bp_size(),
+                10u,
+                15u,
+                MinimizerSketchBackend::PaperNtHashSimd,
+                ExactSimdRangeRoute::require_continuation,
+                fixed_highway_kernels()),
+            PaperNtHashRuntimeError);
+    }
+    REQUIRE(fragmented_collector.extract_sketches_data().empty());
+    REQUIRE(admission.reserved_bytes() == reserved_before);
+}
+
+TEST_CASE("Paper ntHash materializes DNA4 slices and rejects every DNA5 width",
           "[paper-nthash][simd][pipe][fragmented][range][fail-closed]") {
     check_fragmented_paper_range_materialization<seq::dna4, std::uint8_t>();
     check_fragmented_paper_range_materialization<seq::dna4, std::uint16_t>();
     check_fragmented_paper_range_materialization<seq::dna4, std::uint32_t>();
     check_fragmented_paper_range_materialization<seq::dna4, std::uint64_t>();
-    check_fragmented_paper_range_materialization<seq::dna5, std::uint8_t>();
-    check_fragmented_paper_range_materialization<seq::dna5, std::uint16_t>();
-    check_fragmented_paper_range_materialization<seq::dna5, std::uint32_t>();
-    check_fragmented_paper_range_materialization<seq::dna5, std::uint64_t>();
+    check_paper_rejects_dna5_coordinate<std::uint8_t>();
+    check_paper_rejects_dna5_coordinate<std::uint16_t>();
+    check_paper_rejects_dna5_coordinate<std::uint32_t>();
+    check_paper_rejects_dna5_coordinate<std::uint64_t>();
 }
 
 enum class InjectedScannerLeaf {

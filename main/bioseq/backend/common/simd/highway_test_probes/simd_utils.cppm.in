@@ -1,0 +1,314 @@
+#ifndef BIOSEQ_TEST_INDEXES
+#error "fixed-target unit probes require BIOSEQ_TEST_INDEXES"
+#endif
+
+#include "common/simd/highway_test_probes/contract.h"
+
+module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
+
+import std;
+import :simd_utils;
+
+namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
+
+namespace hn = hwy::HWY_NAMESPACE;
+
+template<class T>
+[[nodiscard]] bool matrix_equal(
+    const std::vector<std::vector<T>>& actual,
+    const std::vector<std::vector<T>>& expected) {
+    return actual == expected;
+}
+
+template<class T>
+[[nodiscard]] std::vector<T> increasing(
+    const std::size_t size,
+    T value = T{}) {
+    std::vector<T> result(size);
+    for (T& element : result) element = value++;
+    return result;
+}
+
+template<class T>
+[[nodiscard]] std::vector<std::vector<T>> square_increasing(
+    const std::size_t lanes) {
+    std::vector<std::vector<T>> result(
+        lanes, std::vector<T>(lanes));
+    T value{};
+    for (auto& row : result) {
+        for (T& element : row) element = value++;
+    }
+    return result;
+}
+
+template<class T>
+[[nodiscard]] std::vector<T> flatten(
+    const std::vector<std::vector<T>>& matrix) {
+    std::vector<T> result;
+    for (const auto& row : matrix) {
+        result.insert(result.end(), row.begin(), row.end());
+    }
+    return result;
+}
+
+template<class T>
+[[nodiscard]] bool check_fill() {
+    using d_t = hn::ScalableTag<T>;
+    using vec_t = hn::Vec<d_t>;
+    d_t d;
+    constexpr std::size_t maximum = hn::MaxLanes(d_t{});
+    const std::size_t lanes = hn::Lanes(d);
+    const auto expected = square_increasing<T>(lanes);
+    const auto input = flatten(expected);
+    HWY_ALIGN std::array<vec_t, maximum> buffer{};
+    square_lane_matrix<d_t> matrix{buffer.data()};
+    matrix.fill(d, 0u, input.data());
+    return matrix_equal(matrix.template to_scalar_2d<T>(d), expected);
+}
+
+template<class T>
+[[nodiscard]] bool check_transpose() {
+    using d_t = hn::ScalableTag<T>;
+    using vec_t = hn::Vec<d_t>;
+    d_t d;
+    constexpr std::size_t maximum = hn::MaxLanes(d_t{});
+    const std::size_t lanes = hn::Lanes(d);
+    if (lanes != 1u && lanes != 2u && lanes != 4u && lanes != 8u
+        && lanes != 16u) {
+        return false;
+    }
+    const auto source = square_increasing<T>(lanes);
+    const auto input = flatten(source);
+    std::vector<std::vector<T>> expected(
+        lanes, std::vector<T>(lanes));
+    for (std::size_t row = 0u; row < lanes; ++row) {
+        for (std::size_t column = 0u; column < lanes; ++column) {
+            expected[row][column] = source[column][row];
+        }
+    }
+    HWY_ALIGN std::array<vec_t, maximum> buffer{};
+    square_lane_matrix<d_t> matrix{buffer.data()};
+    matrix.fill(d, 0u, input.data());
+    matrix.transpose(d);
+    return matrix_equal(matrix.template to_scalar_2d<T>(d), expected);
+}
+
+template<class T>
+[[nodiscard]] bool check_partial_fill(std::uint32_t& cases) {
+    using d_t = hn::ScalableTag<T>;
+    using vec_t = hn::Vec<d_t>;
+    d_t d;
+    constexpr std::size_t maximum = hn::MaxLanes(d_t{});
+    const std::size_t lanes = hn::Lanes(d);
+    const std::size_t storage_size = lanes * lanes * 4u;
+    const auto data = increasing<T>(storage_size, T{1});
+    for (const std::size_t context : {0u, 1u, 3u}) {
+        if (context > lanes) continue;
+        const std::size_t row_offset = lanes - context;
+        const std::size_t available = std::min(
+            storage_size, lanes + (lanes - 1u) * row_offset);
+        for (const bool full : {false, true}) {
+            HWY_ALIGN std::array<vec_t, maximum> buffer{};
+            square_lane_matrix<d_t> matrix{buffer.data()};
+            if (full) {
+                matrix.fill(d, context, data.data());
+            } else {
+                matrix.partial_fill(d, available, context, data.data());
+            }
+            std::vector<std::vector<T>> expected(
+                lanes, std::vector<T>(lanes));
+            for (std::size_t row = 0u; row < lanes; ++row) {
+                for (std::size_t column = 0u; column < lanes; ++column) {
+                    const std::size_t source = row * row_offset + column;
+                    expected[row][column] = full || source < available
+                        ? data[source]
+                        : T{};
+                }
+            }
+            ++cases;
+            if (!matrix_equal(
+                    matrix.template to_scalar_2d<T>(d), expected)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+template<class T>
+[[nodiscard]] bool check_fill_with_offsets() {
+    using d_t = hn::ScalableTag<T>;
+    using vec_t = hn::Vec<d_t>;
+    d_t d;
+    constexpr std::size_t maximum = hn::MaxLanes(d_t{});
+    const std::size_t lanes = hn::Lanes(d);
+    const auto expected = square_increasing<T>(lanes);
+    const auto input = flatten(expected);
+    std::array<std::size_t, 256u> offsets{};
+    for (std::size_t lane = 0u; lane < lanes; ++lane) {
+        offsets[lane] = lane * lanes;
+    }
+    HWY_ALIGN std::array<vec_t, maximum> buffer{};
+    square_lane_matrix<d_t> matrix{buffer.data()};
+    return matrix.fill_with_offsets(d, offsets, input.data()) == lanes
+        && matrix_equal(matrix.template to_scalar_2d<T>(d), expected);
+}
+
+[[nodiscard]] bool check_partial_fill_with_offsets(std::uint32_t& cases) {
+    using T = std::uint8_t;
+    using d_t = hn::ScalableTag<T>;
+    using vec_t = hn::Vec<d_t>;
+    d_t d;
+    const std::size_t lanes = hn::Lanes(d);
+    const std::size_t storage_size = lanes * lanes * 4u;
+    const auto data = increasing<T>(storage_size, T{1});
+    for (const std::int32_t fake_context : {0, -1, -3, 1, 3, 5}) {
+        const std::int64_t signed_offset =
+            static_cast<std::int64_t>(lanes) + fake_context;
+        if (signed_offset <= 0) continue;
+        const std::size_t equal_offset =
+            static_cast<std::size_t>(signed_offset);
+        std::array<std::size_t, 256u> offsets{};
+        for (std::size_t lane = 0u; lane < lanes; ++lane) {
+            offsets[lane] = equal_offset * lane;
+        }
+        const std::size_t available = std::min(
+            storage_size, lanes + (lanes - 1u) * equal_offset);
+        for (const bool full : {false, true}) {
+            HWY_ALIGN std::array<vec_t, 256u> buffer{};
+            square_lane_matrix<d_t> matrix{buffer.data()};
+            std::size_t loaded_full = lanes;
+            std::size_t loaded_partial = 0u;
+            if (full) {
+                if (matrix.fill_with_offsets(d, offsets, data.data())
+                    != lanes) {
+                    return false;
+                }
+            } else {
+                std::tie(loaded_full, loaded_partial) =
+                    matrix.partial_fill_with_offsets(
+                        d, available, offsets, data.data());
+            }
+            std::vector<std::vector<T>> expected(
+                lanes, std::vector<T>(lanes));
+            std::size_t expected_full = 0u;
+            std::size_t expected_partial = 0u;
+            for (std::size_t row = 0u; row < lanes; ++row) {
+                std::size_t missing = 0u;
+                for (std::size_t column = 0u; column < lanes; ++column) {
+                    const std::size_t source = row * equal_offset + column;
+                    const bool present = full || source < available;
+                    expected[row][column] = present ? data[source] : T{};
+                    if (!present) ++missing;
+                }
+                if (missing == 0u) {
+                    ++expected_full;
+                } else if (missing != lanes) {
+                    expected_partial = lanes - missing;
+                }
+            }
+            if (!full) expected_full += 256u - lanes;
+            ++cases;
+            if (!matrix_equal(
+                    matrix.template to_scalar_2d<T>(d), expected)
+                || (!full && (loaded_full != expected_full
+                    || loaded_partial != expected_partial))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+template<class T>
+[[nodiscard]] bool check_double_transpose() {
+    using d_t = hn::ScalableTag<T>;
+    using vec_t = hn::Vec<d_t>;
+    d_t d;
+    constexpr std::size_t maximum = hn::MaxLanes(d_t{});
+    const std::size_t lanes = hn::Lanes(d);
+    if (lanes != 1u && lanes != 2u && lanes != 4u && lanes != 8u
+        && lanes != 16u) {
+        return false;
+    }
+    const auto expected = square_increasing<T>(lanes);
+    const auto input = flatten(expected);
+    HWY_ALIGN std::array<vec_t, maximum> buffer{};
+    square_lane_matrix<d_t> matrix{buffer.data()};
+    matrix.fill(d, 0u, input.data());
+    matrix.transpose(d);
+    matrix.transpose(d);
+    return matrix_equal(matrix.template to_scalar_2d<T>(d), expected);
+}
+
+template<class Function>
+[[nodiscard]] bool run_for_widths(
+    Function&& function,
+    std::uint32_t& cases) {
+    bool result = true;
+    const auto run = [&]<class T>() {
+        ++cases;
+        result = result && function.template operator()<T>();
+    };
+    run.template operator()<std::uint8_t>();
+    run.template operator()<std::uint16_t>();
+    run.template operator()<std::uint32_t>();
+    run.template operator()<std::uint64_t>();
+    return result;
+}
+
+}  // namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail
+
+extern "C" bool bioseq_highway_probe_simd_utils(
+    BioseqHighwaySimdUtilsProbeReceipt* receipt) noexcept {
+    if (receipt == nullptr) return false;
+    *receipt = {};
+    receipt->target = static_cast<std::int64_t>(HWY_TARGET);
+    namespace probe =
+        bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail;
+    try {
+        const auto record = [&] (const std::uint64_t bit, const bool passed) {
+            if (passed) receipt->passed_properties |= bit;
+        };
+        std::uint32_t cases = 0u;
+        record(1u << 0u, probe::run_for_widths(
+            []<class T> { return probe::check_fill<T>(); }, cases));
+        record(1u << 1u, probe::run_for_widths(
+            []<class T> { return probe::check_transpose<T>(); }, cases));
+        bool partial = true;
+        const auto partial_width = [&]<class T>() {
+            partial = partial && probe::check_partial_fill<T>(cases);
+        };
+        partial_width.template operator()<std::uint8_t>();
+        partial_width.template operator()<std::uint16_t>();
+        partial_width.template operator()<std::uint32_t>();
+        partial_width.template operator()<std::uint64_t>();
+        record(1u << 2u, partial);
+        record(1u << 3u, probe::run_for_widths(
+            []<class T> { return probe::check_fill_with_offsets<T>(); },
+            cases));
+        record(1u << 4u, probe::check_partial_fill_with_offsets(cases));
+        record(1u << 5u, probe::run_for_widths(
+            []<class T> { return probe::check_double_transpose<T>(); },
+            cases));
+        receipt->cases_run = cases;
+        receipt->cases_passed = receipt->passed_properties == 0x3fu
+            ? cases
+            : 0u;
+        receipt->u8_lanes = static_cast<std::uint32_t>(
+            hwy::HWY_NAMESPACE::Lanes(
+                hwy::HWY_NAMESPACE::ScalableTag<std::uint8_t>{}));
+        receipt->u16_lanes = static_cast<std::uint32_t>(
+            hwy::HWY_NAMESPACE::Lanes(
+                hwy::HWY_NAMESPACE::ScalableTag<std::uint16_t>{}));
+        receipt->u32_lanes = static_cast<std::uint32_t>(
+            hwy::HWY_NAMESPACE::Lanes(
+                hwy::HWY_NAMESPACE::ScalableTag<std::uint32_t>{}));
+        receipt->u64_lanes = static_cast<std::uint32_t>(
+            hwy::HWY_NAMESPACE::Lanes(
+                hwy::HWY_NAMESPACE::ScalableTag<std::uint64_t>{}));
+        return receipt->passed_properties == 0x3fu;
+    } catch (...) {
+        return false;
+    }
+}

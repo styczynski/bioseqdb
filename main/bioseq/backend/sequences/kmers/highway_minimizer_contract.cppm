@@ -14,8 +14,8 @@ module;
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
+#include <memory>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -378,12 +378,21 @@ public:
         sketches.push_back(sketch);
     }
 
-    /// Append a stable SIMD-compressed batch without a scalar per-record
-    /// construction loop. The chronological minimizer kernel writes the raw
-    /// representation selected by `MinimizerRepr` directly, then commits the
-    /// compacted prefix in one bulk copy. `MinimizerRepr` is deliberately a
-    /// trivially-copyable, storage-sized wire value, so the byte copy starts
-    /// the same object representation that `from_raw_storage` would produce.
+    /** Append one already-constructed exact-representation batch. */
+    [[nodiscard, always_inline]] bool append_records(
+        const std::span<const MinimizerT> records)
+    {
+        if (records.size() > sketches.max_size() - sketches.size()) {
+            return false;
+        }
+        sketches.insert(sketches.end(), records.begin(), records.end());
+        return true;
+    }
+
+    /// Append a stable SIMD-compressed batch without value-initializing and
+    /// then overwriting the destination tail. Each raw word is converted by
+    /// the representation owner's `from_raw_storage` constructor and range-
+    /// inserted directly into uninitialized vector storage.
     template<class M = MinimizerT>
     [[nodiscard, always_inline]] bool append_raw_storage(
         const typename M::storage_t* raw,
@@ -394,17 +403,14 @@ public:
             && std::is_trivially_copyable_v<M>
             && sizeof(M) == sizeof(typename M::storage_t))
     {
-        const std::size_t old_size = sketches.size();
-        if (count > sketches.max_size() - old_size) {
+        if (count > sketches.max_size() - sketches.size()) {
             return false;
         }
-        sketches.resize(old_size + count);
-        if (count != 0) {
-            std::memcpy(
-                static_cast<void*>(sketches.data() + old_size),
-                static_cast<const void*>(raw),
-                count * sizeof(typename M::storage_t));
-        }
+        const auto records = std::span<const typename M::storage_t>{raw, count}
+            | std::views::transform([](const typename M::storage_t value) {
+                return M::from_raw_storage(value);
+            });
+        sketches.insert(sketches.end(), records.begin(), records.end());
         return true;
     }
 
@@ -502,6 +508,20 @@ public:
         }
     }
 
+    /** Append one admitted batch without value-initializing its tail. */
+    [[nodiscard, always_inline]] bool append_records(
+        const std::span<const MinimizerT> records)
+    {
+        const std::size_t old_size = sketches_.size();
+        if (records.size() > sketches_.max_size() - old_size
+            || !ensure_capacity(old_size + records.size())) {
+            failed_ = true;
+            return false;
+        }
+        sketches_.insert(sketches_.end(), records.begin(), records.end());
+        return true;
+    }
+
     template<class M = MinimizerT>
     [[nodiscard, always_inline]] bool append_raw_storage(
         const typename M::storage_t* raw,
@@ -518,13 +538,11 @@ public:
             failed_ = true;
             return false;
         }
-        sketches_.resize(old_size + count);
-        if (count != 0u) {
-            std::memcpy(
-                static_cast<void*>(sketches_.data() + old_size),
-                static_cast<const void*>(raw),
-                count * sizeof(typename M::storage_t));
-        }
+        const auto records = std::span<const typename M::storage_t>{raw, count}
+            | std::views::transform([](const typename M::storage_t value) {
+                return M::from_raw_storage(value);
+            });
+        sketches_.insert(sketches_.end(), records.begin(), records.end());
         return true;
     }
 
@@ -569,19 +587,35 @@ private:
         }
 
         const std::size_t old_capacity = sketches_.capacity();
+        std::size_t predecessor_capacity = old_capacity;
         std::size_t requested_capacity = initial_growth_records;
         if (old_capacity != 0u) {
             requested_capacity = old_capacity <= sketches_.max_size() / 2u
                 ? old_capacity * 2u
                 : required;
         }
+        // A coarse exact-M sink batch must retain the same observable
+        // admission/capacity boundary as the established per-record collector.
+        // Walk the *logical* geometric capacities, but perform only the final
+        // allocation: this preserves the last old-plus-replacement peak without
+        // reintroducing every intermediate copy.
+        while (requested_capacity < required) {
+            predecessor_capacity = requested_capacity;
+            if (requested_capacity > sketches_.max_size() / 2u) {
+                requested_capacity = required;
+                break;
+            }
+            requested_capacity *= 2u;
+        }
         requested_capacity = std::max(requested_capacity, required);
 
         constexpr std::uint64_t maximum =
             (std::numeric_limits<std::uint64_t>::max)();
         std::uint64_t old_bytes = 0u;
+        std::uint64_t predecessor_bytes = 0u;
         std::uint64_t requested_bytes = 0u;
         if (!checked_bytes(old_capacity, old_bytes)
+            || !checked_bytes(predecessor_capacity, predecessor_bytes)
             || !checked_bytes(requested_capacity, requested_bytes)
             || requested_bytes > maximum / allocation_headroom_factor_
             || permit_.bytes() != old_bytes) {
@@ -590,8 +624,9 @@ private:
         }
         const std::uint64_t allocation_headroom =
             requested_bytes * allocation_headroom_factor_;
-        if (allocation_headroom > maximum - old_bytes
-            || !permit_.grow_to(old_bytes + allocation_headroom)) {
+        if (allocation_headroom > maximum - predecessor_bytes
+            || !permit_.grow_to(
+                predecessor_bytes + allocation_headroom)) {
             failed_ = true;
             return false;
         }
@@ -645,6 +680,123 @@ concept exact_simd_minimizer_representation =
         { MinimizerT::hash_shift } -> std::convertible_to<unsigned>;
         { MinimizerT::pos_shift } -> std::convertible_to<unsigned>;
     };
+
+/**
+ * Finite exact-representation identities reachable by generated minimizers.
+ * This is invocation metadata for one coarse typed switch, never a generated
+ * source-record axis or a per-record packing authority.
+ */
+enum class MinimizerOutputLayout : std::uint8_t {
+    unsupported = 0u,
+    repr_l15_k15_u64 = 1u,
+    repr_l28_k15_u64 = 2u,
+    repr_l33_k15_u64 = 3u,
+    repr_l49_k7_u64 = 4u,
+    repr_l63_k15_u128 = 5u,
+    repr_l7_k7_u32 = 6u,
+    repr_l17_k7_u32 = 7u,
+    repr_l63_k7_u128 = 8u,
+    repr_l27_k27_u128 = 9u,
+    repr_l63_k27_u128 = 10u,
+};
+
+template<class MinimizerT>
+inline constexpr MinimizerOutputLayout minimizer_output_layout_v = [] {
+    using output_type = std::remove_cv_t<MinimizerT>;
+    if constexpr (std::same_as<output_type, MinimizerRepr<15u, 15u>>) {
+        return MinimizerOutputLayout::repr_l15_k15_u64;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<28u, 15u>>) {
+        return MinimizerOutputLayout::repr_l28_k15_u64;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<33u, 15u>>) {
+        return MinimizerOutputLayout::repr_l33_k15_u64;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<63u, 15u>>) {
+        return MinimizerOutputLayout::repr_l63_k15_u128;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<7u, 7u>>) {
+        return MinimizerOutputLayout::repr_l7_k7_u32;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<17u, 7u>>) {
+        return MinimizerOutputLayout::repr_l17_k7_u32;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<49u, 7u>>) {
+        return MinimizerOutputLayout::repr_l49_k7_u64;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<63u, 7u>>) {
+        return MinimizerOutputLayout::repr_l63_k7_u128;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<27u, 27u>>) {
+        return MinimizerOutputLayout::repr_l27_k27_u128;
+    } else if constexpr (
+        std::same_as<output_type, MinimizerRepr<63u, 27u>>) {
+        return MinimizerOutputLayout::repr_l63_k27_u128;
+    } else {
+        return MinimizerOutputLayout::unsupported;
+    }
+}();
+
+static_assert(sizeof(MinimizerRepr<15u, 15u>) == 8u);
+static_assert(sizeof(MinimizerRepr<28u, 15u>) == 8u);
+static_assert(sizeof(MinimizerRepr<33u, 15u>) == 8u);
+static_assert(sizeof(MinimizerRepr<63u, 15u>) == 16u);
+static_assert(sizeof(MinimizerRepr<7u, 7u>) == 4u);
+static_assert(sizeof(MinimizerRepr<17u, 7u>) == 4u);
+static_assert(sizeof(MinimizerRepr<49u, 7u>) == 8u);
+static_assert(sizeof(MinimizerRepr<63u, 7u>) == 16u);
+static_assert(sizeof(MinimizerRepr<27u, 27u>) == 16u);
+static_assert(sizeof(MinimizerRepr<63u, 27u>) == 16u);
+static_assert(minimizer_output_layout_v<MinimizerRepr<15u, 15u>>
+    == MinimizerOutputLayout::repr_l15_k15_u64);
+static_assert(minimizer_output_layout_v<MinimizerRepr<28u, 15u>>
+    == MinimizerOutputLayout::repr_l28_k15_u64);
+static_assert(minimizer_output_layout_v<MinimizerRepr<33u, 15u>>
+    == MinimizerOutputLayout::repr_l33_k15_u64);
+static_assert(minimizer_output_layout_v<MinimizerRepr<63u, 15u>>
+    == MinimizerOutputLayout::repr_l63_k15_u128);
+static_assert(minimizer_output_layout_v<MinimizerRepr<7u, 7u>>
+    == MinimizerOutputLayout::repr_l7_k7_u32);
+static_assert(minimizer_output_layout_v<MinimizerRepr<17u, 7u>>
+    == MinimizerOutputLayout::repr_l17_k7_u32);
+static_assert(minimizer_output_layout_v<MinimizerRepr<49u, 7u>>
+    == MinimizerOutputLayout::repr_l49_k7_u64);
+static_assert(minimizer_output_layout_v<MinimizerRepr<63u, 7u>>
+    == MinimizerOutputLayout::repr_l63_k7_u128);
+static_assert(minimizer_output_layout_v<MinimizerRepr<27u, 27u>>
+    == MinimizerOutputLayout::repr_l27_k27_u128);
+static_assert(minimizer_output_layout_v<MinimizerRepr<63u, 27u>>
+    == MinimizerOutputLayout::repr_l63_k27_u128);
+
+[[nodiscard]] constexpr std::uint64_t minimizer_output_position_mask(
+    MinimizerOutputLayout layout) noexcept
+{
+    switch (layout) {
+        case MinimizerOutputLayout::repr_l15_k15_u64:
+            return MinimizerRepr<15u, 15u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l28_k15_u64:
+            return MinimizerRepr<28u, 15u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l33_k15_u64:
+            return MinimizerRepr<33u, 15u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l63_k15_u128:
+            return MinimizerRepr<63u, 15u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l7_k7_u32:
+            return MinimizerRepr<7u, 7u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l17_k7_u32:
+            return MinimizerRepr<17u, 7u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l49_k7_u64:
+            return MinimizerRepr<49u, 7u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l63_k7_u128:
+            return MinimizerRepr<63u, 7u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l27_k27_u128:
+            return MinimizerRepr<27u, 27u>::pos_field_mask;
+        case MinimizerOutputLayout::repr_l63_k27_u128:
+            return MinimizerRepr<63u, 27u>::pos_field_mask;
+        case MinimizerOutputLayout::unsupported:
+            break;
+    }
+    return 0u;
+}
 
 enum class MinimizerSketchBackend : std::uint8_t {
     Scalar = 0,
@@ -922,74 +1074,13 @@ struct TwoStackExecutionProof {
             bool require_nonempty_vector_work = false) const noexcept {
         const std::uint64_t maximum =
             (std::numeric_limits<std::uint64_t>::max)();
-        const bool scalable_fallback_payload_present =
-            scalable_storage_fallback_calls != 0
+        // A proof stamped with a fixed-width Highway identity may never
+        // authenticate a scalable/scalar storage fallback. Keep the wire
+        // counters for compatibility, but reject every non-zero payload.
+        if (scalable_storage_fallback_calls != 0
             || scalable_storage_fallback_input_symbols != 0
-            || scalable_storage_fallback_minimizers_emitted != 0;
-        if (scalable_fallback_payload_present) {
-            const bool contradictory_vector_payload_absent =
-                vector_batches == 0
-                && vector_lanes_visited == 0
-                && masked_tail_lanes == 0
-                && bridge_symbols_staged == 0
-                && bridge_vector_runs == 0
-                && consecutive_kmer_batches == 0
-                && canonical_scramble_batches == 0
-                && window_reduction_batches == 0
-                && event_generation_batches == 0
-                && stable_compress_batches == 0
-                && direct_event_compress_batches == 0
-                && tie_matrix_event_batches == 0
-                && row_transpose_batches == 0
-                && row_vector_stores == 0
-                && palindrome_lanes == 0
-                && first_window_tie_events == 0
-                && expiry_tie_events == 0
-                && tie_hash_prefilter_batches == 0
-                && tie_hash_prefilter_rejected_lanes == 0
-                && tie_raw_verification_batches == 0
-                && entering_min_transitions == 0
-                && expiry_rescan_transitions == 0
-                && final_flush_records == 0
-                && fragment_symbols_staged == 0
-                && packed_decode_batches == 0
-                && packed_decode_lanes == 0
-                && packed_word_boundary_merges == 0
-                && ambiguous_symbols == 0
-                && ambiguous_reset_batches == 0
-                && scalar_orchestration_steps == 0
-                && resident_vector_stream_kernel_calls == 0
-                && resident_vector_stream_single_calls == 0
-                && resident_vector_stream_dual_calls == 0
-                && resident_vector_stream_nonempty_work_calls == 0
-                && resident_vector_stream_input_bp == 0
-                && resident_vector_stream_minimizers_emitted == 0
-                && generic_u64_kernel_calls == 0
-                && generic_u64_candidate_blocks == 0
-                && generic_u64_lane_visits == 0
-                && k15_w10_b8_u32_hash_kernel_calls == 0
-                && k15_w10_b8_u32_hash_candidate_blocks == 0
-                && k15_w10_b8_u32_hash_lane_visits == 0
-                && k15_w10_b8_packed22_groups == 0
-                && k15_w10_b8_packed22_lane_visits == 0;
-            const bool exact_scalar_accounting =
-                scalable_storage_fallback_calls > 0
-                && scalar_backend_branches
-                    == scalable_storage_fallback_calls
-                && scalable_storage_fallback_input_symbols == bp_consumed
-                && scalar_hash_symbols == bp_consumed
-                && scalar_window_transitions == bp_consumed
-                && scalable_storage_fallback_minimizers_emitted
-                    == minimizers_emitted
-                && scalar_event_records == minimizers_emitted
-                && scalar_tail_symbols == 0
-                && scalar_sort_records == 0
-                && scalar_dedup_records == 0;
-            return !saturated
-                && fail_closed_rejections == 0
-                && contradictory_vector_payload_absent
-                && exact_scalar_accounting
-                && (!require_nonempty_vector_work || bp_consumed > 0);
+            || scalable_storage_fallback_minimizers_emitted != 0) {
+            return false;
         }
         const bool resident_payload_present =
             resident_vector_stream_kernel_calls != 0
@@ -1204,9 +1295,9 @@ inline constexpr std::size_t packed_paper_nthash_max_window = 64;
  * Algorithm-local evidence for the packed paper-ntHash kernel.
  *
  * The scalar append count is truthful orchestration after fixed-width SIMD
- * has selected a complete (hash, position, strand) event. SVE/RVV instead use
- * the disjoint scalable-storage branch below; its explicit counters must not
- * coexist with vector payload.
+ * has selected a complete (hash, position, strand) event. It is not a
+ * hash/window fallback. All scalar-work and fallback counters must remain zero
+ * on every accepted execution.
  */
 struct PackedPaperNthashExecutionProof {
     std::uint32_t scheme_id = 0;
@@ -1244,9 +1335,6 @@ struct PackedPaperNthashExecutionProof {
     std::uint64_t scalar_window_transitions = 0;
     std::uint64_t scalar_minimum_decisions = 0;
     std::uint64_t fallback_calls = 0;
-    std::uint64_t scalable_storage_fallback_calls = 0;
-    std::uint64_t scalable_storage_fallback_input_symbols = 0;
-    std::uint64_t scalable_storage_fallback_minimizers_emitted = 0;
     bool positions_are_segment_local = false;
     bool aggregation_mismatch = false;
     bool saturated = false;
@@ -1321,74 +1409,11 @@ struct PackedPaperNthashExecutionProof {
         BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(scalar_window_transitions);
         BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(scalar_minimum_decisions);
         BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(fallback_calls);
-        BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(
-            scalable_storage_fallback_calls);
-        BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(
-            scalable_storage_fallback_input_symbols);
-        BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD(
-            scalable_storage_fallback_minimizers_emitted);
 #undef BIOSEQ_PACKED_PAPER_ADD_PROOF_FIELD
     }
 
     [[nodiscard]] constexpr bool accepted(
         bool require_nonempty_vector_work = true) const noexcept {
-        const bool scalable_fallback_payload_present =
-            scalable_storage_fallback_calls != 0
-            || scalable_storage_fallback_input_symbols != 0
-            || scalable_storage_fallback_minimizers_emitted != 0;
-        if (scalable_fallback_payload_present) {
-            const bool vector_payload_absent =
-                logical_streams == 0
-                && physical_vector_lanes == 0
-                && vector_registers_per_step == 0
-                && packed_decode_batches == 0
-                && packed_decode_lane_visits == 0
-                && hash_initialization_batches == 0
-                && rolling_hash_batches == 0
-                && hash_table_lookup_batches == 0
-                && canonical_sum_batches == 0
-                && window_update_batches == 0
-                && suffix_rebuild_batches == 0
-                && emission_decision_batches == 0
-                && emission_mask_store_batches == 0
-                && stream_boundary_records_buffered == 0
-                && stream_boundary_records_committed == 0
-                && stream_boundary_duplicates_suppressed == 0
-                && partial_chunk_callback_batches == 0
-                && masked_tail_lane_visits == 0;
-            const bool exact_scalar_accounting =
-                scalable_storage_fallback_calls > 0
-                && fallback_calls == scalable_storage_fallback_calls
-                && scalable_storage_fallback_input_symbols == input_symbols
-                && scalar_hash_symbols == input_symbols
-                && input_symbols >= kmer_size
-                && scalar_window_transitions
-                    == input_symbols - kmer_size + 1u
-                && scalar_window_transitions >= window_size
-                && scalar_minimum_decisions
-                    == scalar_window_transitions - window_size + 1u
-                && scalable_storage_fallback_minimizers_emitted
-                    == minimizers_emitted
-                && scalar_collector_appends == minimizers_emitted
-                && tied_endpoint_records_emitted <= minimizers_emitted;
-            return !saturated
-                && !aggregation_mismatch
-                && scheme_id == packed_paper_nthash_scheme_id
-                && kmer_size > 0
-                && window_size > 0
-                && window_size <= packed_paper_nthash_max_window
-                && nthash_rotation == 7
-                && (source_storage_unit_bytes == sizeof(std::uint8_t)
-                    || source_storage_unit_bytes == sizeof(std::uint16_t)
-                    || source_storage_unit_bytes == sizeof(std::uint32_t)
-                    || source_storage_unit_bytes == sizeof(std::uint64_t))
-                && segments_combined > 0
-                && positions_are_segment_local
-                && fail_closed_rejections == 0
-                && vector_payload_absent
-                && exact_scalar_accounting
-                && (!require_nonempty_vector_work || input_symbols > 0);
-        }
         const bool vector_work_ok = !require_nonempty_vector_work
             || (packed_decode_batches > 0
                 && packed_decode_lane_visits > 0
@@ -1466,12 +1491,35 @@ struct PackedSequenceKernelView final {
     bool final_segment = false;
 };
 
-/** Batch-oriented output adapter; callbacks are never invoked per base/lane. */
+/** One type-erased view of storage for live objects of one exact layout. */
+struct MinimizerSinkBatchView final {
+    void* data = nullptr;
+    std::size_t capacity = 0u;
+    MinimizerOutputLayout layout = MinimizerOutputLayout::unsupported;
+    std::size_t record_size = 0u;
+    std::size_t record_alignment = 0u;
+};
+
+static_assert(std::is_standard_layout_v<MinimizerSinkBatchView>);
+static_assert(std::is_trivially_copyable_v<MinimizerSinkBatchView>);
+
+/**
+ * Batch-oriented output adapter; callbacks are never invoked per base/lane.
+ * `acquire` returns uninitialized storage whose identity is validated once by
+ * the target collector before any `MinimizerRepr` object is constructed.
+ * Genuine u64 layouts may retain their raw representation through the
+ * optional layout-checked fast path.
+ */
 struct MinimizerSink final {
     void* state = nullptr;
-    std::span<MinimapSketchData> (*acquire)(
+    MinimizerSinkBatchView (*acquire)(
         void*, std::size_t minimum) = nullptr;
     void (*commit)(void*, std::size_t initialized) noexcept = nullptr;
+    bool (*append_raw_u64)(
+        void*,
+        MinimizerOutputLayout,
+        const std::uint64_t*,
+        std::size_t) noexcept = nullptr;
 };
 
 /** One borrowed packed fragment consumed synchronously by an ExactSimd call. */
@@ -1504,14 +1552,21 @@ struct PackedSequenceFragmentSource final {
 /**
  * Batch adapter shared by all generated minimizer families. Exact kernels keep
  * their established collector surface; acquire/commit is crossed only when a
- * full local batch is ready or the coarse wrapper finishes.
+ * full batch is ready or the coarse wrapper finishes. The batch is acquired
+ * lazily from the sink and written in place, avoiding a second local buffer.
  */
 template<class MinimizerT>
-requires std::same_as<MinimizerT, MinimapSketchData>
 class minimizer_sink_collector {
 public:
     using minimizer_type = MinimizerT;
     static constexpr std::size_t batch_capacity = 256u;
+    static constexpr MinimizerOutputLayout output_layout =
+        minimizer_output_layout_v<MinimizerT>;
+
+    static_assert(output_layout != MinimizerOutputLayout::unsupported);
+    static_assert(std::is_standard_layout_v<MinimizerT>);
+    static_assert(std::is_trivially_copyable_v<MinimizerT>);
+    static_assert(std::is_trivially_destructible_v<MinimizerT>);
 
     explicit minimizer_sink_collector(MinimizerSink sink) noexcept
         : sink_(sink),
@@ -1533,7 +1588,14 @@ public:
             std::same_as<M, MinimizerT>
             && requires { typename M::storage_t; }
             && std::is_trivially_copyable_v<M>
-            && sizeof(M) == sizeof(typename M::storage_t))
+            && sizeof(M) == sizeof(typename M::storage_t)
+            && requires (typename M::storage_t raw_value, M sketch) {
+                { M::from_raw_storage(raw_value) } -> std::same_as<M>;
+                { sketch.kmer() } -> std::convertible_to<std::uint64_t>;
+                { sketch.last_pos() }
+                    -> std::convertible_to<std::uint64_t>;
+                { sketch.strand() } -> std::convertible_to<std::uint64_t>;
+            })
     {
         if (!flush() || failed_) {
             return false;
@@ -1541,17 +1603,41 @@ public:
         if (count == 0u) {
             return true;
         }
-        auto destination = sink_.acquire(sink_.state, count);
-        if (destination.size() < count || destination.data() == nullptr) {
-            failed_ = true;
-            return false;
+        if constexpr (
+            std::same_as<typename M::storage_t, std::uint64_t>
+            && minimizer_output_layout_v<M>
+                != MinimizerOutputLayout::unsupported) {
+            if (sink_.append_raw_u64 != nullptr) {
+                if (!sink_.append_raw_u64(
+                        sink_.state,
+                        minimizer_output_layout_v<M>,
+                        raw,
+                        count)) {
+                    failed_ = true;
+                    return false;
+                }
+                emitted_ += count;
+                return true;
+            }
         }
-        std::memcpy(
-            static_cast<void*>(destination.data()),
-            static_cast<const void*>(raw),
-            count * sizeof(typename M::storage_t));
-        sink_.commit(sink_.state, count);
-        emitted_ += count;
+        std::size_t offset = 0u;
+        while (offset < count) {
+            const std::size_t chunk =
+                std::min(batch_capacity, count - offset);
+            if (!acquire_slots(chunk)) {
+                return false;
+            }
+            for (std::size_t i = 0u; i < chunk; ++i) {
+                std::construct_at(
+                    pending_ + i,
+                    M::from_raw_storage(raw[offset + i]));
+            }
+            buffered_ = chunk;
+            if (!flush()) {
+                return false;
+            }
+            offset += chunk;
+        }
         return true;
     }
 
@@ -1579,19 +1665,31 @@ public:
         if (buffered_ == 0u) {
             return true;
         }
-        auto destination = sink_.acquire(sink_.state, buffered_);
-        if (destination.size() < buffered_ || destination.data() == nullptr) {
-            failed_ = true;
-            return false;
-        }
-        std::copy_n(buffer_.begin(), buffered_, destination.begin());
         sink_.commit(sink_.state, buffered_);
         emitted_ += buffered_;
+        pending_ = nullptr;
         buffered_ = 0u;
         return true;
     }
 
 private:
+    [[nodiscard]] bool acquire_slots(const std::size_t minimum) {
+        const MinimizerSinkBatchView batch =
+            sink_.acquire(sink_.state, minimum);
+        if (batch.data == nullptr
+            || batch.capacity < minimum
+            || batch.layout != output_layout
+            || batch.record_size != sizeof(MinimizerT)
+            || batch.record_alignment != alignof(MinimizerT)
+            || reinterpret_cast<std::uintptr_t>(batch.data)
+                    % alignof(MinimizerT) != 0u) {
+            failed_ = true;
+            return false;
+        }
+        pending_ = static_cast<MinimizerT*>(batch.data);
+        return true;
+    }
+
     template<class Value>
     void enqueue(Value&& sketch) {
         if (failed_) {
@@ -1600,11 +1698,22 @@ private:
         if (buffered_ == batch_capacity && !flush()) {
             return;
         }
-        buffer_[buffered_++] = std::forward<Value>(sketch);
+        if (buffered_ == 0u) {
+            if (!acquire_slots(batch_capacity)) {
+                return;
+            }
+        }
+        // Preserve the exact object representation selected by the owner.
+        // In particular, split 128-bit layouts carry an explicit span byte;
+        // rebuilding from only hash/position/strand would silently replace a
+        // non-default span even though the neutral ABI promises exact M.
+        std::construct_at(
+            pending_ + buffered_, std::forward<Value>(sketch));
+        ++buffered_;
     }
 
     MinimizerSink sink_{};
-    std::array<MinimizerT, batch_capacity> buffer_{};
+    MinimizerT* pending_ = nullptr;
     std::size_t buffered_ = 0u;
     std::size_t emitted_ = 0u;
     bool failed_ = false;
@@ -1718,6 +1827,9 @@ struct MinimizerKernelInvocation final {
     std::size_t window = 0u;
     std::size_t kmer = 0u;
     std::size_t emitted_position_base = 0u;
+    MinimizerOutputLayout output_layout = MinimizerOutputLayout::unsupported;
+    std::uint64_t output_hash_mask = MinimapSketchData::hash_field_mask;
+    std::uint64_t output_position_mask = MinimapSketchData::pos_field_mask;
     TwoStackRoute two_stack_route =
         TwoStackRoute::chronological_continuation;
     MinimizerSink sink{};

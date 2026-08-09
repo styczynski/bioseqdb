@@ -674,7 +674,7 @@ TEST_CASE("DOC0398 BatchJoin and PerRow EXPLAIN own every selected Highway stage
     require_complete_generic_highway_pipeline(batch_join);
 
     const std::string per_row_sql = fmt::format(
-        "SELECT q.id, t.pk, bioseq.edit(t.pk) AS edit_distance "
+        "SELECT q.id, t.pk, bioseq.edit(t.seq0[0:]) AS edit_distance "
         "FROM {} AS t "
         "JOIN test_explain_highway_join_query AS q "
         "ON mmsearch(t.seq0[0:], q.seq[0:]);",
@@ -682,8 +682,10 @@ TEST_CASE("DOC0398 BatchJoin and PerRow EXPLAIN own every selected Highway stage
     const auto per_row = explain_with_options(
         ctx, "VERBOSE, COSTS OFF", per_row_sql);
     REQUIRE(plan_contains(per_row, "Custom Scan (BioseqBatchJoin)"));
+    /* PostgreSQL may expose the same helper as a whole PHV or bare FuncExpr;
+     * both carrier sites are distinct but resolve to one MatchResult owner. */
     REQUIRE(plan_contains(
-        per_row, "Bioseq Match Placeholder Sites: 1"));
+        per_row, "Bioseq Match Placeholder Sites: 2"));
     REQUIRE(plan_contains(
         per_row, "Bioseq Mmsearch Ownership: per-row recipe"));
     require_complete_generic_highway_pipeline(per_row);
@@ -729,10 +731,12 @@ TEST_CASE("DOC0398 BatchJoin attaches executed grouped32 to SeedHitStage",
         "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'{}'::regclass, 'minimizers_per_fragment', {}, "
         "15::smallint, 10::smallint, 4::smallint, "
-        "'exact_simd');",
+        "'exact_simd', 1024::bigint);",
         target, rowno));
     REQUIRE(fixture.size() == 20u);
     REQUIRE(fixture[1].value_or("") == "4");
+    REQUIRE(fixture[14].value_or("") == "4");
+    REQUIRE(fixture[15].value_or("") == "4");
     exec_sql(ctx, fmt::format(
         "SELECT bioseq.set_active_read_index('{}'::regclass, "
         "'minimizers_per_fragment');",
@@ -746,7 +750,8 @@ TEST_CASE("DOC0398 BatchJoin attaches executed grouped32 to SeedHitStage",
 
     const std::string sql = fmt::format(
         "SELECT q.id, t.pk FROM {} AS t JOIN {} AS q "
-        "ON mmsearch(t.seq0, q.seq);",
+        "ON mmsearch(t.seq0, q.seq, "
+        "aligner_options(index_read_requirement => 2));",
         target, query_table);
     const auto plain = explain_with_options(
         ctx, "VERBOSE, COSTS OFF", sql);
@@ -853,6 +858,61 @@ TEST_CASE("DOC0398 every runnable Highway target preserves public query results"
         REQUIRE(*planned == target_name);
         REQUIRE(*executed == target_name);
 
+        remaining &= remaining - std::uint64_t{1};
+    }
+}
+
+TEST_CASE("KSW2 boundary receipts match EMU128 on every runnable Highway target",
+          "[highway][alignment][ksw2][dispatch][forced-target][serial]") {
+    const std::scoped_lock serialized{highway_target_force_mutex};
+    auto ctx = fresh_context();
+    HighwayTargetForceReset restore{ctx.raw()};
+    (void)query_scalar(
+        ctx, "SELECT bioseq_internal.set_highway_target_for_test(0);");
+
+    const auto baseline_mask = static_cast<std::int64_t>(query_scalar_int(
+        ctx,
+        "SELECT bioseq_internal."
+        "highway_baseline_runnable_targets_for_test();"));
+    REQUIRE(baseline_mask > 0);
+    const std::uint64_t baseline_bits =
+        static_cast<std::uint64_t>(baseline_mask);
+
+    std::string emu128_receipt;
+    std::uint64_t remaining = baseline_bits;
+    while (remaining != 0u) {
+        const std::uint64_t target_bit =
+            remaining & (~remaining + std::uint64_t{1});
+        const auto target = static_cast<std::int64_t>(target_bit);
+        const std::string target_name = query_scalar(ctx, fmt::format(
+            "SELECT bioseq_internal.set_highway_target_for_test({});",
+            target));
+        if (target_name == "EMU128") {
+            emu128_receipt = query_scalar(
+                ctx,
+                "SELECT bioseq_internal."
+                "highway_ksw_boundary_receipt_for_test();");
+            break;
+        }
+        remaining &= remaining - std::uint64_t{1};
+    }
+    REQUIRE_FALSE(emu128_receipt.empty());
+
+    remaining = baseline_bits;
+    while (remaining != 0u) {
+        const std::uint64_t target_bit =
+            remaining & (~remaining + std::uint64_t{1});
+        const auto target = static_cast<std::int64_t>(target_bit);
+        const std::string target_name = query_scalar(ctx, fmt::format(
+            "SELECT bioseq_internal.set_highway_target_for_test({});",
+            target));
+        CAPTURE(target, target_name);
+        const std::string receipt = query_scalar(
+            ctx,
+            "SELECT bioseq_internal."
+            "highway_ksw_boundary_receipt_for_test();");
+        REQUIRE_FALSE(receipt.empty());
+        REQUIRE(receipt == emu128_receipt);
         remaining &= remaining - std::uint64_t{1};
     }
 }

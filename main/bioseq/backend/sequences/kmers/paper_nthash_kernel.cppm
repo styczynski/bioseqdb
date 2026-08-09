@@ -19,7 +19,10 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 using ::bioseq::minimizers::MinimapSketchData;
+using ::bioseq::minimizers::MinimizerOutputLayout;
+using ::bioseq::minimizers::MinimizerRepr;
 using ::bioseq::minimizers::minimizer_sink_collector;
+using ::bioseq::minimizers::minimizer_output_layout_v;
 using ::bioseq::minimizers::two_stack_max_window;
 using ::bioseq::minimizers::two_stack_exact_max_kmer;
 using ::bioseq::minimizers::PackedPaperNthashStatus;
@@ -1049,20 +1052,32 @@ namespace coarse_paper_detail {
     }
 }
 
-template<class StorageUnit>
-[[nodiscard]] bool run(
+template<class MinimizerT, class StorageUnit>
+[[nodiscard]] bool run_paper(
     MinimizerKernelInvocation& invocation,
     MinimizerKernelResult& result)
 {
+    static_assert(
+        minimizer_output_layout_v<MinimizerT>
+            != MinimizerOutputLayout::unsupported);
+    if (invocation.output_hash_mask
+            != static_cast<std::uint64_t>(MinimizerT::hash_field_mask)
+        || invocation.output_position_mask
+            != static_cast<std::uint64_t>(MinimizerT::pos_field_mask)) {
+        result.status = MinimizerKernelStatus::invalid_configuration;
+        result.family_status = static_cast<std::uint32_t>(
+            PackedPaperNthashStatus::unsupported_representation);
+        return false;
+    }
     return ::bioseq::minimizers::kernel_detail::
         with_borrowed_compact_range<seq::dna4, StorageUnit>(
             invocation.sequence,
             [&invocation, &result]<class Range>(Range& range) {
-                minimizer_sink_collector<MinimapSketchData> collector{
+                minimizer_sink_collector<MinimizerT> collector{
                     invocation.sink};
                 const PackedPaperNthashResult native =
                     collect_minimizers_packed_paper_nthash_simd_checked<
-                        15u, 10u, MinimapSketchData>(
+                        15u, 10u, MinimizerT>(
                             collector,
                             range,
                             range.begin(),
@@ -1082,6 +1097,21 @@ template<class StorageUnit>
 
 } // namespace coarse_paper_detail
 
+// Definitions live in generated per-representation owners so each admitted
+// algorithm body is compiled once per target/input-width identity.
+[[nodiscard]] HWY_ATTR bool paper_nthash_repr_l15_k15_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool paper_nthash_repr_l15_k15_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool paper_nthash_repr_l28_k15_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool paper_nthash_repr_l28_k15_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool paper_nthash_repr_l63_k15_u32(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+[[nodiscard]] HWY_ATTR bool paper_nthash_repr_l63_k15_u64(
+    MinimizerKernelInvocation&, MinimizerKernelResult&);
+
 /** Source-topology-owned exact paper-ntHash case. */
 template<sequence_alphabet Alphabet, class StorageUnit>
 requires (
@@ -1097,43 +1127,89 @@ requires (
     MinimizerKernelResult result{};
     result.proof.algorithm = MinimizerKernelAlgorithm::paper_nthash;
     result.proof.target = static_cast<std::int64_t>(HWY_TARGET);
-
-    if constexpr (!std::same_as<Alphabet, seq::dna4>
-                  || (!std::same_as<StorageUnit, std::uint32_t>
-                      && !std::same_as<StorageUnit, std::uint64_t>)) {
+    const auto reject = [&result](const PackedPaperNthashStatus family) {
         result.status = MinimizerKernelStatus::invalid_configuration;
-        result.family_status = static_cast<std::uint32_t>(
-            PackedPaperNthashStatus::invalid_configuration);
+        result.family_status = static_cast<std::uint32_t>(family);
+        result.proof.paper.fail_closed_rejections = 1u;
         return result;
+    };
+
+    if constexpr (!std::same_as<Alphabet, seq::dna4>) {
+        return reject(PackedPaperNthashStatus::unsupported_alphabet);
+    } else if constexpr (!std::same_as<StorageUnit, std::uint32_t>
+                         && !std::same_as<StorageUnit, std::uint64_t>) {
+        return reject(PackedPaperNthashStatus::unsupported_storage);
     } else {
+        if (invocation.sequence.begin_symbol
+            > invocation.sequence.end_symbol) {
+            result.status = MinimizerKernelStatus::invalid_sequence_view;
+            result.family_status = static_cast<std::uint32_t>(
+                PackedPaperNthashStatus::invalid_range);
+            result.proof.paper.fail_closed_rejections = 1u;
+            return result;
+        }
         if (!invocation.sequence.final_segment
             || invocation.fragments.present()
             || invocation.emitted_position_base != 0u
             || invocation.sequence.begin_symbol != 0u
             || invocation.window != 10u
-            || invocation.kmer != 15u
-            || invocation.sequence.end_symbol
-                > static_cast<std::size_t>(
-                    MinimapSketchData::pos_field_mask) + 1u) {
-            result.status = MinimizerKernelStatus::invalid_configuration;
-            result.family_status = static_cast<std::uint32_t>(
-                PackedPaperNthashStatus::invalid_configuration);
-            return result;
+            || invocation.kmer != 15u) {
+            return reject(PackedPaperNthashStatus::invalid_configuration);
+        }
+        if (invocation.output_hash_mask < 0xFFFFFFFFull
+            || (invocation.sequence.end_symbol != 0u
+                && invocation.sequence.end_symbol - 1u
+                    > invocation.output_position_mask)) {
+            return reject(PackedPaperNthashStatus::unsupported_representation);
         }
         if (invocation.sequence.end_symbol
             < invocation.kmer + invocation.window - 1u) {
-            result.status = MinimizerKernelStatus::invalid_configuration;
-            result.family_status = static_cast<std::uint32_t>(
-                PackedPaperNthashStatus::input_too_short);
-            return result;
+            return reject(PackedPaperNthashStatus::input_too_short);
         }
 
-        const bool accepted = coarse_paper_detail::run<StorageUnit>(
-            invocation, result);
-        if (!accepted && result.status == MinimizerKernelStatus::ok) {
-            result.status = MinimizerKernelStatus::invalid_sequence_view;
-            result.family_status = static_cast<std::uint32_t>(
-                PackedPaperNthashStatus::invalid_range);
+        bool accepted = false;
+        switch (invocation.output_layout) {
+            case MinimizerOutputLayout::repr_l15_k15_u64:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = paper_nthash_repr_l15_k15_u32(
+                        invocation, result);
+                } else {
+                    accepted = paper_nthash_repr_l15_k15_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l28_k15_u64:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = paper_nthash_repr_l28_k15_u32(
+                        invocation, result);
+                } else {
+                    accepted = paper_nthash_repr_l28_k15_u64(
+                        invocation, result);
+                }
+                break;
+            case MinimizerOutputLayout::repr_l63_k15_u128:
+                if constexpr (std::same_as<StorageUnit, std::uint32_t>) {
+                    accepted = paper_nthash_repr_l63_k15_u32(
+                        invocation, result);
+                } else {
+                    accepted = paper_nthash_repr_l63_k15_u64(
+                        invocation, result);
+                }
+                break;
+            default:
+                result.status = MinimizerKernelStatus::invalid_configuration;
+                result.family_status = static_cast<std::uint32_t>(
+                    PackedPaperNthashStatus::unsupported_representation);
+                result.proof.paper.fail_closed_rejections = 1u;
+                break;
+        }
+        if (!accepted) {
+            result.proof.paper.fail_closed_rejections = 1u;
+            if (result.status == MinimizerKernelStatus::ok) {
+                result.status = MinimizerKernelStatus::invalid_sequence_view;
+                result.family_status = static_cast<std::uint32_t>(
+                    PackedPaperNthashStatus::invalid_range);
+            }
         }
         return result;
     }

@@ -31,6 +31,11 @@ struct fmgr_migration_entry {
     fmgr_migration_disposition disposition;
 };
 
+struct fmgr_profile_target_entry {
+    std::string_view sql_identity;
+    std::string_view target_symbol;
+};
+
 inline constexpr std::array<std::string_view, 1>
 doc0388_external_fmgr_symbols{
     "bioseq_external_handler",
@@ -285,7 +290,7 @@ doc0388_fmgr_migration_ledger{{
     {"bioseq.inspect_ready_minimizer_generation(regclass,text,bigint)", "inspect_ready_minimizer_generation", "bioseq_inspect_ready_minimizer_generation", fmgr_migration_disposition::retired_symbol},
     {"bioseq.inspect_ready_minimizer_format6_generation(regclass,text,bigint)", "inspect_ready_minimizer_format6_generation", "bioseq_inspect_ready_minimizer_format6_generation", fmgr_migration_disposition::retired_symbol},
     {"bioseq_internal.format6_parallel_scan_probe(regclass,text,bigint,integer)", "format6_parallel_scan_probe", "bioseq_internal_format6_parallel_scan_probe", fmgr_migration_disposition::retired_symbol},
-    {"bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)", "build_minimizer_fixture", "bioseq_internal_rev3_test_build_fixture", fmgr_migration_disposition::retired_symbol},
+    {"bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)", "build_minimizer_fixture", "bioseq_internal_rev3_test_build_fixture", fmgr_migration_disposition::retired_symbol},
     {"bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)", "read_minimizer_fixture", "bioseq_internal_rev3_test_read_fixture", fmgr_migration_disposition::retired_symbol},
     {"bioseq_internal.scan_minimizer_generation_fixture(regclass,text,bigint,smallint,smallint,smallint,text)", "scan_minimizer_generation_fixture", "bioseq_internal_rev3_test_read_full_generation_fixture", fmgr_migration_disposition::retired_symbol},
     {"bioseq_internal.remove_sequence_fragment(regclass,text,bigint,integer)", "remove_sequence_fragment", "bioseq_internal_rev3_test_remove_source_fragment", fmgr_migration_disposition::retired_symbol},
@@ -311,6 +316,16 @@ doc0388_fmgr_migration_ledger{{
     {"bioseq_internal.highway_baseline_runnable_targets_for_test()", "highway_baseline_runnable_targets_for_test", "", fmgr_migration_disposition::native_cpp_replacement},
     {"bioseq_internal.set_highway_target_for_test(bigint)", "set_highway_target_for_test", "", fmgr_migration_disposition::native_cpp_replacement},
  }};
+
+// DOC0388 is the exact production migration authority. Test-index builds add
+// this independently reviewed receipt without changing the production ABI.
+inline constexpr std::array<fmgr_profile_target_entry, 1>
+test_indexes_only_fmgr_target_delta{{
+    {
+        "bioseq_internal.highway_ksw_boundary_receipt_for_test()",
+        "highway_ksw_boundary_receipt_for_test",
+    },
+}};
 
 namespace detail {
 
@@ -517,8 +532,18 @@ doc0388_retired_c_symbols() {
 
 inline void validate_doc0388_fmgr_target(
     std::span<const std::string> identities,
-    std::span<const std::string> symbols) {
+    std::span<const std::string> symbols,
+    std::string_view compiler_profile = {}) {
     validate_doc0388_fmgr_migration_ledger();
+
+    const bool test_indexes_profile = compiler_profile == "test_indexes";
+    if (!compiler_profile.empty()
+        && compiler_profile != "production"
+        && !test_indexes_profile) {
+        throw std::runtime_error(
+            "reviewed fmgr target validation received an unknown compiler "
+            "profile: " + std::string{compiler_profile});
+    }
 
     std::set<std::string, std::less<>> expected_identities;
     std::set<std::string, std::less<>> expected_symbols;
@@ -527,6 +552,25 @@ inline void validate_doc0388_fmgr_target(
         expected_identities.insert(
             detail::canonical_fmgr_identity(entry.sql_identity));
         expected_symbols.emplace(entry.target_symbol);
+    }
+    if (test_indexes_profile) {
+        for (const fmgr_profile_target_entry& entry :
+             test_indexes_only_fmgr_target_delta) {
+            const bool identity_inserted = expected_identities.insert(
+                detail::canonical_fmgr_identity(entry.sql_identity)).second;
+            const bool symbol_inserted =
+                expected_symbols.emplace(entry.target_symbol).second;
+            if (entry.sql_identity.empty()
+                || entry.target_symbol.empty()
+                || detail::fmgr_identity_leaf(entry.sql_identity)
+                    != entry.target_symbol
+                || !identity_inserted
+                || !symbol_inserted) {
+                throw std::runtime_error(
+                    "test-indexes-only fmgr target delta is invalid or "
+                    "duplicates the production authority");
+            }
+        }
     }
     std::set<std::string, std::less<>> actual_identities;
     std::set<std::string, std::less<>> actual_symbols;
@@ -573,7 +617,12 @@ inline void validate_doc0388_fmgr_target(
             + "; symbols expected="
             + std::to_string(expected_symbols.size())
             + " actual=" + std::to_string(actual_symbols.size())
-            + " (input=" + std::to_string(symbols.size()) + ")";
+            + " (input=" + std::to_string(symbols.size()) + ")"
+            + "; compiler profile="
+            + std::string{
+                compiler_profile.empty()
+                ? std::string_view{"production"}
+                : compiler_profile};
         append_set_difference(
             message,
             "missing identities",

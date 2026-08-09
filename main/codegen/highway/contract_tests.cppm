@@ -201,6 +201,52 @@ namespace [[bioseq::similar]] decoy {}
         "the marked target body satisfies generator ownership constraints");
 }
 
+inline void verify_debug_assert_partition_preamble() {
+    generation_plan release_plan = two_target_plan();
+    append_fixture_source(release_plan, "unrelated", "common");
+    const generation_result without_assert = render_generation(release_plan);
+    for (const generated_artifact& artifact : without_assert.artifacts) {
+        if (artifact.kind == artifact_kind::partition) {
+            require(
+                !artifact.content.contains("libassert/assert.hpp")
+                    && !artifact.content.contains("#define DEBUG_ASSERT"),
+                "a partition without DEBUG_ASSERT has no assertion preamble");
+        }
+    }
+
+    release_plan.extracted_sources.front().body =
+        "int kernel() { DEBUG_ASSERT(true, \"fixture\"); return 7; }\n";
+    const generation_result with_assert = render_generation(release_plan);
+    std::size_t asserted_partitions = 0u;
+    for (const generated_artifact& artifact : with_assert.artifacts) {
+        if (artifact.kind != artifact_kind::partition) continue;
+        if (artifact.source_key != "prefilter") {
+            require(
+                !artifact.content.contains("libassert/assert.hpp")
+                    && !artifact.content.contains("#define DEBUG_ASSERT"),
+                "the assertion preamble remains scoped to its source owner");
+            continue;
+        }
+        ++asserted_partitions;
+        require(
+            artifact.content.contains(
+                "#ifdef NDEBUG\n"
+                "#ifndef DEBUG_ASSERT\n"
+                "#define DEBUG_ASSERT(...) (void)0\n"
+                "#endif\n"
+                "#else\n"
+                "#include <libassert/assert.hpp>\n"
+                "#endif\n")
+                && artifact.content.contains(
+                    "DEBUG_ASSERT(true, \"fixture\")"),
+            "a DEBUG_ASSERT user preserves release no-evaluation semantics "
+            "and imports the real debug implementation outside NDEBUG");
+    }
+    require(
+        asserted_partitions == release_plan.target_inventory.targets.size(),
+        "every fixed target receives the source-scoped assertion preamble");
+}
+
 inline void verify_template_flatten_separation() {
     const source_manifest inventory{
         .contract_module = "bioseq.highway.dispatch_contract",
@@ -750,6 +796,14 @@ inline void verify_generated_closure() {
                     "test support binds the configured fixed target without "
                     "introducing runtime dispatch");
                 break;
+            case artifact_kind::unit_probe_implementation:
+            case artifact_kind::bench_probe_implementation:
+            case artifact_kind::minimizer_repr_instantiation:
+                require(
+                    false,
+                    "the minimal generated-closure fixture has no optional "
+                    "probe or representation owners");
+                break;
         }
     }
 
@@ -1090,9 +1144,16 @@ inline void verify_typed_alignment_binder() {
                 && artifact.content.contains(
                     "AlignmentKernels<::seq::dna5> alignment_1")
                 && artifact.content.contains(
-                    ".alphabet_code = 0u, .typed_table = &alignment_0")
+                    ".alphabet_code = 0u, .typed_table_complete = "
+                    "::bioseq::simd::alignment_kernels_complete("
+                    "alignment_0), .typed_table = &alignment_0")
                 && artifact.content.contains(
-                    ".alphabet_code = 1u, .typed_table = &alignment_1")
+                    ".alphabet_code = 1u, .typed_table_complete = "
+                    "::bioseq::simd::alignment_kernels_complete("
+                    "alignment_1), .typed_table = &alignment_1")
+                && occurrences(
+                       artifact.content,
+                       "::bioseq::simd::alignment_kernels_complete(") == 2u
                 && artifact.content.contains(
                     "HighwayAlphabetIdentityEntry alphabet_identities[]")
                 && occurrences(
@@ -1502,10 +1563,64 @@ inline void verify_typed_minimizer_binder() {
         "identity");
 }
 
+inline void verify_bounded_minimizer_representation_owners() {
+    generation_plan plan = two_target_plan();
+    append_fixture_source(plan, "minimizer_reference", "minimizers");
+    append_fixture_source(plan, "minimizer_paper", "minimizers");
+    plan.source_inventory.minimizer_repr_instances = {
+        {"reference_l15_k15", "reference", "minimizer_reference",
+         "::bioseq::minimizers::MinimizerRepr<15u,15u>", {"u32", "u64"}},
+        {"reference_l28_k15", "reference", "minimizer_reference",
+         "::bioseq::minimizers::MinimizerRepr<28u,15u>", {"u32", "u64"}},
+        {"reference_l33_k15", "reference", "minimizer_reference",
+         "::bioseq::minimizers::MinimizerRepr<33u,15u>", {"u32", "u64"}},
+        {"reference_l63_k15", "reference", "minimizer_reference",
+         "::bioseq::minimizers::MinimizerRepr<63u,15u>", {"u32", "u64"}},
+        {"paper_l15_k15", "paper", "minimizer_paper",
+         "::bioseq::minimizers::MinimizerRepr<15u,15u>", {"u32", "u64"}},
+        {"paper_l28_k15", "paper", "minimizer_paper",
+         "::bioseq::minimizers::MinimizerRepr<28u,15u>", {"u32", "u64"}},
+        {"paper_l63_k15", "paper", "minimizer_paper",
+         "::bioseq::minimizers::MinimizerRepr<63u,15u>", {"u32", "u64"}},
+    };
+
+    const generation_result generated = render_generation(plan);
+    std::size_t owner_units = 0u;
+    std::size_t reference_wrappers = 0u;
+    std::size_t paper_wrappers = 0u;
+    for (const generated_artifact& artifact : generated.artifacts) {
+        if (artifact.kind != artifact_kind::minimizer_repr_instantiation) {
+            continue;
+        }
+        ++owner_units;
+        reference_wrappers += occurrences(
+            artifact.content, "reference_minimap_int_repr_");
+        paper_wrappers += occurrences(
+            artifact.content, "paper_nthash_repr_");
+        require(
+            artifact.content.contains("module bioseq.highway.generated.")
+                && artifact.content.contains("import std;")
+                && artifact.content.contains(
+                    "import bioseq.sequences.kmers.highway_contract;")
+                && occurrences(artifact.content, "HWY_ATTR bool") == 2u
+                && !artifact.content.contains("std::uint16_t")
+                && !artifact.content.contains("std::array"),
+            "each representation owner is an ordinary two-width typed seam, "
+            "not widened neutral storage");
+    }
+    require(
+        owner_units == 14u
+            && reference_wrappers == 16u
+            && paper_wrappers == 12u,
+        "the two-target low profile renders exactly 7 owners / 14 typed "
+        "instantiations per target");
+}
+
 }  // namespace contract_detail
 
 void run_highway_contract_self_tests() {
     contract_detail::verify_exact_structural_marker();
+    contract_detail::verify_debug_assert_partition_preamble();
     contract_detail::verify_template_flatten_separation();
     contract_detail::verify_slot_callable_ownership();
     contract_detail::verify_complete_table_target_policy();
@@ -1517,6 +1632,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_shared_publication_envelope();
     contract_detail::verify_typed_alignment_binder();
     contract_detail::verify_typed_minimizer_binder();
+    contract_detail::verify_bounded_minimizer_representation_owners();
 }
 
 }  // namespace bioseq::codegen::highway

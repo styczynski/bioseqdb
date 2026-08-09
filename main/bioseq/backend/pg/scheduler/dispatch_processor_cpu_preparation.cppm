@@ -7,11 +7,11 @@ module;
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <memory>
 #include <new>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -88,6 +88,24 @@ public:
 		append_retained(std::move(minimizer));
 	}
 
+	[[nodiscard, always_inline]] bool append_records(
+			const std::span<const MinimapSketchData> records) {
+		const std::size_t old_size = destination_.size();
+		if (records.size() > destination_.max_size() - old_size
+			|| !ensure_capacity(old_size + records.size())) {
+			failed_ = true;
+			return false;
+		}
+		for (const MinimapSketchData& record : records) {
+			const std::uint64_t hash = record.kmer();
+			hash_width_valid_ = hash_width_valid_
+				&& hash <= (std::numeric_limits<std::uint32_t>::max)();
+			destination_.push_back(static_cast<std::uint32_t>(hash));
+		}
+		append_retained_records(records);
+		return true;
+	}
+
 	template<class M = MinimapSketchData>
 	[[nodiscard, always_inline]] bool append_raw_storage(
 			const typename M::storage_t* raw,
@@ -104,7 +122,6 @@ public:
 			failed_ = true;
 			return false;
 		}
-		destination_.resize(old_size + count);
 		for (std::size_t index = 0; index < count; ++index) {
 			const std::uint64_t hash =
 				MinimapSketchData::from_raw_storage(raw[index]).kmer();
@@ -112,8 +129,7 @@ public:
 				hash_width_valid_
 				&& hash
 					<= (std::numeric_limits<std::uint32_t>::max)();
-			destination_[old_size + index] =
-				static_cast<std::uint32_t>(hash);
+			destination_.push_back(static_cast<std::uint32_t>(hash));
 		}
 		append_retained_raw(raw, count);
 		return true;
@@ -184,6 +200,7 @@ private:
 		}
 
 		const std::size_t old_capacity = retained_query_->capacity();
+		std::size_t predecessor_capacity = old_capacity;
 		std::size_t requested_capacity = 8u;
 		if (old_capacity != 0u) {
 			requested_capacity =
@@ -191,10 +208,25 @@ private:
 				? old_capacity * 2u
 				: required;
 		}
+		/* A coarse exact-representation batch must expose the same last
+		 * predecessor-plus-replacement admission peak as sequential appends,
+		 * without making every intermediate allocation. */
+		while (requested_capacity < required) {
+			predecessor_capacity = requested_capacity;
+			if (requested_capacity
+					> retained_query_->max_size() / 2u) {
+				requested_capacity = required;
+				break;
+			}
+			requested_capacity *= 2u;
+		}
 		requested_capacity = std::max(requested_capacity, required);
 		const std::uint64_t old_bytes =
 			bioseq::parallelism::saturating_mul(
 				old_capacity, sizeof(MinimapSketchData));
+		const std::uint64_t predecessor_bytes =
+			bioseq::parallelism::saturating_mul(
+				predecessor_capacity, sizeof(MinimapSketchData));
 		const std::uint64_t requested_bytes =
 			bioseq::parallelism::saturating_mul(
 				requested_capacity, sizeof(MinimapSketchData));
@@ -203,13 +235,24 @@ private:
 				requested_bytes,
 				bioseq::parallelism::
 					kVectorPreallocationHeadroomFactor);
+		const std::uint64_t retained_other_bytes =
+			*retained_query_bytes_ >= old_bytes
+			? *retained_query_bytes_ - old_bytes
+			: (std::numeric_limits<std::uint64_t>::max)();
+		const std::uint64_t logical_predecessor_peak =
+			bioseq::parallelism::saturating_add(
+				retained_other_bytes, predecessor_bytes);
 		const std::uint64_t peak =
 			bioseq::parallelism::saturating_add(
-				*retained_query_bytes_, allocation_headroom);
+				logical_predecessor_peak, allocation_headroom);
 		if (old_bytes == (std::numeric_limits<std::uint64_t>::max)()
+			|| predecessor_bytes
+				== (std::numeric_limits<std::uint64_t>::max)()
 			|| requested_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| allocation_headroom
+				== (std::numeric_limits<std::uint64_t>::max)()
+			|| logical_predecessor_peak
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| peak == (std::numeric_limits<std::uint64_t>::max)()
 			|| *retained_query_bytes_ < old_bytes
@@ -283,13 +326,22 @@ private:
 			|| !ensure_retained_capacity(old_size + count)) {
 			return;
 		}
-		retained_query_->resize(old_size + count);
-		if (count != 0u) {
-			std::memcpy(
-				static_cast<void*>(retained_query_->data() + old_size),
-				static_cast<const void*>(raw),
-				count * sizeof(Storage));
+		for (std::size_t index = 0u; index < count; ++index) {
+			retained_query_->push_back(
+				MinimapSketchData::from_raw_storage(raw[index]));
 		}
+	}
+
+	[[always_inline]] void append_retained_records(
+			const std::span<const MinimapSketchData> records) {
+		if (!retention_complete_) return;
+		const std::size_t old_size = retained_query_->size();
+		if (records.size() > retained_query_->max_size() - old_size
+			|| !ensure_retained_capacity(old_size + records.size())) {
+			return;
+		}
+		retained_query_->insert(
+			retained_query_->end(), records.begin(), records.end());
 	}
 
 	[[nodiscard]] bool ensure_capacity(const std::size_t required) {
@@ -301,6 +353,7 @@ private:
 		}
 
 		const std::size_t old_capacity = destination_.capacity();
+		std::size_t predecessor_capacity = old_capacity;
 		std::size_t requested_capacity = 8u;
 		if (old_capacity != 0u) {
 			requested_capacity =
@@ -308,11 +361,24 @@ private:
 				? old_capacity * 2u
 				: required;
 		}
+		/* Preserve the established sequential geometric admission cliff for
+		 * coarse exact-representation batches while allocating only once. */
+		while (requested_capacity < required) {
+			predecessor_capacity = requested_capacity;
+			if (requested_capacity > destination_.max_size() / 2u) {
+				requested_capacity = required;
+				break;
+			}
+			requested_capacity *= 2u;
+		}
 		requested_capacity = std::max(requested_capacity, required);
 
 		const std::uint64_t old_bytes =
 			bioseq::parallelism::saturating_mul(
 				old_capacity, sizeof(std::uint32_t));
+		const std::uint64_t predecessor_bytes =
+			bioseq::parallelism::saturating_mul(
+				predecessor_capacity, sizeof(std::uint32_t));
 		const std::uint64_t requested_bytes =
 			bioseq::parallelism::saturating_mul(
 				requested_capacity, sizeof(std::uint32_t));
@@ -321,13 +387,24 @@ private:
 				requested_bytes,
 				bioseq::parallelism::
 					kVectorPreallocationHeadroomFactor);
+		const std::uint64_t retained_other_bytes =
+			retained_bytes_ >= old_bytes
+			? retained_bytes_ - old_bytes
+			: (std::numeric_limits<std::uint64_t>::max)();
+		const std::uint64_t logical_predecessor_peak =
+			bioseq::parallelism::saturating_add(
+				retained_other_bytes, predecessor_bytes);
 		const std::uint64_t peak =
 			bioseq::parallelism::saturating_add(
-				retained_bytes_, allocation_headroom);
+				logical_predecessor_peak, allocation_headroom);
 		if (old_bytes == (std::numeric_limits<std::uint64_t>::max)()
+			|| predecessor_bytes
+				== (std::numeric_limits<std::uint64_t>::max)()
 			|| requested_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| allocation_headroom
+				== (std::numeric_limits<std::uint64_t>::max)()
+			|| logical_predecessor_peak
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| peak == (std::numeric_limits<std::uint64_t>::max)()
 			|| retained_bytes_ < old_bytes

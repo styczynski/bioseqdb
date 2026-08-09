@@ -44,7 +44,6 @@ import bioseq.sequences;
 import bioseq.sequences.cigar;
 import bioseq.alignment.contracts;
 import bioseq.highway.sources.alignment_utils;
-import bioseq.highway.sources.alignment_lanes;
 import bioseq.common.context;
 import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
 import bioseq.storage.lazy;      // DOC0263 — canonical erased lazy view
@@ -101,18 +100,21 @@ template<typename D, typename VecT = hn::Vec<D>>
     const D& d, VecT vec, VecT& lane0) noexcept
 {
     constexpr size_t kElemBytes = sizeof(hn::TFromD<D>);
-    constexpr size_t kVecBytes = hn::MaxLanes(D{}) * kElemBytes;
-    if constexpr (kVecBytes <= 16) {
+    constexpr size_t kMaxVectorBytes =
+        hn::MaxLanes(D{}) * sizeof(hn::TFromD<D>);
+    if constexpr (kMaxVectorBytes <= 16u) {
         auto carry_out =
-            hn::ShiftRightBytes<kVecBytes - kElemBytes>(d, vec);
+            hn::ShiftRightBytes<kMaxVectorBytes - kElemBytes>(d, vec);
         auto shifted = hn::Or(hn::ShiftLeftBytes<kElemBytes>(d, vec), lane0);
         lane0 = carry_out;
         return shifted;
     } else {
-        const auto carry_out = hn::ExtractLane(vec, hn::Lanes(d) - 1u);
         auto shifted = hn::SlideUpLanes(d, vec, 1u);
         shifted = hn::IfThenElse(hn::FirstN(d, 1u), lane0, shifted);
-        lane0 = set_lane_zero(d, carry_out);
+        // Lanes(d), rather than its constexpr upper bound, is required for
+        // scalable SVE/RVV vectors. SlideDown leaves the former last lane in
+        // lane zero and zeros the remaining lanes, matching ShiftRightBytes.
+        lane0 = hn::SlideDownLanes(d, vec, hn::Lanes(d) - 1u);
         return shifted;
     }
 }

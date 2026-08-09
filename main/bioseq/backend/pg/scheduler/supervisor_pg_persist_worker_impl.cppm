@@ -32,6 +32,7 @@ void AbortCurrentTransaction(void);
 
 module bioseq.scheduler.supervisor_pg;
 
+import :persist_queue_publish;
 import bioseq.common.mlogging;
 import bioseq.config;
 import bioseq.pg_utils;

@@ -484,8 +484,22 @@ inline constexpr bool alignment_kernels_are_neutral =
     std::is_standard_layout_v<AlignmentKernels<Alphabet>>
     && std::is_trivially_copyable_v<AlignmentKernels<Alphabet>>;
 
+/** Return true only when every callable in one typed alignment table exists. */
+template<sequence_alphabet Alphabet>
+[[nodiscard]] constexpr bool alignment_kernels_complete(
+    const AlignmentKernels<Alphabet>& kernels) noexcept
+{
+    return kernels.ksw2_z2 != nullptr
+        && kernels.ksw2_d2 != nullptr
+        && kernels.ksw2_batched != nullptr
+        && kernels.block_prepare != nullptr
+        && kernels.block_try_certified_gap != nullptr
+        && kernels.block_align != nullptr;
+}
+
 struct AlignmentTableEntry final {
     std::uint8_t alphabet_code = 0;
+    bool typed_table_complete = false;
     const void* typed_table = nullptr;
 };
 

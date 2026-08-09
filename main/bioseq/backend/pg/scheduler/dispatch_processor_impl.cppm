@@ -204,18 +204,6 @@ namespace bioseq::simd {
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx)
 {
-    const auto highway_plan =
-        ::bioseq::simd_dispatch::registered_highway_dispatch_info();
-    const auto& highway_binding =
-        ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
-    if (highway_binding.target == 0
-        || highway_binding.kernels == nullptr
-        || !highway_binding.kernels->complete()
-        || highway_binding.target != highway_plan.planned_target) {
-        throw std::logic_error{
-            "Highway runtime binding disagrees with the generated target plan"};
-    }
-
     std::map<int32_t, std::vector<MatchResult>> results;
     const bool per_row_query_mode = per_row_query_hdrs != nullptr;
 
@@ -233,6 +221,18 @@ namespace bioseq::simd {
                 static_cast<unsigned>(storage_unit_byte_width));
 		return results;
 	}
+
+    const auto highway_plan =
+        ::bioseq::simd_dispatch::registered_highway_dispatch_info();
+    const auto& highway_binding =
+        ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
+    if (highway_binding.target == 0
+        || highway_binding.kernels == nullptr
+        || !highway_binding.kernels->complete()
+        || highway_binding.target != highway_plan.planned_target) {
+        throw std::logic_error{
+            "Highway runtime binding disagrees with the generated target plan"};
+    }
 	if (scanner_pg_ctx != nullptr
 		&& !scanner_pg_ctx->highway_preparation.empty()
 		&& !scanner_pg_ctx->highway_preparation.valid()) {

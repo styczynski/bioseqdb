@@ -60,9 +60,15 @@ else()
   set(BIOSEQ_OPTTIMIZATION_LEVEL
     "${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}")
   set(_bioseq_opttimization_level_source "qualification preset override")
-  add_compile_definitions(
-    BIOSEQ_OPTTIMIZATION_LEVEL=${BIOSEQ_OPTTIMIZATION_LEVEL})
 endif()
+# Generated Highway implementation units intentionally do not include the
+# PostgreSQL build-config header. Publish the one resolved CMake value for
+# every profile so the generated partition switches and the owner manifest
+# cannot disagree when the checked-in default is raised to level 4 or 5.
+# Header-consuming translation units see the same value through its guarded
+# definition, so this does not change the selected profile's semantics.
+add_compile_definitions(
+  BIOSEQ_OPTTIMIZATION_LEVEL=${BIOSEQ_OPTTIMIZATION_LEVEL})
 message(STATUS
   "bioseq: BIOSEQ_OPTTIMIZATION_LEVEL=${BIOSEQ_OPTTIMIZATION_LEVEL} "
   "(${_bioseq_opttimization_level_source}; checked-in default="
@@ -147,6 +153,7 @@ set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/symbol_counts_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/lazy_minimizer_parity_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_exact_checked_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_aligner_parity_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence_test.cpp
@@ -768,7 +775,6 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/lane_helpers_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm"
@@ -1458,6 +1464,39 @@ unset(_bioseq_highway_minimizer_alphabet_label)
 unset(_bioseq_highway_minimizer_alphabet_replacement)
 unset(_bioseq_highway_minimizer_alphabet_ordinal)
 
+# DOC0399 keeps target-private semantic probes as four ordinary implementation
+# units of the one already-generated static-target primary. They are generator
+# templates, never authored/final module providers or production slot owners.
+set(BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
+  "hashers|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_test_probes/hashers.cppm.in"
+  "sequence_ops|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_test_probes/sequence_ops.cppm.in"
+  "simd_utils|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_test_probes/simd_utils.cppm.in"
+  "two_stack|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_test_probes/two_stack.cppm.in")
+set(BIOSEQ_HIGHWAY_BENCH_PROBE_RECORDS
+  "grouped32|${CMAKE_CURRENT_LIST_DIR}/../bench/highway_grouped32_probe.cppm.in")
+
+# One bounded ordinary owner per admitted result representation prevents every
+# coarse input-width wrapper from instantiating the complete result-layout
+# switch. K15-only profiles have 7 owners / 14 typed instantiations; profile 4+
+# adds K7/K27 identities for exactly 13 owners / 24 instantiations per target.
+set(BIOSEQ_HIGHWAY_MINIMIZER_REPR_INSTANCE_RECORDS
+  "reference_l15_k15|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<15u,15u>|u32,u64"
+  "reference_l28_k15|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<28u,15u>|u32,u64"
+  "reference_l33_k15|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<33u,15u>|u32,u64"
+  "reference_l63_k15|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<63u,15u>|u32,u64"
+  "paper_l15_k15|paper|minimizer_paper|::bioseq::minimizers::MinimizerRepr<15u,15u>|u32,u64"
+  "paper_l28_k15|paper|minimizer_paper|::bioseq::minimizers::MinimizerRepr<28u,15u>|u32,u64"
+  "paper_l63_k15|paper|minimizer_paper|::bioseq::minimizers::MinimizerRepr<63u,15u>|u32,u64")
+if(BIOSEQ_OPTTIMIZATION_LEVEL GREATER_EQUAL 4)
+  list(APPEND BIOSEQ_HIGHWAY_MINIMIZER_REPR_INSTANCE_RECORDS
+    "reference_l7_k7|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<7u,7u>|u32,u64"
+    "reference_l17_k7|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<17u,7u>|u32,u64"
+    "reference_l49_k7|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<49u,7u>|u32,u64"
+    "reference_l63_k7|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<63u,7u>|u32,u64"
+    "reference_l27_k27|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<27u,27u>|u64"
+    "reference_l63_k27|reference|minimizer_reference|::bioseq::minimizers::MinimizerRepr<63u,27u>|u64")
+endif()
+
 bioseq_add_highway_codegen(
   REQUIRE_COMPLETE_TABLE
   TARGET bioseq_highway_target_modules
@@ -1488,10 +1527,9 @@ bioseq_add_highway_codegen(
     "minimizer_two_stack|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm|bioseq.highway.sources.minimizer_two_stack|minimizer_two_stack|minimizers|sequence_ops,hasher_base,hasher_lexic,hasher_minimap_int,simd_utils,vector_stream"
     "minimizer_paper|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/paper_nthash_kernel.cppm|bioseq.highway.sources.minimizer_paper|minimizer_paper|minimizers|sequence_ops,hasher_base,simd_utils,vector_stream"
     "alignment_utils|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm|bioseq.highway.sources.alignment_utils|alignment_utils|alignment|"
-    "alignment_lanes|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/lane_helpers_kernel.cppm|bioseq.highway.sources.alignment_lanes|alignment_lanes|alignment|alignment_utils"
-    "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils,alignment_lanes"
-    "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|simd_utils,alignment_utils,alignment_lanes"
-    "ksw2_batched|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils,alignment_lanes"
+    "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils"
+    "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|simd_utils,alignment_utils"
+    "ksw2_batched|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils"
     "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilters/sneaky_snake_kernel.cppm|bioseq.highway.sources.sneaky_snake|prefilter|common|simd_utils"
     "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|simd_utils"
     "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|simd_utils"
@@ -1507,6 +1545,10 @@ bioseq_add_highway_codegen(
     "common|sneaky_snake_simd_batch"
     "chaining|chain_anchors_simd"
     "indexing|validate_non_scatter_local32_w2"
+  UNIT_PROBE_RECORDS ${BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS}
+  BENCH_PROBE_RECORDS ${BIOSEQ_HIGHWAY_BENCH_PROBE_RECORDS}
+  MINIMIZER_REPR_INSTANCE_RECORDS
+    ${BIOSEQ_HIGHWAY_MINIMIZER_REPR_INSTANCE_RECORDS}
   OUTPUT_MODULES BIOSEQ_HIGHWAY_GENERATED_MODULES
   OUTPUT_PRIMARY_MODULES BIOSEQ_HIGHWAY_GENERATED_PRIMARY_MODULES
   OUTPUT_TARGET_IMPLEMENTATIONS
@@ -1516,9 +1558,116 @@ bioseq_add_highway_codegen(
   OUTPUT_TEST_PRIMARY_MODULE BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE
   OUTPUT_TEST_IMPLEMENTATIONS BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS
   OUTPUT_TEST_SUPPORT BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT
+  OUTPUT_UNIT_PROBE_IMPLEMENTATIONS
+    BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS
+  OUTPUT_BENCH_PROBE_IMPLEMENTATIONS
+    BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS
+  OUTPUT_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS
+    BIOSEQ_HIGHWAY_GENERATED_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS
   OUTPUT_SOURCE_INPUTS BIOSEQ_HIGHWAY_REGISTERED_SOURCE_INPUTS
   OUTPUT_TARGET_RECORDS BIOSEQ_HIGHWAY_COMPILED_TARGET_RECORDS
   OUTPUT_COMPILED_MASK BIOSEQ_HIGHWAY_COMPILED_TARGET_MASK)
+
+list(LENGTH BIOSEQ_HIGHWAY_UNIT_PROBE_RECORDS
+  _bioseq_highway_unit_probe_record_count)
+list(LENGTH BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS
+  _bioseq_highway_unit_probe_output_count)
+list(LENGTH BIOSEQ_HIGHWAY_BENCH_PROBE_RECORDS
+  _bioseq_highway_bench_probe_record_count)
+list(LENGTH BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS
+  _bioseq_highway_bench_probe_output_count)
+list(LENGTH BIOSEQ_HIGHWAY_MINIMIZER_REPR_INSTANCE_RECORDS
+  _bioseq_highway_repr_owner_count)
+list(LENGTH BIOSEQ_HIGHWAY_COMPILED_TARGET_RECORDS
+  _bioseq_highway_compiled_target_count)
+list(LENGTH BIOSEQ_HIGHWAY_GENERATED_MINIMIZER_REPR_INSTANCE_IMPLEMENTATIONS
+  _bioseq_highway_repr_output_count)
+math(EXPR _bioseq_highway_expected_repr_output_count
+  "${_bioseq_highway_repr_owner_count} * ${_bioseq_highway_compiled_target_count}")
+if(NOT _bioseq_highway_unit_probe_record_count EQUAL 4
+    OR NOT _bioseq_highway_unit_probe_output_count EQUAL 4)
+  message(FATAL_ERROR
+    "DOC0399 requires exactly four fixed-target unit probe owners/outputs")
+endif()
+if(NOT _bioseq_highway_bench_probe_record_count EQUAL 1
+    OR NOT _bioseq_highway_bench_probe_output_count EQUAL 1)
+  message(FATAL_ERROR
+    "DOC0399 requires exactly one fixed-target benchmark probe owner/output")
+endif()
+if(BIOSEQ_OPTTIMIZATION_LEVEL GREATER_EQUAL 4)
+  set(_bioseq_highway_expected_repr_owner_count 13)
+else()
+  set(_bioseq_highway_expected_repr_owner_count 7)
+endif()
+if(NOT _bioseq_highway_repr_owner_count EQUAL
+      _bioseq_highway_expected_repr_owner_count
+    OR NOT _bioseq_highway_repr_output_count EQUAL
+      _bioseq_highway_expected_repr_output_count)
+  message(FATAL_ERROR
+    "DOC0399 minimizer representation owner/output closure diverged: "
+    "owners=${_bioseq_highway_repr_owner_count}, "
+    "outputs=${_bioseq_highway_repr_output_count}, "
+    "targets=${_bioseq_highway_compiled_target_count}")
+endif()
+set(_bioseq_highway_probe_outputs
+  ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS}
+  ${BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS})
+set(_bioseq_highway_unique_probe_outputs ${_bioseq_highway_probe_outputs})
+list(REMOVE_DUPLICATES _bioseq_highway_unique_probe_outputs)
+list(LENGTH _bioseq_highway_probe_outputs _bioseq_highway_probe_output_count)
+list(LENGTH _bioseq_highway_unique_probe_outputs
+  _bioseq_highway_unique_probe_output_count)
+if(NOT _bioseq_highway_probe_output_count EQUAL
+    _bioseq_highway_unique_probe_output_count)
+  message(FATAL_ERROR "DOC0399 Highway probe outputs are not disjoint")
+endif()
+foreach(_bioseq_highway_unit_probe
+    IN LISTS BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS)
+  if(_bioseq_highway_unit_probe IN_LIST
+        BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS
+      OR _bioseq_highway_unit_probe IN_LIST
+        BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS
+      OR _bioseq_highway_unit_probe IN_LIST
+        BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS
+      OR _bioseq_highway_unit_probe STREQUAL
+        BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY
+      OR _bioseq_highway_unit_probe STREQUAL
+        BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY)
+    message(FATAL_ERROR
+      "unit probe escaped its dedicated fixed-target output: "
+      "${_bioseq_highway_unit_probe}")
+  endif()
+endforeach()
+foreach(_bioseq_highway_bench_probe
+    IN LISTS BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS)
+  if(_bioseq_highway_bench_probe IN_LIST
+        BIOSEQ_HIGHWAY_GENERATED_TARGET_IMPLEMENTATIONS
+      OR _bioseq_highway_bench_probe IN_LIST
+        BIOSEQ_HIGHWAY_GENERATED_TEST_IMPLEMENTATIONS
+      OR _bioseq_highway_bench_probe STREQUAL
+        BIOSEQ_HIGHWAY_GENERATED_DISPATCH_REGISTRY
+      OR _bioseq_highway_bench_probe STREQUAL
+        BIOSEQ_HIGHWAY_GENERATED_DISPATCH_INVENTORY)
+    message(FATAL_ERROR
+      "benchmark probe escaped its dedicated fixed-target output: "
+      "${_bioseq_highway_bench_probe}")
+  endif()
+endforeach()
+unset(_bioseq_highway_bench_probe)
+unset(_bioseq_highway_unit_probe)
+unset(_bioseq_highway_probe_outputs)
+unset(_bioseq_highway_unique_probe_outputs)
+unset(_bioseq_highway_probe_output_count)
+unset(_bioseq_highway_unique_probe_output_count)
+unset(_bioseq_highway_expected_repr_owner_count)
+unset(_bioseq_highway_expected_repr_output_count)
+unset(_bioseq_highway_repr_output_count)
+unset(_bioseq_highway_compiled_target_count)
+unset(_bioseq_highway_repr_owner_count)
+unset(_bioseq_highway_bench_probe_output_count)
+unset(_bioseq_highway_bench_probe_record_count)
+unset(_bioseq_highway_unit_probe_output_count)
+unset(_bioseq_highway_unit_probe_record_count)
 
 # CMake requires every named module partition provider in a CXX_MODULES file
 # set. Keep binders and per-owner instantiation units as ordinary private
@@ -1742,6 +1891,13 @@ avoid constructing very large inlining graphs while compiling typed dispatch.")
 # Materialize only the profile-enabled scheduler coordinates. The canonical
 # body remains an unattached raw-token input; dependency BMIs use the authored
 # primary as their compilation-signature donor.
+set(_bioseq_typed_sql_support_profile production)
+if(BIOSEQ_TEST_INDEXES)
+  set(_bioseq_typed_sql_support_profile test_indexes)
+endif()
+set(BIOSEQ_TYPED_SQL_SUPPORT_STAMP
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/profiles/${_bioseq_typed_sql_support_profile}/support.stamp")
+unset(_bioseq_typed_sql_support_profile)
 bioseq_add_template_flatten_codegen(
   NAME dispatch_processor_typed
   SOURCE "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
@@ -1754,6 +1910,7 @@ bioseq_add_template_flatten_codegen(
   SIGNATURE_SOURCE
     "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor.cppm"
   PCM_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}/pcm"
+  PREPARE_DEPENDS "${BIOSEQ_TYPED_SQL_SUPPORT_STAMP}"
   OUT_API_PARTITION BIOSEQ_TYPED_API_PARTITION
   OUT_SELECTOR_PARTITION BIOSEQ_TYPED_SELECTOR_PARTITION
   OUT_IMPLEMENTATION_UNITS BIOSEQ_TYPED_IMPLEMENTATION_UNITS
@@ -1783,12 +1940,23 @@ if(NOT BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT EQUAL
 endif()
 unset(_bioseq_typed_expected_count)
 
-set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_impl.cppm"
+set(BIOSEQ_ALIGNMENT_HOOK_PRIVATE_PARTITIONS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_contract.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_state_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_lookup_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_unlink_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_retirement_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_stack_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_binding_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_run_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_callbacks_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_publish_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_publish_impl.cppm")
+
+set(BIOSEQ_SUPERVISOR_PRIVATE_PARTITIONS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_publish_impl.cppm")
+
+set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_evidence_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_stats_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_index_admin_impl.cppm"
@@ -1803,7 +1971,6 @@ set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_legacy_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_metadata_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_publish_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_stage_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_stats_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_worker_impl.cppm"
@@ -1819,6 +1986,66 @@ list(REMOVE_DUPLICATES SRC_MOD_FILES)
 list(APPEND SRC_FILES
   ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS}
   ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS})
+foreach(_bioseq_alignment_hook_partition
+    IN LISTS BIOSEQ_ALIGNMENT_HOOK_PRIVATE_PARTITIONS)
+  set(_bioseq_alignment_hook_module_count 0)
+  foreach(_bioseq_module_source IN LISTS SRC_MOD_FILES)
+    if(_bioseq_module_source STREQUAL _bioseq_alignment_hook_partition)
+      math(EXPR _bioseq_alignment_hook_module_count
+        "${_bioseq_alignment_hook_module_count} + 1")
+    endif()
+  endforeach()
+  if(NOT _bioseq_alignment_hook_module_count EQUAL 1)
+    message(FATAL_ERROR
+      "Alignment-hook private partition must occur exactly once in "
+      "SRC_MOD_FILES: '${_bioseq_alignment_hook_partition}' occurs "
+      "${_bioseq_alignment_hook_module_count} times")
+  endif()
+  if(_bioseq_alignment_hook_partition IN_LIST SRC_FILES
+      OR _bioseq_alignment_hook_partition IN_LIST
+        BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
+      OR _bioseq_alignment_hook_partition IN_LIST
+        BIOSEQ_TYPED_IMPLEMENTATION_UNITS
+      OR _bioseq_alignment_hook_partition IN_LIST
+        BIOSEQ_HIGHWAY_GENERATED_MODULES)
+    message(FATAL_ERROR
+      "Alignment-hook private partition must be target-owned only through "
+      "the CXX_MODULES file set: '${_bioseq_alignment_hook_partition}'")
+  endif()
+endforeach()
+unset(_bioseq_alignment_hook_module_count)
+unset(_bioseq_module_source)
+unset(_bioseq_alignment_hook_partition)
+foreach(_bioseq_supervisor_partition
+    IN LISTS BIOSEQ_SUPERVISOR_PRIVATE_PARTITIONS)
+  set(_bioseq_supervisor_module_count 0)
+  foreach(_bioseq_module_source IN LISTS SRC_MOD_FILES)
+    if(_bioseq_module_source STREQUAL _bioseq_supervisor_partition)
+      math(EXPR _bioseq_supervisor_module_count
+        "${_bioseq_supervisor_module_count} + 1")
+    endif()
+  endforeach()
+  if(NOT _bioseq_supervisor_module_count EQUAL 1)
+    message(FATAL_ERROR
+      "Supervisor private partition must occur exactly once in "
+      "SRC_MOD_FILES: '${_bioseq_supervisor_partition}' occurs "
+      "${_bioseq_supervisor_module_count} times")
+  endif()
+  if(_bioseq_supervisor_partition IN_LIST SRC_FILES
+      OR _bioseq_supervisor_partition IN_LIST
+        BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
+      OR _bioseq_supervisor_partition IN_LIST
+        BIOSEQ_TYPED_IMPLEMENTATION_UNITS
+      OR _bioseq_supervisor_partition IN_LIST
+        BIOSEQ_HIGHWAY_GENERATED_MODULES)
+    message(FATAL_ERROR
+      "Supervisor private partition must be target-owned only through "
+      "the CXX_MODULES file set: '${_bioseq_supervisor_partition}'")
+  endif()
+endforeach()
+unset(_bioseq_supervisor_module_count)
+unset(_bioseq_module_source)
+unset(_bioseq_supervisor_partition)
 set_source_files_properties(
   ${BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS}
   "${BIOSEQ_TYPED_API_PARTITION}"
@@ -1941,6 +2168,13 @@ if(TARGET bioseq_aligner_tests_exec)
         "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
         "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
         ${BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS})
+  if(BIOSEQ_TEST_INDEXES)
+    set_source_files_properties(
+      ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS}
+      PROPERTIES GENERATED TRUE COMPILE_OPTIONS "-x;c++")
+    target_sources(bioseq_aligner_tests_exec PRIVATE
+      ${BIOSEQ_HIGHWAY_GENERATED_UNIT_PROBE_IMPLEMENTATIONS})
+  endif()
   target_link_libraries(bioseq_aligner_tests_exec PRIVATE
     bioseq_highway_target_policy)
   add_dependencies(
@@ -2091,6 +2325,19 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_SUPPORT_STAMP
     "${_bioseq_sql_profile_artifact_dir}/support.stamp")
 endforeach()
+if(BIOSEQ_TEST_INDEXES)
+  set(_bioseq_expected_typed_sql_support_stamp
+    "${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_STAMP}")
+else()
+  set(_bioseq_expected_typed_sql_support_stamp
+    "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}")
+endif()
+if(NOT "${BIOSEQ_TYPED_SQL_SUPPORT_STAMP}" STREQUAL
+    "${_bioseq_expected_typed_sql_support_stamp}")
+  message(FATAL_ERROR
+    "Template-flatten SQL support dependency does not match the active profile")
+endif()
+unset(_bioseq_expected_typed_sql_support_stamp)
 set(BIOSEQ_SQL_CORE_DESCRIPTOR_HASH
   "${BIOSEQ_SQL_CODEGEN_DIR}/core/core-descriptor.sha256")
 set(BIOSEQ_SQL_CORE_MANIFEST
@@ -2300,6 +2547,10 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     "${_bioseq_sql_fmgr_entrypoints_dir}/mod.entrypoints.cppm")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_HIGHWAY_TARGET_TEST_SUPPORT
     "${_bioseq_sql_fmgr_entrypoints_dir}/highway_target_test_support.entrypoints.cppm")
+  if(_bioseq_sql_profile STREQUAL "test_indexes")
+    set(BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINTS_HIGHWAY_KSW_TARGET_TEST_SUPPORT
+      "${_bioseq_sql_fmgr_entrypoints_dir}/highway_ksw_target_test_support.entrypoints.cppm")
+  endif()
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_STORAGE_MANAGER
     "${_bioseq_sql_fmgr_entrypoints_dir}/storage_manager_sequence_storage_manager.entrypoints.cppm")
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_TABLE_ACCESS_HOOKS
@@ -2333,6 +2584,10 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_VECTOR_TYPES_AGGREGATES}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_COMPARISON_REGISTRY}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_AGGREGATE_REGISTRY}")
+  if(_bioseq_sql_profile STREQUAL "test_indexes")
+    list(APPEND BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINT_MODULES
+      "${BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINTS_HIGHWAY_KSW_TARGET_TEST_SUPPORT}")
+  endif()
   set(BIOSEQ_SQL_${_bioseq_sql_profile_key}_SUPPORT_VECTOR_REGISTRY_MODULES
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_COMPARISON_REGISTRY}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_AGGREGATE_REGISTRY}")
@@ -2347,18 +2602,46 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_VECTOR_TYPES_INTEGER}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_VECTOR_TYPES_DATE}"
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_VECTOR_TYPES_AGGREGATES}")
+  if(_bioseq_sql_profile STREQUAL "test_indexes")
+    list(APPEND BIOSEQ_SQL_TEST_INDEXES_FINAL_FMGR_ENTRYPOINT_MODULES
+      "${BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINTS_HIGHWAY_KSW_TARGET_TEST_SUPPORT}")
+  endif()
 endforeach()
+if(DEFINED BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINTS_HIGHWAY_KSW_TARGET_TEST_SUPPORT)
+  message(FATAL_ERROR
+    "KSW boundary FMGR output must not exist in the production SQL profile")
+endif()
+set(_bioseq_ksw_test_fmgr_occurrences 0)
+foreach(_bioseq_fmgr_module
+    IN LISTS BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINT_MODULES)
+  if(_bioseq_fmgr_module STREQUAL
+      BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINTS_HIGHWAY_KSW_TARGET_TEST_SUPPORT)
+    math(EXPR _bioseq_ksw_test_fmgr_occurrences
+      "${_bioseq_ksw_test_fmgr_occurrences} + 1")
+  endif()
+endforeach()
+if(NOT _bioseq_ksw_test_fmgr_occurrences EQUAL 1
+    OR BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINTS_HIGHWAY_KSW_TARGET_TEST_SUPPORT
+      IN_LIST BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINT_MODULES)
+  message(FATAL_ERROR
+    "KSW boundary FMGR must occur exactly once in test_indexes and never "
+    "in the production generated-module list")
+endif()
+unset(_bioseq_fmgr_module)
+unset(_bioseq_ksw_test_fmgr_occurrences)
 if(BIOSEQ_TEST_INDEXES)
   set(BIOSEQ_SQL_ROW_CODEC_MODULES
     ${BIOSEQ_SQL_TEST_INDEXES_ROW_CODEC_MODULES})
   set(BIOSEQ_SQL_FMGR_ENTRYPOINT_MODULES
     ${BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINT_MODULES})
+  set(_bioseq_sql_active_profile test_indexes)
   set(_bioseq_sql_active_profile_key TEST_INDEXES)
 else()
   set(BIOSEQ_SQL_ROW_CODEC_MODULES
     ${BIOSEQ_SQL_PRODUCTION_ROW_CODEC_MODULES})
   set(BIOSEQ_SQL_FMGR_ENTRYPOINT_MODULES
     ${BIOSEQ_SQL_PRODUCTION_FMGR_ENTRYPOINT_MODULES})
+  set(_bioseq_sql_active_profile production)
   set(_bioseq_sql_active_profile_key PRODUCTION)
 endif()
 foreach(_bioseq_sql_output_name IN ITEMS
@@ -2573,6 +2856,13 @@ bioseq_register_sql_owner(
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS highway_target_test_support)
 bioseq_register_sql_owner(
+  OWNER_KEY highway_ksw_target_test_support
+  MODULE bioseq.highway_ksw_target_test_support
+  SOURCES backend/pg/highway_ksw_target_test_support.cppm
+  PROFILES test_indexes
+  AUTHORITIES FINAL
+  FMGR_ENTRYPOINTS highway_ksw_target_test_support)
+bioseq_register_sql_owner(
   OWNER_KEY sequences_sample_table_udf
   MODULE bioseq.sequences.sample_table_udf
   SOURCES backend/pg/sequences_pg/sample_table_udf.cppm
@@ -2698,6 +2988,7 @@ bioseq_finalize_sql_owner_registry(
   EXPECTED_FMGR_ENTRYPOINTS
     mod
     highway_target_test_support
+    highway_ksw_target_test_support
     storage_manager_sequence_storage_manager
     table_access_hooks
     storage_load_pg
@@ -3067,9 +3358,6 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       ${BIOSEQ_SQL_${_bioseq_sql_profile_key}_SUPPORT_VECTOR_REGISTRY_MODULES}
       "${BIOSEQ_SQL_CORE_GENERATED_STAMP}"
       ${_bioseq_sql_final_sources}
-    # FINAL preparation precompiles the full bioseq.mod closure. Keep the
-    # production and test_indexes variants out of memory-pressure contention.
-    JOB_POOL sql_codegen_ast_proof
     COMMENT
       "Preparing ${_bioseq_sql_profile} Clang SQL final closure"
     DEPFILE "${_bioseq_sql_final_prepare_depfile}"
@@ -3095,6 +3383,12 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       AND NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
     set(_bioseq_sql_golden_args
       --golden "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql")
+  endif()
+  set(_bioseq_sql_profile_only_fmgr_args)
+  if(_bioseq_sql_profile STREQUAL "test_indexes")
+    list(APPEND _bioseq_sql_profile_only_fmgr_args
+      --fmgr-entrypoints-output
+      "highway_ksw_target_test_support=${BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINTS_HIGHWAY_KSW_TARGET_TEST_SUPPORT}")
   endif()
 
   add_custom_command(
@@ -3183,6 +3477,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
         "vector_comparison_registry=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_COMPARISON_REGISTRY}"
       --fmgr-entrypoints-output
         "vector_aggregate_registry=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_AGGREGATE_REGISTRY}"
+      ${_bioseq_sql_profile_only_fmgr_args}
       --guc-parity-ledger "${BIOSEQ_SQL_GUC_PARITY_LEDGER}"
       --guc-output-root "${BIOSEQ_SQL_GUC_OUTPUT_ROOT}"
       --guc-active-profile "${_bioseq_sql_profile}"
@@ -3631,9 +3926,14 @@ set_target_properties(bioseq_sql_compile_contract_providers PROPERTIES
   CXX_MODULE_STD ON
   POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE)
+# These objects compile only active-profile SUPPORT providers and
+# profile-neutral CORE handles. Keep those exact generation prerequisites, but
+# do not serialize their compilation behind either FINAL SQL proof closure.
+# FINAL generation and every dual-profile proof remain ordinary DSO/link gates.
 add_dependencies(
   bioseq_sql_compile_contract_providers
-  bioseq_sql_final)
+  bioseq_sql_support_${_bioseq_sql_active_profile}
+  bioseq_sql_core_entity_handles)
 
 add_library(bioseq_sql_gcc_compile_contract_objects OBJECT EXCLUDE_FROM_ALL
   ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES})

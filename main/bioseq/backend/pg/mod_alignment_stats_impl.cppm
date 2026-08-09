@@ -28,7 +28,7 @@ module bioseq.mod;
 import bioseq.mod.alignment.sql_rows;
 import bioseq.pipeline.stats;
 import bioseq.pg_utils;
-import bioseq.table.scan_state;
+import bioseq.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 

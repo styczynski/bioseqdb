@@ -171,14 +171,17 @@ bioseq_add_highway_imported_binder_canary(
 # Retain the original namespace-materialization GCC closure beside the real
 # Highway boundary so the specialized proof does not regress generic generated
 # implementation-unit/module dependency coverage.
-set(_generic_generated_sources
+set(_generic_generated_partitions
   "${BIOSEQ_GCC_CANARY_GENERATED_ROOT}/typed_flat_api.cppm"
-  "${BIOSEQ_GCC_CANARY_GENERATED_ROOT}/typed_flat_selector.cppm"
+  "${BIOSEQ_GCC_CANARY_GENERATED_ROOT}/typed_flat_selector.cppm")
+set(_generic_generated_implementation_units
   "${BIOSEQ_GCC_CANARY_GENERATED_ROOT}/instance_0.cppm"
   "${BIOSEQ_GCC_CANARY_GENERATED_ROOT}/instance_1.cppm"
   "${BIOSEQ_GCC_CANARY_GENERATED_ROOT}/instance_2.cppm"
   "${BIOSEQ_GCC_CANARY_GENERATED_ROOT}/instance_3.cppm")
-foreach(_generic_source IN LISTS _generic_generated_sources)
+foreach(_generic_source IN LISTS
+    _generic_generated_partitions
+    _generic_generated_implementation_units)
   if(NOT IS_ABSOLUTE "${_generic_source}"
       OR NOT EXISTS "${_generic_source}"
       OR IS_DIRECTORY "${_generic_source}")
@@ -192,15 +195,19 @@ add_executable(bioseq_namespace_materialization_gcc_module_canary)
 target_sources(bioseq_namespace_materialization_gcc_module_canary
   PRIVATE
     "${BIOSEQ_GCC_CANARY_MAIN}"
-    ${_generic_generated_sources}
+    ${_generic_generated_implementation_units}
     "${BIOSEQ_GCC_CANARY_DRIVER}"
   PRIVATE
     FILE_SET CXX_MODULES
     TYPE CXX_MODULES
-    BASE_DIRS "${_generic_primary_base}"
-    FILES "${BIOSEQ_GCC_CANARY_PRIMARY}")
+    BASE_DIRS
+      "${_generic_primary_base}"
+      "${BIOSEQ_GCC_CANARY_GENERATED_ROOT}"
+    FILES
+      "${BIOSEQ_GCC_CANARY_PRIMARY}"
+      ${_generic_generated_partitions})
 set_source_files_properties(
-  ${_generic_generated_sources}
+  ${_generic_generated_implementation_units}
   "${BIOSEQ_GCC_CANARY_DRIVER}"
   PROPERTIES COMPILE_OPTIONS "-x;c++" CXX_SCAN_FOR_MODULES ON)
 set_target_properties(

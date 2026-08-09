@@ -6,10 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
+import bioseq.common.sequan_compat;
 import bioseq.highway.dispatch_contract;
+import bioseq.highway.test_support;
+import bioseq.sequences;
 
 namespace simd_dispatch = bioseq::simd_dispatch;
 
@@ -76,6 +81,68 @@ TEST_CASE("Highway dispatch contract has an exact coarse-kernel inventory",
     REQUIRE(simd_dispatch::highway_kernel_name(HighwayKernelId::count)
             == "unknown");
     REQUIRE_FALSE(table.contains(HighwayKernelId::count));
+}
+
+TEST_CASE("Highway alignment tables require all six typed callables",
+          "[highway][dispatch][contract][alignment]") {
+    using AlignmentTable = bioseq::simd::AlignmentKernels<seq::dna4>;
+
+    const auto& binding = simd_dispatch::highway_test_target_binding();
+    REQUIRE(binding.target != 0);
+    const auto& generated_root = simd_dispatch::highway_test_kernel_table();
+    REQUIRE(binding.kernels == &generated_root);
+    REQUIRE(generated_root.complete());
+
+    const auto* identity =
+        generated_root.resolve_alphabet_identity<seq::dna4>();
+    REQUIRE(identity != nullptr);
+    const bioseq::simd::AlignmentTableEntry* generated_entry = nullptr;
+    for (const auto& entry : generated_root.alignment_by_alphabet) {
+        if (entry.alphabet_code == identity->alphabet_code) {
+            REQUIRE(generated_entry == nullptr);
+            generated_entry = &entry;
+        }
+    }
+    REQUIRE(generated_entry != nullptr);
+    REQUIRE(generated_entry->typed_table_complete);
+    REQUIRE(generated_entry->typed_table != nullptr);
+
+    const AlignmentTable complete_table =
+        *static_cast<const AlignmentTable*>(generated_entry->typed_table);
+    REQUIRE(bioseq::simd::alignment_kernels_complete(complete_table));
+
+    AlignmentTable incomplete_table = complete_table;
+    incomplete_table.ksw2_z2 = nullptr;
+    REQUIRE_FALSE(bioseq::simd::alignment_kernels_complete(incomplete_table));
+    incomplete_table = complete_table;
+    incomplete_table.ksw2_d2 = nullptr;
+    REQUIRE_FALSE(bioseq::simd::alignment_kernels_complete(incomplete_table));
+    incomplete_table = complete_table;
+    incomplete_table.ksw2_batched = nullptr;
+    REQUIRE_FALSE(bioseq::simd::alignment_kernels_complete(incomplete_table));
+    incomplete_table = complete_table;
+    incomplete_table.block_prepare = nullptr;
+    REQUIRE_FALSE(bioseq::simd::alignment_kernels_complete(incomplete_table));
+    incomplete_table = complete_table;
+    incomplete_table.block_try_certified_gap = nullptr;
+    REQUIRE_FALSE(bioseq::simd::alignment_kernels_complete(incomplete_table));
+    incomplete_table = complete_table;
+    incomplete_table.block_align = nullptr;
+    REQUIRE_FALSE(bioseq::simd::alignment_kernels_complete(incomplete_table));
+
+    std::vector<bioseq::simd::AlignmentTableEntry> entries{
+        generated_root.alignment_by_alphabet.begin(),
+        generated_root.alignment_by_alphabet.end()};
+    simd_dispatch::HighwayKernelTable synthetic_root = generated_root;
+    synthetic_root.alignment_by_alphabet =
+        std::span<const bioseq::simd::AlignmentTableEntry>{entries};
+    REQUIRE(synthetic_root.complete());
+
+    entries.front().typed_table_complete = false;
+    REQUIRE_FALSE(synthetic_root.complete());
+    entries.front().typed_table_complete = true;
+    entries.front().typed_table = nullptr;
+    REQUIRE_FALSE(synthetic_root.complete());
 }
 
 TEST_CASE("Highway dispatch inventory preserves supported and runnable masks",

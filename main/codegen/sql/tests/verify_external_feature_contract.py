@@ -178,12 +178,248 @@ EXTERNAL_SOURCE_PATHS = {
     "main/bioseq/backend/pg/external/sql_catalog.cppm",
 }
 
+KSW_TEST_SOURCE_PATH = (
+    "main/bioseq/backend/pg/highway_ksw_target_test_support.cppm"
+)
+KSW_TEST_SOURCE_MODULE = "bioseq.highway_ksw_target_test_support"
+KSW_TEST_FUNCTION_IDENTITY = (
+    "sql:function:bioseq_internal."
+    "highway_ksw_boundary_receipt_for_test()"
+)
+KSW_TEST_REVOKE_IDENTITY = (
+    "sql:revoke:function:bioseq_internal."
+    "highway_ksw_boundary_receipt_for_test():"
+    "execute:public:ordinary"
+)
+KSW_TEST_SQL_SUFFIX = (
+    b"\n"
+    b"CREATE OR REPLACE FUNCTION "
+    b"bioseq_internal.highway_ksw_boundary_receipt_for_test()\n"
+    b"RETURNS text\n"
+    b"AS 'MODULE_PATHNAME', 'highway_ksw_boundary_receipt_for_test'\n"
+    b"LANGUAGE C\n"
+    b"VOLATILE\n"
+    b"PARALLEL UNSAFE\n"
+    b"SECURITY INVOKER;\n"
+    b"\n"
+    b"REVOKE ALL ON FUNCTION "
+    b"bioseq_internal.highway_ksw_boundary_receipt_for_test() "
+    b"FROM PUBLIC;\n"
+)
+
 
 def _read_manifest(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise RuntimeError(f"{path}: manifest must be one JSON object")
     return value
+
+
+def _normalize_profile_sql(
+    sql_bytes: bytes,
+    manifest: dict[str, Any],
+) -> tuple[bytes, int]:
+    profile = manifest.get("compiler_profile")
+    if profile not in {"production", "test_indexes"}:
+        raise RuntimeError(
+            "external feature contract received an unknown compiler profile: "
+            f"{profile!r}"
+        )
+
+    entities = manifest.get("entities")
+    statements = manifest.get("physical_statements")
+    if not isinstance(entities, list):
+        raise RuntimeError("generated SQL manifest has no entity array")
+    if not isinstance(statements, list):
+        raise RuntimeError(
+            "generated SQL manifest has no physical statement array"
+        )
+    ksw_entities = [
+        entity
+        for entity in entities
+        if isinstance(entity, dict)
+        and entity.get("source_path") == KSW_TEST_SOURCE_PATH
+    ]
+    ksw_statements = [
+        statement
+        for statement in statements
+        if isinstance(statement, dict)
+        and statement.get("source_path") == KSW_TEST_SOURCE_PATH
+    ]
+
+    if profile == "production":
+        if (
+            ksw_entities
+            or ksw_statements
+            or KSW_TEST_SQL_SUFFIX in sql_bytes
+        ):
+            raise RuntimeError(
+                "production SQL contains the test-indexes-only KSW receipt"
+            )
+        return sql_bytes, 0
+
+    if (
+        sql_bytes.count(KSW_TEST_SQL_SUFFIX) != 1
+        or not sql_bytes.endswith(KSW_TEST_SQL_SUFFIX)
+    ):
+        raise RuntimeError(
+            "test-indexes SQL does not end in exactly the reviewed KSW "
+            "receipt projection"
+        )
+
+    physical_count = manifest.get("physical_statement_count")
+    if not isinstance(physical_count, int) or physical_count < 2:
+        raise RuntimeError(
+            "test-indexes manifest has an invalid physical statement count"
+        )
+    function_statement_id = f"S{physical_count - 1:03d}"
+    revoke_statement_id = f"S{physical_count:03d}"
+    active_condition = "(defined(BIOSEQ_TEST_INDEXES))"
+
+    entity_projection = tuple(
+        (
+            entity.get("stable_identity"),
+            entity.get("kind"),
+            entity.get("source_module"),
+            entity.get("active_condition"),
+            tuple(entity.get("dependencies", []))
+            if isinstance(entity.get("dependencies"), list)
+            else None,
+            tuple(entity.get("statement_ids", []))
+            if isinstance(entity.get("statement_ids"), list)
+            else None,
+            entity.get("result_sql_type"),
+            entity.get("typed_install_owner"),
+            (
+                entity.get("routine_properties", {}).get("c_symbol"),
+                entity.get("routine_properties", {}).get(
+                    "generated_wrapper"
+                ),
+                entity.get("routine_properties", {}).get("create_mode"),
+                entity.get("routine_properties", {}).get("volatility"),
+                entity.get("routine_properties", {}).get("null_input"),
+                entity.get("routine_properties", {}).get("security"),
+                entity.get("routine_properties", {}).get("parallel"),
+            )
+            if isinstance(entity.get("routine_properties"), dict)
+            else None,
+            (
+                entity.get("c_binding", {}).get("symbol"),
+                entity.get("c_binding", {}).get("finfo_symbol"),
+                entity.get("c_binding", {}).get("routine_identity"),
+                entity.get("c_binding", {}).get(
+                    "implementation_declaration"
+                ),
+                entity.get("c_binding", {}).get("generated_wrapper"),
+            )
+            if isinstance(entity.get("c_binding"), dict)
+            else None,
+        )
+        for entity in ksw_entities
+    )
+    expected_entity_projection = (
+        (
+            KSW_TEST_FUNCTION_IDENTITY,
+            "function",
+            KSW_TEST_SOURCE_MODULE,
+            active_condition,
+            ("sql:schema:bioseq_internal",),
+            (function_statement_id,),
+            "text",
+            False,
+            (
+                "highway_ksw_boundary_receipt_for_test",
+                True,
+                "or_replace",
+                "volatile",
+                "called",
+                "invoker",
+                "unsafe",
+            ),
+            (
+                "highway_ksw_boundary_receipt_for_test",
+                "pg_finfo_highway_ksw_boundary_receipt_for_test",
+                "bioseq_internal.highway_ksw_boundary_receipt_for_test()",
+                (
+                    "bioseq::pg::sql_routines::"
+                    "highway_ksw_boundary_receipt_for_test"
+                ),
+                True,
+            ),
+        ),
+        (
+            KSW_TEST_REVOKE_IDENTITY,
+            "revoke",
+            KSW_TEST_SOURCE_MODULE,
+            active_condition,
+            (KSW_TEST_FUNCTION_IDENTITY,),
+            (revoke_statement_id,),
+            "",
+            False,
+            None,
+            None,
+        ),
+    )
+    if entity_projection != expected_entity_projection:
+        raise RuntimeError(
+            "test-indexes manifest does not contain the exact reviewed KSW "
+            "receipt entity projection"
+        )
+
+    statement_projection = tuple(
+        (
+            statement.get("statement_id"),
+            statement.get("baseline_physical_id"),
+            statement.get("baseline_ordinal"),
+            statement.get("kind"),
+            statement.get("facet"),
+            statement.get("owner_identity"),
+            statement.get("render_source"),
+            statement.get("text_sha256"),
+            statement.get("baseline_text_sha256"),
+            statement.get("order_identity"),
+            statement.get("source_module"),
+        )
+        for statement in ksw_statements
+    )
+    expected_statement_projection = (
+        (
+            function_statement_id,
+            None,
+            None,
+            "function",
+            "primary",
+            KSW_TEST_FUNCTION_IDENTITY,
+            "natural_projection",
+            "6865781db32b7798d1313dc1baa1f1223c9961fc4ca37d4c3299f72d613b14d7",
+            None,
+            "",
+            KSW_TEST_SOURCE_MODULE,
+        ),
+        (
+            revoke_statement_id,
+            None,
+            None,
+            "revoke",
+            "primary",
+            KSW_TEST_REVOKE_IDENTITY,
+            "natural_projection",
+            "7c424756b149781cd013a53381106ef4328ef1d4eb1e8d3abcbf7f1d772999cc",
+            None,
+            "",
+            KSW_TEST_SOURCE_MODULE,
+        ),
+    )
+    if statement_projection != expected_statement_projection:
+        raise RuntimeError(
+            "test-indexes manifest does not contain the exact reviewed KSW "
+            "receipt physical projection"
+        )
+    if statements[-2:] != ksw_statements:
+        raise RuntimeError(
+            "test-indexes KSW receipt is not the terminal natural SQL delta"
+        )
+    return sql_bytes[: -len(KSW_TEST_SQL_SUFFIX)], 2
 
 
 def _parse_table_columns(body: str, table: str) -> tuple[tuple[str, str, bool], ...]:
@@ -322,7 +558,10 @@ def _external_entities(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def _verify_enabled_manifest(manifest: dict[str, Any]) -> None:
+def _verify_enabled_manifest(
+    manifest: dict[str, Any],
+    profile_statement_delta: int,
+) -> None:
     entities = _external_entities(manifest)
     top_level = {
         entity.get("stable_identity")
@@ -448,9 +687,12 @@ def _verify_enabled_manifest(manifest: dict[str, Any]) -> None:
         raise RuntimeError(
             "external physical ledger projection is not exactly P492-P504"
         )
-    if manifest.get("physical_statement_count") != 504:
+    if manifest.get("physical_statement_count") != (
+        504 + profile_statement_delta
+    ):
         raise RuntimeError(
-            "enabled package does not close over all 504 physical statements"
+            "enabled package does not close over the expected physical "
+            "statements for its compiler profile"
         )
 
 
@@ -464,13 +706,16 @@ def verify(args: argparse.Namespace) -> str:
         raise RuntimeError(
             "checked base SQL golden must end with one newline"
         )
-    sql = sql_bytes.decode("utf-8")
     manifest = _read_manifest(manifest_path)
     digest = hashlib.sha256(sql_bytes).hexdigest()
     if manifest.get("script_sha256") != digest:
         raise RuntimeError(
             "external feature contract received a stale SQL manifest"
         )
+    base_sql_bytes, profile_statement_delta = _normalize_profile_sql(
+        sql_bytes, manifest
+    )
+    sql = base_sql_bytes.decode("utf-8")
     if manifest.get("external_legacy_macro_symbols") != [
         "bioseq_external_handler"
     ]:
@@ -493,15 +738,15 @@ def verify(args: argparse.Namespace) -> str:
 
     if args.expect == "enabled":
         expected_base_prefix = base_golden_bytes[:-1] + b"\n\n"
-        if not sql_bytes.startswith(expected_base_prefix):
+        if not base_sql_bytes.startswith(expected_base_prefix):
             raise RuntimeError(
                 "enabled external package changed the checked P001-P491 "
                 "base SQL projection"
             )
         _verify_enabled_sql(sql)
-        _verify_enabled_manifest(manifest)
+        _verify_enabled_manifest(manifest, profile_statement_delta)
     else:
-        if sql_bytes != base_golden_bytes:
+        if base_sql_bytes != base_golden_bytes:
             raise RuntimeError(
                 "disabled external package differs from the checked "
                 "P001-P491 base SQL golden"
@@ -514,9 +759,12 @@ def verify(args: argparse.Namespace) -> str:
             raise RuntimeError(
                 "disabled SQL profile manifest contains external entities"
             )
-        if manifest.get("physical_statement_count") != 491:
+        if manifest.get("physical_statement_count") != (
+            491 + profile_statement_delta
+        ):
             raise RuntimeError(
-                "disabled package changed the 491-statement base closure"
+                "disabled package changed the expected base closure for its "
+                "compiler profile"
             )
     return digest
 

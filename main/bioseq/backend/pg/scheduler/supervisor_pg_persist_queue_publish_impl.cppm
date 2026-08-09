@@ -14,15 +14,56 @@ extern "C" {
 #include <atomic>
 #include <cstdio>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 
-module bioseq.scheduler.supervisor_pg;
+export module bioseq.scheduler.supervisor_pg:persist_queue_publish;
 
 import bioseq.common.mlogging;
-import bioseq.indexing.type;
+import bioseq.config;
+
+export namespace bioseq::parallelism::pg {
+
+struct PersistTarget {
+    Oid db_oid = InvalidOid;
+    Oid user_relid = InvalidOid;
+    Oid tablespace_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    std::int16_t column_attno = 0;
+    std::uint8_t bucket_idx = 0;
+    std::uint32_t shard_idx = 0;
+    std::uint64_t sequence_rowno = 0;
+    std::string_view index_name{};
+};
+
+} // namespace bioseq::parallelism::pg
 
 namespace bioseq::parallelism::pg {
+
+struct PgPersistQueueSlot {
+    pg_atomic_uint32 state;
+    pg_atomic_uint32 generation;
+    Oid db_oid;
+    Oid user_relid;
+    Oid tablespace_oid;
+    Oid main_relfilenode;
+    std::int16_t column_attno;
+    std::uint8_t bucket_idx;
+    std::uint32_t shard_idx;
+    std::uint64_t sequence_rowno;
+    std::uint64_t payload_bytes;
+    dsm_handle dsm;
+    std::uint32_t payload_kind;
+    std::int32_t requested_provider;
+};
+
+enum class PersistPayloadKind : std::uint32_t {
+    none = 0,
+    prohibited_legacy_dsm = 1,
+    prohibited_legacy_file = 2,
+    mps_build_identity = 3,
+};
 
 inline std::atomic<std::uint64_t> g_prohibited_legacy_persist_rejections{0};
 
@@ -55,13 +96,14 @@ void remove_temp_file_noexcept(std::string_view path) noexcept {
 }
 
 [[nodiscard]] bool publish_persist_job_to_shared_queue(
+        std::span<PgPersistQueueSlot> persist_queue,
         const PersistTarget& target,
         std::string_view index_name,
         dsm_handle dsm,
         std::uint64_t payload_bytes,
         PersistPayloadKind payload_kind,
         IndexPayloadStorageBackend requested_provider) noexcept {
-    if (g_shared == nullptr || dsm == DSM_HANDLE_INVALID) {
+    if (persist_queue.empty() || dsm == DSM_HANDLE_INVALID) {
         return false;
     }
     if (payload_kind != PersistPayloadKind::mps_build_identity) {
@@ -77,7 +119,7 @@ void remove_temp_file_noexcept(std::string_view path) noexcept {
             "queue_publish_provider");
         return false;
     }
-    for (PgPersistQueueSlot& slot : g_shared->persist_queue) {
+    for (PgPersistQueueSlot& slot : persist_queue) {
         std::uint32_t expected = 0;
         if (!pg_atomic_compare_exchange_u32(&slot.state, &expected, 3)) {
             continue;

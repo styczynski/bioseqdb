@@ -399,9 +399,16 @@ class SanitizerPresetContractTest(unittest.TestCase):
                     server, "_running_in_same_group",
                     return_value=(None, None)), \
                 mock.patch.object(
+                    server, "_git_commit", return_value="a" * 40), \
+                mock.patch.object(
+                    server, "_source_graph_fingerprint",
+                    return_value="source-digest"), \
+                mock.patch.object(
                     server, "_configured_local_build_rt_priority",
                     return_value=None), \
                 mock.patch.object(server, "_preflight_local_clang_rt_launcher"), \
+                mock.patch.object(
+                    server, "_capture_process_identity", return_value=None), \
                 mock.patch.object(server, "_save_state"), \
                 mock.patch.object(server, "_log"), \
                 mock.patch.object(
@@ -430,6 +437,11 @@ class SanitizerPresetContractTest(unittest.TestCase):
                 mock.patch.object(
                     server, "_running_in_same_group",
                     return_value=(None, None)), \
+                mock.patch.object(
+                    server, "_git_commit", return_value="a" * 40), \
+                mock.patch.object(
+                    server, "_source_graph_fingerprint",
+                    return_value="source-digest"), \
                 mock.patch.object(
                     server, "_configured_local_build_rt_priority",
                     return_value=None), \

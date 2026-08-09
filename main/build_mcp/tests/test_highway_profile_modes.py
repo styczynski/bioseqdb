@@ -111,6 +111,18 @@ class HighwayProfileModeContractTest(unittest.TestCase):
                     documentation,
                 )
         self.assertIn("local build-only only", documentation)
+        self.assertEqual(
+            local_schema["properties"]["build_timeout_sec"]["maximum"],
+            3300,
+        )
+        for field in (
+            "fresh",
+            "build_timeout_sec",
+            "baseline_ref",
+            "run_only",
+            "reuse_build_receipt",
+        ):
+            self.assertIn(field, local_schema["properties"])
 
     def test_fixed_mode_definition_rejects_runtime_ownership(self) -> None:
         base = {
@@ -167,6 +179,36 @@ class HighwayProfileInputGuardTest(unittest.TestCase):
                         message = server.tool_start_build(mode, **request)
                         self.assertIn("fixed local compile gate", message)
                         self.assertIn("requires build_only=true", message)
+
+    def test_profiles_reject_baseline_and_receipt_runtime_controls(self) -> None:
+        invalid_requests = (
+            {"build_only": True, "run_only": True},
+            {
+                "build_only": True,
+                "fresh": True,
+                "baseline_ref": "refs/heads/main",
+            },
+            {
+                "build_only": True,
+                "reuse_build_receipt": "br_invalid",
+            },
+        )
+        with mock.patch.object(
+            server,
+            "_refuse_root_build_identity",
+            return_value=None,
+        ), mock.patch.object(
+            server,
+            "_ensure_build_worker_timesharing_policy",
+        ):
+            for mode in PROFILE_MODES:
+                for request in invalid_requests:
+                    with self.subTest(mode=mode, request=request):
+                        message = server.tool_start_build(mode, **request)
+                        self.assertTrue(
+                            "run_only" in message
+                            or "fixed local compile gate" in message
+                        )
 
     def test_detached_worker_fails_closed_before_subprocess_work(self) -> None:
         invalid_requests = (

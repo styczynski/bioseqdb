@@ -126,18 +126,6 @@ HWY_INLINE hn::Vec<D_F> vectorized_fast_log2(
     return hn::Add(exponent_as_float, fractional_part);
 }
 
-template<typename D_IN, typename D_OUT>
-concept d_simd_cmp_3x = sizeof(hwy::MakeWide<hwy::MakeWide<hwy::MakeWide<hn::TFromD<D_IN>>>>) == sizeof(hn::TFromD<D_OUT>);
-
-template<typename D_IN, typename D_OUT>
-concept d_simd_cmp_2x = sizeof(hwy::MakeWide<hwy::MakeWide<hn::TFromD<D_IN>>>) == sizeof(hn::TFromD<D_OUT>);
-
-template<typename D_IN, typename D_OUT>
-concept d_simd_cmp_1x = sizeof(hwy::MakeWide<hn::TFromD<D_IN>>) == sizeof(hn::TFromD<D_OUT>);
-
-template<typename D_IN, typename D_OUT>
-concept d_simd_cmp = sizeof(hn::TFromD<D_IN>) == sizeof(hn::TFromD<D_OUT>);
-
 template<typename D>
 concept d_simd_resizeable_x3 = sizeof(hwy::MakeWide<hwy::MakeWide<hwy::MakeWide<hn::TFromD<D>>>>) <= 8;
 

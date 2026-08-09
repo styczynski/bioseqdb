@@ -5,6 +5,7 @@
 module;
 
 #include "common.h"
+#include "fmt/format.h"
 
 #include <algorithm>
 #include <array>
@@ -20,10 +21,14 @@ module;
 
 module bioseq.mod;
 
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_hashmap_format6;
+import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.type;
 import bioseq.mod.sql_rows;
 import bioseq.pg_utils;
 import bioseq.storage.indexing_pg.admin;
+import bioseq.storage.indexing_pg.chunked_storage;
 
 namespace {
 
@@ -547,10 +552,18 @@ build_minimizer_fixture(
 	std::int16_t kmer_size,
 	std::int16_t window_size,
 	std::int16_t selected_wire_format,
-	std::string requested_backend) {
+	std::string requested_backend,
+	std::int64_t position_segment_span_bp) {
 	validate_minimizer_fixture_parameters(
 		sequence_rowno, kmer_size, window_size,
 		selected_wire_format, false);
+	if (position_segment_span_bp < 0
+		|| (position_segment_span_bp != 0 && selected_wire_format != 4)) {
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INVALID_PARAMETER_VALUE,
+			{.message =
+				"minimizer fixture position segment span is invalid"});
+	}
 	const auto wire_format = static_cast<
 		bioseq::indexing::MinimizerGenerationWireFormat>(
 			static_cast<std::uint16_t>(selected_wire_format));
@@ -561,7 +574,8 @@ build_minimizer_fixture(
 			static_cast<std::uint16_t>(kmer_size),
 			static_cast<std::uint16_t>(window_size),
 			wire_format,
-			minimizer_fixture_backend(requested_backend));
+			minimizer_fixture_backend(requested_backend),
+			static_cast<std::uint64_t>(position_segment_span_bp));
 	constexpr std::string_view context = "minimizer build fixture";
 	std::vector<bioseq::pg::sql_rows::build_minimizer_fixture_row> rows;
 	rows.push_back({

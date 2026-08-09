@@ -1,0 +1,236 @@
+#ifndef BIOSEQ_TEST_INDEXES
+#error "fixed-target unit probes require BIOSEQ_TEST_INDEXES"
+#endif
+
+#include "common/simd/highway_test_probes/contract.h"
+
+module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
+
+import std;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import :sequence_ops;
+
+namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
+
+namespace hn = hwy::HWY_NAMESPACE;
+
+template<class Range>
+class iteration_receipt final {
+private:
+    using range_t = std::remove_cvref_t<Range>;
+    using traits_t = typename range_t::traits;
+    using storage_t = typename traits_t::storage_unit;
+    using d_t = hn::ScalableTag<storage_t>;
+    static constexpr std::size_t maximum_lanes = hn::MaxLanes(d_t{});
+
+    const range_t& source_;
+    std::vector<std::uint8_t> expected_;
+    std::array<std::size_t, maximum_lanes> starts_{};
+    std::array<std::size_t, maximum_lanes> counts_{};
+    std::size_t lanes_{};
+    std::size_t context_{};
+    bool valid_{true};
+
+    template<class D, class Mask, class Vec, class Offsets>
+    void observe(
+        D& d,
+        const Mask& mask,
+        const Vec& incoming,
+        const Offsets& offsets) {
+        std::array<storage_t, maximum_lanes> lane_values{};
+        std::array<storage_t, maximum_lanes> lane_masks{};
+        hn::Store(incoming, d, lane_values.data());
+        hn::Store(hn::VecFromMask(d, mask), d, lane_masks.data());
+        lanes_ = hn::Lanes(d);
+        for (std::size_t lane = 0u; lane < lanes_; ++lane) {
+            const std::size_t start =
+                offsets[lane] * traits_t::letters_per_unit;
+            if (counts_[lane] == 0u) starts_[lane] = start;
+            if (lane_masks[lane] == storage_t{}) continue;
+            const std::size_t position = start + counts_[lane];
+            if (position >= expected_.size()
+                || static_cast<std::uint8_t>(lane_values[lane])
+                    != expected_[position]) {
+                valid_ = false;
+            }
+            ++counts_[lane];
+        }
+    }
+
+public:
+    explicit iteration_receipt(const range_t& source)
+        : source_(source) {
+        expected_.reserve(source.bp_size());
+        for (const auto rank : source.template iterable<BP>()) {
+            expected_.push_back(static_cast<std::uint8_t>(rank));
+        }
+    }
+
+    void run(
+        const std::size_t context,
+        const bool delayed,
+        const std::size_t delay = 0u) {
+        context_ = context;
+        starts_.fill(0u);
+        counts_.fill(0u);
+        lanes_ = 0u;
+        valid_ = true;
+        if (!delayed) {
+            iterate_sequence_bp_simd_offsets(
+                source_, source_.begin(), source_.end(), context,
+                [&]<bool IsFull>(
+                    std::bool_constant<IsFull>,
+                    const auto& offsets,
+                    auto& d,
+                    auto& mask,
+                    auto&& incoming) {
+                    observe(d, mask, incoming, offsets);
+                },
+                [](const auto&, auto&, auto&) {});
+        } else {
+            iterate_sequence_bp_simd_offsets(
+                source_, source_.begin(), source_.end(), context,
+                [&]<bool IsFull>(
+                    std::bool_constant<IsFull>,
+                    const auto& offsets,
+                    auto& d,
+                    auto&,
+                    auto&&,
+                    auto delayed_mask,
+                    auto delayed_incoming) {
+                    observe(d, delayed_mask, delayed_incoming, offsets);
+                },
+                [](const auto&, auto&, auto&) {}, delay);
+        }
+    }
+
+    [[nodiscard]] bool valid() const {
+        if (!valid_) return false;
+        if (source_.bp_size() < context_) {
+            return lanes_ == 0u
+                && std::ranges::all_of(counts_, [](const auto count) {
+                    return count == 0u;
+                });
+        }
+        if (lanes_ == 0u) return false;
+
+        std::vector<std::pair<std::size_t, std::size_t>> coverage;
+        coverage.reserve(lanes_);
+        for (std::size_t lane = 0u; lane < lanes_; ++lane) {
+            if (counts_[lane] == 0u || counts_[lane] < context_) {
+                return false;
+            }
+            coverage.emplace_back(
+                starts_[lane], starts_[lane] + counts_[lane]);
+        }
+        std::ranges::sort(coverage);
+        if (coverage.front().first != 0u
+            || coverage.back().second != source_.bp_size()) {
+            return false;
+        }
+        std::size_t covered_until = coverage.front().second;
+        for (std::size_t index = 1u; index < coverage.size(); ++index) {
+            if (coverage[index].first > covered_until) return false;
+            covered_until = std::max(covered_until, coverage[index].second);
+        }
+        return covered_until == source_.bp_size();
+    }
+};
+
+template<class Alphabet>
+[[nodiscard]] std::vector<Alphabet> make_sequence(
+    const std::size_t size,
+    std::uint64_t state) {
+    std::vector<Alphabet> sequence(size);
+    constexpr std::size_t alphabet_size = seqan3::alphabet_size<Alphabet>;
+    for (std::size_t index = 0u; index < size; ++index) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        const auto rank = static_cast<seqan3::alphabet_rank_t<Alphabet>>(
+            (state >> 32u) % alphabet_size);
+        sequence[index].assign_rank(rank);
+    }
+    return sequence;
+}
+
+template<class Range>
+[[nodiscard]] bool run_context_matrix(
+    Range& range,
+    std::uint32_t& cases_run,
+    std::uint32_t& cases_passed) {
+    const std::size_t size = range.bp_size();
+    const std::array<std::size_t, 14u> contexts{
+        size + 1u, size * 2u,
+        size,
+        size - 1u, size - 2u, size - 3u, size - 4u, size - 8u,
+        0u, 1u, 2u, 5u, 10u, size / 2u,
+    };
+    bool passed = true;
+    for (const std::size_t context : contexts) {
+        iteration_receipt<Range> receipt{range};
+        receipt.run(context, false);
+        ++cases_run;
+        if (receipt.valid()) {
+            ++cases_passed;
+        } else {
+            passed = false;
+        }
+    }
+    for (const std::size_t delay : {0u, 1u, 3u, 5u}) {
+        iteration_receipt<Range> receipt{range};
+        receipt.run(5u, true, delay);
+        ++cases_run;
+        if (receipt.valid()) {
+            ++cases_passed;
+        } else {
+            passed = false;
+        }
+    }
+    return passed;
+}
+
+template<class Alphabet>
+[[nodiscard]] bool run_group(
+    const std::size_t size,
+    const std::uint64_t seed,
+    std::uint32_t& cases_run,
+    std::uint32_t& cases_passed) {
+    auto source = make_sequence<Alphabet>(size, seed);
+    using packed_config = sequence_custom_alphabet<Alphabet>;
+    compact_sequence_range<packed_config> packed{source};
+    compact_sequence_range<std::vector<Alphabet>> vector_backed{source};
+    const bool packed_ok =
+        run_context_matrix(packed, cases_run, cases_passed);
+    const bool vector_ok =
+        run_context_matrix(vector_backed, cases_run, cases_passed);
+    return packed_ok && vector_ok;
+}
+
+}  // namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail
+
+extern "C" bool bioseq_highway_probe_sequence_ops(
+    BioseqHighwaySequenceOpsProbeReceipt* receipt) noexcept {
+    if (receipt == nullptr) return false;
+    *receipt = {};
+    receipt->target = static_cast<std::int64_t>(HWY_TARGET);
+    namespace probe =
+        bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail;
+    try {
+        const auto record = [&](const std::uint64_t bit, const bool passed) {
+            if (passed) receipt->passed_properties |= bit;
+        };
+        record(1u << 0u, probe::run_group<seq::dna4>(
+            289u, 0x14f6d2c93b85a071ULL,
+            receipt->cases_run, receipt->cases_passed));
+        record(1u << 1u, probe::run_group<seq::dna5>(
+            301u, 0xd507aa21ecbe5493ULL,
+            receipt->cases_run, receipt->cases_passed));
+        record(1u << 2u, probe::run_group<seq::dna4>(
+            4096u, 0x70c1869d3a4f52ebULL,
+            receipt->cases_run, receipt->cases_passed));
+        return receipt->passed_properties == 0x7u
+            && receipt->cases_run == receipt->cases_passed;
+    } catch (...) {
+        return false;
+    }
+}

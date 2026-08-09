@@ -69,6 +69,7 @@ module;
 
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -103,7 +104,6 @@ import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.cigar;
 import bioseq.alignment;
 import bioseq.alignment.utils;
-import bioseq.alignment.lane_helpers;
 import bioseq.alignment.ksw2_batched;
 import bioseq.alignment.block_aligner;
 import bioseq.sequences.chaining.utils;
@@ -615,6 +615,11 @@ struct sketch_collector_arena_adapter {
         return slab_->size();
     }
 
+    [[nodiscard, gnu::always_inline]] bool append_records(
+            const std::span<const E> records) {
+        return slab_->append_trivial_records(records);
+    }
+
     template<class M = E>
     [[nodiscard, gnu::always_inline]] bool append_raw_storage(
         const typename M::storage_t* raw,
@@ -625,23 +630,8 @@ struct sketch_collector_arena_adapter {
             && std::is_trivially_copyable_v<M>
             && sizeof(M) == sizeof(typename M::storage_t))
     {
-        const std::size_t old_size = slab_->size();
-        if (count > (std::numeric_limits<std::size_t>::max)() - old_size) {
-            return false;
-        }
-        // `estimated_sketch_count()` is intentionally only an estimate.  XXL
-        // inputs commonly exceed it by many raw-output batches; exact growth
-        // here caused one full-prefix copy and one unreclaimable arena block per
-        // batch.  Geometric growth bounds both copies and live arena footprint.
-        slab_->reserve_geometric(old_size + count);
-        if (count != 0) {
-            std::memcpy(
-                static_cast<void*>(slab_->data() + old_size),
-                static_cast<const void*>(raw),
-                count * sizeof(typename M::storage_t));
-        }
-        slab_->resize(old_size + count);
-        return true;
+        return slab_->append_trivial_storage(
+            std::span<const typename M::storage_t>{raw, count});
     }
 };
 
@@ -1079,7 +1069,7 @@ try_minimizer_resident_packed(
     return std::nullopt;
 }
 
-/** Reference/Paper kernels retain their established u32/u64 SIMD contract. */
+/** Reference SIMD retains its established resident u32/u64 contract. */
 template <sequence_alphabet Alphabet>
 [[nodiscard]] inline std::optional<typename bioseq::storage::
     basic_lazy_sequence_view<Alphabet>::resident_packed_region>
@@ -1100,8 +1090,8 @@ try_word_minimizer_resident_packed(
 }
 
 /**
- * Batch adapter from the neutral MinimapSketchData ABI to the caller's exact
- * collector type. Exceptions cannot cross the sink's noexcept commit
+ * Batch adapter from the caller-selected exact minimizer ABI to its collector.
+ * Exceptions cannot cross the sink's noexcept commit
  * callback, so they are captured and rethrown immediately after the one
  * coarse fixed-target call returns.
  */
@@ -1116,6 +1106,7 @@ public:
             .state = this,
             .acquire = &acquire,
             .commit = &commit,
+            .append_raw_u64 = &append_raw_u64,
         };
     }
 
@@ -1123,60 +1114,166 @@ public:
         if (exception_ != nullptr) {
             std::rethrow_exception(exception_);
         }
+        // An acquired-but-uncommitted batch is always a transport protocol
+        // violation.  It cannot be reclassified as a caller-owned allocation
+        // failure because the target never completed the batch lifetime.
+        if (acquired_) {
+            throw std::runtime_error(
+                "selected Highway minimizer sink left a batch uncommitted");
+        }
         if (rejected_ || result.emitted != committed_) {
+            if constexpr (requires (const Collector& value) {
+                { value.ok() } -> std::convertible_to<bool>;
+            }) {
+                // Admission-aware collectors deliberately expose their
+                // sticky failure to the outer scheduler. Preserve the
+                // established caller mapping (for example PostgreSQL OOM /
+                // collector_growth_failed) instead of replacing it with a
+                // generic transport exception. Protocol/layout failures keep
+                // collector.ok()==true and still throw below.
+                if (!static_cast<bool>(collector_->ok())) {
+                    return;
+                }
+            }
             throw std::runtime_error(
                 "selected Highway minimizer sink rejected a committed batch");
         }
     }
 
 private:
-    [[nodiscard]] static std::span<::bioseq::minimizers::MinimapSketchData>
+    static constexpr std::size_t batch_capacity = 256u;
+    static constexpr auto output_layout =
+        ::bioseq::minimizers::minimizer_output_layout_v<MinimizerT>;
+
+    static_assert(
+        output_layout
+        != ::bioseq::minimizers::MinimizerOutputLayout::unsupported);
+    static_assert(std::is_standard_layout_v<MinimizerT>);
+    static_assert(std::is_trivially_copyable_v<MinimizerT>);
+    static_assert(std::is_trivially_destructible_v<MinimizerT>);
+
+    [[nodiscard]] static ::bioseq::minimizers::MinimizerSinkBatchView
     acquire(void* opaque, std::size_t minimum) {
         auto& self = *static_cast<HighwayMinimizerSinkState*>(opaque);
-        if (self.rejected_) {
-            return {};
-        }
-        try {
-            self.batch_.resize(minimum);
-            return {self.batch_.data(), self.batch_.size()};
-        } catch (...) {
-            self.exception_ = std::current_exception();
+        if (self.rejected_ || self.acquired_ || minimum > batch_capacity) {
             self.rejected_ = true;
             return {};
         }
+        self.acquired_ = true;
+        return {
+            .data = self.batch_.data(),
+            .capacity = batch_capacity,
+            .layout = output_layout,
+            .record_size = sizeof(MinimizerT),
+            .record_alignment = alignof(MinimizerT),
+        };
     }
 
     static void commit(void* opaque, std::size_t initialized) noexcept {
         auto& self = *static_cast<HighwayMinimizerSinkState*>(opaque);
-        if (self.rejected_ || initialized > self.batch_.size()) {
+        if (!self.acquired_ || initialized > batch_capacity) {
             self.rejected_ = true;
             return;
         }
+        auto* records = std::launder(
+            reinterpret_cast<MinimizerT*>(self.batch_.data()));
+        const auto destroy_records = [&self, records, initialized]() noexcept {
+            std::destroy_n(records, initialized);
+            self.acquired_ = false;
+        };
+        if (self.rejected_) {
+            destroy_records();
+            return;
+        }
         try {
-            for (std::size_t i = 0; i < initialized; ++i) {
-                const auto& sketch = self.batch_[i];
-                self.collector_->collect(MinimizerT{
-                    sketch.kmer(), sketch.last_pos(), sketch.strand()});
-            }
+            bool accepted = static_cast<bool>(self.collector_->append_records(
+                std::span<const MinimizerT>{records, initialized}));
             if constexpr (requires (Collector& value) {
                 { value.ok() } -> std::convertible_to<bool>;
             }) {
-                if (!static_cast<bool>(self.collector_->ok())) {
-                    self.rejected_ = true;
-                    return;
-                }
+                accepted = accepted
+                    && static_cast<bool>(self.collector_->ok());
             }
-            self.committed_ += initialized;
+            destroy_records();
+            if (accepted) {
+                self.committed_ += initialized;
+            } else {
+                self.rejected_ = true;
+            }
         } catch (...) {
+            destroy_records();
             self.exception_ = std::current_exception();
             self.rejected_ = true;
         }
     }
 
+    [[nodiscard]] static bool append_raw_u64(
+            void* opaque,
+            ::bioseq::minimizers::MinimizerOutputLayout layout,
+            const std::uint64_t* raw,
+            std::size_t count) noexcept {
+        auto& self = *static_cast<HighwayMinimizerSinkState*>(opaque);
+        constexpr auto expected_layout =
+            ::bioseq::minimizers::minimizer_output_layout_v<MinimizerT>;
+        if (self.rejected_ || self.acquired_ || layout != expected_layout
+            || expected_layout
+                == ::bioseq::minimizers::MinimizerOutputLayout::unsupported
+            || (count != 0u && raw == nullptr)) {
+            self.rejected_ = true;
+            return false;
+        }
+        if constexpr (!::bioseq::minimizers::
+                exact_simd_minimizer_representation<
+                    std::remove_cv_t<MinimizerT>>) {
+            // A raw-u64 batch is an exact representation fast path, never a
+            // conversion path. In particular, do not truncate it into a
+            // u32-backed MinimizerRepr.
+            self.rejected_ = true;
+            return false;
+        } else {
+            try {
+                bool accepted = true;
+                if constexpr (requires (
+                        Collector& value,
+                        const std::uint64_t* values,
+                        std::size_t value_count) {
+                    { value.append_raw_storage(values, value_count) }
+                        -> std::convertible_to<bool>;
+                }) {
+                    accepted = static_cast<bool>(
+                        self.collector_->append_raw_storage(raw, count));
+                } else {
+                    for (std::size_t i = 0u; i < count; ++i) {
+                        self.collector_->collect(
+                            MinimizerT::from_raw_storage(raw[i]));
+                    }
+                }
+                if constexpr (requires (Collector& value) {
+                    { value.ok() } -> std::convertible_to<bool>;
+                }) {
+                    accepted = accepted
+                        && static_cast<bool>(self.collector_->ok());
+                }
+                if (!accepted) {
+                    self.rejected_ = true;
+                    return false;
+                }
+                self.committed_ += count;
+                return true;
+            } catch (...) {
+                self.exception_ = std::current_exception();
+                self.rejected_ = true;
+                return false;
+            }
+        }
+    }
+
     Collector* collector_ = nullptr;
-    std::vector<::bioseq::minimizers::MinimapSketchData> batch_{};
+    alignas(MinimizerT)
+        std::array<std::byte, batch_capacity * sizeof(MinimizerT)> batch_;
     std::exception_ptr exception_{};
     std::size_t committed_ = 0u;
+    bool acquired_ = false;
     bool rejected_ = false;
 };
 
@@ -1219,35 +1316,38 @@ invoke_selected_minimizer_kernel(
     ::bioseq::minimizers::TwoStackRoute two_stack_route =
         ::bioseq::minimizers::TwoStackRoute::chronological_continuation)
 {
-    // The generated table has one stable minimizer record geometry.  Do not
-    // silently reinterpret it as another caller-selected minimizer layout:
-    // wider/custom layouts require an explicit registry record and ABI.
-    if constexpr (!std::same_as<std::remove_cv_t<MinimizerT>,
-                                ::bioseq::minimizers::MinimapSketchData>) {
-        throw std::invalid_argument(
-            "selected Highway minimizer kernels require MinimapSketchData");
-    } else {
-        const auto kernel = selected_minimizer_kernel(table, id);
-        if (kernel == nullptr) {
-            throw std::runtime_error(
-                "selected Highway minimizer table contains a null slot");
-        }
-        HighwayMinimizerSinkState<MinimizerT, Collector> sink_state{collector};
-        ::bioseq::minimizers::MinimizerKernelInvocation invocation{
-            .sequence = sequence,
-            .window = window,
-            .kmer = kmer,
-            .two_stack_route = two_stack_route,
-            .sink = sink_state.sink(),
-        };
-        auto result = kernel(invocation);
-        sink_state.validate(result);
-        if (result.proof.algorithm != expected_algorithm) {
-            throw std::runtime_error(
-                "selected Highway minimizer returned the wrong family proof");
-        }
-        return result;
+    static_assert(std::constructible_from<
+        std::remove_cv_t<MinimizerT>,
+        std::uint64_t,
+        std::uint64_t,
+        std::uint64_t>);
+
+    const auto kernel = selected_minimizer_kernel(table, id);
+    if (kernel == nullptr) {
+        throw std::runtime_error(
+            "selected Highway minimizer table contains a null slot");
     }
+    HighwayMinimizerSinkState<MinimizerT, Collector> sink_state{collector};
+    ::bioseq::minimizers::MinimizerKernelInvocation invocation{
+        .sequence = sequence,
+        .window = window,
+        .kmer = kmer,
+        .output_layout =
+            ::bioseq::minimizers::minimizer_output_layout_v<MinimizerT>,
+        .output_hash_mask = static_cast<std::uint64_t>(
+            std::remove_cv_t<MinimizerT>::hash_field_mask),
+        .output_position_mask = static_cast<std::uint64_t>(
+            std::remove_cv_t<MinimizerT>::pos_field_mask),
+        .two_stack_route = two_stack_route,
+        .sink = sink_state.sink(),
+    };
+    auto result = kernel(invocation);
+    sink_state.validate(result);
+    if (result.proof.algorithm != expected_algorithm) {
+        throw std::runtime_error(
+            "selected Highway minimizer returned the wrong family proof");
+    }
+    return result;
 }
 
 [[nodiscard]] constexpr TwoStackContinuationStatus
@@ -1350,6 +1450,16 @@ template <MinKernelKind Kind, class MinimizerT,
         }
         return result.proof.two_stack;
     } else if constexpr (Kind == MinKernelKind::Simd) {
+        if constexpr (bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                          traits::logical_bits_per_symbol != 2u) {
+            // Preserve the established reference-SIMD contract for alphabets
+            // whose symbols are not DNA4's two-bit ranks. They use the scalar
+            // minimizer route without consulting or materializing for a
+            // Highway kernel.
+            collect_minimizers_segment_scalar<MinimizerT>(
+                c, seq, 0u, seq.bp_size(), w, k);
+            return {};
+        }
         const auto run_reference = [&](const auto& descriptor) {
             const auto result =
                 invoke_selected_minimizer_kernel<MinimizerT>(
@@ -1471,6 +1581,14 @@ enum class ExactSimdRangeRoute : std::uint8_t {
     require_resident_vector_stream,
 };
 
+/// Preserve native-width topology by default. Persisted indexed-query
+/// preparation is the narrow exception: its continuation/B8 compatibility
+/// contract requires an exact u32 input packing.
+enum class ExactSimdInputStorage : std::uint8_t {
+    preserve_native_width,
+    require_indexed_u32,
+};
+
 [[nodiscard]] inline bool exact_simd_proof_matches_range_route(
     ExactSimdRangeRoute route,
     const TwoStackExecutionProof& proof) noexcept
@@ -1562,7 +1680,9 @@ minimizer_dispatch_range(
     MinimizerSketchBackend backend,
     ExactSimdRangeRoute exact_simd_route =
         ExactSimdRangeRoute::require_continuation,
-    const ::bioseq::simd_dispatch::HighwayKernelTable* highway = nullptr)
+    const ::bioseq::simd_dispatch::HighwayKernelTable* highway = nullptr,
+    ExactSimdInputStorage exact_simd_input_storage =
+        ExactSimdInputStorage::preserve_native_width)
 {
     if (lo_bp > hi_bp || hi_bp > seq.bp_size()) {
         throw std::invalid_argument(
@@ -1578,22 +1698,24 @@ minimizer_dispatch_range(
                 "PaperNtHashSimd currently requires W=10 and K=15; "
                 "fallback is forbidden");
         }
-        auto run_paper = [&](const auto& descriptor) {
-            return invoke_selected_minimizer_kernel<MinimizerT>(
-                highway,
-                ::bioseq::simd_dispatch::HighwayKernelId::
-                    minimizer_paper_nthash,
-                ::bioseq::minimizers::MinimizerKernelAlgorithm::paper_nthash,
-                minimizer_kernel_view<Alphabet>(descriptor, highway),
-                window_size,
-                kmer_size,
-                collector);
-        };
-        ::bioseq::minimizers::MinimizerKernelResult result{};
-        if (auto native = try_word_minimizer_resident_packed(
-                seq, lo_bp, hi_bp); native.has_value()) {
-            result = run_paper(*native);
+        if constexpr (!std::same_as<Alphabet, ::seq::dna4>) {
+            throw PaperNtHashRuntimeError(
+                "PaperNtHashSimd requires the DNA4 alphabet; fallback is "
+                "forbidden");
         } else {
+            auto run_paper = [&](const auto& descriptor) {
+                return invoke_selected_minimizer_kernel<MinimizerT>(
+                    highway,
+                    ::bioseq::simd_dispatch::HighwayKernelId::
+                        minimizer_paper_nthash,
+                    ::bioseq::minimizers::MinimizerKernelAlgorithm::
+                        paper_nthash,
+                    minimizer_kernel_view<Alphabet>(descriptor, highway),
+                    window_size,
+                    kmer_size,
+                    collector);
+            };
+            ::bioseq::minimizers::MinimizerKernelResult result{};
             const auto access = bioseq::storage::plan_sequence_access(
                 seq,
                 bioseq::storage::sequence_access_requirement::
@@ -1601,38 +1723,45 @@ minimizer_dispatch_range(
                 lo_bp,
                 hi_bp,
                 sizeof(std::uint32_t));
-            bioseq::parallelism::MemoryAdmissionFailure failure{};
-            auto permit =
-                bioseq::parallelism::MemoryAdmissionController::instance()
-                    .try_reserve(access.admission_bytes, &failure);
-            if (!permit) {
-                throw PaperNtHashRuntimeError(fmt::format(
-                    "packed-range admission failed: reason={} "
-                    "requested_bytes={} reserved_bytes={} budget_bytes={}",
-                    bioseq::parallelism::memory_admission_failure_reason_name(
-                        failure.reason),
-                    failure.requested_bytes,
-                    failure.reserved_bytes,
-                    failure.budget_ceiling_bytes));
+            if (access.route
+                    == bioseq::storage::sequence_access_route::borrow_resident
+                && access.resident.has_value()) {
+                result = run_paper(*access.resident);
+            } else {
+                bioseq::parallelism::MemoryAdmissionFailure failure{};
+                auto permit =
+                    bioseq::parallelism::MemoryAdmissionController::instance()
+                        .try_reserve(access.admission_bytes, &failure);
+                if (!permit) {
+                    throw PaperNtHashRuntimeError(fmt::format(
+                        "packed-range admission failed: reason={} "
+                        "requested_bytes={} reserved_bytes={} budget_bytes={}",
+                        bioseq::parallelism::
+                            memory_admission_failure_reason_name(
+                                failure.reason),
+                        failure.requested_bytes,
+                        failure.reserved_bytes,
+                        failure.budget_ceiling_bytes));
+                }
+                auto owner = bioseq::storage::materialize_packed_region(
+                    seq, lo_bp, hi_bp, sizeof(std::uint32_t),
+                    std::move(*permit));
+                result = run_paper(owner.descriptor());
             }
-            auto owner = bioseq::storage::materialize_packed_region(
-                seq, lo_bp, hi_bp, sizeof(std::uint32_t),
-                std::move(*permit));
-            result = run_paper(owner.descriptor());
+            if (!result.ok()
+                || !result.proof.paper.accepted(
+                    /*require_nonempty_vector_work=*/false)) {
+                throw PaperNtHashRuntimeError(fmt::format(
+                    "checked resident kernel declined without fallback: "
+                    "status={} lo_bp={} hi_bp={} w={} k={}",
+                    static_cast<unsigned>(result.status),
+                    lo_bp, hi_bp, window_size, kmer_size));
+            }
+            return MinimizerRangeExecutionProof{
+                .paper_nthash = result.proof.paper,
+                .paper_nthash_present = true,
+            };
         }
-        if (!result.ok()
-            || !result.proof.paper.accepted(
-                /*require_nonempty_vector_work=*/false)) {
-            throw PaperNtHashRuntimeError(fmt::format(
-                "checked resident kernel declined without fallback: "
-                "status={} lo_bp={} hi_bp={} w={} k={}",
-                static_cast<unsigned>(result.status),
-                lo_bp, hi_bp, window_size, kmer_size));
-        }
-        return MinimizerRangeExecutionProof{
-            .paper_nthash = result.proof.paper,
-            .paper_nthash_present = true,
-        };
     }
     if (backend == MinimizerSketchBackend::ExactSimd) {
         const bool require_resident = exact_simd_route
@@ -1662,7 +1791,9 @@ minimizer_dispatch_range(
         std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
         typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
             resident_packed_region descriptor{};
-        const auto native_resident = require_resident
+        const bool require_indexed_u32 = exact_simd_input_storage
+            == ExactSimdInputStorage::require_indexed_u32;
+        const auto native_resident = require_resident || require_indexed_u32
             ? std::optional<typename bioseq::storage::
                 basic_lazy_sequence_view<Alphabet>::resident_packed_region>{}
             : try_minimizer_resident_packed(seq, lo_bp, hi_bp);
@@ -1676,17 +1807,25 @@ minimizer_dispatch_range(
                 lo_bp,
                 hi_bp,
                 4u);
-            auto permit =
-                bioseq::parallelism::MemoryAdmissionController::instance()
-                    .try_reserve(access.admission_bytes);
-            if (!permit) {
-                throw ExactSimdRuntimeError{
-                    TwoStackContinuationStatus::non_contiguous_range,
-                    "target minimizer range sketch admission"};
+            if (access.route
+                    == bioseq::storage::sequence_access_route::borrow_resident
+                && access.resident.has_value()) {
+                descriptor = *access.resident;
+            } else {
+                auto permit =
+                    bioseq::parallelism::MemoryAdmissionController::instance()
+                        .try_reserve(access.admission_bytes);
+                if (!permit) {
+                    throw ExactSimdRuntimeError{
+                        TwoStackContinuationStatus::non_contiguous_range,
+                        require_resident
+                            ? "resident vector_stream admission"
+                            : "target minimizer range sketch admission"};
+                }
+                owner.emplace(bioseq::storage::materialize_packed_region(
+                    seq, lo_bp, hi_bp, 4u, std::move(*permit)));
+                descriptor = owner->descriptor();
             }
-            owner.emplace(bioseq::storage::materialize_packed_region(
-                seq, lo_bp, hi_bp, 4u, std::move(*permit)));
-            descriptor = owner->descriptor();
         }
         const auto route = require_resident
             ? ::bioseq::minimizers::TwoStackRoute::resident_report76
@@ -1755,7 +1894,8 @@ minimizer_dispatch_indexed_query_whole(
         kmer_size,
         backend,
         ExactSimdRangeRoute::require_continuation,
-        highway);
+        highway,
+        ExactSimdInputStorage::require_indexed_u32);
 }
 
 // Resolve the biological target-sketch backend from the minimizer selector
@@ -9592,57 +9732,6 @@ template <sequence_alphabet Alphabet,
         return filtered_pairs.size();
     };
     using QueryKmerFilter = decltype(query_kmer_filter);
-    struct QueryFilteredSketchCollector {
-        using minimizer_type = MinimizerT;
-
-        const QueryKmerFilter* filter = nullptr;
-        const QueryKmerGate* gate = nullptr;
-        std::vector<MinimizerT> sketches;
-
-        void reserve(std::size_t expected_count) {
-            const std::size_t filtered_hint = filter == nullptr
-                ? expected_count
-                : std::min<std::size_t>(expected_count, filter->size() + 64u);
-            sketches.reserve(filtered_hint);
-        }
-        void clear() { sketches.clear(); }
-        [[gnu::always_inline]] void collect(MinimizerT&& sketch) {
-            if (filter == nullptr) {
-                sketches.push_back(std::move(sketch));
-                return;
-            }
-            const std::uint64_t kmer = sketch.kmer();
-            if ((gate == nullptr || gate->maybe_contains(kmer))
-                && filter->find(kmer) != filter->end()) {
-                sketches.push_back(std::move(sketch));
-            }
-        }
-        [[gnu::always_inline]] void collect(const MinimizerT& sketch) {
-            if (filter == nullptr) {
-                sketches.push_back(sketch);
-                return;
-            }
-            const std::uint64_t kmer = sketch.kmer();
-            if ((gate == nullptr || gate->maybe_contains(kmer))
-                && filter->find(kmer) != filter->end()) {
-                sketches.push_back(sketch);
-            }
-        }
-        [[nodiscard]] const std::vector<MinimizerT>& extract_sketches_data() const & {
-            return sketches;
-        }
-        [[nodiscard]] bool append_raw_storage(
-            const typename MinimizerT::storage_t* raw,
-            std::size_t count) {
-            if (count > sketches.max_size() - sketches.size()) {
-                return false;
-            }
-            for (std::size_t index = 0; index < count; ++index) {
-                collect(MinimizerT::from_raw_storage(raw[index]));
-            }
-            return true;
-        }
-    };
     struct QueryFilteredPairCollector {
         using minimizer_type = MinimizerT;
 

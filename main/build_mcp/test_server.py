@@ -4,6 +4,7 @@ from pathlib import Path
 import hashlib
 import json
 import socket
+import subprocess
 import tempfile
 import time
 import unittest
@@ -775,6 +776,28 @@ class OrdinaryBenchE2eFilterTests(unittest.TestCase):
 
 
 class UnitIntegrationQualificationTests(unittest.TestCase):
+    def test_builder_co_schedules_independent_compile_graphs(self):
+        mode = server.MODES["unit+integration"]
+
+        self.assertTrue(mode.build_targets_together)
+        self.assertEqual(
+            server._build_target_groups_for("unit+integration"),
+            (tuple(mode.targets),),
+        )
+        self.assertEqual(
+            server._cmake_build_argv(
+                Path("/tmp/test-opt"), tuple(mode.targets)),
+            [
+                "cmake", "--build", "/tmp/test-opt", "--target",
+                *mode.targets, "--parallel", str(server.CMAKE_PARALLEL_JOBS),
+            ],
+        )
+        self.assertFalse(server.MODES["bench"].build_targets_together)
+        self.assertEqual(
+            server._build_target_groups_for("bench"),
+            tuple((target,) for target in server.MODES["bench"].targets),
+        )
+
     def test_builder_builds_and_runs_e2e_serializer_contract(self):
         mode = server.MODES["unit+integration"]
 
@@ -858,6 +881,16 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                     for name, value in cache_entries.items()),
                 encoding="utf-8",
             )
+            configure_stamp = {
+                "artifact_kind": "test-configure-stamp",
+                "schema_version": 1,
+                "inputs": {"preset": preset},
+                "inputs_sha256": "0" * 64,
+            }
+            (build_dir / server._CMAKE_CONFIGURE_STAMP_NAME).write_text(
+                json.dumps(configure_stamp),
+                encoding="utf-8",
+            )
             log_path = Path(temporary) / "worker.log"
             state = {
                 mode: {
@@ -887,6 +920,9 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                     _preflight_local_clang_rt_launcher=mock.DEFAULT,
                     _stream_subprocess=mock.DEFAULT,
                     _clang_rt_cmake_cache_repairs=mock.DEFAULT,
+                    _cmake_preset_cache_contract=mock.DEFAULT,
+                    _cmake_preset_cache_repairs=mock.DEFAULT,
+                    _cmake_configure_stamp_document=mock.DEFAULT,
             ) as patched:
                 patched["_refuse_root_build_identity"].return_value = None
                 patched["_load_state"].return_value = state
@@ -898,6 +934,10 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                 patched["_local_clang_rt_is_enabled"].return_value = False
                 patched["_stream_subprocess"].side_effect = run
                 patched["_clang_rt_cmake_cache_repairs"].return_value = ([], [])
+                patched["_cmake_preset_cache_contract"].return_value = {}
+                patched["_cmake_preset_cache_repairs"].return_value = {}
+                patched["_cmake_configure_stamp_document"].return_value = (
+                    configure_stamp)
 
                 result = server._run_build_worker(mode, build_only=True)
 
@@ -1083,6 +1123,8 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                     _initial_clang_rt_cmake_args=mock.DEFAULT,
                     _stream_subprocess=mock.DEFAULT,
                     _clang_rt_cmake_cache_repairs=mock.DEFAULT,
+                    _cmake_preset_cache_contract=mock.DEFAULT,
+                    _cmake_preset_cache_repairs=mock.DEFAULT,
             ) as patched:
                 patched["_refuse_root_build_identity"].return_value = None
                 patched["_load_state"].return_value = state
@@ -1098,6 +1140,8 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                 ]
                 patched["_stream_subprocess"].side_effect = run
                 patched["_clang_rt_cmake_cache_repairs"].return_value = ([], [])
+                patched["_cmake_preset_cache_contract"].return_value = {}
+                patched["_cmake_preset_cache_repairs"].return_value = {}
 
                 result = server._run_build_worker(
                     "unit+integration", build_only=True)
@@ -1139,6 +1183,1245 @@ class RemoteRunWebsiteRejectionTests(unittest.TestCase):
     def test_remote_run_does_not_reject_ordinary_modes(self):
         self.assertNotIn("unit+integration", server.REMOTE_RUN_REJECTED_MODES)
         self.assertIn("unit+integration", server.REMOTE_RUN_BUILD_MODES)
+
+
+class BuildReceiptWorkflowTests(unittest.TestCase):
+    @staticmethod
+    def _write_receipted_bench_command(build_dir: Path) -> Path:
+        bin_dir = build_dir / "bioseq"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        command = bin_dir / "bioseq_bench"
+        command.write_bytes(b"test benchmark executable\n")
+        command.chmod(0o755)
+        return command
+
+    def test_public_schemas_expose_guard_and_receipt_controls(self):
+        start_schema = next(
+            item for item in server.TOOL_DEFINITIONS
+            if item["name"] == "start_build"
+        )["inputSchema"]
+        inspect_schema = next(
+            item for item in server.TOOL_DEFINITIONS
+            if item["name"] == "inspect"
+        )["inputSchema"]
+        self.assertTrue({
+            "fresh",
+            "build_timeout_sec",
+            "baseline_ref",
+            "run_only",
+            "reuse_build_receipt",
+        }.issubset(start_schema["properties"]))
+        self.assertEqual(
+            start_schema["properties"]["build_timeout_sec"]["maximum"],
+            3300,
+        )
+        self.assertEqual(
+            start_schema["properties"]["baseline_ref"]["const"],
+            "refs/heads/main",
+        )
+        self.assertIn(
+            "reuse_build_receipt", inspect_schema["properties"])
+
+    def test_public_input_matrix_fails_closed_before_scheduling(self):
+        invalid = (
+            ({"fresh": True}, "requires build_only"),
+            ({"build_only": True, "build_timeout_sec": 3301}, "between 60"),
+            ({"build_only": True, "build_timeout_sec": 3300},
+             "requires fresh=true"),
+            ({"run_only": True}, "requires reuse_build_receipt"),
+            ({"build_only": True, "run_only": True}, "mutually exclusive"),
+            ({"reuse_build_receipt": "br_x"}, "only with run_only"),
+            ({
+                "build_only": True,
+                "baseline_ref": "refs/heads/main",
+            }, "requires build_only=true and fresh=true"),
+            ({
+                "build_only": True,
+                "fresh": True,
+                "baseline_ref": "refs/heads/main",
+            }, "only for benchmark modes"),
+        )
+        with mock.patch.object(
+            server, "_refuse_root_build_identity", return_value=None,
+        ), mock.patch.object(
+            server, "_ensure_build_worker_timesharing_policy",
+        ):
+            for request, expected in invalid:
+                with self.subTest(request=request):
+                    message = server.tool_start_build(
+                        "unit+integration", **request)
+                    self.assertIn(expected, message)
+
+    def test_guard_terms_at_54_minutes_and_kills_by_55(self):
+        soft, hard = server._build_phase_deadlines(100.0, 3300)
+        self.assertEqual(soft, 100.0 + 54 * 60)
+        self.assertEqual(hard, 100.0 + 55 * 60)
+
+    def test_start_rechecks_cleanup_after_running_entry_refresh(self):
+        with mock.patch.object(
+            server, "_refuse_root_build_identity", return_value=None,
+        ), mock.patch.object(
+            server, "_ensure_build_worker_timesharing_policy",
+        ), mock.patch.object(
+            server, "_git_commit", return_value="a" * 40,
+        ), mock.patch.object(
+            server, "_source_graph_fingerprint", return_value="fingerprint",
+        ), mock.patch.object(
+            server, "_load_state", return_value={},
+        ), mock.patch.object(
+            server,
+            "_unverified_guard_cleanup",
+            side_effect=(None, "newly discovered unverified cleanup"),
+        ) as cleanup, mock.patch.object(
+            server, "_running_in_same_group", return_value=(None, None),
+        ) as refresh, mock.patch.object(server.subprocess, "Popen") as popen:
+            message = server.tool_start_build(
+                "unit+integration",
+                build_only=True,
+                fresh=True,
+                build_timeout_sec=3300,
+            )
+
+        self.assertIn("newly discovered unverified cleanup", message)
+        self.assertEqual(cleanup.call_count, 2)
+        refresh.assert_called_once()
+        popen.assert_not_called()
+
+    def test_source_fingerprint_ignores_docs_build_and_reports(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "main/DOCS/CURRENT").mkdir(parents=True)
+            (root / "main/build/x").mkdir(parents=True)
+            (root / "main/reporting").mkdir(parents=True)
+            (root / "main/bioseq").mkdir(parents=True)
+            (root / "main/bioseq/source.cppm").write_text(
+                "export module source;\n", encoding="utf-8")
+            (root / "main/DOCS/CURRENT/log.md").write_text(
+                "one\n", encoding="utf-8")
+            (root / "main/build/x/output").write_text(
+                "one\n", encoding="utf-8")
+            (root / "main/reporting/report.json").write_text(
+                "{}\n", encoding="utf-8")
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "init", "-q", str(root)], check=False,
+                ).returncode,
+                0,
+            )
+            first = server._source_graph_fingerprint(root)
+            (root / "main/DOCS/CURRENT/log.md").write_text(
+                "two\n", encoding="utf-8")
+            (root / "main/build/x/output").write_text(
+                "two\n", encoding="utf-8")
+            (root / "main/reporting/report.json").write_text(
+                '{"changed":true}\n', encoding="utf-8")
+            self.assertEqual(first, server._source_graph_fingerprint(root))
+            (root / "main/bioseq/source.cppm").write_text(
+                "export module changed;\n", encoding="utf-8")
+            self.assertNotEqual(first, server._source_graph_fingerprint(root))
+
+    def test_descendant_capture_includes_new_sessions(self):
+        root = server._ProcessIdentity(10, 1, 10, 10, "start-root", "cmake")
+        child = server._ProcessIdentity(11, 10, 11, 11, "start-child", "ninja")
+        compiler = server._ProcessIdentity(
+            12, 11, 12, 12, "start-compiler", "clang")
+        with mock.patch.object(
+            server,
+            "_process_snapshot",
+            return_value={10: root, 11: child, 12: compiler},
+        ):
+            groups, evidence = server._validated_process_tree(root)
+        self.assertEqual(set(groups), {10, 11, 12})
+        self.assertEqual(evidence["descendant_pids"], [10, 11, 12])
+
+    def test_receipt_round_trip_and_content_tamper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "main"
+            build_dir = project / "build/mcp/run/test-opt"
+            build_dir.mkdir(parents=True)
+            receipt_path = root / "receipts.json"
+            host = {
+                "node": server.host_platform.node(),
+                "system": server.host_platform.system(),
+                "machine": server.host_platform.machine(),
+                "release": server.host_platform.release(),
+            }
+            receipt = {
+                "kind": "bioseq-build-receipt-v1",
+                "schema_version": 1,
+                "build_receipt_id": "br_round_trip",
+                "status": "completed",
+                "exit_code": 0,
+                "created_at": 1.0,
+                "mode": "unit+integration",
+                "debug": False,
+                "fresh": True,
+                "preset": "test-opt",
+                "preset_family": "test",
+                "binary_subdir": "bioseq",
+                "targets": list(
+                    server.MODES["unit+integration"].targets),
+                "source_project_root": str(project),
+                "source_workspace_root": str(root),
+                "source_commit": "a" * 40,
+                "source_graph_fingerprint": "source-digest",
+                "baseline_ref": None,
+                "baseline_commit": None,
+                "build_dir": str(build_dir),
+                "build_timeout_sec": 3300,
+                "build_phase_started_at": 1.0,
+                "configure_completed_at": 2.0,
+                "configure_duration_sec": 1.0,
+                "build_phase_completed_at": 3.0,
+                "build_phase_duration_sec": 2.0,
+                "target_timings": [],
+                "termination_evidence": None,
+                "configuration": {"sealed": True},
+                "runtime_artifacts": [],
+                "authorized_artifacts": [{"sealed": True}],
+                "artifact_counts": {"sealed": 1},
+                "host": host,
+            }
+            receipt["content_sha256"] = server._canonical_json_sha256(
+                receipt)
+            with mock.patch.object(
+                server, "BUILD_RECEIPT_FILE", receipt_path,
+            ), mock.patch.object(
+                server, "_source_graph_fingerprint",
+                return_value="source-digest",
+            ), mock.patch.object(
+                server, "_git_commit", return_value="a" * 40,
+            ), mock.patch.object(
+                server, "_build_configuration_evidence",
+                return_value={"sealed": True},
+            ), mock.patch.object(
+                server, "_runtime_artifact_evidence", return_value=[],
+            ), mock.patch.object(
+                server,
+                "_receipt_authorized_artifact_evidence",
+                return_value=[{"sealed": True}],
+            ), mock.patch.object(
+                server, "_build_artifact_counts",
+                return_value={"sealed": 1},
+            ):
+                server._store_build_receipt(receipt)
+                observed, error = server._validate_build_receipt(
+                    "br_round_trip", expected_mode="unit+integration")
+                self.assertIsNone(error)
+                self.assertEqual(
+                    observed["build_receipt_id"], "br_round_trip")
+                ledger = json.loads(receipt_path.read_text(encoding="utf-8"))
+                ledger["br_round_trip"]["mode"] = "bench"
+                receipt_path.write_text(
+                    json.dumps(ledger), encoding="utf-8")
+                observed, error = server._validate_build_receipt(
+                    "br_round_trip")
+                self.assertIsNone(observed)
+                self.assertIn("content seal", error)
+
+    def test_reparented_survivor_is_still_killed_by_start_identity(self):
+        root = server._ProcessIdentity(20, 1, 20, 20, "root-start", "cmake")
+        child = server._ProcessIdentity(21, 20, 21, 21, "child-start", "clang")
+        reparented = server._ProcessIdentity(
+            21, 1, 21, 21, "child-start", "clang --still-running")
+        snapshots = [
+            {20: root, 21: child},
+            {21: reparented},
+            {21: reparented},
+        ]
+        clock = iter((0.0, 0.0, 10.0, 10.0, 10.0, 10.0))
+        killed = []
+        with mock.patch.object(
+            server, "_process_snapshot", side_effect=snapshots,
+        ), mock.patch.object(
+            server.os, "killpg", side_effect=lambda pgid, sig: killed.append(
+                (pgid, sig)),
+        ), mock.patch.object(
+            server.time, "time", side_effect=lambda: next(clock),
+        ), mock.patch.object(server.time, "sleep"):
+            evidence = server._terminate_validated_process_tree(
+                root, hard_kill_deadline=10.0)
+        self.assertIn((21, server.signal.SIGKILL), killed)
+        self.assertIn(21, evidence["survivor_pids"])
+
+    def test_artifact_authority_detects_extension_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            bin_dir = build_dir / "bioseq"
+            bin_dir.mkdir()
+            for command in server.MODES["unit+integration"].commands:
+                path = bin_dir / command[0]
+                path.write_bytes(b"test executable\n")
+                path.chmod(0o755)
+            suffix = server._native_shared_library_suffix(
+                server.host_platform.system())
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=Release\n", encoding="utf-8")
+            core = bin_dir / f"bioseq{suffix}"
+            cache = (
+                build_dir
+                / "bioseq_caching/artifacts/cache_production/Release"
+                / f"bioseq_cache{suffix}"
+            )
+            cache.parent.mkdir(parents=True)
+            core.write_bytes(b"core dso\n")
+            cache.write_bytes(b"cache dso\n")
+            (build_dir / "cmake_install.cmake").write_text(
+                "# install plan\n", encoding="utf-8")
+            (bin_dir / "bioseq.control").write_text(
+                "default_version='1.0'\n", encoding="utf-8")
+            (bin_dir / "bioseq--1.0.sql").write_text(
+                "SELECT 1;\n", encoding="utf-8")
+
+            before = server._receipt_authorized_artifact_evidence(
+                "unit+integration", build_dir, debug=False)
+            core.write_bytes(b"mutated core dso\n")
+            after = server._receipt_authorized_artifact_evidence(
+                "unit+integration", build_dir, debug=False)
+
+        self.assertNotEqual(before, after)
+        relative_paths = {item["relative_path"] for item in before}
+        self.assertIn(str(core.relative_to(build_dir)), relative_paths)
+        self.assertIn(str(cache.relative_to(build_dir)), relative_paths)
+        self.assertIn("cmake_install.cmake", relative_paths)
+
+    def test_artifact_authority_seals_vcpkg_library_alias_chains(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            self._write_receipted_bench_command(build_dir)
+            expected = {}
+            for relative_library_dir in (
+                Path("vcpkg_installed/test-triplet/lib"),
+                Path("vcpkg_installed/test-triplet/debug/lib"),
+            ):
+                library_dir = build_dir / relative_library_dir
+                library_dir.mkdir(parents=True)
+                terminal = library_dir / "libvulkan.1.4.341.dylib"
+                terminal.write_bytes(
+                    b"debug vulkan\n"
+                    if "debug" in relative_library_dir.parts
+                    else b"release vulkan\n")
+                middle = library_dir / "libvulkan.1.dylib"
+                entry = library_dir / "libvulkan.dylib"
+                middle.symlink_to(terminal.name)
+                entry.symlink_to(middle.name)
+                expected[str(entry.relative_to(build_dir))] = (
+                    middle.name,
+                    str(terminal.relative_to(build_dir)),
+                    hashlib.sha256(terminal.read_bytes()).hexdigest(),
+                )
+
+            evidence = server._receipt_authorized_artifact_evidence(
+                "bench", build_dir, debug=False)
+
+        by_path = {item["relative_path"]: item for item in evidence}
+        for alias_path, (direct_target, terminal_path, digest) in expected.items():
+            alias = by_path[alias_path]
+            self.assertEqual(
+                alias["artifact_kind"], "vcpkg-shared-library-alias")
+            self.assertEqual(alias["link_target"], direct_target)
+            self.assertEqual(len(alias["symlink_chain"]), 2)
+            self.assertEqual(alias["target_relative_path"], terminal_path)
+            self.assertEqual(alias["target_sha256"], digest)
+            self.assertEqual(by_path[terminal_path]["sha256"], digest)
+            middle_path = str(Path(alias_path).parent / direct_target)
+            self.assertEqual(
+                by_path[middle_path]["artifact_kind"],
+                "vcpkg-shared-library-alias",
+            )
+            self.assertEqual(len(by_path[middle_path]["symlink_chain"]), 1)
+        self.assertEqual(
+            [item["relative_path"] for item in evidence],
+            sorted(item["relative_path"] for item in evidence),
+        )
+
+    def test_artifact_authority_seals_same_content_alias_retarget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            self._write_receipted_bench_command(build_dir)
+            library_dir = (
+                build_dir / "vcpkg_installed/test-triplet/lib")
+            library_dir.mkdir(parents=True)
+            first = library_dir / "libchoice.1.dylib"
+            second = library_dir / "libchoice.2.dylib"
+            first.write_bytes(b"same library bytes\n")
+            second.write_bytes(b"same library bytes\n")
+            alias = library_dir / "libchoice.dylib"
+            alias.symlink_to(first.name)
+            before = server._receipt_authorized_artifact_evidence(
+                "bench", build_dir, debug=False)
+            alias.unlink()
+            alias.symlink_to(second.name)
+            after = server._receipt_authorized_artifact_evidence(
+                "bench", build_dir, debug=False)
+
+        before_regular = [
+            item for item in before if "artifact_kind" not in item]
+        after_regular = [
+            item for item in after if "artifact_kind" not in item]
+        before_alias = next(
+            item for item in before
+            if item["relative_path"].endswith("libchoice.dylib"))
+        after_alias = next(
+            item for item in after
+            if item["relative_path"].endswith("libchoice.dylib"))
+        self.assertEqual(before_regular, after_regular)
+        self.assertNotEqual(before_alias, after_alias)
+        self.assertEqual(before_alias["link_target"], first.name)
+        self.assertEqual(after_alias["link_target"], second.name)
+
+    def test_artifact_authority_rejects_alias_replacement_during_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            self._write_receipted_bench_command(build_dir)
+            library_dir = (
+                build_dir / "vcpkg_installed/test-triplet/lib")
+            library_dir.mkdir(parents=True)
+            first = library_dir / "libchoice.1.dylib"
+            second = library_dir / "libchoice.2.dylib"
+            first.write_bytes(b"first library\n")
+            second.write_bytes(b"second library\n")
+            alias = library_dir / "libchoice.dylib"
+            alias.symlink_to(first.name)
+            original_readlink = server.os.readlink
+            replaced = False
+
+            def replace_after_readlink(path):
+                nonlocal replaced
+                target = original_readlink(path)
+                if Path(path) == alias and not replaced:
+                    replaced = True
+                    alias.unlink()
+                    alias.symlink_to(second.name)
+                return target
+
+            with mock.patch.object(
+                    server.os, "readlink", side_effect=replace_after_readlink):
+                with self.assertRaisesRegex(
+                        RuntimeError, "changed while inspected"):
+                    server._receipt_authorized_artifact_evidence(
+                        "bench", build_dir, debug=False)
+
+    def test_artifact_authority_seals_alias_terminal_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            self._write_receipted_bench_command(build_dir)
+            library_dir = (
+                build_dir / "vcpkg_installed/test-triplet/lib")
+            library_dir.mkdir(parents=True)
+            terminal = library_dir / "libcontent.1.dylib"
+            terminal.write_bytes(b"content A\n")
+            alias = library_dir / "libcontent.dylib"
+            alias.symlink_to(terminal.name)
+            before = server._receipt_authorized_artifact_evidence(
+                "bench", build_dir, debug=False)
+            terminal.write_bytes(b"content B\n")
+            after = server._receipt_authorized_artifact_evidence(
+                "bench", build_dir, debug=False)
+
+        before_by_path = {
+            item["relative_path"]: item for item in before}
+        after_by_path = {
+            item["relative_path"]: item for item in after}
+        alias_path = str(alias.relative_to(build_dir))
+        terminal_path = str(terminal.relative_to(build_dir))
+        self.assertNotEqual(
+            before_by_path[alias_path]["target_sha256"],
+            after_by_path[alias_path]["target_sha256"],
+        )
+        self.assertNotEqual(
+            before_by_path[terminal_path]["sha256"],
+            after_by_path[terminal_path]["sha256"],
+        )
+
+    def test_artifact_authority_rejects_unsafe_vcpkg_library_aliases(self):
+        cases = {
+            "absolute": "/tmp/liboutside.dylib",
+            "parent": "../liboutside.dylib",
+            "nested": "nested/libtarget.dylib",
+            "broken": "libmissing.dylib",
+            "non-library": "payload.txt",
+            "non-regular": "libdirectory.dylib",
+        }
+        for label, target in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                build_dir = Path(temporary).resolve()
+                self._write_receipted_bench_command(build_dir)
+                library_dir = (
+                    build_dir / "vcpkg_installed/test-triplet/lib")
+                library_dir.mkdir(parents=True)
+                if label == "nested":
+                    (library_dir / "nested").mkdir()
+                    (library_dir / target).write_bytes(b"nested library\n")
+                elif label == "non-library":
+                    (library_dir / target).write_bytes(b"not a library\n")
+                elif label == "non-regular":
+                    (library_dir / target).mkdir()
+                alias = library_dir / "libunsafe.dylib"
+                alias.symlink_to(target)
+                with self.assertRaises(RuntimeError):
+                    server._receipt_authorized_artifact_evidence(
+                        "bench", build_dir, debug=False)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            self._write_receipted_bench_command(build_dir)
+            library_dir = (
+                build_dir / "vcpkg_installed/test-triplet/lib")
+            library_dir.mkdir(parents=True)
+            first = library_dir / "libcycle.dylib"
+            second = library_dir / "libcycle.1.dylib"
+            first.symlink_to(second.name)
+            second.symlink_to(first.name)
+            with self.assertRaisesRegex(RuntimeError, "cycle"):
+                server._receipt_authorized_artifact_evidence(
+                    "bench", build_dir, debug=False)
+
+    def test_artifact_authority_rejects_symlinked_vcpkg_library_parents(self):
+        parent_paths = (
+            Path("vcpkg_installed"),
+            Path("vcpkg_installed/test-triplet"),
+            Path("vcpkg_installed/test-triplet/lib"),
+            Path("vcpkg_installed/test-triplet/debug"),
+            Path("vcpkg_installed/test-triplet/debug/lib"),
+        )
+        for relative_parent in parent_paths:
+            with self.subTest(relative_parent=relative_parent), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                build_dir = root / "build"
+                build_dir.mkdir()
+                self._write_receipted_bench_command(build_dir)
+                external = root / "external"
+                external.mkdir()
+                symlink = build_dir / relative_parent
+                symlink.parent.mkdir(parents=True, exist_ok=True)
+                symlink.symlink_to(external, target_is_directory=True)
+                with self.assertRaisesRegex(
+                        RuntimeError, "parent must be a real non-symlink"):
+                    server._receipt_authorized_artifact_evidence(
+                        "bench", build_dir, debug=False)
+
+    def test_artifact_authority_keeps_non_vcpkg_symlinks_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            target = build_dir / "real-bench"
+            target.write_bytes(b"test executable\n")
+            target.chmod(0o755)
+            bin_dir = build_dir / "bioseq"
+            bin_dir.mkdir()
+            (bin_dir / "bioseq_bench").symlink_to(target)
+            with self.assertRaisesRegex(RuntimeError, "regular non-symlink"):
+                server._receipt_authorized_artifact_evidence(
+                    "bench", build_dir, debug=False)
+
+        for authority_name in ("cmake_install.cmake", "install.sql"):
+            with self.subTest(authority_name=authority_name), \
+                    tempfile.TemporaryDirectory() as temporary:
+                build_dir = Path(temporary).resolve()
+                self._write_receipted_bench_command(build_dir)
+                payload = build_dir / "payload"
+                payload.write_bytes(b"install payload\n")
+                (build_dir / authority_name).symlink_to(payload)
+                with self.assertRaisesRegex(RuntimeError, "must not be a symlink"):
+                    server._receipt_authorized_artifact_evidence(
+                        "bench", build_dir, debug=False)
+
+        for authority_name, debug in (
+            ("install.so.sql", False),
+            ("install.so.control", False),
+            ("listing.so.s", True),
+            ("bitcode.so.bc", True),
+        ):
+            with self.subTest(overlapping_name=authority_name), \
+                    tempfile.TemporaryDirectory() as temporary:
+                build_dir = Path(temporary).resolve()
+                self._write_receipted_bench_command(build_dir)
+                library_dir = (
+                    build_dir / "vcpkg_installed/test-triplet/lib")
+                library_dir.mkdir(parents=True)
+                payload = library_dir / "libpayload.so.1"
+                payload.write_bytes(b"library payload\n")
+                (library_dir / authority_name).symlink_to(payload.name)
+                with self.assertRaisesRegex(RuntimeError, "must not be a symlink"):
+                    server._receipt_authorized_artifact_evidence(
+                        "bench", build_dir, debug=debug)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            self._write_receipted_bench_command(build_dir)
+            dependency_dir = build_dir / "linked"
+            dependency_dir.mkdir()
+            target = dependency_dir / "liboutside.1.dylib"
+            target.write_bytes(b"library\n")
+            (dependency_dir / "liboutside.dylib").symlink_to(target.name)
+            with self.assertRaisesRegex(RuntimeError, "must not be a symlink"):
+                server._receipt_authorized_artifact_evidence(
+                    "bench", build_dir, debug=False)
+
+    def test_artifact_authority_keeps_extension_dsos_non_symlink_strict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            bin_dir = build_dir / "bioseq"
+            bin_dir.mkdir()
+            for command in server.MODES["unit+integration"].commands:
+                path = bin_dir / command[0]
+                path.write_bytes(b"test executable\n")
+                path.chmod(0o755)
+            suffix = server._native_shared_library_suffix(
+                server.host_platform.system())
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=Release\n", encoding="utf-8")
+            real_core = bin_dir / f"real-bioseq{suffix}"
+            real_core.write_bytes(b"core dso\n")
+            (bin_dir / f"bioseq{suffix}").symlink_to(real_core.name)
+            cache = (
+                build_dir
+                / "bioseq_caching/artifacts/cache_production/Release"
+                / f"bioseq_cache{suffix}"
+            )
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(b"cache dso\n")
+
+            with self.assertRaisesRegex(RuntimeError, "has no native"):
+                server._receipt_authorized_artifact_evidence(
+                    "unit+integration", build_dir, debug=False)
+
+    def test_artifact_authority_rejects_dependency_dso_name_substitution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            bin_dir = build_dir / "bioseq"
+            bin_dir.mkdir()
+            for command in server.MODES["unit+integration"].commands:
+                path = bin_dir / command[0]
+                path.write_bytes(b"test executable\n")
+                path.chmod(0o755)
+            suffix = server._native_shared_library_suffix(
+                server.host_platform.system())
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=Release\n", encoding="utf-8")
+            dependency_dir = build_dir / "vcpkg_installed/test-triplet/lib"
+            dependency_dir.mkdir(parents=True)
+            (dependency_dir / f"bioseq{suffix}").write_bytes(
+                b"unrelated core basename\n")
+            (dependency_dir / f"bioseq_cache{suffix}").write_bytes(
+                b"unrelated cache basename\n")
+            stale_cache = (
+                build_dir
+                / "bioseq_caching/artifacts/cache_production/OldConfiguration"
+                / f"bioseq_cache{suffix}"
+            )
+            stale_cache.parent.mkdir(parents=True)
+            stale_cache.write_bytes(b"stale cache dso\n")
+
+            with self.assertRaisesRegex(RuntimeError, "has no native"):
+                server._receipt_authorized_artifact_evidence(
+                    "unit+integration", build_dir, debug=False)
+            real_cache = (
+                build_dir
+                / "bioseq_caching/artifacts/cache_production/Release"
+                / f"bioseq_cache{suffix}"
+            )
+            real_cache.parent.mkdir(parents=True)
+            real_cache.write_bytes(b"real cache dso\n")
+            with self.assertRaisesRegex(RuntimeError, "has no native"):
+                server._receipt_authorized_artifact_evidence(
+                    "unit+integration", build_dir, debug=False)
+
+    def test_artifact_authority_uses_core_target_path_across_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            suffix = server._native_shared_library_suffix(
+                server.host_platform.system())
+            core = build_dir / "bioseq" / f"bioseq{suffix}"
+            core.parent.mkdir()
+            core.write_bytes(b"website-owned core dso\n")
+
+            evidence = server._receipt_authorized_artifact_evidence(
+                "website", build_dir, debug=False)
+
+        relative_paths = {item["relative_path"] for item in evidence}
+        self.assertIn(str(core.relative_to(build_dir)), relative_paths)
+
+    def test_runtime_artifact_must_be_executable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            bin_dir = build_dir / "bioseq"
+            bin_dir.mkdir()
+            (bin_dir / "bioseq_bench").write_text(
+                "not executable\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "not executable"):
+                server._runtime_artifact_evidence("bench", build_dir)
+
+    def test_artifact_counts_report_actual_compiled_and_linked_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary).resolve()
+            generated = build_dir / "bioseq/generated/highway/target"
+            generated.mkdir(parents=True)
+            (generated / "owner.cppm").write_text(
+                "export module owner;\n", encoding="utf-8")
+            objects = build_dir / "objects"
+            objects.mkdir()
+            (objects / "one.o").write_bytes(b"one")
+            (objects / "two.o").write_bytes(b"two")
+            bin_dir = build_dir / "bioseq"
+            bin_dir.mkdir(exist_ok=True)
+            executable = bin_dir / "bioseq_bench"
+            executable.write_bytes(b"binary")
+            executable.chmod(0o755)
+            (bin_dir / f"provider{server._native_shared_library_suffix(server.host_platform.system())}").write_bytes(b"dso")
+            (build_dir / "compile_commands.json").write_text(
+                json.dumps([{}, {}, {}]), encoding="utf-8")
+            (build_dir / "cmake_install.cmake").write_text(
+                "# plan\n", encoding="utf-8")
+            (objects / "ignored.o.link").symlink_to(objects / "one.o")
+
+            counts = server._build_artifact_counts(build_dir, "bench")
+
+        self.assertEqual(counts["compile_commands"], 3)
+        self.assertEqual(counts["generated_highway_sources"], 1)
+        self.assertEqual(counts["compiled_objects"], 2)
+        self.assertEqual(counts["linked_artifacts"], 2)
+        self.assertEqual(counts["runtime_artifacts"], 1)
+        self.assertEqual(counts["install_scripts"], 1)
+
+    def test_baseline_ref_rejects_arbitrary_commit_before_git(self):
+        with mock.patch.object(server, "_git_commit") as git_commit:
+            with self.assertRaisesRegex(RuntimeError, "exact local ref"):
+                server._create_baseline_worktree("a" * 40, "run")
+        git_commit.assert_not_called()
+
+    def test_special_postgres_worker_does_not_promise_ordinary_receipt(self):
+        self.assertFalse(server._build_receipt_required(
+            server.POSTGRES_ERROR_SAFETY_MODE, True))
+        self.assertTrue(server._build_receipt_required("bench", True))
+
+    def test_io_inspect_target_is_owned_by_io_mode(self):
+        self.assertEqual(
+            server.INSPECT_TARGETS["bioseq_io_bench"].mode,
+            "bench-io",
+        )
+
+    def test_status_surfaces_artifact_counts(self):
+        entry = {
+            "status": "completed",
+            "started_at": 1.0,
+            "completed_at": 2.0,
+            "build_only": True,
+            "debug": False,
+            "preset": "bench-opt",
+            "log_file": "/tmp/test.log",
+            "artifact_counts": {
+                "compiled_objects": 2,
+                "linked_artifacts": 1,
+            },
+        }
+        with mock.patch.object(
+            server, "_load_state", return_value={"bench": entry},
+        ), mock.patch.object(server, "_refresh", return_value=entry):
+            message = server.tool_status("bench")
+        self.assertIn("Artifact counts", message)
+        self.assertIn('"compiled_objects": 2', message)
+
+        failed = dict(entry)
+        failed.update({
+            "status": "failed",
+            "notes": "guard cleanup failed",
+            "build_timeout_sec": 3300,
+            "timeout_guard_armed": True,
+            "build_soft_deadline": 3240.0,
+            "build_hard_deadline": 3300.0,
+            "active_edge": "[2/10] clang++ owner.cppm",
+            "termination_evidence": {"cleanup_verified": False},
+            "cleanup_unverified": True,
+        })
+        with mock.patch.object(
+            server, "_load_state", return_value={"bench": failed},
+        ), mock.patch.object(server, "_refresh", return_value=failed):
+            failed_message = server.tool_status("bench")
+        self.assertIn("[2/10] clang++ owner.cppm", failed_message)
+        self.assertIn("Termination evidence", failed_message)
+        self.assertIn("cleanup_unverified=True", failed_message)
+
+    def test_run_only_helper_never_invokes_build(self):
+        mode = "bench-fast"
+        receipt = {"build_receipt_id": "br_test", "debug": False}
+        entry = {"started_at": time.time()}
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary)
+            log_path = build_dir / "run.log"
+            with log_path.open("w", encoding="utf-8") as log_handle, \
+                    mock.patch.object(
+                        server,
+                        "_build_worker_descendant_environment",
+                        return_value={},
+                    ), mock.patch.object(
+                        server, "_ensure_local_toolchain_environment",
+                    ), mock.patch.object(
+                        server,
+                        "_run_mode_commands",
+                        return_value=(None, [], [], []),
+                    ) as run_commands, mock.patch.object(
+                        server, "_stream_subprocess",
+                    ) as subprocess_call, mock.patch.object(
+                        server, "_update_entry",
+                    ), mock.patch.object(
+                        server,
+                        "_validate_build_receipt",
+                        return_value=(receipt, None),
+                    ), mock.patch.object(
+                        server,
+                        "_seal_run_receipt",
+                        return_value={"build_receipt_id": "rr_test"},
+                    ):
+                result = server._run_only_from_build_receipt(
+                    mode=mode,
+                    entry=entry,
+                    receipt=receipt,
+                    active_build_dir=build_dir,
+                    active_bin_dir=build_dir / "bioseq",
+                    active_preset="bench-opt",
+                    bench_flags=[],
+                    test_flags=[],
+                    bench_e2e_config=None,
+                    log_handle=log_handle,
+                    deadline=time.time() + 60,
+                )
+        self.assertEqual(result, 0)
+        run_commands.assert_called_once()
+        subprocess_call.assert_not_called()
+
+    def test_inspect_uses_exact_debug_receipt_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary) / "debug-tree"
+            build_dir.mkdir()
+            receipt = {
+                "build_receipt_id": "br_debug",
+                "debug": True,
+                "preset": "test-opt-debug",
+                "build_dir": str(build_dir),
+                "source_graph_fingerprint": "source-digest",
+                "baseline_ref": None,
+            }
+            captured = {}
+
+            def inspect_impl(**arguments):
+                captured.update(arguments)
+                return {"summary": {}}
+
+            with mock.patch.object(
+                server,
+                "_validate_build_receipt",
+                return_value=(receipt, None),
+            ) as validate, mock.patch.object(
+                server,
+                "_inspect_artifact_candidates",
+                return_value=("bioseq_aligner_tests_exec",),
+            ), mock.patch.object(
+                server, "_run_inspect_impl", side_effect=inspect_impl,
+            ):
+                result = json.loads(server.tool_inspect({
+                    "function_name": "ksw",
+                    "target": "bioseq_aligner_tests_exec",
+                    "reuse_build_receipt": "br_debug",
+                }))
+        validate.assert_called_once_with(
+            "br_debug",
+            expected_mode="unit+integration",
+            expected_debug=None,
+        )
+        self.assertEqual(captured["build_dir"], build_dir)
+        self.assertEqual(
+            result["build_metadata"]["build_receipt_id"], "br_debug")
+
+
+class GuardedProcessTrackerTests(unittest.TestCase):
+    @staticmethod
+    def _identity(pid, ppid, pgid, session, started, command):
+        return server._ProcessIdentity(
+            pid, ppid, pgid, session, started, command)
+
+    def test_marker_finds_already_reparented_new_session(self):
+        root = self._identity(10, 1, 10, 10, "root-start", "cmake")
+        escaped = self._identity(
+            11, 1, 11, 11, "child-start", "clang")
+        tracker = server._GuardedProcessTracker(root, "marker")
+        with mock.patch.object(
+            server,
+            "_guarded_process_snapshot",
+            return_value=({10: root, 11: escaped}, {11}),
+        ):
+            live = tracker.refresh()
+        self.assertEqual(
+            {process.pid for process in live.values()}, {10, 11})
+
+    def test_host_snapshot_finds_process_by_isolated_build_cwd(self):
+        if not (
+            server.sys.platform == "darwin"
+            or server.sys.platform.startswith("linux")
+        ):
+            self.skipTest("cwd ownership probe is implemented on macOS/Linux")
+        with tempfile.TemporaryDirectory() as temporary:
+            ownership_root = Path(temporary).resolve()
+            marker = "host-cwd-probe-marker"
+            environment = dict(server.os.environ)
+            environment[server.BUILD_GUARD_ENV_KEY] = marker
+            process = subprocess.Popen(
+                [server.sys.executable, "-c", "import time; time.sleep(2)"],
+                cwd=ownership_root,
+                env=environment,
+                start_new_session=True,
+            )
+            try:
+                snapshot, owned = server._guarded_process_snapshot(
+                    marker, ownership_root)
+                self.assertIn(process.pid, snapshot)
+                self.assertIn(process.pid, owned)
+                self.assertEqual(snapshot[process.pid].session, process.pid)
+            finally:
+                server._terminate_unarmed_popen_group(
+                    process,
+                    guard_marker=marker,
+                    ownership_root=ownership_root,
+                )
+
+    def test_retains_child_after_reparent_and_marker_clear(self):
+        root = self._identity(20, 1, 20, 20, "root-start", "cmake")
+        child = self._identity(21, 20, 21, 21, "child-start", "clang")
+        reparented = self._identity(
+            21, 1, 31, 31, "child-start", "clang")
+        tracker = server._GuardedProcessTracker(root, "marker")
+        with mock.patch.object(
+            server,
+            "_guarded_process_snapshot",
+            side_effect=[
+                ({20: root, 21: child}, {20, 21}),
+                ({20: root, 21: reparented}, set()),
+            ],
+        ):
+            tracker.refresh()
+            live = tracker.refresh()
+        observed = next(
+            process for process in live.values() if process.pid == 21)
+        self.assertEqual((observed.ppid, observed.pgid, observed.session),
+                         (1, 31, 31))
+
+    def test_pid_reuse_is_not_retained_without_marker_or_ancestry(self):
+        root = self._identity(30, 1, 30, 30, "root-start", "cmake")
+        child = self._identity(31, 30, 31, 31, "old-start", "clang")
+        reused = self._identity(31, 1, 31, 31, "new-start", "unrelated")
+        tracker = server._GuardedProcessTracker(root, "marker")
+        with mock.patch.object(
+            server,
+            "_guarded_process_snapshot",
+            side_effect=[
+                ({30: root, 31: child}, {30, 31}),
+                ({30: root, 31: reused}, set()),
+            ],
+        ):
+            tracker.refresh()
+            live = tracker.refresh()
+        self.assertEqual({process.pid for process in live.values()}, {30})
+
+    def test_termination_discovers_group_created_after_term_snapshot(self):
+        root = self._identity(40, 1, 40, 40, "root-start", "cmake")
+        child = self._identity(41, 1, 41, 41, "child-start", "clang")
+        tracker = server._GuardedProcessTracker(root, "marker")
+        snapshots = iter([
+            ({40: root}, {40}),
+            ({40: root, 41: child}, {40, 41}),
+            ({40: root, 41: child}, {40, 41}),
+            ({40: root, 41: child}, {40, 41}),
+            ({}, set()),
+        ])
+        now = [0.0]
+        signals = []
+        direct_signals = []
+
+        def sleep(duration):
+            now[0] += max(duration, 0.1)
+
+        with mock.patch.object(
+            server,
+            "_guarded_process_snapshot",
+            side_effect=lambda marker, ownership_root=None: next(snapshots),
+        ), mock.patch.object(
+            server,
+            "_guarded_worker_validation",
+            return_value=({}, None),
+        ), mock.patch.object(
+            server.os,
+            "killpg",
+            side_effect=lambda pgid, sig: signals.append((pgid, sig)),
+        ), mock.patch.object(
+            server.os,
+            "kill",
+            side_effect=lambda pid, sig: direct_signals.append((pid, sig)),
+        ), mock.patch.object(
+            server,
+            "BUILD_TIMEOUT_TERM_GRACE_SEC",
+            0.2,
+        ):
+            evidence = server._terminate_guarded_process_tree(
+                tracker,
+                hard_kill_deadline=2.0,
+                state_mode="unit+integration",
+                clock=lambda: now[0],
+                sleeper=sleep,
+            )
+        self.assertIn((41, server.signal.SIGKILL), signals)
+        self.assertIn((41, server.signal.SIGKILL), direct_signals)
+        self.assertEqual(evidence["survivor_pids"], [])
+
+    def test_persistent_snapshot_failure_is_not_reported_as_cleanup(self):
+        root = self._identity(50, 1, 50, 50, "root-start", "cmake")
+        tracker = server._GuardedProcessTracker(root, "marker")
+        tracker.last_live = {(root.pid, root.started): root}
+        now = [0.0]
+
+        def sleep(duration):
+            now[0] += max(duration, 0.1)
+
+        with mock.patch.object(
+            server,
+            "_guarded_process_snapshot",
+            side_effect=RuntimeError("ps unavailable"),
+        ), mock.patch.object(
+            server,
+            "_guarded_worker_validation",
+            return_value=({}, None),
+        ), mock.patch.object(server.os, "killpg"), mock.patch.object(
+            server.os, "kill",
+        ), mock.patch.object(
+            server, "BUILD_TIMEOUT_TERM_GRACE_SEC", 0.1,
+        ):
+            with self.assertRaises(
+                server._GuardedTerminationError,
+            ) as raised:
+                server._terminate_guarded_process_tree(
+                    tracker,
+                    hard_kill_deadline=0.5,
+                    state_mode="unit+integration",
+                    clock=lambda: now[0],
+                    sleeper=sleep,
+                )
+        self.assertFalse(raised.exception.evidence["cleanup_verified"])
+        self.assertEqual(
+            raised.exception.evidence["survivor_pids"], [50])
+
+    def test_expired_deadline_does_not_spawn(self):
+        with tempfile.NamedTemporaryFile(mode="w+") as log_handle, \
+                mock.patch.object(server.subprocess, "Popen") as popen:
+            with self.assertRaises(TimeoutError):
+                server._stream_subprocess(
+                    ["never-run"],
+                    log_handle,
+                    deadline=10.0,
+                    hard_kill_deadline=11.0,
+                    require_verified_termination=True,
+                    deadline_clock=lambda: 10.0,
+                )
+        popen.assert_not_called()
+
+    def test_guard_preflight_cannot_launch_after_deadline(self):
+        now = [9.0]
+
+        def preflight(marker, ownership_root=None):
+            now[0] = 10.0
+            return {}, set()
+
+        with tempfile.NamedTemporaryFile(mode="w+") as log_handle, \
+                mock.patch.object(
+                    server, "_guarded_process_snapshot", side_effect=preflight,
+                ), mock.patch.object(
+                    server,
+                    "_load_state",
+                    return_value={
+                        "unit+integration": {"build_dir": "/tmp/guarded"},
+                    },
+                ), mock.patch.object(server.subprocess, "Popen") as popen:
+            with self.assertRaises(TimeoutError):
+                server._stream_subprocess(
+                    ["never-run"],
+                    log_handle,
+                    deadline=10.0,
+                    hard_kill_deadline=11.0,
+                    require_verified_termination=True,
+                    state_mode="unit+integration",
+                    deadline_clock=lambda: now[0],
+                )
+        popen.assert_not_called()
+
+    def test_parent_accepts_only_new_session_child_topology(self):
+        exact = self._identity(
+            70, 7, 70, 70, "worker-start", "python server.py")
+        wrong_parent = self._identity(
+            70, 8, 70, 70, "worker-start", "python server.py")
+        wrong_group = self._identity(
+            70, 7, 71, 70, "worker-start", "python server.py")
+        self.assertTrue(server._valid_detached_worker_identity(
+            exact, child_pid=70, parent_pid=7))
+        self.assertFalse(server._valid_detached_worker_identity(
+            wrong_parent, child_pid=70, parent_pid=7))
+        self.assertFalse(server._valid_detached_worker_identity(
+            wrong_group, child_pid=70, parent_pid=7))
+
+    def test_guarded_worker_arm_requires_exact_pid_start_and_session(self):
+        identity = self._identity(
+            77, 1, 77, 77, "worker-start", "python server.py")
+        entry = {
+            "status": "running",
+            "step": "armed",
+            "pid": 77,
+            "worker_process_identity": identity.__dict__,
+        }
+        with mock.patch.object(
+            server, "_load_state", return_value={"unit+integration": entry},
+        ), mock.patch.object(server.os, "getpid", return_value=77), \
+                mock.patch.object(
+                    server, "_capture_process_identity", return_value=identity):
+            observed = server._await_guarded_worker_arm("unit+integration")
+        self.assertEqual(observed["pid"], 77)
+
+    def test_parent_refuses_to_arm_when_identity_capture_fails(self):
+        fake_process = mock.Mock(pid=4321, returncode=1)
+        fake_process.wait.return_value = 1
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            server, "STATE_FILE", Path(temporary) / "state.json",
+        ), mock.patch.object(
+            server, "LOCK_FILE", Path(temporary) / "state.lock",
+        ), mock.patch.object(
+            server, "_refuse_root_build_identity", return_value=None,
+        ), mock.patch.object(
+            server, "_ensure_build_worker_timesharing_policy",
+        ), mock.patch.object(
+            server, "_source_graph_fingerprint", return_value="fingerprint",
+        ), mock.patch.object(
+            server, "_git_commit", return_value="a" * 40,
+        ), mock.patch.object(
+            server, "_configured_local_build_rt_priority", return_value=None,
+        ), mock.patch.object(
+            server, "_preflight_local_clang_rt_launcher",
+        ), mock.patch.object(
+            server, "_local_clang_rt_is_enabled", return_value=False,
+        ), mock.patch.object(
+            server.subprocess, "Popen", return_value=fake_process,
+        ), mock.patch.object(
+            server, "_capture_process_identity", return_value=None,
+        ), mock.patch.object(
+            server,
+            "_terminate_unarmed_popen_group",
+            return_value={"cleanup_verified": True},
+        ) as terminate_unarmed:
+            message = server.tool_start_build(
+                "unit+integration",
+                build_only=True,
+                fresh=True,
+                build_timeout_sec=3300,
+            )
+            state = server._load_state()["unit+integration"]
+        self.assertIn("identity error", message.lower())
+        self.assertEqual(state["step"], "worker_identity_failed")
+        terminate_unarmed.assert_called_once_with(fake_process)
+
+    def test_initial_tracker_failure_persists_cleanup_block(self):
+        root = self._identity(
+            90, 1, 90, 90, "root-start", "cmake --build")
+        fake_process = mock.Mock(pid=90)
+        fake_process.stdout = mock.Mock()
+        cleanup_error = server._GuardedTerminationError(
+            "cleanup unverified",
+            {
+                "survivor_identities": [root.__dict__],
+                "cleanup_verified": False,
+            },
+        )
+        with tempfile.NamedTemporaryFile(mode="w+") as log_handle, \
+                mock.patch.object(
+                    server,
+                    "_load_state",
+                    return_value={
+                        "unit+integration": {"build_dir": "/tmp/guarded"},
+                    },
+                ), mock.patch.object(
+                    server, "_guarded_process_snapshot", return_value=({}, set()),
+                ), mock.patch.object(
+                    server.subprocess, "Popen", return_value=fake_process,
+                ), mock.patch.object(
+                    server, "_capture_process_identity", return_value=root,
+                ), mock.patch.object(
+                    server._GuardedProcessTracker,
+                    "refresh",
+                    side_effect=RuntimeError("snapshot failed"),
+                ), mock.patch.object(
+                    server,
+                    "_terminate_guarded_process_tree",
+                    side_effect=cleanup_error,
+                ), mock.patch.object(server, "_update_entry") as update:
+            with self.assertRaises(server._GuardedTerminationError):
+                server._stream_subprocess(
+                    ["cmake", "--build", "/tmp/guarded"],
+                    log_handle,
+                    deadline=10.0,
+                    hard_kill_deadline=11.0,
+                    state_mode="unit+integration",
+                    require_verified_termination=True,
+                    deadline_clock=lambda: 0.0,
+                )
+        self.assertTrue(any(
+            call.kwargs.get("cleanup_unverified") is True
+            for call in update.call_args_list
+        ))
+
+    def test_dead_guarded_worker_runs_orphan_recovery(self):
+        worker = self._identity(
+            101, 1, 101, 101, "worker-start", "python server.py")
+        entry = {
+            "status": "running",
+            "pid": 101,
+            "worker_process_identity": worker.__dict__,
+            "build_timeout_sec": 3300,
+            "build_dir": "/tmp/guarded",
+            "started_at": 1.0,
+        }
+        state = {"unit+integration": entry}
+        evidence = {"cleanup_verified": False, "survivor_identities": []}
+        with mock.patch.object(
+            server, "_capture_process_identity", return_value=None,
+        ), mock.patch.object(
+            server, "_is_pid_alive", return_value=False,
+        ), mock.patch.object(
+            server,
+            "_recover_guarded_worker_descendants",
+            return_value=(evidence, True),
+        ) as recover, mock.patch.object(server, "_save_state"):
+            observed = server._refresh(state, "unit+integration")
+        recover.assert_called_once()
+        self.assertEqual(observed["status"], "aborted")
+        self.assertTrue(observed["cleanup_unverified"])
+        self.assertEqual(observed["termination_evidence"], evidence)
+
+    def test_unverified_cleanup_requires_successful_empty_ownership_sweep(self):
+        entry = {
+            "cleanup_unverified": True,
+            "build_dir": "/tmp/guarded",
+            "termination_evidence": {"survivor_identities": []},
+        }
+        child = self._identity(
+            111, 1, 111, 111, "child-start", "clang")
+        with mock.patch.object(
+            server,
+            "_guarded_process_snapshot",
+            return_value=({111: child}, {111}),
+        ):
+            blocked = server._unverified_guard_cleanup({"bench": entry})
+        self.assertIn("remain live", blocked)
+        with mock.patch.object(
+            server, "_guarded_process_snapshot", return_value=({}, set()),
+        ):
+            cleared = server._unverified_guard_cleanup({"bench": entry})
+        self.assertIsNone(cleared)
 
 
 if __name__ == "__main__":

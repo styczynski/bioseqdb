@@ -59,6 +59,7 @@ import bioseq.alignment.block_aligner;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
 import bioseq.highway.test_support;
+import bioseq.indexing.grouped32_contract;
 import bioseq.storage.lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
 import bioseq.instr;
 import bioseq.parallelism.memory_admission;
@@ -66,6 +67,33 @@ import bench_framework;
 import bench.tool_minimap2;
 import bioseq.sequences.generation;
 import bioseq.gpu.vulkan.runtime;
+
+extern "C" {
+
+[[nodiscard]]
+bioseq::indexing::MinimizerGrouped32NonScatterValidationResult
+bioseq_bench_grouped32_validate_w1(
+    std::span<const std::byte>,
+    const bioseq::indexing::MinimizerGrouped32Control&,
+    const bioseq::indexing::MinimizerPositionSegmentCore&) noexcept;
+
+[[nodiscard]]
+bioseq::indexing::MinimizerGrouped32NonScatterValidationResult
+bioseq_bench_grouped32_validate_w2(
+    std::span<const std::byte>,
+    const bioseq::indexing::MinimizerGrouped32Control&,
+    const bioseq::indexing::MinimizerPositionSegmentCore&) noexcept;
+
+[[nodiscard]]
+bioseq::indexing::MinimizerGrouped32NonScatterValidationResult
+bioseq_bench_grouped32_validate_w4(
+    std::span<const std::byte>,
+    const bioseq::indexing::MinimizerGrouped32Control&,
+    const bioseq::indexing::MinimizerPositionSegmentCore&) noexcept;
+
+[[nodiscard]] std::size_t bioseq_bench_grouped32_u32_lanes() noexcept;
+
+}  // extern "C"
 
 namespace bioseq::bench_prefilters {
 [[nodiscard]] bioseq::bench_framework::ErasedBenchmark
@@ -491,6 +519,9 @@ enum class Grouped32ValidationRoute : std::uint8_t {
     scalar_exact = 1,
     scalar_optimized,
     scalar_unrolled,
+    vector_stream_1,
+    vector_stream_2,
+    vector_stream_4,
 };
 
 struct Grouped32ValidationSpan {
@@ -508,9 +539,13 @@ struct Grouped32ValidationResult {
     std::uint32_t terminal_word_witness = 0;
     Grouped32ValidationRoute selected_route =
         Grouped32ValidationRoute::scalar_exact;
+    std::uint8_t selected_vector_stream_width = 0;
+    std::uint64_t vectorized_words = 0;
     std::uint64_t scalar_boundary_words = 0;
     std::uint64_t scalar_tail_words = 0;
     std::uint64_t failure_replay_count = 0;
+    std::uint64_t selected_hwy_target = 0;
+    bool exact_target_proof = true;
 
     [[nodiscard]] bool valid() const noexcept {
         return error == Grouped32ValidationError::none;
@@ -530,8 +565,12 @@ struct Grouped32FastValidationResult {
     std::uint32_t terminal_word_witness = 0;
     Grouped32ValidationRoute selected_route =
         Grouped32ValidationRoute::scalar_optimized;
+    std::uint8_t selected_vector_stream_width = 0;
+    std::uint64_t vectorized_words = 0;
     std::uint64_t scalar_boundary_words = 0;
     std::uint64_t scalar_tail_words = 0;
+    std::uint64_t selected_hwy_target = 0;
+    bool exact_target_proof = true;
 };
 
 inline constexpr std::uint64_t kGrouped32MaximumLocalBp = 0x7fffffffu;
@@ -547,6 +586,20 @@ inline constexpr std::size_t kGrouped32EncodedWordBytes = 4u;
         && lhs.first_error_word == rhs.first_error_word
         && lhs.words_examined == rhs.words_examined
         && lhs.terminal_word_witness == rhs.terminal_word_witness;
+}
+
+template <std::size_t StreamWidth>
+[[nodiscard]] consteval Grouped32ValidationRoute
+grouped32_vector_route() noexcept {
+    static_assert(
+        StreamWidth == 1u || StreamWidth == 2u || StreamWidth == 4u);
+    if constexpr (StreamWidth == 1u) {
+        return Grouped32ValidationRoute::vector_stream_1;
+    } else if constexpr (StreamWidth == 2u) {
+        return Grouped32ValidationRoute::vector_stream_2;
+    } else {
+        return Grouped32ValidationRoute::vector_stream_4;
+    }
 }
 
 /// Decode one persisted little-endian u32 without alignment or host-endian
@@ -675,8 +728,8 @@ grouped32_span_fast_path_admitted(
 }
 
 /// Hoisted scalar candidate. It is intentionally left auto-vectorizable: the
-/// comparison should reflect the compiler's best ordinary loop, not a
-/// deliberately weakened scalar baseline.
+/// explicit Highway candidates must beat the compiler's best ordinary loop,
+/// not a deliberately weakened scalar baseline.
 [[nodiscard, gnu::always_inline]] inline Grouped32FastValidationResult
 validate_grouped32_local32_scalar_optimized_fast(
     const Grouped32ValidationInput& input) noexcept
@@ -734,6 +787,9 @@ validate_grouped32_local32_scalar_optimized_bench(
         Grouped32ValidationResult replay =
             validate_grouped32_local32_scalar_exact_bench(input);
         replay.selected_route = fast.selected_route;
+        replay.selected_vector_stream_width =
+            fast.selected_vector_stream_width;
+        replay.vectorized_words = fast.vectorized_words;
         replay.scalar_boundary_words = fast.scalar_boundary_words;
         replay.scalar_tail_words = fast.scalar_tail_words;
         replay.failure_replay_count = 1u;
@@ -743,6 +799,9 @@ validate_grouped32_local32_scalar_optimized_bench(
         .words_examined = fast.words_examined,
         .terminal_word_witness = fast.terminal_word_witness,
         .selected_route = fast.selected_route,
+        .selected_vector_stream_width =
+            fast.selected_vector_stream_width,
+        .vectorized_words = fast.vectorized_words,
         .scalar_boundary_words = fast.scalar_boundary_words,
         .scalar_tail_words = fast.scalar_tail_words,
     };
@@ -834,6 +893,9 @@ validate_grouped32_local32_scalar_unrolled_bench(
         Grouped32ValidationResult replay =
             validate_grouped32_local32_scalar_exact_bench(input);
         replay.selected_route = fast.selected_route;
+        replay.selected_vector_stream_width =
+            fast.selected_vector_stream_width;
+        replay.vectorized_words = fast.vectorized_words;
         replay.scalar_boundary_words = fast.scalar_boundary_words;
         replay.scalar_tail_words = fast.scalar_tail_words;
         replay.failure_replay_count = 1u;
@@ -843,9 +905,267 @@ validate_grouped32_local32_scalar_unrolled_bench(
         .words_examined = fast.words_examined,
         .terminal_word_witness = fast.terminal_word_witness,
         .selected_route = fast.selected_route,
+        .selected_vector_stream_width =
+            fast.selected_vector_stream_width,
+        .vectorized_words = fast.vectorized_words,
         .scalar_boundary_words = fast.scalar_boundary_words,
         .scalar_tail_words = fast.scalar_tail_words,
     };
+}
+
+using Grouped32ProbeKernel = bioseq::indexing::
+    MinimizerGrouped32ValidateNonScatterLocal32W2Kernel;
+using Grouped32KernelResult = bioseq::indexing::
+    MinimizerGrouped32NonScatterValidationResult;
+using Grouped32KernelStatus = bioseq::indexing::
+    MinimizerGrouped32NonScatterValidation;
+
+template <std::size_t StreamWidth>
+[[nodiscard]] consteval Grouped32ProbeKernel
+grouped32_probe_kernel() noexcept {
+    static_assert(
+        StreamWidth == 1u || StreamWidth == 2u || StreamWidth == 4u);
+    if constexpr (StreamWidth == 1u) {
+        return &bioseq_bench_grouped32_validate_w1;
+    } else if constexpr (StreamWidth == 2u) {
+        return &bioseq_bench_grouped32_validate_w2;
+    } else {
+        return &bioseq_bench_grouped32_validate_w4;
+    }
+}
+
+[[nodiscard]] bool grouped32_span_kernel_arguments(
+    const Grouped32ValidationSpan& span,
+    bioseq::indexing::MinimizerGrouped32Control& control,
+    bioseq::indexing::MinimizerPositionSegmentCore& core) noexcept
+{
+    if (span.byte_offset % kGrouped32EncodedWordBytes != 0u) {
+        return false;
+    }
+    const std::size_t position_offset =
+        span.byte_offset / kGrouped32EncodedWordBytes;
+    if (position_offset
+            > (std::numeric_limits<std::uint32_t>::max)()
+        || span.position_count
+            > (std::numeric_limits<std::uint32_t>::max)()) {
+        return false;
+    }
+    control = {
+        .position_offset = static_cast<std::uint32_t>(position_offset),
+        .position_count = static_cast<std::uint32_t>(span.position_count),
+    };
+    core = {
+        .begin_bp = span.segment_base_bp,
+        .end_bp = span.segment_end_bp,
+    };
+    return true;
+}
+
+/// Validate a span that the production core deliberately returns to scalar.
+/// This is ordinary benchmark orchestration, not another vector algorithm.
+[[nodiscard, gnu::always_inline]] inline bool
+validate_grouped32_scalar_required_span(
+    std::span<const std::byte> bytes,
+    const Grouped32ValidationSpan& span,
+    Grouped32FastValidationResult& result) noexcept
+{
+    if (!grouped32_span_fast_path_admitted(bytes, span)) {
+        return false;
+    }
+    if (span.position_count == 0u) {
+        return true;
+    }
+    const auto segment_width = static_cast<std::uint32_t>(
+        span.segment_end_bp - span.segment_base_bp);
+    std::uint32_t previous = read_grouped32_word_native(
+        bytes, span.byte_offset);
+    ++result.scalar_boundary_words;
+    if ((previous >> 1u) >= segment_width) {
+        return false;
+    }
+    result.terminal_word_witness = previous;
+    for (std::size_t position_index = 1u;
+         position_index < span.position_count;
+         ++position_index) {
+        const std::uint32_t encoded = read_grouped32_word_native(
+            bytes,
+            span.byte_offset
+                + position_index * kGrouped32EncodedWordBytes);
+        if (encoded <= previous
+            || (encoded >> 1u) >= segment_width) {
+            result.scalar_tail_words += position_index;
+            return false;
+        }
+        previous = encoded;
+        result.terminal_word_witness = encoded;
+    }
+    result.scalar_tail_words += span.position_count - 1u;
+    result.words_examined += span.position_count;
+    return true;
+}
+
+template <std::size_t StreamWidth>
+[[nodiscard, gnu::always_inline]] inline Grouped32FastValidationResult
+validate_grouped32_local32_probe_fast(
+    const Grouped32ValidationInput& input) noexcept
+{
+    static_assert(
+        StreamWidth == 1u || StreamWidth == 2u || StreamWidth == 4u);
+    const Grouped32ProbeKernel kernel =
+        grouped32_probe_kernel<StreamWidth>();
+    const std::span<const std::byte> bytes{input.encoded_bytes};
+    Grouped32FastValidationResult result;
+    result.selected_route = grouped32_vector_route<StreamWidth>();
+    result.selected_vector_stream_width =
+        static_cast<std::uint8_t>(StreamWidth);
+
+    for (const Grouped32ValidationSpan& span : input.spans) {
+        if (span.position_count == 0u) {
+            continue;
+        }
+        bioseq::indexing::MinimizerGrouped32Control control;
+        bioseq::indexing::MinimizerPositionSegmentCore core;
+        if (!grouped32_span_kernel_arguments(span, control, core)) {
+            result.valid = false;
+            return result;
+        }
+        const Grouped32KernelResult kernel_result =
+            kernel(bytes, control, core);
+        if (kernel_result.selected_hwy_target == 0u
+            || (result.selected_hwy_target != 0u
+                && result.selected_hwy_target
+                    != kernel_result.selected_hwy_target)) {
+            result.exact_target_proof = false;
+            result.valid = false;
+            return result;
+        }
+        result.selected_hwy_target = kernel_result.selected_hwy_target;
+        result.vectorized_words += kernel_result.vectorized_words;
+
+        if (kernel_result.validation
+                == Grouped32KernelStatus::scalar_required) {
+            if (!validate_grouped32_scalar_required_span(
+                    bytes, span, result)) {
+                result.valid = false;
+                return result;
+            }
+            continue;
+        }
+
+        ++result.scalar_boundary_words;
+        if (kernel_result.vectorized_words != 0u
+            && kernel_result.selected_vector_stream_width
+                != static_cast<std::uint8_t>(StreamWidth)) {
+            result.exact_target_proof = false;
+            result.valid = false;
+            return result;
+        }
+        if (kernel_result.validation == Grouped32KernelStatus::rejected) {
+            result.valid = false;
+            return result;
+        }
+        if (kernel_result.validation != Grouped32KernelStatus::accepted
+            || kernel_result.vectorized_words == 0u
+            || kernel_result.vectorized_words > span.position_count - 1u) {
+            result.exact_target_proof = false;
+            result.valid = false;
+            return result;
+        }
+
+        result.scalar_tail_words += span.position_count - 1u
+            - kernel_result.vectorized_words;
+        result.words_examined += span.position_count;
+        result.terminal_word_witness = read_grouped32_word_native(
+            bytes,
+            span.byte_offset
+                + (span.position_count - 1u)
+                    * kGrouped32EncodedWordBytes);
+    }
+    return result;
+}
+
+template <std::size_t StreamWidth>
+[[nodiscard, gnu::noinline]] Grouped32ValidationResult
+validate_grouped32_local32_probe_bench(
+    const Grouped32ValidationInput& input)
+{
+    static_assert(
+        StreamWidth == 1u || StreamWidth == 2u || StreamWidth == 4u);
+    if constexpr (std::endian::native != std::endian::little) {
+        throw std::runtime_error(fmt::format(
+            "grouped32 vector_stream_{} requires a little-endian host; "
+            "silent scalar fallback is forbidden",
+            StreamWidth));
+    } else {
+        const Grouped32FastValidationResult fast =
+            validate_grouped32_local32_probe_fast<StreamWidth>(input);
+        if (!fast.valid) {
+            Grouped32ValidationResult replay =
+                validate_grouped32_local32_scalar_exact_bench(input);
+            replay.selected_route = fast.selected_route;
+            replay.selected_vector_stream_width =
+                fast.selected_vector_stream_width;
+            replay.vectorized_words = fast.vectorized_words;
+            replay.scalar_boundary_words = fast.scalar_boundary_words;
+            replay.scalar_tail_words = fast.scalar_tail_words;
+            replay.failure_replay_count = 1u;
+            replay.selected_hwy_target = fast.selected_hwy_target;
+            replay.exact_target_proof = fast.exact_target_proof;
+            return replay;
+        }
+        return Grouped32ValidationResult{
+            .words_examined = fast.words_examined,
+            .terminal_word_witness = fast.terminal_word_witness,
+            .selected_route = fast.selected_route,
+            .selected_vector_stream_width =
+                fast.selected_vector_stream_width,
+            .vectorized_words = fast.vectorized_words,
+            .scalar_boundary_words = fast.scalar_boundary_words,
+            .scalar_tail_words = fast.scalar_tail_words,
+            .selected_hwy_target = fast.selected_hwy_target,
+            .exact_target_proof = fast.exact_target_proof,
+        };
+    }
+}
+
+[[nodiscard]] constexpr bool same_grouped32_kernel_result(
+    const Grouped32KernelResult& lhs,
+    const Grouped32KernelResult& rhs) noexcept
+{
+    return lhs.validation == rhs.validation
+        && lhs.vectorized_words == rhs.vectorized_words
+        && lhs.selected_hwy_target == rhs.selected_hwy_target
+        && lhs.selected_vector_stream_width
+            == rhs.selected_vector_stream_width;
+}
+
+/// Untimed proof that the benchmark W2 adapter and production table slot call
+/// the same generated specialization with byte-identical route evidence.
+[[nodiscard]] bool grouped32_w2_matches_production_slot(
+    const Grouped32ValidationInput& input)
+{
+    const Grouped32ProbeKernel production_kernel =
+        bioseq::simd_dispatch::highway_test_kernel_table()
+            .indexing.validate_non_scatter_local32_w2;
+    if (production_kernel == nullptr) {
+        return false;
+    }
+    const std::span<const std::byte> bytes{input.encoded_bytes};
+    for (const Grouped32ValidationSpan& span : input.spans) {
+        bioseq::indexing::MinimizerGrouped32Control control;
+        bioseq::indexing::MinimizerPositionSegmentCore core;
+        if (!grouped32_span_kernel_arguments(span, control, core)) {
+            return false;
+        }
+        const Grouped32KernelResult adapter =
+            bioseq_bench_grouped32_validate_w2(bytes, control, core);
+        const Grouped32KernelResult production =
+            production_kernel(bytes, control, core);
+        if (!same_grouped32_kernel_result(adapter, production)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// Return one exact four-byte little-endian benchmark word.
@@ -864,6 +1184,7 @@ struct Grouped32AdversarialProbe {
     Grouped32ValidationInput input;
     Grouped32ValidationError expected_error =
         Grouped32ValidationError::none;
+    std::uint64_t required_vectorized_words = 0;
 };
 
 /// Small owned input used only by the untimed evaluator probes.
@@ -913,7 +1234,8 @@ struct Grouped32AdversarialProbe {
 [[nodiscard]] Grouped32AdversarialProbe finalize_grouped32_probe(
     std::string_view name,
     Grouped32ValidationInput input,
-    Grouped32ValidationError expected_error)
+    Grouped32ValidationError expected_error,
+    std::uint64_t required_vectorized_words = 0)
 {
     input.exact_reference =
         validate_grouped32_local32_scalar_exact_bench(input);
@@ -921,7 +1243,17 @@ struct Grouped32AdversarialProbe {
         .name = name,
         .input = std::move(input),
         .expected_error = expected_error,
+        .required_vectorized_words = required_vectorized_words,
     };
+}
+
+[[nodiscard]] std::size_t grouped32_probe_u32_lanes() {
+    const std::size_t lanes = bioseq_bench_grouped32_u32_lanes();
+    if (lanes == 0u) {
+        throw std::runtime_error{
+            "grouped32 benchmark probe reported zero u32 lanes"};
+    }
+    return lanes;
 }
 
 /// Build corruption at one strict-order boundary. Equal and decreasing probes
@@ -930,6 +1262,7 @@ struct Grouped32AdversarialProbe {
     std::string_view name,
     std::size_t corrupt_index,
     std::size_t minimum_count,
+    std::uint64_t required_vectorized_words,
     bool decreasing)
 {
     const std::size_t count = std::max(
@@ -947,27 +1280,34 @@ struct Grouped32AdversarialProbe {
     return finalize_grouped32_probe(
         name,
         std::move(input),
-        Grouped32ValidationError::position_range);
+        Grouped32ValidationError::position_range,
+        required_vectorized_words);
 }
 
 [[nodiscard]] std::vector<Grouped32AdversarialProbe>
-build_grouped32_adversarial_probes()
+build_grouped32_adversarial_probes(std::size_t stream_width)
 {
-    constexpr std::size_t unrolled_group_words = 4u;
-    constexpr std::size_t first_group_count = 1u + unrolled_group_words;
-    constexpr std::size_t cross_group_boundary = first_group_count;
-    constexpr std::size_t two_group_count =
-        1u + 2u * unrolled_group_words;
-    constexpr std::size_t scalar_tail_boundary = two_group_count;
-    constexpr std::size_t scalar_tail_probe_count =
+    const std::size_t lanes = grouped32_probe_u32_lanes();
+    const std::size_t admitted_stream_width =
+        stream_width == 1u || stream_width == 2u || stream_width == 4u
+        ? stream_width : 2u;
+    const std::size_t vector_words = admitted_stream_width * lanes;
+    const std::size_t one_iteration_count = 1u + vector_words;
+    const std::size_t scalar_to_vector_boundary = 1u;
+    const std::size_t lane_boundary = lanes;
+    const std::size_t stream_boundary = 1u + lanes;
+    const std::size_t cross_iteration_boundary = 1u + vector_words;
+    const std::size_t two_iteration_count = 1u + 2u * vector_words;
+    const std::size_t scalar_tail_boundary = two_iteration_count;
+    const std::size_t scalar_tail_probe_count =
         scalar_tail_boundary + 2u;
 
     std::vector<Grouped32AdversarialProbe> probes;
-    probes.reserve(12u);
+    probes.reserve(14u);
 
     Grouped32ValidationInput truncated = make_grouped32_adversarial_input(
-        two_group_count + 1u, 0u,
-        static_cast<std::uint64_t>(two_group_count + 64u));
+        two_iteration_count + 1u, 0u,
+        static_cast<std::uint64_t>(two_iteration_count + 64u));
     truncated.encoded_bytes.pop_back();
     probes.push_back(finalize_grouped32_probe(
         "byte_truncation",
@@ -980,10 +1320,11 @@ build_grouped32_adversarial_probes()
         Grouped32ValidationError::position_range));
 
     probes.push_back(finalize_grouped32_probe(
-        "order_valid_local_range",
+        "order_valid_local_range_inside_vector_block",
         make_grouped32_adversarial_input(
-            first_group_count, 0u, 1u),
-        Grouped32ValidationError::position_range));
+            one_iteration_count, 0u, 1u),
+        Grouped32ValidationError::position_range,
+        vector_words));
 
     probes.push_back(finalize_grouped32_probe(
         "global_addition_overflow",
@@ -997,54 +1338,86 @@ build_grouped32_adversarial_probes()
         Grouped32ValidationError::arithmetic_overflow));
 
     probes.push_back(make_grouped32_order_probe(
-        "equal_at_scalar_to_unrolled_group",
-        1u,
-        first_group_count,
+        "equal_at_scalar_to_vector_borrow",
+        scalar_to_vector_boundary,
+        one_iteration_count,
+        vector_words,
         false));
     probes.push_back(make_grouped32_order_probe(
-        "decreasing_at_scalar_to_unrolled_group",
-        1u,
-        first_group_count,
+        "decreasing_at_scalar_to_vector_borrow",
+        scalar_to_vector_boundary,
+        one_iteration_count,
+        vector_words,
         true));
     probes.push_back(make_grouped32_order_probe(
-        "equal_inside_unrolled_group",
-        3u,
-        first_group_count,
+        "equal_at_vector_lane_boundary",
+        lane_boundary,
+        one_iteration_count,
+        vector_words,
         false));
     probes.push_back(make_grouped32_order_probe(
-        "decreasing_inside_unrolled_group",
-        3u,
-        first_group_count,
+        "decreasing_at_vector_lane_boundary",
+        lane_boundary,
+        one_iteration_count,
+        vector_words,
         true));
+    if (admitted_stream_width > 1u) {
+        probes.push_back(make_grouped32_order_probe(
+            "equal_at_intra_iteration_stream_boundary",
+            stream_boundary,
+            one_iteration_count,
+            vector_words,
+            false));
+        probes.push_back(make_grouped32_order_probe(
+            "decreasing_at_intra_iteration_stream_boundary",
+            stream_boundary,
+            one_iteration_count,
+            vector_words,
+            true));
+    }
     probes.push_back(make_grouped32_order_probe(
-        "equal_at_cross_unrolled_group_boundary",
-        cross_group_boundary,
-        two_group_count,
+        "equal_at_cross_iteration_slot_zero_borrow",
+        cross_iteration_boundary,
+        two_iteration_count,
+        2u * vector_words,
         false));
     probes.push_back(make_grouped32_order_probe(
-        "decreasing_at_cross_unrolled_group_boundary",
-        cross_group_boundary,
-        two_group_count,
+        "decreasing_at_cross_iteration_slot_zero_borrow",
+        cross_iteration_boundary,
+        two_iteration_count,
+        2u * vector_words,
         true));
     probes.push_back(make_grouped32_order_probe(
-        "equal_at_scalar_tail_after_two_unrolled_groups",
+        "equal_at_scalar_tail_after_two_vector_iterations",
         scalar_tail_boundary,
         scalar_tail_probe_count,
+        2u * vector_words,
         false));
     probes.push_back(make_grouped32_order_probe(
-        "decreasing_at_scalar_tail_after_two_unrolled_groups",
+        "decreasing_at_scalar_tail_after_two_vector_iterations",
         scalar_tail_boundary,
         scalar_tail_probe_count,
+        2u * vector_words,
         true));
     return probes;
 }
 
 [[nodiscard]] const std::vector<Grouped32AdversarialProbe>&
-grouped32_adversarial_probes()
+grouped32_adversarial_probes(std::size_t stream_width)
 {
-    static const std::vector<Grouped32AdversarialProbe> probes =
-        build_grouped32_adversarial_probes();
-    return probes;
+    static const std::vector<Grouped32AdversarialProbe> probes_w1 =
+        build_grouped32_adversarial_probes(1u);
+    static const std::vector<Grouped32AdversarialProbe> probes_w2 =
+        build_grouped32_adversarial_probes(2u);
+    static const std::vector<Grouped32AdversarialProbe> probes_w4 =
+        build_grouped32_adversarial_probes(4u);
+    if (stream_width == 1u) {
+        return probes_w1;
+    }
+    if (stream_width == 4u) {
+        return probes_w4;
+    }
+    return probes_w2;
 }
 
 [[nodiscard]] RunConstraints estimate_grouped32_validation_resources(
@@ -1178,19 +1551,29 @@ grouped32_adversarial_probes()
 struct Grouped32ExpectedRoute {
     Grouped32ValidationRoute route =
         Grouped32ValidationRoute::scalar_exact;
+    std::uint8_t vector_stream_width = 0;
 };
 
 [[nodiscard]] Grouped32ExpectedRoute grouped32_expected_route(
     std::string_view algorithm)
 {
     if (algorithm == "grouped32_local32_scalar_exact") {
-        return {Grouped32ValidationRoute::scalar_exact};
+        return {Grouped32ValidationRoute::scalar_exact, 0u};
     }
     if (algorithm == "grouped32_local32_scalar_optimized") {
-        return {Grouped32ValidationRoute::scalar_optimized};
+        return {Grouped32ValidationRoute::scalar_optimized, 0u};
     }
     if (algorithm == "grouped32_local32_scalar_unrolled") {
-        return {Grouped32ValidationRoute::scalar_unrolled};
+        return {Grouped32ValidationRoute::scalar_unrolled, 0u};
+    }
+    if (algorithm == "grouped32_local32_vec_stream_1") {
+        return {Grouped32ValidationRoute::vector_stream_1, 1u};
+    }
+    if (algorithm == "grouped32_local32_vec_stream_2") {
+        return {Grouped32ValidationRoute::vector_stream_2, 2u};
+    }
+    if (algorithm == "grouped32_local32_vec_stream_4") {
+        return {Grouped32ValidationRoute::vector_stream_4, 4u};
     }
     throw std::invalid_argument(fmt::format(
         "unknown grouped32 validation algorithm '{}'", algorithm));
@@ -1211,6 +1594,15 @@ struct Grouped32ExpectedRoute {
     if (algorithm == "grouped32_local32_scalar_unrolled") {
         return validate_grouped32_local32_scalar_unrolled_bench(input);
     }
+    if (algorithm == "grouped32_local32_vec_stream_1") {
+        return validate_grouped32_local32_probe_bench<1u>(input);
+    }
+    if (algorithm == "grouped32_local32_vec_stream_2") {
+        return validate_grouped32_local32_probe_bench<2u>(input);
+    }
+    if (algorithm == "grouped32_local32_vec_stream_4") {
+        return validate_grouped32_local32_probe_bench<4u>(input);
+    }
     throw std::invalid_argument(fmt::format(
         "unknown grouped32 validation algorithm '{}'", algorithm));
 }
@@ -1219,7 +1611,20 @@ struct Grouped32ExpectedRoute {
     const Grouped32ValidationResult& result,
     const Grouped32ExpectedRoute& expected) noexcept
 {
-    return result.selected_route == expected.route;
+    if (result.selected_route != expected.route
+        || result.selected_vector_stream_width
+            != expected.vector_stream_width) {
+        return false;
+    }
+    if (expected.vector_stream_width == 0u) {
+        return result.vectorized_words == 0u
+            && result.selected_hwy_target == 0u;
+    }
+    const auto& binding =
+        bioseq::simd_dispatch::highway_test_target_binding();
+    return result.exact_target_proof
+        && result.selected_hwy_target
+            == static_cast<std::uint64_t>(binding.target);
 }
 
 [[nodiscard]] bool grouped32_complete_route_proof_matches(
@@ -1228,7 +1633,8 @@ struct Grouped32ExpectedRoute {
 {
     return grouped32_route_identity_matches(result, expected)
         && result.failure_replay_count == 0u
-        && result.scalar_boundary_words
+        && result.vectorized_words
+            + result.scalar_boundary_words
             + result.scalar_tail_words
             == result.words_examined;
 }
@@ -1256,17 +1662,45 @@ evaluate_grouped32_validation(
         validate_grouped32_local32_scalar_exact_bench(input);
     const Grouped32ExpectedRoute expected =
         grouped32_expected_route(algorithm);
+    bool input_requires_vector_words = false;
+    if (expected.vector_stream_width != 0u) {
+        const std::size_t vector_words =
+            static_cast<std::size_t>(expected.vector_stream_width)
+            * grouped32_probe_u32_lanes();
+        for (const Grouped32ValidationSpan& span : input.spans) {
+            if (span.position_count > vector_words) {
+                input_requires_vector_words = true;
+                break;
+            }
+        }
+    }
+    if (!grouped32_w2_matches_production_slot(input)) {
+        throw std::runtime_error{
+            "grouped32 benchmark W2 adapter diverged from production slot"};
+    }
+    for (const Grouped32AdversarialProbe& probe
+         : grouped32_adversarial_probes(2u)) {
+        if (!grouped32_w2_matches_production_slot(probe.input)) {
+            throw std::runtime_error(fmt::format(
+                "grouped32 benchmark W2 adapter diverged from production "
+                "slot for probe '{}'",
+                probe.name));
+        }
+    }
     if (!same_grouped32_validation_semantics(output, reference)
         || !same_grouped32_validation_semantics(
             reference, input.exact_reference)
         || (reference.valid()
             && reference.words_examined != input.total_words)
-        || !grouped32_complete_route_proof_matches(output, expected)) {
+        || !grouped32_complete_route_proof_matches(output, expected)
+        || (input_requires_vector_words
+            && output.vectorized_words == 0u)) {
         throw std::runtime_error(fmt::format(
             "grouped32 validation/parity route proof failed for '{}' "
             "(error={}, first={}, words={}, witness={}; "
             "reference error={}, first={}, words={}, witness={}; "
-            "route={}, boundary={}, tail={}, replay={})",
+            "route={}, width={}, vector={}, boundary={}, tail={}, replay={}, "
+            "target={}, target_proof={})",
             algorithm,
             static_cast<unsigned>(output.error),
             output.first_error_word,
@@ -1277,12 +1711,19 @@ evaluate_grouped32_validation(
             reference.words_examined,
             reference.terminal_word_witness,
             static_cast<unsigned>(output.selected_route),
+            static_cast<unsigned>(output.selected_vector_stream_width),
+            output.vectorized_words,
             output.scalar_boundary_words,
             output.scalar_tail_words,
-            output.failure_replay_count));
+            output.failure_replay_count,
+            output.selected_hwy_target,
+            output.exact_target_proof));
     }
 
-    const auto& probes = grouped32_adversarial_probes();
+    const std::size_t probe_width = expected.vector_stream_width == 0u
+        ? 2u : expected.vector_stream_width;
+    const auto& probes = grouped32_adversarial_probes(probe_width);
+    std::uint64_t adversarial_vectorized_words = 0;
     std::uint64_t adversarial_replay_count = 0;
     for (const Grouped32AdversarialProbe& probe : probes) {
         const Grouped32ValidationResult probe_reference =
@@ -1298,11 +1739,15 @@ evaluate_grouped32_validation(
             || !same_grouped32_validation_semantics(
                 candidate, probe_reference)
             || !grouped32_route_identity_matches(candidate, expected)
-            || candidate.failure_replay_count != expected_replay_count) {
+            || candidate.failure_replay_count != expected_replay_count
+            || (expected.vector_stream_width != 0u
+                && candidate.vectorized_words
+                    < probe.required_vectorized_words)) {
             throw std::runtime_error(fmt::format(
                 "grouped32 adversarial parity failed for '{}' probe '{}' "
                 "(expected_error={}, reference_error={}, candidate_error={}, "
-                "first={}, route={}, boundary={}, tail={}, replay={})",
+                "first={}, route={}, width={}, vector={}, required_vector={}, "
+                "boundary={}, tail={}, replay={}, target={}, target_proof={})",
                 algorithm,
                 probe.name,
                 static_cast<unsigned>(probe.expected_error),
@@ -1310,11 +1755,25 @@ evaluate_grouped32_validation(
                 static_cast<unsigned>(candidate.error),
                 candidate.first_error_word,
                 static_cast<unsigned>(candidate.selected_route),
+                static_cast<unsigned>(
+                    candidate.selected_vector_stream_width),
+                candidate.vectorized_words,
+                probe.required_vectorized_words,
                 candidate.scalar_boundary_words,
                 candidate.scalar_tail_words,
-                candidate.failure_replay_count));
+                candidate.failure_replay_count,
+                candidate.selected_hwy_target,
+                candidate.exact_target_proof));
         }
+        adversarial_vectorized_words += candidate.vectorized_words;
         adversarial_replay_count += candidate.failure_replay_count;
+    }
+    if (expected.vector_stream_width != 0u
+        && adversarial_vectorized_words == 0u) {
+        throw std::runtime_error(fmt::format(
+            "grouped32 vector_stream_{} adversarial probes executed no "
+            "vector words",
+            expected.vector_stream_width));
     }
     return {
         {"validation_parity", 1.0},
@@ -1324,6 +1783,10 @@ evaluate_grouped32_validation(
         {"selected_route",
             static_cast<double>(static_cast<unsigned>(
                 output.selected_route))},
+        {"selected_vector_stream_width",
+            static_cast<double>(output.selected_vector_stream_width)},
+        {"vectorized_words",
+            static_cast<double>(output.vectorized_words)},
         {"scalar_boundary_words",
             static_cast<double>(output.scalar_boundary_words)},
         {"scalar_tail_words",
@@ -1332,6 +1795,8 @@ evaluate_grouped32_validation(
             static_cast<double>(output.failure_replay_count)},
         {"adversarial_probe_count",
             static_cast<double>(probes.size())},
+        {"adversarial_vectorized_words",
+            static_cast<double>(adversarial_vectorized_words)},
         {"adversarial_replay_count",
             static_cast<double>(adversarial_replay_count)},
         {"valid_result", output.valid() ? 1.0 : 0.0},

@@ -39,7 +39,6 @@ import bioseq.alignment.contracts;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.sources.ksw2;
 import bioseq.highway.sources.alignment_utils;
-import bioseq.highway.sources.alignment_lanes;
 import bioseq.sequences.chaining.utils;
 import bioseq.common.context;
 import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default

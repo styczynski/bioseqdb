@@ -252,9 +252,7 @@ function(bioseq_add_highway_imported_binder_canary)
       "${_source_root}/main.cpp"
       "${_source_root}/driver.cppm"
       "${_runtime}"
-      ${_target_partitions}
       ${_target_binders}
-      "${_registry}"
     PRIVATE
       FILE_SET CXX_MODULES
       TYPE CXX_MODULES
@@ -262,14 +260,14 @@ function(bioseq_add_highway_imported_binder_canary)
       FILES
         "${_source_root}/contract.cppm"
         "${_source_root}/dispatch.cppm"
-        ${_target_primaries})
+        ${_target_primaries}
+        ${_target_partitions}
+        "${_registry}")
   # Fixed-target kernels and the sole registry are private partitions; binders
   # and the driver are implementation units imported through the public module.
   set_source_files_properties(
     "${_source_root}/driver.cppm"
-    ${_target_partitions}
     ${_target_binders}
-    "${_registry}"
     PROPERTIES COMPILE_OPTIONS "-x;c++" CXX_SCAN_FOR_MODULES ON)
   target_include_directories("${ARG_TARGET}"
     SYSTEM PRIVATE "${_highway_include}")

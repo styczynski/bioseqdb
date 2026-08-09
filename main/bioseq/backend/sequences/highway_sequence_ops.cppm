@@ -2,6 +2,7 @@
 module;
 #include <hwy/aligned_allocator.h>
 #include <hwy/highway.h>
+#include "common.h"
 
 export module bioseq.highway.sources.sequence_ops;
 
@@ -16,14 +17,6 @@ import bioseq.highway.sources.vector_stream;
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
-
-inline void highway_kernel_invariant(
-    const bool condition, const std::string_view message)
-{
-    if (!condition) {
-        throw std::logic_error{std::string{message}};
-    }
-}
 
 template <typename T>
 inline constexpr std::pair<T, T> int_div_ceil(const T& val, const T& div) {
@@ -90,7 +83,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	}
 
 	const size_t max_delay = std::max<size_t>({ static_cast<size_t>(0), delays... });
-	highway_kernel_invariant(max_delay <= max_delay_bound, "Delay used cannot exceed manimum delay bound defined by max_delay_bound");
+	DEBUG_ASSERT(max_delay <= max_delay_bound, "Delay used cannot exceed manimum delay bound defined by max_delay_bound");
 
 	const hn::ScalableTag<typename seq_traits::storage_unit> d;
 	using VecT = hn::Vec<decltype(d)>;
@@ -156,7 +149,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	vec_mask_t main_mask = full_mask;
 	int32_t main_counter = 0;
 
-	highway_kernel_invariant(bps_last_chunk >= seq.padding() || bps_last_chunk == 0, "Sanity check. This should never fail as we should have more basses than are padded, otherwise all calculations are wrong.");
+	DEBUG_ASSERT(bps_last_chunk >= seq.padding() || bps_last_chunk == 0, "Sanity check. This should never fail as we should have more basses than are padded, otherwise all calculations are wrong.");
 	const int32_t main_counter_only_left = static_cast<int32_t>(bps_last_chunk) - static_cast<int32_t>(seq.padding());
 	const int32_t main_counter_none = static_cast<int32_t>(bps_last_chunk);
 
@@ -236,11 +229,11 @@ inline void iterate_sequence_bp_simd_offsets(
 		matrix mat(buffer.get_ptr_iter(buffer_write_pos));
 
 		// We read only full matrices
-		highway_kernel_invariant(buffer.get_forward_capacity() >= matrix_size, "Demand correct capacity in the buffer pre-load");
+		DEBUG_ASSERT(buffer.get_forward_capacity() >= matrix_size, "Demand correct capacity in the buffer pre-load");
 		// iter += mat.fill_with_offsets(d, offsets,static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
 		iter += mat.fill_with_offsets(d, offsets, seq.read_cptr(iter));
 		mat.transpose(d);
-		highway_kernel_invariant(buffer.get_forward_capacity() >= matrix_size, "Demand correct capacity in the buffer post-load");
+		DEBUG_ASSERT(buffer.get_forward_capacity() >= matrix_size, "Demand correct capacity in the buffer post-load");
 
 		for (size_t row_index = 0; row_index < hn::Lanes(d); ++row_index) {
 			//row = buffer.get_value_iter(buffer_write_pos);
@@ -252,13 +245,13 @@ inline void iterate_sequence_bp_simd_offsets(
 		// context change
 	}
 
-	highway_kernel_invariant(
+	DEBUG_ASSERT(
 		static_cast<size_t>(end - iter) * seq_traits::letters_per_unit - offsets[hn::Lanes(d)-1] * seq_traits::letters_per_unit \
 		== bps_last_chunk,
 		"Expect the last available part to load be exactly of size bps_last_chunk (ignoring padding)"
 	);
 
-	highway_kernel_invariant(buffer.get_forward_capacity() >= bps_last_chunk / seq_traits::letters_per_unit, "Demand correct capacity in the buffer when loading last (partial) chunk");
+	DEBUG_ASSERT(buffer.get_forward_capacity() >= bps_last_chunk / seq_traits::letters_per_unit, "Demand correct capacity in the buffer when loading last (partial) chunk");
 
 	//bioseq_log<DBG>("LOAD {} VALUES PARTIAL cap={}", static_cast<uint32_t>(end - iter), buffer.get_forward_capacity());
 
@@ -272,9 +265,9 @@ inline void iterate_sequence_bp_simd_offsets(
 		return;
 	}
 
-	highway_kernel_invariant(main_counter_none >= 1, "None counter cannot be less than 1.");
-	highway_kernel_invariant(main_counter_only_left >= 1, "Only-left counter cannot be less than 1.");
-	highway_kernel_invariant(main_counter_none >= main_counter_only_left, "Counters should have proper order (first should be left, then none)");
+	DEBUG_ASSERT(main_counter_none >= 1, "None counter cannot be less than 1.");
+	DEBUG_ASSERT(main_counter_only_left >= 1, "Only-left counter cannot be less than 1.");
+	DEBUG_ASSERT(main_counter_none >= main_counter_only_left, "Counters should have proper order (first should be left, then none)");
 	// `main_counter_none` is how many partial-matrix iterations we will run; that
 	// upper bound is the per-lane reach (bps_per_lane), NOT the total sequence
 	// length. After the `bps_last_chunk == 0` fix we may pull a full chunk into
@@ -282,7 +275,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	// dna4 × uint64_t: 64 iterations over a 62-bp sequence — the last 2 are
 	// masked out via left_mask/none_mask transitions). Use bps_per_lane as the
 	// sanity bound instead of seq.bp_size().
-	highway_kernel_invariant(static_cast<size_t>(main_counter_none) <= bps_per_lane, "Sanity check. If this fails, there's probably size_t overflow");
+	DEBUG_ASSERT(static_cast<size_t>(main_counter_none) <= bps_per_lane, "Sanity check. If this fails, there's probably size_t overflow");
 
 	while(true) {
 		// todo: break condition
@@ -478,7 +471,7 @@ iterate_sequence_bp_simd_v2(
 	vec_mask_t main_mask = full_mask;
 	int32_t main_counter = 0;
 
-	highway_kernel_invariant(bps_last_chunk >= seq.padding() || bps_last_chunk == 0,
+	DEBUG_ASSERT(bps_last_chunk >= seq.padding() || bps_last_chunk == 0,
 		"Sanity check. bps_last_chunk should always cover at least seq.padding().");
 	const int32_t main_counter_only_left =
 		static_cast<int32_t>(bps_last_chunk) - static_cast<int32_t>(seq.padding());
@@ -488,6 +481,9 @@ iterate_sequence_bp_simd_v2(
 	// (4) Per-stream raw matrix storage. With `delays_count == 0` we don't
 	// need the circular buffer indirection from v1 — one chunk of rows is
 	// loaded, consumed in order, then overwritten by the next chunk.
+	// Keep aggregate list-initialization: a bare declaration asks libc++ to
+	// synthesize a targetless std::array default constructor around fixed-
+	// target vectors, which is ill-formed for targets such as NEON_BF16.
 	HWY_ALIGN std::array<std::array<vec_t, max_lanes_per_stream>, NumStreams>
 		raw_matrix_storage{};
 
@@ -567,12 +563,12 @@ iterate_sequence_bp_simd_v2(
 		return;
 	}
 
-	highway_kernel_invariant(main_counter_none >= 1, "None counter cannot be less than 1.");
-	highway_kernel_invariant(main_counter_only_left >= 1,
+	DEBUG_ASSERT(main_counter_none >= 1, "None counter cannot be less than 1.");
+	DEBUG_ASSERT(main_counter_only_left >= 1,
 		"Only-left counter cannot be less than 1.");
-	highway_kernel_invariant(main_counter_none >= main_counter_only_left,
+	DEBUG_ASSERT(main_counter_none >= main_counter_only_left,
 		"Counters should have proper order (first should be only_left, then none)");
-	highway_kernel_invariant(static_cast<size_t>(main_counter_none) <= bps_per_lane,
+	DEBUG_ASSERT(static_cast<size_t>(main_counter_none) <= bps_per_lane,
 		"Sanity check. If this fails, there's probably size_t overflow.");
 
 	// Tail loop. Same body shape as the full-chunk fast path but with

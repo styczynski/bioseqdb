@@ -113,6 +113,25 @@ target_sources(bioseq_bench
       "${BIOSEQ_HIGHWAY_GENERATED_TEST_PRIMARY_MODULE}"
       "${BIOSEQ_HIGHWAY_GENERATED_TEST_SUPPORT}"
       ${BIOSEQ_HIGHWAY_GENERATED_TEST_PARTITIONS})
+
+# DOC0399: the grouped32 W1/W2/W4 adapter is one ordinary implementation unit
+# of the existing static-target primary.  It is benchmark-private and must
+# never join the production/test/E2E generated implementation closures.
+list(LENGTH BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS
+  _bioseq_highway_bench_probe_count)
+if(NOT _bioseq_highway_bench_probe_count EQUAL 1)
+  message(FATAL_ERROR
+    "DOC0399 requires exactly one generated Highway benchmark probe; got "
+    "${_bioseq_highway_bench_probe_count}")
+endif()
+set_source_files_properties(
+  ${BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS}
+  PROPERTIES
+    GENERATED TRUE
+    COMPILE_OPTIONS "-x;c++")
+target_sources(bioseq_bench PRIVATE
+  ${BIOSEQ_HIGHWAY_GENERATED_BENCH_PROBE_IMPLEMENTATIONS})
+
 target_link_libraries(bioseq_bench PRIVATE bioseq_highway_target_policy)
 add_dependencies(bioseq_bench bioseq_highway_target_modules)
 

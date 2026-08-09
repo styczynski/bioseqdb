@@ -14,9 +14,10 @@ extern "C" {
 #include <new>
 #include <vector>
 
-module bioseq.mod;
+module bioseq.mod:alignment_hook_callbacks_impl;
 
-import bioseq.table.scan_state;
+import :alignment_hook_contract;
+import bioseq.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 
@@ -94,7 +95,7 @@ void bioseq_alignment_executor_finish(QueryDesc* query_desc)
 	{
 		call_previous_or_standard_executor_finish(query_desc);
 		if (frame != nullptr && !frame->nested) {
-			bioseq::pg::detail::publish_alignment_root(frame);
+			publish_alignment_root(frame);
 			retire_escaped_nested_bindings(frame);
 		}
 		retire_alignment_frame(frame);

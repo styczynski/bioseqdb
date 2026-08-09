@@ -1,6 +1,7 @@
 /** Canonical generator input for the exact two-stack minimizer kernels. */
 module;
 #include <hwy/highway.h>
+#include "common.h"
 
 export module bioseq.highway.sources.minimizer_two_stack;
 
@@ -31,6 +32,8 @@ using ::bioseq::minimizers::MinimizerKernelAlgorithm;
 using ::bioseq::minimizers::MinimizerKernelInvocation;
 using ::bioseq::minimizers::MinimizerKernelResult;
 using ::bioseq::minimizers::MinimizerKernelStatus;
+using ::bioseq::minimizers::MinimizerOutputLayout;
+using ::bioseq::minimizers::minimizer_output_position_mask;
 using ::bioseq::minimizers::TwoStackRoute;
 
 /**
@@ -393,7 +396,7 @@ struct sequence_simd_iteration_state {
             // in dispatch_buffer.cppm). DOC0260 §3.2 keeps `dna5` in the
             // `pgseq_supported_alphabets` pack, so the instantiation is
             // unavoidable. We resolve this by routing the impossible
-            // configuration through a `highway_kernel_invariant(false, …)` runtime
+            // configuration through a `DEBUG_ASSERT(false, …)` runtime
             // guard so the impl compiles for every (alphabet, K)
             // combination the spec advertises and only trips at run-time
             // for the configurations the public dispatcher promises to
@@ -403,7 +406,7 @@ struct sequence_simd_iteration_state {
             if constexpr (static_rev_shift < sizeof(ST) * 8) {
                 new_high = ShiftLeft<static_rev_shift>(complemented);
             } else {
-                highway_kernel_invariant(false,
+                DEBUG_ASSERT(false,
                     fmt::format("two_stack SIMD: static K reverse-complement "
                                 "shift {} >= lane width {}; this (alphabet, K) "
                                 "must be routed to the scalar fallback "
@@ -738,7 +741,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
     // DEBUG_ASSERT below trips before the per-BP body emits a `ushl`
     // that would saturate to zero (see Phase-5 §3 for the failure
     // mechanism).
-    highway_kernel_invariant(k * seq_traits::bits_per_char <= sizeof(storage_unit) * 8,
+    DEBUG_ASSERT(k * seq_traits::bits_per_char <= sizeof(storage_unit) * 8,
         fmt::format(
             "two_stack SIMD lane storage_unit too narrow for K. "
             "k={}, bits_per_char={}, lane_bits={}. The public dispatcher "
@@ -790,9 +793,9 @@ collect_minimizers_two_stack_nthash_simd_impl(
     constexpr storage_unit hash_mask_high = static_cast<storage_unit>(~pos_mask);
     constexpr storage_unit max_val        = static_cast<storage_unit>(-1);
 
-    highway_kernel_invariant(w <= two_stack_max_window,
+    DEBUG_ASSERT(w <= two_stack_max_window,
         "two_stack_max_window must hold the requested window size");
-    highway_kernel_invariant(w >= 1, "Window size must be at least 1");
+    DEBUG_ASSERT(w >= 1, "Window size must be at least 1");
 
     const vec_t v_max       = hn::Set(d, max_val);
     const vec_t v_one       = hn::Set(d, static_cast<storage_unit>(1));
@@ -1085,7 +1088,7 @@ inline void collect_minimizers_two_stack_nthash_simd(
                     dispatch_with_unit.template operator()<
                         uint64_t, StaticW, 0>();
                 } else {
-                    highway_kernel_invariant(false, fmt::format(
+                    DEBUG_ASSERT(false, fmt::format(
                         "two_stack SIMD: kmer_bits={} exceeds uint64 "
                         "lane (k={}, bits_per_char={}). Need a wider "
                         "lane vocabulary or a scalar fallback.",
@@ -4236,7 +4239,8 @@ namespace coarse_two_stack_detail {
     }
 }
 
-template<sequence_alphabet Alphabet, class StorageUnit>
+template<class MinimizerT,
+         sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] bool run(
     MinimizerKernelInvocation& invocation,
     MinimizerKernelResult& result)
@@ -4245,14 +4249,14 @@ template<sequence_alphabet Alphabet, class StorageUnit>
         with_borrowed_compact_range<Alphabet, StorageUnit>(
             invocation.sequence,
             [&invocation, &result]<class Range>(Range& range) {
-                minimizer_sink_collector<MinimapSketchData> collector{
+                minimizer_sink_collector<MinimizerT> collector{
                     invocation.sink};
                 TwoStackFinalizeResult native{};
                 if (invocation.window == 10u
                     && invocation.kmer == 15u) {
                     native =
                         collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
-                            10u, 15u, MinimapSketchData>(
+                            10u, 15u, MinimizerT>(
                                 collector,
                                 range,
                                 0u,
@@ -4263,7 +4267,7 @@ template<sequence_alphabet Alphabet, class StorageUnit>
                 } else {
                     native =
                         collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked<
-                            0u, 0u, MinimapSketchData>(
+                            0u, 0u, MinimizerT>(
                                 collector,
                                 range,
                                 0u,
@@ -4291,7 +4295,7 @@ template<sequence_alphabet Alphabet, class StorageUnit>
 }
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN run_fragmented_impl
-template<std::size_t W, std::size_t K,
+template<std::size_t W, std::size_t K, class MinimizerT,
          sequence_alphabet Alphabet, class StorageUnit>
 void run_fragmented_impl(
     MinimizerKernelInvocation& invocation,
@@ -4303,7 +4307,7 @@ void run_fragmented_impl(
     using state_type = TwoStackContinuationState<W, K, traits>;
     constexpr std::size_t letters_per_unit = traits::letters_per_unit;
 
-    minimizer_sink_collector<MinimapSketchData> collector{invocation.sink};
+    minimizer_sink_collector<MinimizerT> collector{invocation.sink};
     state_type state{};
     TwoStackContinuationStatus status = reset_two_stack_nthash(
         state,
@@ -4352,7 +4356,7 @@ void run_fragmented_impl(
 
         try {
             status = consume_two_stack_nthash_packed_fragment<
-                W, K, MinimapSketchData>(
+                W, K, MinimizerT>(
                     state,
                     collector,
                     std::span<const StorageUnit>{
@@ -4390,21 +4394,23 @@ void run_fragmented_impl(
 }
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END run_fragmented_impl
 
-template<sequence_alphabet Alphabet, class StorageUnit>
+template<class MinimizerT,
+         sequence_alphabet Alphabet, class StorageUnit>
 [[nodiscard]] bool run_fragmented(
     MinimizerKernelInvocation& invocation,
     MinimizerKernelResult& result)
 {
     if (invocation.window == 10u && invocation.kmer == 15u) {
-        run_fragmented_impl<10u, 15u, Alphabet, StorageUnit>(
+        run_fragmented_impl<10u, 15u, MinimizerT, Alphabet, StorageUnit>(
             invocation, result);
     } else {
-        run_fragmented_impl<0u, 0u, Alphabet, StorageUnit>(
+        run_fragmented_impl<0u, 0u, MinimizerT, Alphabet, StorageUnit>(
             invocation, result);
     }
     return true;
 }
 
+template<class MinimizerT>
 [[nodiscard]] bool run_resident_report76(
     MinimizerKernelInvocation& invocation,
     MinimizerKernelResult& result)
@@ -4413,12 +4419,12 @@ template<sequence_alphabet Alphabet, class StorageUnit>
         with_borrowed_compact_range<seq::dna4, std::uint32_t>(
             invocation.sequence,
             [&invocation, &result]<class Range>(Range& range) {
-                minimizer_sink_collector<MinimapSketchData> collector{
+                minimizer_sink_collector<MinimizerT> collector{
                     invocation.sink};
                 try {
                     result.proof.two_stack =
                         collect_minimizers_two_stack_nthash_resident_or_throw<
-                            MinimapSketchData>(
+                            MinimizerT>(
                                 collector,
                                 range,
                                 invocation.window,
@@ -4442,6 +4448,54 @@ template<sequence_alphabet Alphabet, class StorageUnit>
             });
 }
 
+template<class MinimizerT,
+         sequence_alphabet Alphabet, class StorageUnit>
+[[nodiscard]] bool run_selected_output_layout(
+    MinimizerKernelInvocation& invocation,
+    MinimizerKernelResult& result)
+{
+    static_assert(exact_simd_minimizer_representation<MinimizerT>);
+
+    if (invocation.output_hash_mask
+            != static_cast<std::uint64_t>(MinimizerT::hash_field_mask)
+        || invocation.output_position_mask
+            != static_cast<std::uint64_t>(MinimizerT::pos_field_mask)) {
+        result.family_status = static_cast<std::uint32_t>(
+            TwoStackContinuationStatus::unsupported_representation);
+        result.status = MinimizerKernelStatus::invalid_configuration;
+        result.proof.two_stack.fail_closed_rejections = 1u;
+        return false;
+    }
+
+    switch (invocation.two_stack_route) {
+        case TwoStackRoute::chronological_continuation:
+            return invocation.fragments.present()
+                ? run_fragmented<MinimizerT, Alphabet, StorageUnit>(
+                    invocation, result)
+                : run<MinimizerT, Alphabet, StorageUnit>(
+                    invocation, result);
+        case TwoStackRoute::resident_report76:
+            if constexpr (!std::same_as<Alphabet, seq::dna4>
+                          || !std::same_as<StorageUnit, std::uint32_t>) {
+                result.family_status = static_cast<std::uint32_t>(
+                    TwoStackContinuationStatus::invalid_static_configuration);
+                result.status = MinimizerKernelStatus::invalid_configuration;
+                return false;
+            }
+            if (invocation.window != 10u
+                || invocation.kmer != 15u
+                || invocation.emitted_position_base != 0u
+                || invocation.fragments.present()) {
+                result.family_status = static_cast<std::uint32_t>(
+                    TwoStackContinuationStatus::invalid_static_configuration);
+                result.status = MinimizerKernelStatus::invalid_configuration;
+                return false;
+            }
+            return run_resident_report76<MinimizerT>(invocation, result);
+    }
+    return false;
+}
+
 } // namespace coarse_two_stack_detail
 
 /**
@@ -4457,48 +4511,66 @@ template<sequence_alphabet Alphabet, class StorageUnit>
     result.proof.algorithm = MinimizerKernelAlgorithm::two_stack_nthash;
     result.proof.target = static_cast<std::int64_t>(HWY_TARGET);
 
+    const auto reject_output_layout = [&result]() {
+        result.family_status = static_cast<std::uint32_t>(
+            TwoStackContinuationStatus::unsupported_representation);
+        result.status = MinimizerKernelStatus::invalid_configuration;
+        return result;
+    };
+
     if (!invocation.sequence.final_segment
         || invocation.sequence.begin_symbol != 0u
         || invocation.window == 0u
         || invocation.window > two_stack_max_window
         || invocation.kmer == 0u
-        || invocation.kmer > two_stack_exact_max_kmer
-        || invocation.sequence.end_symbol
-            > static_cast<std::size_t>(
-                MinimapSketchData::pos_field_mask) + 1u) {
+        || invocation.kmer > two_stack_exact_max_kmer) {
         result.status = MinimizerKernelStatus::invalid_configuration;
         return result;
     }
 
+    const std::uint64_t output_position_mask =
+        minimizer_output_position_mask(invocation.output_layout);
+    const std::uint64_t maximum_local_position =
+        invocation.sequence.end_symbol == 0u
+            ? 0u
+            : static_cast<std::uint64_t>(
+                invocation.sequence.end_symbol - 1u);
+    if (output_position_mask == 0u
+        || (invocation.sequence.end_symbol != 0u
+            && (invocation.emitted_position_base > output_position_mask
+                || maximum_local_position
+                    > output_position_mask
+                        - invocation.emitted_position_base))) {
+        return reject_output_layout();
+    }
+
     bool accepted = false;
-    switch (invocation.two_stack_route) {
-        case TwoStackRoute::chronological_continuation:
-            accepted = invocation.fragments.present()
-                ? coarse_two_stack_detail::run_fragmented<
-                    Alphabet, StorageUnit>(invocation, result)
-                : coarse_two_stack_detail::run<Alphabet, StorageUnit>(
+    switch (invocation.output_layout) {
+        case MinimizerOutputLayout::repr_l15_k15_u64:
+            accepted = coarse_two_stack_detail::run_selected_output_layout<
+                MinimizerRepr<15u, 15u>, Alphabet, StorageUnit>(
                     invocation, result);
             break;
-        case TwoStackRoute::resident_report76:
-            if constexpr (!std::same_as<Alphabet, seq::dna4>
-                          || !std::same_as<StorageUnit, std::uint32_t>) {
-                result.family_status = static_cast<std::uint32_t>(
-                    TwoStackContinuationStatus::invalid_static_configuration);
-                result.status = MinimizerKernelStatus::invalid_configuration;
-                break;
-            }
-            if (invocation.window != 10u
-                || invocation.kmer != 15u
-                || invocation.emitted_position_base != 0u
-                || invocation.fragments.present()) {
-                result.family_status = static_cast<std::uint32_t>(
-                    TwoStackContinuationStatus::invalid_static_configuration);
-                result.status = MinimizerKernelStatus::invalid_configuration;
-                break;
-            }
-            accepted = coarse_two_stack_detail::run_resident_report76(
-                invocation, result);
+        case MinimizerOutputLayout::repr_l28_k15_u64:
+            accepted = coarse_two_stack_detail::run_selected_output_layout<
+                MinimizerRepr<28u, 15u>, Alphabet, StorageUnit>(
+                    invocation, result);
             break;
+        case MinimizerOutputLayout::repr_l33_k15_u64:
+            accepted = coarse_two_stack_detail::run_selected_output_layout<
+                MinimizerRepr<33u, 15u>, Alphabet, StorageUnit>(
+                    invocation, result);
+            break;
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 4
+        case MinimizerOutputLayout::repr_l49_k7_u64:
+            accepted = coarse_two_stack_detail::run_selected_output_layout<
+                MinimizerRepr<49u, 7u>, Alphabet, StorageUnit>(
+                    invocation, result);
+            break;
+#endif
+        case MinimizerOutputLayout::unsupported:
+        default:
+            return reject_output_layout();
     }
     if (!accepted && result.status == MinimizerKernelStatus::ok) {
         result.status = MinimizerKernelStatus::invalid_sequence_view;

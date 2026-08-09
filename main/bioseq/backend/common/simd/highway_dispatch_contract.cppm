@@ -230,6 +230,7 @@ struct HighwayKernelTable final {
             const auto& identity = alphabet_identities[index];
             const auto& alignment = alignment_by_alphabet[index];
             if (identity.type_identity == nullptr
+                || !alignment.typed_table_complete
                 || alignment.typed_table == nullptr
                 || alignment.alphabet_code != identity.alphabet_code
                 || (index != 0u

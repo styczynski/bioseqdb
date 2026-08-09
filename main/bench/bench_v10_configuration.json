@@ -49,7 +49,10 @@
     "bioseq_ksw2_rmq_scalar_mm":                {"_": {"type": "integer", "default": 0}},
     "grouped32_local32_scalar_exact":           {"_": {"type": "integer", "default": 0, "description": "Current per-word little-endian decode and checked-globalization semantics; exact failure-order reference"}},
     "grouped32_local32_scalar_optimized":       {"_": {"type": "integer", "default": 0, "description": "Hoisted span admission plus alias-safe native scalar loads; compiler auto-vectorization remains enabled"}},
-    "grouped32_local32_scalar_unrolled":        {"_": {"type": "integer", "default": 0, "description": "Four-word unrolled alias-safe scalar validation with exact scalar replay on failure"}}
+    "grouped32_local32_scalar_unrolled":        {"_": {"type": "integer", "default": 0, "description": "Four-word unrolled alias-safe scalar validation with exact scalar replay on failure"}},
+    "grouped32_local32_vec_stream_1":           {"_": {"type": "integer", "default": 0, "description": "Contiguous grouped32 validation using one Highway vector stream; no gather/global-position materialization"}},
+    "grouped32_local32_vec_stream_2":           {"_": {"type": "integer", "default": 0, "description": "Contiguous grouped32 validation using two Highway vector streams for NEON issue-width saturation; no gather"}},
+    "grouped32_local32_vec_stream_4":           {"_": {"type": "integer", "default": 0, "description": "Contiguous grouped32 validation using four Highway vector streams to expose register-pressure tradeoffs; no gather"}}
   },
 
   "test_cases": {
@@ -140,13 +143,13 @@
 
     "GROUPED32_LOCAL32_ONE_70K":      { "concurrency": 1, "data": { "span_count": 1, "words_per_span": 70000, "total_words": 70000 }, "description": "One long 70k-word scatter-false span; primary contiguous-throughput case" },
     "GROUPED32_LOCAL32_256_X_256":    { "concurrency": 1, "data": { "span_count": 256, "words_per_span": 256, "total_words": 65536 }, "description": "256 medium controls with 256 contiguous local32 words each" },
-    "GROUPED32_LOCAL32_4096_X_16":    { "concurrency": 1, "data": { "span_count": 4096, "words_per_span": 16, "total_words": 65536 }, "description": "4096 short controls; exposes unrolling payoff and per-span reduction cost" },
-    "GROUPED32_LOCAL32_65536_X_1":    { "concurrency": 1, "data": { "span_count": 65536, "words_per_span": 1, "total_words": 65536 }, "description": "Singleton negative control for per-span scalar boundary overhead" },
+    "GROUPED32_LOCAL32_4096_X_16":    { "concurrency": 1, "data": { "span_count": 4096, "words_per_span": 16, "total_words": 65536 }, "description": "4096 short controls; exposes the SIMD cutoff and per-span reduction cost" },
+    "GROUPED32_LOCAL32_65536_X_1":    { "concurrency": 1, "data": { "span_count": 65536, "words_per_span": 1, "total_words": 65536 }, "description": "Singleton negative control; vector candidates should naturally remain on scalar boundaries" },
     "GROUPED32_LOCAL32_ZIPF_64K":     { "concurrency": 1, "data": { "span_count": 1024, "words_per_span": 1, "total_words": 65536 }, "description": "Deterministic skewed control lengths summing to 65536 local32 words" }
   },
   "bench_grouped32_local32_validation": {
-    "tags": ["grouped32-local32", "index-loading"],
-    "description": "Benchmark-only contiguous grouped32 scatter-false validation experiment. Compares exact, optimized, and four-word-unrolled scalar loops, reports operation-originated route counters, and runs untimed adversarial parity probes. It never gathers u64 positions and does not alter production reader routing.",
+    "tags": ["grouped32-local32", "index-loading", "simd"],
+    "description": "Benchmark-only contiguous grouped32 scatter-false validation experiment. Compares exact and optimized scalar loops with the production grouped32 Highway core instantiated at W=1/2/4, reports operation-originated route counters, and runs untimed adversarial parity probes. Vector-labelled rows fail rather than silently switching algorithms. It never gathers u64 positions and does not alter production reader routing.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "iteration_order": { "mode": "interleaved_seeded", "seed": 370032 },
@@ -161,7 +164,10 @@
       "over": {
         "grouped32_local32_scalar_exact": {},
         "grouped32_local32_scalar_optimized": {},
-        "grouped32_local32_scalar_unrolled": {}
+        "grouped32_local32_scalar_unrolled": {},
+        "grouped32_local32_vec_stream_1": {},
+        "grouped32_local32_vec_stream_2": {},
+        "grouped32_local32_vec_stream_4": {}
       },
       "by_regions": true,
       "metrics": {
@@ -176,10 +182,13 @@
         "primary_correct_fraction": { "type": "evaluation", "rules": [] },
         "route_proof_accepted": { "type": "evaluation" },
         "selected_route": { "type": "evaluation" },
+        "selected_vector_stream_width": { "type": "evaluation" },
+        "vectorized_words": { "type": "evaluation" },
         "scalar_boundary_words": { "type": "evaluation" },
         "scalar_tail_words": { "type": "evaluation" },
         "failure_replay_count": { "type": "evaluation" },
         "adversarial_probe_count": { "type": "evaluation" },
+        "adversarial_vectorized_words": { "type": "evaluation" },
         "adversarial_replay_count": { "type": "evaluation" },
         "valid_result": { "type": "evaluation" },
         "validated_words": { "type": "evaluation" },

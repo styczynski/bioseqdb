@@ -30,6 +30,7 @@ extern "C" {
 #include <cstring>
 
 module bioseq.scheduler.supervisor_pg;
+import :persist_queue_publish;
 import bioseq.common.mlogging;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq_scheduler_*, bioseq::settings::index_async_persist, bioseq::settings::index_memory_cap_mb GUCs
 import bioseq.instr;

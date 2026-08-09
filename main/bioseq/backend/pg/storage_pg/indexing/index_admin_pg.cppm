@@ -1657,9 +1657,10 @@ static_assert(packed_paper_nthash_index_pg_errcode(
 		 errmsg("%s", message),
 		 errdetail_internal("%s: status=%.*s %s", operation,
 			 static_cast<int>(status_name.size()), status_name.data(), detail),
-		 errhint("Paper ntHash requires DNA4 or DNA5 with supported packed "
-			 "storage and W=10/K=15, or increase "
-			 "the index memory limit when status=admission_denied.")));
+			 errhint("Paper ntHash SIMD has no scalar or Exact SIMD fallback; "
+				 "use DNA4 with packed uint32/uint64 storage and W=10/K=15, "
+				 "or increase the index memory limit when "
+				 "status=admission_denied.")));
 	pg_unreachable();
 }
 
@@ -4738,7 +4739,8 @@ build_rev3_pg_integration_fixture_impl(
         std::uint16_t kmer_size,
         std::uint16_t window_size,
         bioseq::indexing::MinimizerGenerationWireFormat wire_format,
-        bioseq::minimizers::MinimizerSketchBackend backend) {
+        bioseq::minimizers::MinimizerSketchBackend backend,
+        std::uint64_t position_segment_span_bp) {
     if (!OidIsValid(rel_oid)
         || !bioseq::pg_utils::invoke_pg_as_cpp(
             [rel_oid] { return IsBioseqColumnTableAmTable(rel_oid); })) {
@@ -4772,6 +4774,14 @@ build_rev3_pg_integration_fixture_impl(
         ready_minimizer_error_as_cpp(
             ERRCODE_INVALID_PARAMETER_VALUE,
             "bioseq rev3 fixture wire format must be canonical 3 or 4");
+    }
+    if (position_segment_span_bp != 0
+        && position_segment_span_bp
+            > static_cast<std::uint64_t>(
+                bioseq::indexing::kMinimizerGrouped32MaxLocalBp) + 1u) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "bioseq rev3 fixture position segment span exceeds grouped32 capacity");
     }
     const auto requested_scheme =
         bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
@@ -4901,6 +4911,7 @@ build_rev3_pg_integration_fixture_impl(
             .source_identity = result.source_identity,
             .source_content_checksum = source_content_checksum,
             .target_length = target_length,
+            .position_segment_span_bp = position_segment_span_bp,
             .alphabet_code = source.alphabet_code,
             .storage_unit_byte_width = source.storage_unit_byte_width,
             .kmer_size = kmer_size,

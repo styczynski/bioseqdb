@@ -13,11 +13,13 @@ extern "C" {
 }
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
 
 module bioseq.scheduler.supervisor_pg;
+import :persist_queue_publish;
 import bioseq.common.mlogging;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.type;
@@ -77,7 +79,12 @@ void bioseq_persist_xact_callback(XactEvent event, void*) {
     }
     if (commit) {
         for (PendingPersistJob& job : jobs) {
+            const std::span<PgPersistQueueSlot> persist_queue =
+                g_shared == nullptr
+                    ? std::span<PgPersistQueueSlot>{}
+                    : std::span<PgPersistQueueSlot>{g_shared->persist_queue};
             if (publish_persist_job_to_shared_queue(
+                    persist_queue,
                     job.target,
                     job.index_name,
                     job.dsm,

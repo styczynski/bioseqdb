@@ -16,6 +16,19 @@ using namespace bioseq_int_tests;
 
 namespace {
 
+constexpr std::string_view kDoc0388ActiveProfile{
+    BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE};
+static_assert(kDoc0388ActiveProfile == "production"
+              || kDoc0388ActiveProfile == "test_indexes");
+constexpr bool kDoc0388TestIndexesProfile =
+    kDoc0388ActiveProfile == "test_indexes";
+constexpr std::string_view kExpectedCFunctionCount =
+    kDoc0388TestIndexesProfile ? "272" : "271";
+constexpr std::string_view kExpectedCRoutineCount =
+    kDoc0388TestIndexesProfile ? "273" : "272";
+constexpr std::string_view kExpectedDistinctCBindingCount =
+    kDoc0388TestIndexesProfile ? "271" : "270";
+
 constexpr std::string_view kAlterTable = "doc0388_alter_t";
 constexpr std::string_view kVacuumTable = "doc0388_vacuum_t";
 constexpr std::string_view kEmptyVacuumTable = "doc0388_empty_vacuum_t";
@@ -404,7 +417,7 @@ TEST_CASE(
            "                 OR (prokind = 'p' AND lanname = 'c'))))::text "
            "  FROM extension_routines;");
   REQUIRE(languages.size() == 5);
-  REQUIRE(languages[0].value() == "269");
+  REQUIRE(languages[0].value() == kExpectedCFunctionCount);
   REQUIRE(languages[1].value() == "2");
   REQUIRE(languages[2].value() == "1");
   REQUIRE(languages[3].value() == "0");
@@ -440,8 +453,8 @@ TEST_CASE(
            "                          ORDER BY prosrc) "
            "          FROM shared);");
   REQUIRE(symbols.size() == 4);
-  REQUIRE(symbols[0].value() == "270");
-  REQUIRE(symbols[1].value() == "268");
+  REQUIRE(symbols[0].value() == kExpectedCRoutineCount);
+  REQUIRE(symbols[1].value() == kExpectedDistinctCBindingCount);
   REQUIRE(symbols[2].value() == "0");
   REQUIRE(symbols[3].value() == "from_array:2,mmsearch:2");
 

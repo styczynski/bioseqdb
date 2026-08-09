@@ -500,6 +500,52 @@ struct ArenaSlab {
         ptr_[len_++] = std::move(element);
     }
 
+    /** Append exact trivially-copyable records into uninitialized arena slots. */
+    [[nodiscard]] bool append_trivial_records(
+            const std::span<const E> records) {
+        static_assert(std::is_trivially_copyable_v<E>);
+        if (records.size()
+            > (std::numeric_limits<std::size_t>::max)() - len_) {
+            return false;
+        }
+        reserve_geometric(len_ + records.size());
+        if (!records.empty()) {
+            // Copying an implicit-lifetime E object representation into the
+            // suitably aligned arena storage starts the destination objects'
+            // lifetimes without value-initializing unused capacity.
+            std::memcpy(
+                static_cast<void*>(ptr_ + len_),
+                static_cast<const void*>(records.data()),
+                records.size_bytes());
+            len_ += records.size();
+        }
+        return true;
+    }
+
+    /** Append storage-sized wire values that are exactly E's representation. */
+    template <class Storage>
+    [[nodiscard]] bool append_trivial_storage(
+            const std::span<const Storage> records)
+        requires (
+            std::is_trivially_copyable_v<E>
+            && std::is_trivially_copyable_v<Storage>
+            && sizeof(E) == sizeof(Storage))
+    {
+        if (records.size()
+            > (std::numeric_limits<std::size_t>::max)() - len_) {
+            return false;
+        }
+        reserve_geometric(len_ + records.size());
+        if (!records.empty()) {
+            std::memcpy(
+                static_cast<void*>(ptr_ + len_),
+                static_cast<const void*>(records.data()),
+                records.size_bytes());
+            len_ += records.size();
+        }
+        return true;
+    }
+
     void resize(std::size_t new_len) noexcept {
         DEBUG_ASSERT(new_len <= cap_, "ArenaSlab::resize beyond reserved capacity");
         len_ = new_len;

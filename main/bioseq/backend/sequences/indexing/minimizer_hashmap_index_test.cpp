@@ -4805,6 +4805,182 @@ TEST_CASE("inactive MPS storage incarnation counters fail closed at wrap",
     REQUIRE_FALSE(last_valid.segment_spill_storage_binding().valid());
 }
 
+TEST_CASE("minimizer index facades preserve biological rejection precedence",
+          "[indexing][minimizer-hashmap][exact-simd][paper][precedence]"
+          "[fail-closed]") {
+    using namespace bioseq::indexing;
+    auto data = make_dna4(257u, 0x399500u);
+    range_t range(data);
+    auto owner = bioseq::storage::make_lazy_in_memory(range);
+    const auto view = bioseq::storage::as_lazy_sequence_view(owner);
+
+    sketch_collector exact_collector;
+    try {
+        (void)collect_exact_simd_index_range_or_throw(
+            exact_collector,
+            view,
+            fixed_alphabet_code<::seq::dna4>(),
+            2u,
+            1u,
+            10u,
+            15u,
+            0u,
+            nullptr,
+            "precedence probe");
+        FAIL("Exact lazy facade accepted a reversed range");
+    } catch (const ExactSimdIndexRuntimeError& error) {
+        REQUIRE(error.status() == ExactSimdIndexStatus::invalid_range);
+    }
+
+    sketch_collector paper_collector;
+    const auto paper_lazy = collect_bounded_packed_paper_nthash_index_lazy(
+        view,
+        fixed_alphabet_code<::seq::dna4>(),
+        2u,
+        1u,
+        0u,
+        10u,
+        15u,
+        nullptr,
+        paper_collector);
+    REQUIRE(paper_lazy.status
+            == PackedPaperNthashIndexStatus::invalid_range);
+    REQUIRE(paper_collector.extract_sketches_data().empty());
+
+    const ExactSimdIndexBridgeRequest unsupported_alphabet{
+        .alphabet_code = 77u,
+        .bits_per_symbol = 2u,
+        .storage_unit_bytes = sizeof(std::uint32_t),
+    };
+    REQUIRE(collect_exact_simd_index_erased(unsupported_alphabet).status
+            == ExactSimdIndexStatus::unsupported_alphabet);
+    auto unsupported_storage = unsupported_alphabet;
+    unsupported_storage.alphabet_code =
+        fixed_alphabet_code<::seq::dna4>();
+    unsupported_storage.storage_unit_bytes = 3u;
+    REQUIRE(collect_exact_simd_index_erased(unsupported_storage).status
+            == ExactSimdIndexStatus::unsupported_storage);
+    auto missing_exact_state = unsupported_storage;
+    missing_exact_state.storage_unit_bytes = sizeof(std::uint32_t);
+    REQUIRE(collect_exact_simd_index_erased(missing_exact_state).status
+            == ExactSimdIndexStatus::invalid_state);
+
+    PackedPaperNthashIndexBridgeRequest paper_request{
+        .kernels = nullptr,
+        .sequence = fixed_packed_sequence_view(range),
+        .sequence_context = &range,
+        .collector_context = &paper_collector,
+        .storage_unit_bytes = sizeof(std::uint64_t),
+        .letters_per_unit = range_t::traits::letters_per_unit,
+        .storage_units = range.size(),
+        .local_bp_size = range.bp_size(),
+        .window_size = 10u,
+        .kmer_size = 15u,
+    };
+    auto invalid_configuration = paper_request;
+    invalid_configuration.window_size = 9u;
+    invalid_configuration.sequence.alphabet_code = 77u;
+    invalid_configuration.storage_unit_bytes = sizeof(std::uint16_t);
+    REQUIRE(collect_packed_paper_nthash_index_erased(
+                invalid_configuration).status
+            == PackedPaperNthashIndexStatus::invalid_configuration);
+
+    auto invalid_alphabet = paper_request;
+    invalid_alphabet.sequence.alphabet_code =
+        fixed_alphabet_code<::seq::dna5>();
+    invalid_alphabet.storage_unit_bytes = sizeof(std::uint16_t);
+    REQUIRE(collect_packed_paper_nthash_index_erased(invalid_alphabet).status
+            == PackedPaperNthashIndexStatus::unsupported_alphabet);
+
+    auto invalid_storage = paper_request;
+    invalid_storage.storage_unit_bytes = sizeof(std::uint16_t);
+    invalid_storage.sequence.storage_unit_bytes = sizeof(std::uint16_t);
+    invalid_storage.letters_per_unit = 8u;
+    REQUIRE(collect_packed_paper_nthash_index_erased(invalid_storage).status
+            == PackedPaperNthashIndexStatus::unsupported_storage);
+
+    auto invalid_range = paper_request;
+    invalid_range.sequence.end_symbol = range.bp_size() + 1u;
+    REQUIRE(collect_packed_paper_nthash_index_erased(invalid_range).status
+            == PackedPaperNthashIndexStatus::invalid_range);
+    REQUIRE(collect_packed_paper_nthash_index_erased(paper_request).status
+            == PackedPaperNthashIndexStatus::invalid_state);
+}
+
+TEST_CASE("Paper index proof combine rejects mixed source widths without rewriting identity",
+          "[indexing][minimizer-hashmap][paper][proof][combine][storage]") {
+    using namespace bioseq::indexing;
+    PackedPaperNthashIndexExecutionProof u32{
+        .scheme_id = kPackedPaperNthashKernelSchemeId,
+        .kmer_size = 15u,
+        .window_size = 10u,
+        .nthash_rotation = 7u,
+        .source_storage_unit_bytes = sizeof(std::uint32_t),
+        .segments_combined = 1u,
+        .logical_streams = 8u,
+        .physical_vector_lanes = 4u,
+        .vector_registers_per_step = 2u,
+        .positions_are_segment_local = true,
+    };
+    auto second_u32 = u32;
+    auto same_width = u32;
+    same_width.combine(second_u32);
+    REQUIRE_FALSE(same_width.aggregation_mismatch);
+    REQUIRE(same_width.source_storage_unit_bytes == sizeof(std::uint32_t));
+    REQUIRE(same_width.segments_combined == 2u);
+
+    auto u64 = u32;
+    u64.source_storage_unit_bytes = sizeof(std::uint64_t);
+    auto mixed_width = u32;
+    mixed_width.combine(u64);
+    REQUIRE(mixed_width.aggregation_mismatch);
+    REQUIRE(mixed_width.source_storage_unit_bytes == sizeof(std::uint32_t));
+    REQUIRE_FALSE(mixed_width.accepted(false));
+}
+
+TEST_CASE("Paper lazy index admits resident u64 through one canonical u32 window",
+          "[indexing][minimizer-hashmap][paper][storage][u32]"
+          "[memory-admission]") {
+    using namespace bioseq::indexing;
+    auto data = make_dna4(4096u, 0x5533325041504552ULL);
+    range_t range(data);
+    auto owner = bioseq::storage::make_lazy_in_memory(range);
+    const auto view = bioseq::storage::as_lazy_sequence_view(owner);
+    REQUIRE(view.try_resident_packed(
+        0u, view.bp_size(), sizeof(std::uint64_t)).has_value());
+    REQUIRE_FALSE(view.try_resident_packed(
+        0u, view.bp_size(), sizeof(std::uint32_t)).has_value());
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t admission_before = admission.reserved_bytes();
+    sketch_collector collector;
+    std::uint64_t materialized_window_bp = 0u;
+    const auto result = collect_bounded_packed_paper_nthash_index_lazy(
+        view,
+        fixed_alphabet_code<::seq::dna4>(),
+        0u,
+        view.bp_size(),
+        view.bp_size(),
+        10u,
+        15u,
+        fixed_minimizer_kernels(),
+        collector,
+        &materialized_window_bp);
+    if (result.status
+        == PackedPaperNthashIndexStatus::unsupported_vector_shape) {
+        REQUIRE(admission.reserved_bytes() == admission_before);
+        SKIP("the compiled Highway target cannot execute packed Paper ntHash");
+    }
+    REQUIRE(result.status == PackedPaperNthashIndexStatus::ok);
+    REQUIRE(result.proof.accepted(true));
+    REQUIRE(result.proof.source_storage_unit_bytes
+        == sizeof(std::uint32_t));
+    REQUIRE(materialized_window_bp == view.bp_size());
+    REQUIRE_FALSE(collector.extract_sketches_data().empty());
+    REQUIRE(admission.reserved_bytes() == admission_before);
+}
+
 TEST_CASE("inactive format-4 MPS reuses checked bounded packed Paper",
           "[indexing][minimizer-hashmap][wire][encoder][mps][paper][evidence]") {
     using namespace bioseq::indexing;
@@ -4998,8 +5174,9 @@ TEST_CASE("inactive format-4 MPS canonicalizes periodic Paper ties within admiss
     require_complete_generation_rows(*encoded, sink.rows);
 }
 
-TEST_CASE("format-4 MPS Paper admits DNA5 and preserves the explicit N-reset fallback",
-          "[indexing][minimizer-hashmap][wire][encoder][mps][paper][dna5]") {
+TEST_CASE("format-4 MPS Paper rejects DNA5 without scalar substitution",
+          "[indexing][minimizer-hashmap][wire][encoder][mps][paper][dna5]"
+          "[fail-closed]") {
     using namespace bioseq::indexing;
     constexpr std::size_t fragment_units = 64;
     constexpr std::uint64_t fragment_bp = fragment_units * 21u;
@@ -5019,29 +5196,34 @@ TEST_CASE("format-4 MPS Paper admits DNA5 and preserves the explicit N-reset fal
     const std::uint64_t admission_before =
         bioseq::parallelism::MemoryAdmissionController::instance()
             .reserved_bytes();
-    auto spill = MpsIndex::spill_generation_replay_runs_serial(
-        storage,
-        lazy_view,
-        MinimizerSketchBackend::PaperNtHashSimd,
-        fixed_minimizer_kernels(),
-        fragment_bp,
-        kMinimizerPreferredSegmentSpanBp,
-        &evidence,
-        fixed_alphabet_code<::seq::dna5>());
-    REQUIRE(spill.has_value());
-    REQUIRE(evidence.spill_complete);
-    REQUIRE(evidence.spill_accepted());
-    REQUIRE(evidence.scalar_core_runs == 0);
-    REQUIRE(evidence.exact_simd_core_runs == 0);
-    REQUIRE(evidence.paper_nthash_core_runs > 0);
-    REQUIRE(evidence.vulkan_core_runs == 0);
+    try {
+        (void)MpsIndex::spill_generation_replay_runs_serial(
+            storage,
+            lazy_view,
+            MinimizerSketchBackend::PaperNtHashSimd,
+            fixed_minimizer_kernels(),
+            fragment_bp,
+            kMinimizerPreferredSegmentSpanBp,
+            &evidence,
+            fixed_alphabet_code<::seq::dna5>());
+        FAIL("Paper MPS accepted DNA5");
+    } catch (const PackedPaperNthashIndexRuntimeError& error) {
+        REQUIRE(error.status()
+            == PackedPaperNthashIndexStatus::unsupported_alphabet);
+    }
+    REQUIRE_FALSE(evidence.spill_complete);
+    REQUIRE_FALSE(evidence.spill_accepted());
+    REQUIRE(evidence.scalar_core_runs == 0u);
+    REQUIRE(evidence.exact_simd_core_runs == 0u);
+    REQUIRE(evidence.paper_nthash_core_runs == 1u);
+    REQUIRE(evidence.vulkan_core_runs == 0u);
     REQUIRE(evidence.packed_paper_proof_present);
     REQUIRE(evidence.packed_paper_status
-        == PackedPaperNthashIndexStatus::ok);
-    REQUIRE(evidence.packed_paper_proof.accepted(true));
-    REQUIRE(evidence.packed_paper_proof.fail_closed_rejections == 0);
-    REQUIRE(evidence.packed_paper_proof.fallback_calls > 0);
-    REQUIRE(storage.segment_spill_run_count() > 0);
+        == PackedPaperNthashIndexStatus::unsupported_alphabet);
+    REQUIRE_FALSE(evidence.packed_paper_proof.accepted(true));
+    REQUIRE(evidence.packed_paper_proof.fail_closed_rejections == 1u);
+    REQUIRE(evidence.packed_paper_proof.fallback_calls == 0u);
+    REQUIRE(storage.segment_spill_run_count() == 0u);
     REQUIRE(bioseq::parallelism::MemoryAdmissionController::instance()
         .reserved_bytes() == admission_before);
 }
@@ -5370,7 +5552,7 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
     using namespace bioseq::indexing;
     using Index = MinimizersPerFragmentIndex<FakeFragmentStorage<>>;
 
-    SECTION("DNA5 executes the ambiguity-aware Paper topology case") {
+    SECTION("DNA5 fails closed without scalar substitution") {
         using chunked = sequence_scanner_test_chunked<std::uint64_t, 64>;
         std::vector<seq::dna5> data(4096);
         for (std::size_t index = 0; index < data.size(); ++index) {
@@ -5395,19 +5577,21 @@ TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biolo
         const std::uint64_t admission_before =
             bioseq::parallelism::MemoryAdmissionController::instance()
                 .reserved_bytes();
-        const auto encoded = encode_minimizer_generation(
-            producer, sink, options);
-        REQUIRE(encoded.has_value());
-        REQUIRE_FALSE(sink.rows.empty());
-        REQUIRE(producer.scan_count() == 2u);
+        try {
+            (void)encode_minimizer_generation(producer, sink, options);
+            FAIL("Paper MPF accepted DNA5");
+        } catch (const PackedPaperNthashIndexRuntimeError& error) {
+            REQUIRE(error.status()
+                == PackedPaperNthashIndexStatus::unsupported_alphabet);
+        }
+        REQUIRE(sink.rows.empty());
         REQUIRE(producer.packed_paper_proof_present());
         REQUIRE(producer.packed_paper_status()
-            == PackedPaperNthashIndexStatus::ok);
-        REQUIRE(producer.packed_paper_proof().accepted(true));
-        REQUIRE(producer.packed_paper_proof().fallback_calls > 0u);
-        REQUIRE(producer.packed_paper_proof().fail_closed_rejections == 0);
+            == PackedPaperNthashIndexStatus::unsupported_alphabet);
+        REQUIRE_FALSE(producer.packed_paper_proof().accepted(true));
+        REQUIRE(producer.packed_paper_proof().fail_closed_rejections == 1u);
+        REQUIRE(producer.packed_paper_proof().fallback_calls == 0u);
         REQUIRE_FALSE(producer.exact_simd_proof_present());
-        require_complete_generation_rows(*encoded, sink.rows);
         REQUIRE(bioseq::parallelism::MemoryAdmissionController::instance()
             .reserved_bytes() == admission_before);
     }

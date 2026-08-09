@@ -526,7 +526,8 @@ build_fmgr_ownership_inventory(
     if (validate_reviewed_target) {
         safety::validate_doc0388_fmgr_target(
             routines.c_routine_identities,
-            routines.link_symbols);
+            routines.link_symbols,
+            graph.compiler_profile);
     }
 
     const std::set<std::string, std::less<>> target_symbols{
@@ -588,7 +589,7 @@ build_fmgr_ownership_inventory(
             "generated plus legacy fmgr ownership does not exactly cover "
             + std::string{
                 validate_reviewed_target
-                    ? "the reviewed 270-symbol main-extension closure"
+                    ? "the reviewed profile-specific main-extension closure"
                     : "the normalized C-routine closure"});
     }
 

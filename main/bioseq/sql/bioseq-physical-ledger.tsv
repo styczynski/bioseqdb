@@ -428,9 +428,9 @@ P425	catalog_comment	sql:function:bioseq.inspect_ready_minimizer_format6_generat
 P426	primary	sql:function:bioseq_internal.format6_parallel_scan_probe(regclass,text,bigint,integer)
 P427	primary	sql:revoke:function:bioseq_internal.format6_parallel_scan_probe(regclass,text,bigint,integer):execute:public:ordinary
 P428	catalog_comment	sql:function:bioseq_internal.format6_parallel_scan_probe(regclass,text,bigint,integer)
-P429	primary	sql:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)
-P430	primary	sql:revoke:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text):execute:public:ordinary
-P431	catalog_comment	sql:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)
+P429	primary	sql:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)
+P430	primary	sql:revoke:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint):execute:public:ordinary
+P431	catalog_comment	sql:function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text,bigint)
 P432	primary	sql:function:bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)
 P433	primary	sql:revoke:function:bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text):execute:public:ordinary
 P434	catalog_comment	sql:function:bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)

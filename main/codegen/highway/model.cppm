@@ -45,6 +45,21 @@ struct required_slot_spec {
     std::string slot_field;
 };
 
+/** Test/benchmark-only ordinary implementation-unit template. */
+struct probe_spec {
+    std::string key;
+    std::filesystem::path path;
+};
+
+/** One bounded representation owner emitted beside a target's slot owners. */
+struct minimizer_repr_instance_spec {
+    std::string owner_key;
+    std::string algorithm;
+    std::string source_key;
+    std::string representation_type;
+    std::vector<std::string> storage_types;
+};
+
 /** Ordered external domain topology supplied by configure-time authority. */
 struct domain_topology_manifest_input {
     std::string name;
@@ -79,6 +94,9 @@ struct source_manifest {
     std::vector<source_spec> sources;
     std::vector<slot_spec> slots;
     std::vector<required_slot_spec> required_slots;
+    std::vector<probe_spec> unit_probes;
+    std::vector<probe_spec> bench_probes;
+    std::vector<minimizer_repr_instance_spec> minimizer_repr_instances;
     std::vector<domain_topology_expectation> domain_topologies;
 };
 
@@ -149,6 +167,9 @@ enum class artifact_kind : std::uint8_t {
     dispatch_registry_partition,
     dispatch_inventory_implementation,
     test_support,
+    unit_probe_implementation,
+    bench_probe_implementation,
+    minimizer_repr_instantiation,
 };
 
 struct generated_artifact {
