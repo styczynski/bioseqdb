@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_core_stack_impl.cppm
+ * @file alignment_hook_core_stack.cppm
  * @brief PostgreSQL executor-hook alignment-frame stack helpers.
  */
 module;
@@ -14,7 +14,7 @@ extern "C" {
 #include <cstddef>
 #include <vector>
 
-module bioseq.mod:alignment_hook_core_stack_impl;
+module bioseq.postgres.extension:alignment_hook_core_stack;
 
 namespace bioseq::pg::detail {
 

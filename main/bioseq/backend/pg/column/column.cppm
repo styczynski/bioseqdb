@@ -25,7 +25,7 @@ import bioseq.common.mlogging;
 import bioseq.table;                      // bioseq_tableam_init, bioseq_customscan_init
 import bioseq.table.am_cache;             // bioseq_am_cache_invalidate
 import bioseq.storage.manager;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 import bioseq.column.planner_hook;        // DOC0322 §9.4 — exported bioseq_planner_init
 import bioseq.table.batch_sort_scan;      // exported bioseq_batch_sort_init (sequence ORDER BY)
 

@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_core_retirement_impl.cppm
+ * @file alignment_hook_core_retirement.cppm
  * @brief PostgreSQL executor-hook escaped-binding retirement helper.
  */
 module;
@@ -12,7 +12,7 @@ extern "C" {
 
 #include <vector>
 
-module bioseq.mod:alignment_hook_core_retirement_impl;
+module bioseq.postgres.extension:alignment_hook_core_retirement;
 
 import :alignment_hook_contract;
 

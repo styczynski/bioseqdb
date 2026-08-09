@@ -79,7 +79,7 @@ import bioseq.storage.physical;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 
 namespace {
 

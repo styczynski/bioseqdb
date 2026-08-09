@@ -1,5 +1,5 @@
 /**
- * @file supervisor_pg_persist_queue_publish_impl.cppm
+ * @file persist_queue_publish.cppm
  * @brief Shared asynchronous persistence queue publication.
  */
 module;
@@ -18,7 +18,7 @@ extern "C" {
 #include <string>
 #include <string_view>
 
-export module bioseq.scheduler.supervisor_pg:persist_queue_publish;
+export module bioseq.postgres.scheduler.supervisor:persist_queue_publish;
 
 import bioseq.common.mlogging;
 import bioseq.config;

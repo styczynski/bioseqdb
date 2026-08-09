@@ -7,7 +7,7 @@ module;
 #include <cstdint>
 #include <stdexcept>
 
-module bioseq.scheduler.supervisor_pg;
+module bioseq.postgres.scheduler.supervisor;
 
 import bioseq.highway.dispatch_contract;
 

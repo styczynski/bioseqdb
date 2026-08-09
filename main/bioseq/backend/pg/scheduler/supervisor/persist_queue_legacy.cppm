@@ -1,5 +1,5 @@
 /**
- * @file supervisor_pg_persist_queue_legacy_impl.cppm
+ * @file persist_queue_legacy.cppm
  * @brief Fail-closed legacy persistence staging entry points.
  */
 module;
@@ -10,7 +10,7 @@ module;
 #include <span>
 #include <string>
 
-module bioseq.scheduler.supervisor_pg;
+module bioseq.postgres.scheduler.supervisor;
 import :persist_queue_publish;
 
 namespace bioseq::parallelism::pg {

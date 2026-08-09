@@ -4,7 +4,8 @@
  *
  * @defgroup bioseq_sql_public_api Bioseq SQL public API
  *
- * Extension lifecycle and PostgreSQL logging ownership for bioseq.mod.
+ * Extension lifecycle and PostgreSQL logging ownership for
+ * bioseq.postgres.extension.
  *
  *-------------------------------------------------------------------------
  */
@@ -35,7 +36,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-module bioseq.mod;
+module bioseq.postgres.extension;
 
 import bioseq.column;
 import bioseq.common.mlogging;
@@ -48,7 +49,7 @@ import bioseq.sql.generated.test_indexes.guc_registry;
 #else
 import bioseq.sql.generated.production.guc_registry;
 #endif
-import bioseq.table.scan_state;
+import bioseq.postgres.table.scan_state;
 import bioseq.types.pg_compact_sequence;
 
 using namespace bioseq::pg_utils;

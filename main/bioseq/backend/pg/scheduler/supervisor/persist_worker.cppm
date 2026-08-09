@@ -1,5 +1,5 @@
 /**
- * @file supervisor_pg_persist_worker_impl.cppm
+ * @file persist_worker.cppm
  * @brief PostgreSQL asynchronous persistence queue and worker dispatch.
  */
 module;
@@ -30,7 +30,7 @@ void AbortCurrentTransaction(void);
 #include <type_traits>
 #include <utility>
 
-module bioseq.scheduler.supervisor_pg;
+module bioseq.postgres.scheduler.supervisor;
 
 import :persist_queue_publish;
 import bioseq.common.mlogging;

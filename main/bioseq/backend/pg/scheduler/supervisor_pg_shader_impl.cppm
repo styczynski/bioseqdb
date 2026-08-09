@@ -39,7 +39,7 @@ extern "C" {
 
 #include <vulkan/vulkan.h>
 
-module bioseq.scheduler.supervisor_pg;
+module bioseq.postgres.scheduler.supervisor;
 import bioseq.common.mlogging;
 import bioseq.config;
 import bioseq.instr;

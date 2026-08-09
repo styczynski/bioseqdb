@@ -1,12 +1,13 @@
 /**-------------------------------------------------------------------------
  *
- * mod.cppm
+ * extension/index.cppm
  *
  * @defgroup bioseq_sql_public_api Bioseq SQL public API
  *
  * Exported declarations for typed SQL routine owners. Generated fmgr
  * modules provide the C ABI for annotated SQL routines; implementations and
- * extension lifecycle state live in the bioseq.mod implementation unit.
+ * extension lifecycle state live in the bioseq.postgres.extension
+ * implementation unit.
  *
  *-------------------------------------------------------------------------
  */
@@ -20,7 +21,7 @@ module;
 #include <optional>
 #include <string>
 
-export module bioseq.mod;
+export module bioseq.postgres.extension;
 
 import bioseq.codegen.sql.annotation_model;
 import bioseq.mod.alignment.sql_rows;
@@ -28,7 +29,7 @@ import bioseq.mod.sql_rows;
 import bioseq.pipeline.stats;
 import bioseq.pg_utils.sql_boundary;
 import bioseq.table.sql_rows;
-import bioseq.table.alignment_execution;
+import bioseq.postgres.table.alignment_execution;
 
 export namespace bioseq::pg::sql_routines {
 

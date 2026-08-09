@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_core_unlink_impl.cppm
+ * @file alignment_hook_core_unlink.cppm
  * @brief PostgreSQL executor-hook alignment-frame unlink helpers.
  */
 module;
@@ -13,7 +13,7 @@ extern "C" {
 #include <algorithm>
 #include <vector>
 
-module bioseq.mod:alignment_hook_core_unlink_impl;
+module bioseq.postgres.extension:alignment_hook_core_unlink;
 
 import :alignment_hook_contract;
 

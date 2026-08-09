@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_core_lookup_impl.cppm
+ * @file alignment_hook_core_lookup.cppm
  * @brief PostgreSQL executor-hook alignment-frame registry lookup and insertion.
  */
 module;
@@ -10,7 +10,7 @@ extern "C" {
 #include "executor/executor.h"
 }
 
-module bioseq.mod:alignment_hook_core_lookup_impl;
+module bioseq.postgres.extension:alignment_hook_core_lookup;
 
 import :alignment_hook_contract;
 

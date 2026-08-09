@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_run_impl.cppm
+ * @file alignment_hook_run.cppm
  * @brief PostgreSQL ExecutorRun hook.
  */
 module;
@@ -14,7 +14,7 @@ extern "C" {
 #include <cstdint>
 #include <vector>
 
-module bioseq.mod:alignment_hook_run_impl;
+module bioseq.postgres.extension:alignment_hook_run;
 
 import :alignment_hook_contract;
 

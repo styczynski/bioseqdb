@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_contract.cppm
+ * @file alignment_hook_contract.cppm
  * @brief Private executor-hook frame contract shared by implementation partitions.
  */
 module;
@@ -14,10 +14,10 @@ extern "C" {
 #include <cstdint>
 #include <vector>
 
-module bioseq.mod:alignment_hook_contract;
+module bioseq.postgres.extension:alignment_hook_contract;
 
-import :alignment_hook_core_stack_impl;
-import bioseq.table.alignment_execution;
+import :alignment_hook_core_stack;
+import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 

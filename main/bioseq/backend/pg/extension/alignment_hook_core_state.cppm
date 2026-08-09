@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_core_state_impl.cppm
+ * @file alignment_hook_core_state.cppm
  * @brief PostgreSQL executor-hook alignment-frame registry state.
  */
 module;
@@ -12,7 +12,7 @@ extern "C" {
 
 #include <vector>
 
-module bioseq.mod:alignment_hook_core_state_impl;
+module bioseq.postgres.extension:alignment_hook_core_state;
 
 import :alignment_hook_contract;
 

@@ -70,7 +70,7 @@ import bioseq.storage.indexing_pg.sorted_runs;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 import bioseq.scheduler.supervisor_pg_vulkan;
 import bioseq.table.io;                     // BioseqColumnBeginRead/BioseqColumnReadNextRow/BioseqColumnEndRead (raw-stub row walk, §8.6)
 export import bioseq.storage.indexing_pg.handles;

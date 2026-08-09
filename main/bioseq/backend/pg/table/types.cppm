@@ -8,7 +8,7 @@
  * blobs passed across the PostgreSQL C ABI.
  *
  * Note: BioseqScanState (the CustomScanState wrapper for the bioseq
- * custom scan) and BioseqIndexScanState live in bioseq_scan_state.cppm
+ * custom scan) and BioseqIndexScanState live in scan_state.cppm
  * so their helper methods can be defined alongside the layout
  * invariants. Re-export them here for the convenience of callers that
  * import bioseq_table_types.
@@ -24,7 +24,7 @@ module;
 
 export module bioseq.table.types;
 
-export import bioseq.table.scan_state;
+export import bioseq.postgres.table.scan_state;
 import bioseq.vector.types;
 import bioseq.storage.metadata;   // DOC0322 §9.2 — BioseqColumnReadState, ParallelBioseqColumnScan, StripeMetadata (was types.h)
 import bioseq.pg_utils.lists;

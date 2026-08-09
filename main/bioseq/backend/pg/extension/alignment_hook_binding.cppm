@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_binding_impl.cppm
+ * @file alignment_hook_binding.cppm
  * @brief PostgreSQL executor-hook alignment-frame binding and cleanup lifecycle.
  */
 module;
@@ -13,10 +13,10 @@ extern "C" {
 
 #include <cstdint>
 
-module bioseq.mod:alignment_hook_binding_impl;
+module bioseq.postgres.extension:alignment_hook_binding;
 
 import :alignment_hook_contract;
-import bioseq.table.alignment_execution;
+import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 

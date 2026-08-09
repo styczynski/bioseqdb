@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_stats_impl.cppm
+ * @file alignment_stats.cppm
  * @brief Alignment execution statistics formatting and SQL row materialization.
  */
 module;
@@ -23,12 +23,12 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-module bioseq.mod;
+module bioseq.postgres.extension;
 
 import bioseq.mod.alignment.sql_rows;
 import bioseq.pipeline.stats;
 import bioseq.pg_utils;
-import bioseq.table.alignment_execution;
+import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 

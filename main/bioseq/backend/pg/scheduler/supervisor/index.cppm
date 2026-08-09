@@ -1,5 +1,5 @@
 /**
- * @file supervisor_pg.cppm
+ * @file supervisor/index.cppm
  * @brief Narrow PostgreSQL-facing scheduler supervision API.
  */
 module;
@@ -22,7 +22,7 @@ extern "C" {
 #include <string>
 #include <string_view>
 
-export module bioseq.scheduler.supervisor_pg;
+export module bioseq.postgres.scheduler.supervisor;
 
 export import :persist_queue_publish;
 import bioseq.indexing.type;

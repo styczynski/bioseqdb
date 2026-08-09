@@ -3,7 +3,7 @@
  * mod_sequence_source_contract_impl.cppm
  *
  * Ordinary implementation unit for sequence-source and catalog runtime
- * contract routines declared by bioseq.mod.
+ * contract routines declared by bioseq.postgres.extension.
  *
  *-------------------------------------------------------------------------
  */
@@ -56,7 +56,7 @@ void bioseq_external_scan_init(void);
 #include <variant>
 #include <vector>
 
-module bioseq.mod;
+module bioseq.postgres.extension;
 
 import bioseq.common.mlogging;
 import bioseq.column;
@@ -93,12 +93,12 @@ import bioseq.indexing.symbol_counts;
 import bioseq.storage.indexing_pg.admin;
 import bioseq.storage.indexing_pg.chunked_storage;
 import bioseq.storage.indexing_pg.handles;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 import bioseq.parallelism.mode;
 import bioseq.common.sequan_compat;
 import bioseq.column.tam;
 import bioseq.pg_utils.nodes;
-import bioseq.table.scan_state;
+import bioseq.postgres.table.scan_state;
 import bioseq.table;
 import bioseq.table.sql_rows;
 

@@ -25,7 +25,7 @@ extern "C" {
 #include <type_traits>
 #include <utility>
 
-module bioseq.scheduler.supervisor_pg;
+module bioseq.postgres.scheduler.supervisor;
 
 import bioseq.common.mlogging;
 import bioseq.instr;

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * table/bioseq_scan_state.cppm
+ * table/scan_state.cppm
  *
  * BioseqScanState is the state object passed between the lifecycle hooks
  * of the bioseq custom scan node (BeginCustomScan, ExecCustomScan,
@@ -29,13 +29,13 @@ module;
 #include <new>
 #include <type_traits>
 
-export module bioseq.table.scan_state;
+export module bioseq.postgres.table.scan_state;
 
 import bioseq.vector.types;
 import bioseq.storage.metadata;   // DOC0322 §9.2 — ParallelBioseqColumnScan (was types.h)
 import bioseq.pg_utils.lists;
 import bioseq.pg_utils.bitmapset;
-export import bioseq.table.alignment_execution;
+export import bioseq.postgres.table.alignment_execution;
 
 /*
  * Vectorization-related per-scan state. Kept as a nested struct so that

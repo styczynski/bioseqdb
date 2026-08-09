@@ -185,7 +185,7 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 import bioseq.scheduler.supervisor_pg_vulkan;
 
 namespace bioseq::simd {

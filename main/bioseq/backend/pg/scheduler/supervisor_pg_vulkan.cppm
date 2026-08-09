@@ -4,7 +4,7 @@
  */
 export module bioseq.scheduler.supervisor_pg_vulkan;
 
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 export import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::parallelism::pg {

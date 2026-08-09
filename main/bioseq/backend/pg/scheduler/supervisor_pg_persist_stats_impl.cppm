@@ -12,7 +12,7 @@ extern "C" {
 
 #include <cstdint>
 
-module bioseq.scheduler.supervisor_pg;
+module bioseq.postgres.scheduler.supervisor;
 
 import bioseq.storage.indexing_pg.chunked_storage;
 

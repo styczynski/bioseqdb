@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_hook_publish_impl.cppm
+ * @file alignment_hook_publish.cppm
  * @brief Alignment execution snapshot publication and accessors.
  */
 module;
@@ -12,11 +12,11 @@ module;
 #include <optional>
 #include <utility>
 
-module bioseq.mod:alignment_hook_publish_impl;
+module bioseq.postgres.extension:alignment_hook_publish;
 
 import :alignment_hook_contract;
 import bioseq.pipeline.stats;
-import bioseq.table.alignment_execution;
+import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 

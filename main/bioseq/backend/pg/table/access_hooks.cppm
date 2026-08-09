@@ -35,7 +35,7 @@ export module bioseq.table:access_hooks;
 
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 import bioseq.storage.metadata;
 import bioseq.storage.manager;
 import bioseq.column.tam;

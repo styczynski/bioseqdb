@@ -16,7 +16,7 @@ module;
 #include <limits>
 #include <vector>
 
-export module bioseq.table.alignment_execution;
+export module bioseq.postgres.table.alignment_execution;
 
 import bioseq.pipeline.stats;
 

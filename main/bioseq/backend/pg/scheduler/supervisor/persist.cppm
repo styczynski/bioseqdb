@@ -1,5 +1,5 @@
 /**
- * @file supervisor_pg_persist_impl.cppm
+ * @file persist.cppm
  * @brief PostgreSQL asynchronous persistence staging and worker implementation.
  */
 module;
@@ -18,7 +18,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-module bioseq.scheduler.supervisor_pg;
+module bioseq.postgres.scheduler.supervisor;
 import :persist_queue_publish;
 import bioseq.common.mlogging;
 import bioseq.parallelism.memory_admission;

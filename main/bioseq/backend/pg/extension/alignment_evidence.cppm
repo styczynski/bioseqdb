@@ -1,5 +1,5 @@
 /**
- * @file mod_alignment_evidence_impl.cppm
+ * @file alignment_evidence.cppm
  * @brief Alignment reader and persisted-GPU execution evidence diagnostics.
  */
 module;
@@ -13,11 +13,11 @@ module;
 #include <string>
 #include <string_view>
 
-module bioseq.mod;
+module bioseq.postgres.extension;
 
 import bioseq.pipeline.stats;
 import bioseq.pg_utils;
-import bioseq.table.alignment_execution;
+import bioseq.postgres.table.alignment_execution;
 
 namespace {
 

@@ -19,7 +19,7 @@ module;
 #include <variant>
 #include <vector>
 
-module bioseq.mod;
+module bioseq.postgres.extension;
 
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_hashmap_format6;

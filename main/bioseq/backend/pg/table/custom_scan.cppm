@@ -7,7 +7,7 @@
  * plan time it materializes a CustomScan, and at execution time we drive
  * the bioseq columnar reader through the CustomScanState helpers
  * defined here. The state object is BioseqScanState (defined in
- * table/bioseq_scan_state.cppm), which embeds CustomScanState as its
+ * table/scan_state.cppm), which embeds CustomScanState as its
  * first field so PostgreSQL's reinterpret_cast across the C ABI stays
  * sound.
  *
@@ -79,13 +79,13 @@ import bioseq.highway.dispatch_contract;
 import bioseq.pg.external.path_builder_slot;  // DOC0372 — TryAddBioseqExternalScanPaths (always-owned slot)
 import bioseq.storage.metadata;
 import bioseq.table.types;
-import bioseq.table.scan_state;
+import bioseq.postgres.table.scan_state;
 import bioseq.table.sql_row_codecs;
 import bioseq.table.sql_rows;
 import bioseq.pg_utils;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.scheduler.dispatch_buffer_api;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 import bioseq.scheduler.supervisor_pg_vulkan;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.memory_admission;
@@ -310,7 +310,7 @@ struct BioseqPlaceholderConsts {
 
 /*
  * Per-scan runtime state, owned via a heap pointer from BioseqScanState
- * (see bioseq_scan_state.cppm for the void* runtime slot).
+ * (see scan_state.cppm for the void* runtime slot).
  *
  * Owning these fields per-scan-state — rather than as file statics —
  * lets a single backend run two BioseqScan nodes concurrently. The bug

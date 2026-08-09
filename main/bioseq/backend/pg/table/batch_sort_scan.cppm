@@ -26,7 +26,7 @@
  * Layout invariant: BioseqBatchSortState keeps CustomScanState as its first
  * field (standard-layout) so PostgreSQL's CustomScanState* <-> our state*
  * reinterpret_cast across the C ABI round-trips (same pattern as
- * BioseqScanState in table/bioseq_scan_state.cppm).
+ * BioseqScanState in table/scan_state.cppm).
  *
  *-------------------------------------------------------------------------
  */
@@ -66,7 +66,7 @@ import bioseq.config;                   // DOC0346 — bioseq::aligner::settings
 import bioseq.sql_guc_settings;
 import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
 import bioseq.gpu.vulkan.runtime;       // Runtime counters for EXPLAIN proof
-import bioseq.scheduler.supervisor_pg;  // readiness-first PG Runtime entry
+import bioseq.postgres.scheduler.supervisor;  // readiness-first PG Runtime entry
 import bioseq.scheduler.supervisor_pg_vulkan;
 import bioseq.pg_utils;                 // PostgresErrorAsCpp at the PG callback seam
 import bioseq.storage.scanner_pg;       // source-route leases + locator promotion

@@ -1,5 +1,5 @@
 /**
- * @file supervisor_pg_persist_queue_metadata_impl.cppm
+ * @file persist_queue_metadata.cppm
  * @brief Legacy file-payload metadata cleanup helpers.
  */
 module;
@@ -16,7 +16,7 @@ extern "C" {
 #include <optional>
 #include <string>
 
-module bioseq.scheduler.supervisor_pg;
+module bioseq.postgres.scheduler.supervisor;
 import :persist_queue_publish;
 
 namespace bioseq::parallelism::pg {

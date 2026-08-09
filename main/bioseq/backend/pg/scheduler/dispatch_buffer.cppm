@@ -83,7 +83,7 @@ import bioseq.storage.manager;                  // DOC0260 §9
 import bioseq.storage.scanner;          // DOC0263 §11.3.2 — chunked test scanner — seq_locator, fetch_payload_bulk, seq_caches
 import bioseq.storage.scanner_pg;       // statement-owned source provider for locator targets
 import bioseq.parallelism.memory_admission;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 import bioseq.column.tam;               // DOC0322 §7.4 — tid_to_row_number (leaf; replaces the former extern "C++" reach into the table AM)
 
 export namespace bioseq::scheduler {

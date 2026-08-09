@@ -1941,24 +1941,24 @@ endif()
 unset(_bioseq_typed_expected_count)
 
 set(BIOSEQ_ALIGNMENT_HOOK_PRIVATE_PARTITIONS
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_contract.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_state_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_lookup_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_unlink_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_retirement_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_core_stack_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_binding_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_run_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_callbacks_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_hook_publish_impl.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_contract.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_core_state.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_core_lookup.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_core_unlink.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_core_retirement.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_core_stack.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_binding.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_run.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_callbacks.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_hook_publish.cppm")
 
 set(BIOSEQ_SUPERVISOR_PRIVATE_PARTITIONS
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_publish_impl.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_queue_publish.cppm")
 
 set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_evidence_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_alignment_stats_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_evidence.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_stats.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_index_admin_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_minimizer_diagnostics_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/mod_scheduler_diagnostics_impl.cppm"
@@ -1968,12 +1968,12 @@ set(BIOSEQ_DISPATCH_PROCESSOR_AUTHORED_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer_api_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_highway_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_legacy_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_queue_metadata_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_queue_legacy.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_queue_metadata.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_stage_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_stats_impl.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_persist_worker_impl.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_worker.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_shader_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor_pg_mps_impl.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
@@ -2843,8 +2843,8 @@ bioseq_register_sql_owner(
   ENTITY_HANDLES storage_metadata_core)
 bioseq_register_sql_owner(
   OWNER_KEY mod
-  MODULE bioseq.mod
-  SOURCES backend/pg/mod.cppm
+  MODULE bioseq.postgres.extension
+  SOURCES backend/pg/extension/index.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS mod)

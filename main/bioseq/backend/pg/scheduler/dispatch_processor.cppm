@@ -178,7 +178,7 @@ import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.memory_admission;
-import bioseq.scheduler.supervisor_pg;
+import bioseq.postgres.scheduler.supervisor;
 namespace bioseq::simd {
 
 export constexpr size_t kDispatchBatchCapacity = 8192;

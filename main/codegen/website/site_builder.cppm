@@ -370,7 +370,7 @@ void run_website_smoke() {
                   "kind": "function",
                   "name": "mmsearch",
                   "source_module": "bioseq.pg",
-                  "source_path": "bioseq/backend/pg/mod.cppm",
+                  "source_path": "bioseq/backend/pg/extension/index.cppm",
                   "source_line": 42,
                   "typed_install_owner": false,
                   "public_documentation": true,

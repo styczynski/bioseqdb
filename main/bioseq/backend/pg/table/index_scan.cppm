@@ -21,7 +21,7 @@ import bioseq.common.mlogging;
 import bioseq.pg_utils;
 import bioseq.pg_support;
 import bioseq.table.types;
-import bioseq.table.scan_state;
+import bioseq.postgres.table.scan_state;
 import bioseq.pg_utils.lists;
 import bioseq.pg_utils.bitmapset;
 import :access_method;       // DOC0322 §7.4/§7.5 — bioseq_index_fetch_begin_extended (exported)
