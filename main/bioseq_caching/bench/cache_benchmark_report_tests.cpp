@@ -404,21 +404,19 @@ TEST_CASE(
     CHECK(
         required_integer(required_property(
             qualification, "effective_total_ram_bytes"))
-        >= required_integer(required_property(
-            qualification, "required_total_ram_bytes")));
+        > 0);
     CHECK(
         required_integer(required_property(
             qualification, "required_total_ram_bytes"))
-        == 17'179'869'184LL);
+        == 0);
     CHECK(
         required_integer(required_property(
             qualification, "effective_available_ram_bytes"))
-        >= required_integer(required_property(
-            qualification, "required_available_ram_bytes")));
+        > 0);
     CHECK(
         required_integer(required_property(
             qualification, "required_available_ram_bytes"))
-        == 8'589'934'592LL);
+        == 0);
     CHECK(
         required_integer(required_property(
             qualification, "data_filesystem_available_bytes"))

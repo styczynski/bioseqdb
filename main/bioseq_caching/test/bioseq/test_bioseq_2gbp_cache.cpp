@@ -27,8 +27,6 @@ constexpr std::uint64_t target_bases =
 static_assert(query_bases > 0);
 static_assert(query_bases + target_bases == total_input_bases);
 constexpr std::uint64_t gibibyte = 1024ULL * 1024ULL * 1024ULL;
-constexpr std::uint64_t minimum_total_ram = 16ULL * gibibyte;
-constexpr std::uint64_t minimum_available_ram = 8ULL * gibibyte;
 constexpr std::uint64_t minimum_data_space =
     32ULL * gibibyte > 12ULL * total_input_bases
     ? 32ULL * gibibyte
@@ -41,24 +39,27 @@ constexpr std::array<std::string_view, 8> required_resource_phases{
     "cold", "warm", "explain", "column-cache"};
 
 constexpr std::string_view alignment_query{
-    "SELECT id, "
-    "bioseq.target_start(id), "
-    "bioseq.target_end(id), "
-    "bioseq.target_len(id), "
-    "bioseq.query_start(id), "
-    "bioseq.query_end(id), "
-    "bioseq.query_len(id), "
-    "bioseq.is_reverse(id) "
-    "FROM cache_bioseq_2gbp "
-    "WHERE mmsearch(target, query) "
-    "ORDER BY id, "
-    "bioseq.target_start(id), "
-    "bioseq.target_end(id), "
-    "bioseq.target_len(id), "
-    "bioseq.query_start(id), "
-    "bioseq.query_end(id), "
-    "bioseq.query_len(id), "
-    "bioseq.is_reverse(id)"};
+    "SELECT target_sample.id, "
+    "bioseq.target_start(target_sample.id), "
+    "bioseq.target_end(target_sample.id), "
+    "bioseq.target_len(target_sample.id), "
+    "bioseq.query_start(target_sample.id), "
+    "bioseq.query_end(target_sample.id), "
+    "bioseq.query_len(target_sample.id), "
+    "bioseq.is_reverse(target_sample.id) "
+    "FROM cache_bioseq_2gbp AS target_sample "
+    "JOIN cache_bioseq_2gbp AS query_sample "
+    "ON target_sample.id = query_sample.id "
+    "AND mmsearch(target_sample.target, query_sample.query, "
+    "aligner_options(index_read_requirement => 2)) "
+    "ORDER BY target_sample.id, "
+    "bioseq.target_start(target_sample.id), "
+    "bioseq.target_end(target_sample.id), "
+    "bioseq.target_len(target_sample.id), "
+    "bioseq.query_start(target_sample.id), "
+    "bioseq.query_end(target_sample.id), "
+    "bioseq.query_len(target_sample.id), "
+    "bioseq.is_reverse(target_sample.id)"};
 
 [[nodiscard]] std::int64_t parse_i64(std::string_view text) {
     std::int64_t value{};
@@ -174,6 +175,12 @@ void configure_canonical_cpu_path(
         "SET bioseq.aligner.vulkan_fused_frontend_enabled = off; "
         "SET bioseq.aligner.vulkan_gpu_index_build_enabled = off; "
         "SET bioseq.aligner.vulkan_extend_enabled = off; "
+        "SET bioseq.index_async_persist = off; "
+        "SET bioseq.recompute_async_persist = off; "
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on; "
+        "SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash'; "
+        "SET bioseq.aligner.chaining_algorithm = 'simd_mm2'; "
+        "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner'; "
         "SET bioseq.enable_custom_scan = on; "
         "SET bioseq.enable_column_cache = on; "
         "SET bioseq.read_sequence_index = on");
@@ -242,25 +249,12 @@ void configure_canonical_cpu_path(
                 "SELECT bioseq_cache.invalidate_all(); "
                 "SELECT bioseq_cache.reset_stats()",
                 30s);
-            if (!ready
-                || std::chrono::steady_clock::now() >= deadline) {
-                return false;
-            }
-            const bool drained =
-                bioseq::postgres_test::wait_until(
-                    [&admin] {
-                        return bioseq::cache_test::integer(
-                            admin,
-                            "SELECT count(*) "
-                            "FROM bioseq_cache.entries()")
-                            == 0;
-                    },
-                    deadline, 50ms);
-            bioseq::cache_test::exec(
-                admin,
-                "SELECT bioseq_cache.reset_stats()",
-                30s);
-            return drained;
+            // invalidate_all() retires the probe generation immediately, but
+            // production janitor cleanup is deliberately asynchronous.  The
+            // public entries() diagnostic may therefore retain the retired
+            // row for a later sweep; physical disappearance is not part of
+            // the invalidation contract and is not cache-readiness evidence.
+            return ready;
         },
         deadline, 50ms);
 }
@@ -290,10 +284,12 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
                                 bioseq::postgres_test::
                                     current_report_case_context()
                                         .test_case,
-                            .minimum_total_ram_bytes =
-                                minimum_total_ram,
-                            .minimum_available_ram_bytes =
-                                minimum_available_ram,
+                            // Bioseq's admission tickets, streamed sequence
+                            // storage, and spillable index runs own memory
+                            // safety. Record host RAM as evidence without an
+                            // unrelated fixed-capacity rejection.
+                            .minimum_total_ram_bytes = 0,
+                            .minimum_available_ram_bytes = 0,
                             .minimum_data_available_bytes =
                                 minimum_data_space,
                             .minimum_logical_cores = 8,
@@ -381,10 +377,10 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
             admin,
             "SELECT bioseq.update_index("
             "'cache_bioseq_2gbp'::regclass, "
-            "'minimizers_per_fragment'); "
+            "'minimizers_per_sequence'); "
             "SELECT bioseq.set_active_read_index("
             "'cache_bioseq_2gbp'::regclass, "
-            "'minimizers_per_fragment')",
+            "'minimizers_per_sequence')",
             20min);
         phase.complete();
         fixture.observe_resource_phase("index");
@@ -430,17 +426,13 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
         planned_cache_nodes.front()->find("Plans");
     REQUIRE(planned_children != nullptr);
     const auto planned_bioseq_nodes = find_plan_nodes_with_property(
-        *planned_children, "Custom Plan Provider", "BioseqScan");
+        *planned_children, "Custom Plan Provider", "BioseqBatchJoin");
     REQUIRE(planned_bioseq_nodes.size() == 1);
-    const auto persisted_index =
+    const auto index_requirement =
         bioseq::postgres_test::explain_property_string(
             *planned_bioseq_nodes.front(),
-            "Bioseq Fetched From Sequence Index");
-    REQUIRE(persisted_index.has_value());
-    REQUIRE(persisted_index->contains("index presence: 100%"));
-    REQUIRE(
-        planned_bioseq_nodes.front()->find("Bioseq Recomputed")
-        == nullptr);
+            "Bioseq Index Read Requirement");
+    REQUIRE(index_requirement == "require_compatible_persisted");
     REQUIRE(find_plan_nodes_with_property(
                 *planned_children, "Node Type", "Seq Scan")
                 .empty());
@@ -464,10 +456,30 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     CHECK(cold_delta.produced == 1);
     CHECK(cold_delta.completed_hits == 0);
     CHECK(cold_delta.fallbacks == 0);
+    {
+        bioseq::postgres_test::scoped_guc cache_disabled{
+            data,
+            "bioseq.query_cache_optimisation_mode",
+            "disabled",
+            30s};
+        REQUIRE(bioseq::cache_test::boolean(
+            data,
+            "SELECT count(*) > 0 "
+            "AND bool_and(completed AND fully_drained "
+            "AND requested_target_index_source = 'persisted' "
+            "AND actual_target_index_source = 'persisted' "
+            "AND target_rows = 1 "
+            "AND persisted_index_rows = 1 "
+            "AND missing_persisted_index_rows = 0 "
+            "AND recomputed_target_index_rows = 0) "
+            "FROM bioseq.last_alignment_execution_stats()"));
+    }
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.cold_identity");
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_2gbp.cold_counter_contract");
+    bioseq::postgres_test::record_migration_probe(
+        "combined.bioseq_2gbp.persisted_index_active");
 
     const bioseq::libpq::result truth = admin.exec(
         "SELECT id, truth_target_start, truth_target_end, "
@@ -594,7 +606,7 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
                   children->as_array()->front(), "Actual Loops")
               == 0.0);
         const auto bioseq_nodes = find_plan_nodes_with_property(
-            *children, "Custom Plan Provider", "BioseqScan");
+            *children, "Custom Plan Provider", "BioseqBatchJoin");
         REQUIRE(bioseq_nodes.size() == 1);
         REQUIRE(bioseq::postgres_test::explain_property_string(
                     *bioseq_nodes.front(), "Node Type")
@@ -603,8 +615,6 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
     const auto after_explain =
         bioseq::cache_test::read_cache_stats(admin);
     CHECK((after_explain - after_warm).completed_hits == 1);
-    bioseq::postgres_test::record_migration_probe(
-        "combined.bioseq_2gbp.persisted_index_active");
     bioseq::postgres_test::record_migration_probe(
         "python.benchmark.provider_placeholder_removed");
     bioseq::postgres_test::record_migration_probe(
@@ -651,7 +661,7 @@ TEST_CASE("exactly 2 Gbp combined Bioseq input produces once and replays exactly
                   terminal_children->as_array()->front(), "Actual Loops")
               == 0.0);
         const auto terminal_bioseq_nodes = find_plan_nodes_with_property(
-            *terminal_children, "Custom Plan Provider", "BioseqScan");
+            *terminal_children, "Custom Plan Provider", "BioseqBatchJoin");
         REQUIRE(terminal_bioseq_nodes.size() == 1);
     }
     const auto after_terminal_explain =

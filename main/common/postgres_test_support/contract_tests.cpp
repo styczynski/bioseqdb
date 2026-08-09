@@ -2006,6 +2006,91 @@ TEST_CASE("resource phase crash journal preserves exact boundary samples",
     CHECK(observed.owned_root_bytes == expected.owned_root_bytes);
 }
 
+TEST_CASE(
+    "owned-root sampling tolerates only descendant disappearance races",
+    "[postgres-test-support][unit][resource][filesystem]") {
+    temporary_resource_journal_tree tree;
+    const std::filesystem::path stable =
+        tree.owned_root() / "stable-resource";
+    {
+        std::ofstream output(stable, std::ios::binary);
+        output << "stable";
+        output.close();
+        REQUIRE(static_cast<bool>(output));
+    }
+
+    const std::filesystem::path missing_target =
+        tree.owned_root() / "published-resource";
+    const std::filesystem::path vanished_entry =
+        tree.owned_root() / "vanished-resource";
+    // A name whose target vanished forces the same descendant ENOENT that a
+    // concurrent publish/rename can surface between iteration and status.
+    REQUIRE(
+        ::symlink(missing_target.c_str(), vanished_entry.c_str()) == 0);
+    const auto raced_sample =
+        sample_owned_root_bytes(tree.owned_root());
+    REQUIRE(raced_sample.has_value());
+    CHECK(*raced_sample >= std::filesystem::file_size(stable));
+
+    const std::filesystem::path publishing =
+        tree.owned_root() / "publishing";
+    REQUIRE(std::filesystem::create_directory(publishing));
+    constexpr std::size_t published_file_count = 128;
+    std::vector<std::pair<
+        std::filesystem::path, std::filesystem::path>> publication_paths;
+    publication_paths.reserve(published_file_count);
+    for (std::size_t index = 0; index < published_file_count; ++index) {
+        const std::filesystem::path committed =
+            publishing / ("resource-" + std::to_string(index));
+        const std::filesystem::path partial =
+            committed.string() + ".partial";
+        std::ofstream output(committed, std::ios::binary);
+        output.put('x');
+        output.close();
+        REQUIRE(static_cast<bool>(output));
+        publication_paths.emplace_back(committed, partial);
+    }
+    std::atomic<std::uint64_t> publish_operations{};
+    std::jthread publisher(
+        [&publication_paths,
+         &publish_operations](std::stop_token token) {
+            while (!token.stop_requested()) {
+                for (const auto& [committed, partial] :
+                     publication_paths) {
+                    std::error_code error;
+                    std::filesystem::rename(committed, partial, error);
+                    if (!error) {
+                        publish_operations.fetch_add(
+                            1, std::memory_order_relaxed);
+                        std::filesystem::rename(
+                            partial, committed, error);
+                    }
+                }
+            }
+        });
+    const auto publication_deadline =
+        std::chrono::steady_clock::now() + 2s;
+    while (publish_operations.load(std::memory_order_relaxed) == 0
+           && std::chrono::steady_clock::now()
+               < publication_deadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(publish_operations.load(std::memory_order_relaxed) > 0);
+    for (std::size_t sample = 0; sample < 32; ++sample) {
+        REQUIRE(sample_owned_root_bytes(tree.owned_root()).has_value());
+    }
+    publisher.request_stop();
+    publisher.join();
+
+    CHECK_FALSE(sample_owned_root_bytes(
+        tree.owned_root() / "missing-owned-root").has_value());
+
+    REQUIRE(std::filesystem::remove(vanished_entry));
+    const std::filesystem::path loop = tree.owned_root() / "symlink-loop";
+    REQUIRE(::symlink(loop.c_str(), loop.c_str()) == 0);
+    CHECK_FALSE(sample_owned_root_bytes(tree.owned_root()).has_value());
+}
+
 TEST_CASE("supervision journal v1 wire format is byte exact",
           "[postgres-test-support][unit][supervision][journal][format]") {
     temporary_resource_journal_tree tree;

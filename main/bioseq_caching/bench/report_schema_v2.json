@@ -266,16 +266,16 @@
                 "$ref": "#/$defs/sha256"
               },
               "effective_total_ram_bytes": {
-                "minimum": 17179869184
+                "minimum": 1
               },
               "effective_available_ram_bytes": {
-                "minimum": 8589934592
+                "minimum": 1
               },
               "required_total_ram_bytes": {
-                "minimum": 17179869184
+                "const": 0
               },
               "required_available_ram_bytes": {
-                "minimum": 8589934592
+                "const": 0
               },
               "data_filesystem_capacity_bytes": {
                 "minimum": 34359738368

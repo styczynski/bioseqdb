@@ -1,0 +1,97 @@
+{
+  "architecture": "arm64",
+  "artifact_kind": "bioseq-extracted-deb-payload-qualification",
+  "artifacts": [
+    {
+      "basename": "bioseq.so",
+      "path": "usr/lib/postgresql/17/lib/bioseq.so",
+      "sha256": "038253600a0322e1fbaa10715b5cfa28b4ab297b28fc3866b885b26280ae769c",
+      "size_bytes": 47339064
+    },
+    {
+      "basename": "bioseq_cache.so",
+      "path": "usr/lib/postgresql/17/lib/bioseq_cache.so",
+      "sha256": "736d3338f0250993d4f4ed2f3f320b4d1727665a54740586ad7866a8f22f47ab",
+      "size_bytes": 2110240
+    },
+    {
+      "basename": "bioseq--1.0.sql",
+      "path": "usr/share/postgresql/17/extension/bioseq--1.0.sql",
+      "sha256": "c0a26b78c00cb7dbec4ed4f5a8ccbd148cf01f1edda1475cf08975d5b747aabd",
+      "size_bytes": 116343
+    },
+    {
+      "basename": "bioseq.control",
+      "path": "usr/share/postgresql/17/extension/bioseq.control",
+      "sha256": "25ef36d7667fd62febe6e4d608e830ee1fe9315691e64e3d0fc9d49c95b2977c",
+      "size_bytes": 114
+    },
+    {
+      "basename": "bioseq_cache--1.0.sql",
+      "path": "usr/share/postgresql/17/extension/bioseq_cache--1.0.sql",
+      "sha256": "46b1a800c64d255e6c814487202caa10c5839fb0142d7574afdc2b62918528c5",
+      "size_bytes": 2352
+    },
+    {
+      "basename": "bioseq_cache.control",
+      "path": "usr/share/postgresql/17/extension/bioseq_cache.control",
+      "sha256": "896bc913507581c31cf9c8d047015bd17543c204edb423374bc156aa713e859c",
+      "size_bytes": 184
+    }
+  ],
+  "content_sha256": "c9b39c99bd883a328e99a95ea6b57af23ab2e07f94bbfce1b8a5b0c59297b9d6",
+  "elf": [
+    {
+      "architecture": "arm64",
+      "basename": "bioseq.so",
+      "build_identity_listing_sha256": "e956582b98c4c9513b165a3357114782d0e9f1d11babc60b7334436eee9956a4",
+      "dependency_listing_sha256": "cd67755ba745fbc883e95af19abe12f608971b92f62a5b2eb04c6d540f22793d",
+      "direct_load_dependencies": [
+        "ld-linux-aarch64.so.1",
+        "libc.so.6",
+        "libm.so.6"
+      ],
+      "format": "ELF",
+      "gnu_build_ids": [
+        "1bf4ba3fe3f4f330561ad846eaddd7ae301720e5"
+      ],
+      "header_listing_sha256": "32718aba61a0e5a6a1de7a5b6637d395215479edfbdc2e3ef3e70a04903e5591",
+      "machine": "AArch64",
+      "sibling_dependency_absent": true
+    },
+    {
+      "architecture": "arm64",
+      "basename": "bioseq_cache.so",
+      "build_identity_listing_sha256": "a9d64b9aef7e509d6b8c63e166ae957fbe62a3fdbaa1bc32c0bb5019f7abb934",
+      "dependency_listing_sha256": "cb802718ada19465a467fc0ac68e8ae764b183b5ee6f36c6f0dc2e1d956a5ff2",
+      "direct_load_dependencies": [
+        "libc.so.6",
+        "libm.so.6"
+      ],
+      "format": "ELF",
+      "gnu_build_ids": [
+        "e73eabea873f7e23b653f06810993de95da831a5"
+      ],
+      "header_listing_sha256": "665532ddcdecfd23879fdb2ac4a0df537bfc33d81cc7d3b26bc9f891eeb72ac5",
+      "machine": "AArch64",
+      "sibling_dependency_absent": true
+    }
+  ],
+  "exact_six": true,
+  "expected_basenames": [
+    "bioseq--1.0.sql",
+    "bioseq.control",
+    "bioseq.so",
+    "bioseq_cache--1.0.sql",
+    "bioseq_cache.control",
+    "bioseq_cache.so"
+  ],
+  "inspection_tool": {
+    "path": "/usr/bin/aarch64-linux-gnu-readelf",
+    "sha256": "f31afa74b95d9619afc85c940393141fdb8340407fc0130d98cd1a48770dca48",
+    "size_bytes": 798368
+  },
+  "postgres_major": 17,
+  "schema_version": 1,
+  "validator_sha256": "397f365bab32c9e643a499531a4d01ddb01c518aaad17e940e2db3b37a2adc8e"
+}

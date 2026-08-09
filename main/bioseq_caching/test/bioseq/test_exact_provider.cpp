@@ -29,6 +29,14 @@ constexpr std::string_view small_query{
     "bioseq.query_end(id), bioseq.query_len(id), "
     "bioseq.is_reverse(id)"};
 
+constexpr std::string_view batch_join_query{
+    "SELECT target_sample.id, query_sample.id "
+    "FROM cache_bioseq_small AS target_sample "
+    "JOIN cache_bioseq_small AS query_sample "
+    "  ON target_sample.id = query_sample.id "
+    " AND mmsearch(target_sample.target, query_sample.query) "
+    "ORDER BY target_sample.id, query_sample.id"};
+
 constexpr std::string_view exact_provider_test_case{
     "BioseqScan exact provider produces and hits in same and reuse modes"};
 constexpr std::string_view prepared_semantics_test_case{
@@ -102,6 +110,88 @@ void check_one_completed_exact_hit(
     CHECK(delta.inflight_waits == 0);
     CHECK(delta.reuse_hits == 0);
     CHECK(delta.fallbacks == 0);
+}
+
+void check_batch_join_exact_provider(
+    bioseq::libpq::connection& admin,
+    bioseq::libpq::connection& data) {
+    bioseq::cache_test::exec(
+        data,
+        "SET bioseq.query_cache_optimisation_mode = 'disabled'");
+    const auto oracle = data.exec(batch_join_query, 5min);
+    REQUIRE(oracle.rows() > 0);
+    const auto oracle_digest =
+        bioseq::postgres_test::exact_row_hash(oracle);
+    const auto uncached_plan = bioseq::postgres_test::run_explain(
+        data, batch_join_query, false, 5min);
+    REQUIRE(
+        uncached_plan.find_plan_nodes(
+            "Custom Plan Provider", "BioseqBatchJoin").size()
+        == 1);
+
+    bioseq::cache_test::exec(
+        admin,
+        "SELECT bioseq_cache.invalidate_all(); "
+        "SELECT bioseq_cache.reset_stats()");
+    bioseq::cache_test::exec(
+        data,
+        "SET bioseq.query_cache_optimisation_mode = 'same'");
+    const auto cacheable_plan = bioseq::postgres_test::run_explain(
+        data, batch_join_query, false, 5min);
+    const auto planned_cache_nodes = cacheable_plan.find_plan_nodes(
+        "Custom Plan Provider", "BioseqCacheScan");
+    REQUIRE(planned_cache_nodes.size() == 1);
+    REQUIRE(bioseq::postgres_test::explain_property_bool(
+                *planned_cache_nodes.front(), "Cache Force Bypass")
+            == false);
+    REQUIRE(bioseq::postgres_test::explain_property_integer(
+                *planned_cache_nodes.front(),
+                "Provider Runtime Recipes")
+            == 3);
+    REQUIRE(
+        cacheable_plan.find_plan_nodes(
+            "Custom Plan Provider", "BioseqBatchJoin").size()
+        == 1);
+    const auto before = bioseq::cache_test::read_cache_stats(admin);
+    const auto child_before = exact_child_executions(admin);
+    const auto cold = data.exec(batch_join_query, 5min);
+    const auto after_cold = bioseq::cache_test::read_cache_stats(admin);
+    const auto child_after_cold = exact_child_executions(admin);
+    const auto warm = data.exec(batch_join_query, 5min);
+    const auto after_warm = bioseq::cache_test::read_cache_stats(admin);
+    const auto child_after_warm = exact_child_executions(admin);
+
+    REQUIRE(bioseq::postgres_test::exact_row_hash(cold) == oracle_digest);
+    REQUIRE(bioseq::postgres_test::exact_row_hash(warm) == oracle_digest);
+    check_one_exact_producer(after_cold - before);
+    check_one_completed_exact_hit(after_warm - after_cold);
+    CHECK(child_after_cold == child_before + 1);
+    CHECK(child_after_warm == child_after_cold);
+
+    const auto warm_explain = bioseq::postgres_test::run_explain(
+        data, batch_join_query, true, 5min);
+    const auto cache_nodes = warm_explain.find_plan_nodes(
+        "Custom Plan Provider", "BioseqCacheScan");
+    REQUIRE(cache_nodes.size() == 1);
+    CHECK(bioseq::postgres_test::explain_property_string(
+              *cache_nodes.front(), "Actual Cache Action")
+          == "[Hit] exact final result");
+    REQUIRE(
+        warm_explain.find_plan_nodes(
+            "Custom Plan Provider", "BioseqBatchJoin").empty());
+    const bioseq::postgres_test::json_value* children =
+        cache_nodes.front()->find("Plans");
+    if (children != nullptr) {
+        REQUIRE(children->as_array() != nullptr);
+        for (const auto& child : *children->as_array()) {
+            CHECK(bioseq::postgres_test::explain_property_number(
+                      child, "Actual Loops")
+                  == 0.0);
+        }
+    }
+    check_one_completed_exact_hit(
+        bioseq::cache_test::read_cache_stats(admin) - after_warm);
+    CHECK(exact_child_executions(admin) == child_after_warm);
 }
 
 [[nodiscard]] std::string query_with_aligner_options(
@@ -273,6 +363,7 @@ TEST_CASE("BioseqScan exact provider produces and hits in same and reuse modes",
             bioseq::postgres_test::record_migration_probe(
                 "combined.bioseq_provider.warm_child_not_executed");
         }
+        check_batch_join_exact_provider(admin, data);
     }
     bioseq::postgres_test::record_migration_probe(
         "combined.bioseq_provider.load_order_equivalent_exact");

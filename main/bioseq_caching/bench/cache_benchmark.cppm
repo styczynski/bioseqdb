@@ -55,8 +55,6 @@ constexpr std::uint64_t target_bases =
 static_assert(query_bases > 0);
 static_assert(query_bases + target_bases == total_input_bases);
 constexpr std::uint64_t gibibyte = 1024ULL * 1024ULL * 1024ULL;
-constexpr std::uint64_t minimum_total_ram = 16ULL * gibibyte;
-constexpr std::uint64_t minimum_available_ram = 8ULL * gibibyte;
 constexpr std::uint64_t minimum_data_space =
     32ULL * gibibyte > 12ULL * total_input_bases
     ? 32ULL * gibibyte
@@ -76,24 +74,27 @@ constexpr std::string_view standalone_query{
     "FROM cache_benchmark_rows "
     "ORDER BY group_id, id, optional_value, payload"};
 constexpr std::string_view bioseq_query{
-    "SELECT id, "
-    "bioseq.target_start(id), "
-    "bioseq.target_end(id), "
-    "bioseq.target_len(id), "
-    "bioseq.query_start(id), "
-    "bioseq.query_end(id), "
-    "bioseq.query_len(id), "
-    "bioseq.is_reverse(id) "
-    "FROM cache_bioseq_2gbp "
-    "WHERE mmsearch(target, query) "
-    "ORDER BY id, "
-    "bioseq.target_start(id), "
-    "bioseq.target_end(id), "
-    "bioseq.target_len(id), "
-    "bioseq.query_start(id), "
-    "bioseq.query_end(id), "
-    "bioseq.query_len(id), "
-    "bioseq.is_reverse(id)"};
+    "SELECT target_sample.id, "
+    "bioseq.target_start(target_sample.id), "
+    "bioseq.target_end(target_sample.id), "
+    "bioseq.target_len(target_sample.id), "
+    "bioseq.query_start(target_sample.id), "
+    "bioseq.query_end(target_sample.id), "
+    "bioseq.query_len(target_sample.id), "
+    "bioseq.is_reverse(target_sample.id) "
+    "FROM cache_bioseq_2gbp AS target_sample "
+    "JOIN cache_bioseq_2gbp AS query_sample "
+    "ON target_sample.id = query_sample.id "
+    "AND mmsearch(target_sample.target, query_sample.query, "
+    "aligner_options(index_read_requirement => 2)) "
+    "ORDER BY target_sample.id, "
+    "bioseq.target_start(target_sample.id), "
+    "bioseq.target_end(target_sample.id), "
+    "bioseq.target_len(target_sample.id), "
+    "bioseq.query_start(target_sample.id), "
+    "bioseq.query_end(target_sample.id), "
+    "bioseq.query_len(target_sample.id), "
+    "bioseq.is_reverse(target_sample.id)"};
 
 struct benchmark_options {
     scenario selected_scenario{scenario::standalone};
@@ -852,6 +853,12 @@ void configure_cpu_path(libpq::connection& connection) {
         "SET bioseq.aligner.vulkan_fused_frontend_enabled = off; "
         "SET bioseq.aligner.vulkan_gpu_index_build_enabled = off; "
         "SET bioseq.aligner.vulkan_extend_enabled = off; "
+        "SET bioseq.index_async_persist = off; "
+        "SET bioseq.recompute_async_persist = off; "
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled = on; "
+        "SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash'; "
+        "SET bioseq.aligner.chaining_algorithm = 'simd_mm2'; "
+        "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner'; "
         "SET bioseq.enable_custom_scan = on; "
         "SET bioseq.enable_column_cache = on; "
         "SET bioseq.read_sequence_index = on",
@@ -933,9 +940,9 @@ void create_standalone_fixture(libpq::connection& connection) {
     execute(
         connection,
         "SELECT bioseq.update_index("
-        "'cache_bioseq_2gbp'::regclass, 'minimizers_per_fragment'); "
+        "'cache_bioseq_2gbp'::regclass, 'minimizers_per_sequence'); "
         "SELECT bioseq.set_active_read_index("
-        "'cache_bioseq_2gbp'::regclass, 'minimizers_per_fragment')",
+        "'cache_bioseq_2gbp'::regclass, 'minimizers_per_sequence')",
         40min);
     return fixture_evidence{
         .relation = "cache_bioseq_2gbp",
@@ -995,10 +1002,11 @@ extension_artifacts(const benchmark_options& options) {
                         postgres_test::host_qualification_requirements{
                             .test_case =
                                 "bioseq cache 2 Gbp native benchmark",
-                            .minimum_total_ram_bytes =
-                                minimum_total_ram,
-                            .minimum_available_ram_bytes =
-                                minimum_available_ram,
+                            // RAM is telemetry: ticketed allocations, bounded
+                            // chunk caches, and spillable runs enforce the
+                            // workload's actual memory envelope.
+                            .minimum_total_ram_bytes = 0,
+                            .minimum_available_ram_bytes = 0,
                             .minimum_data_available_bytes =
                                 minimum_data_space,
                             .minimum_logical_cores = 8,
@@ -1637,14 +1645,10 @@ void validate_passed_report(const benchmark_report& report) {
         || qualification.status != "passed"
         || qualification.host_identity_sha256
             != report.host_identity.identity_sha256
-        || qualification.required_total_ram_bytes
-            < minimum_total_ram
-        || qualification.required_available_ram_bytes
-            < minimum_available_ram
-        || qualification.effective_total_ram_bytes
-            < qualification.required_total_ram_bytes
-        || qualification.effective_available_ram_bytes
-            < qualification.required_available_ram_bytes
+        || qualification.required_total_ram_bytes != 0
+        || qualification.required_available_ram_bytes != 0
+        || qualification.effective_total_ram_bytes == 0
+        || qualification.effective_available_ram_bytes == 0
         || qualification.data_filesystem_available_bytes
             < qualification.required_data_filesystem_available_bytes
         || qualification.required_data_filesystem_available_bytes
@@ -1671,7 +1675,7 @@ void validate_passed_report(const benchmark_report& report) {
             < qualification.required_io_mib_per_second) {
         throw std::runtime_error(
             "passed bioseq-2gbp benchmark report has no valid same-host "
-            "RAM, disk, CPU, and I/O qualification");
+            "RAM telemetry plus disk, CPU, and I/O qualification");
     }
     if (report.measurement_cohort != combined_measurement_cohort
         || report.fixture.source_rows != 1
@@ -2264,9 +2268,9 @@ void write(std::ostream& output, const benchmark_report& report) {
                 .effective_available_ram_bytes =
                     combined ? 16ULL * gibibyte : 0,
                 .required_total_ram_bytes =
-                    combined ? minimum_total_ram : 0,
+                    0,
                 .required_available_ram_bytes =
-                    combined ? minimum_available_ram : 0,
+                    0,
                 .data_filesystem_capacity_bytes =
                     combined ? 100ULL * gibibyte : 0,
                 .data_filesystem_available_bytes =

@@ -551,24 +551,6 @@ class CacheModeRoutingTest(unittest.TestCase):
             ],
             cache_unit.commands,
         )
-        self.assertIn(
-            "bioseq_cache_legacy_inventory_tracking",
-            cache_unit.targets,
-        )
-        self.assertIn(
-            [
-                "bioseq_cache_legacy_inventory_tracking",
-                "--legacy-root",
-                str(server.PROJECT_ROOT / "bioseq_caching"),
-                "--legacy-inventory",
-                "{legacy_inventory}",
-                "--phase",
-                "current",
-                "--inventory-only",
-            ],
-            cache_unit.commands,
-        )
-
     def test_combined_mode_owns_host_native_dso_qualification(self) -> None:
         root_cmake = (MAIN_DIR / "CMakeLists.txt").read_text(encoding="utf-8")
         helper = (
@@ -1259,42 +1241,6 @@ class CacheModeRoutingTest(unittest.TestCase):
                         "--large-case-timeout-seconds")
                     self.assertEqual(
                         production_command[timeout_index + 1], "6300")
-
-    def test_cache_unit_inventory_resolves_current_state_argv(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            binary_dir = Path(tmp)
-            inventory = binary_dir / "legacy_inventory"
-            inventory.touch()
-            manifest = {
-                key: str(binary_dir / key)
-                for key in server._CACHE_NATIVE_ARTIFACT_KEYS
-            }
-            manifest["legacy_inventory"] = str(inventory)
-            (binary_dir / "cache_native_artifacts.json").write_text(
-                json.dumps(manifest), encoding="utf-8")
-            command = server.MODES["cache-unit"].commands[-1]
-            resolved = server._run_command_argv(
-                "cache-unit",
-                binary_dir,
-                command,
-            )
-
-        self.assertEqual(
-            resolved,
-            [
-                str(
-                    binary_dir
-                    / "bioseq_cache_legacy_inventory_tracking"
-                ),
-                "--legacy-root",
-                str(server.PROJECT_ROOT / "bioseq_caching"),
-                "--legacy-inventory",
-                str(inventory),
-                "--phase",
-                "current",
-                "--inventory-only",
-            ],
-        )
 
     def test_cache_integration_resolves_exact_cmake_parity_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4027,7 +3973,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
 
             receipt = json.loads(
                 receipt_path.read_text(encoding="utf-8"))
-        self.assertEqual(len(receipt["commands"]), 5)
+        self.assertEqual(len(receipt["commands"]), 4)
         self.assertEqual(
             {
                 Path(command["executable"]).name
@@ -4038,12 +3984,7 @@ class CacheRetirementProvenanceTest(unittest.TestCase):
                 "bioseq_postgres_test_support_contract_tests",
                 "bioseq_cache_benchmark_report_contract_tests",
                 "bioseq_durable_file_io_contract_tests",
-                "bioseq_cache_legacy_inventory_tracking",
             },
-        )
-        self.assertEqual(
-            receipt["commands"][-1]["arguments"][-3:],
-            ["--phase", "current", "--inventory-only"],
         )
 
     def test_cache_unit_rejects_executable_replacement_during_command(

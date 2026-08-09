@@ -3352,8 +3352,8 @@
     }
   ],
   "inputs": {
-    "approved_delta_semantic_sha256": "a9b8190451c1f7150d4aed52ec69621342e6ec59c8c2adc1af1bbf1bc8d273f8",
-    "candidate_manifest_semantic_sha256": "93569570d8d26594045da4a344b4588a553be32f48c00bd2b4dd5ff29b2b4986",
+    "approved_delta_semantic_sha256": "039882ffa7b642b8f3dff91e6c036e3844a787ee812a37b8a539d48dfbda27ae",
+    "candidate_manifest_semantic_sha256": "82503682e18fb270eaf78b39531ea419947afea43d9cdaecae3a34355bd0d31c",
     "legacy_sql_sha256": "0eb3aa6da75d80fc07c92dc1f6213ef27ddf1da7f4eaed33e6c69e6c8a7dfa71"
   },
   "schema": "bioseq_doc0388_catalog_join_projection/v1"

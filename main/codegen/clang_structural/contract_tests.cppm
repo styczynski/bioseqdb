@@ -1886,7 +1886,12 @@ inline int invoke() {
     const std::filesystem::path lane_c =
         root / "build/lane-c";
     const auto lane_commands =
-        [&](const std::filesystem::path& lane,
+        [&toolchain,
+         &conditional_root,
+         &production_only,
+         &test_only,
+         &production_profile,
+         &test_profile](const std::filesystem::path& lane,
             const std::filesystem::path& relative_include) {
             const std::filesystem::path package_include =
                 lane / relative_include;

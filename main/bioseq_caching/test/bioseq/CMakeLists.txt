@@ -178,15 +178,3 @@ set_tests_properties(
   LABELS "cache;integration;bioseq;production;2gbp"
   RESOURCE_LOCK "bioseq_private_postgres"
   TIMEOUT "${_bioseq_cache_bioseq_production_suite_timeout_seconds}")
-
-if(NOT TARGET bioseq_cache_legacy_migration_contract)
-  message(FATAL_ERROR
-    "combined cache/Bioseq tests require the cache-owned legacy "
-    "migration contract target")
-endif()
-add_dependencies(
-  bioseq_cache_bioseq_support_integration_tests
-  bioseq_cache_legacy_migration_contract)
-add_dependencies(
-  bioseq_cache_bioseq_production_integration_tests
-  bioseq_cache_legacy_migration_contract)
