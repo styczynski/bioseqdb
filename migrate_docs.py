@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-migrate_docs — one-shot migration of bioseqdb markdown files into main/DOCS/.
+migrate_docs — one-shot migration of bioseqdb markdown files into DOCS/.
 
 Implements the rules in REORG_PLAN.md:
   - routing rule (importance-class override for bugfix and bench-framework)
   - slug derivation with generic-name rule + uniqueness assertion
   - DOC id assignment by git first-commit timestamp (lexical path tiebreaker)
   - YAML frontmatter prepended to every moved file
-  - migration map artifact at main/DOCS/.migration_map.txt
+  - migration map artifact at DOCS/.migration_map.txt
 
 Run modes:
   --dry-run    do not touch the filesystem; just print map + summary.
   --execute    perform git mv + frontmatter write.
 
 Run order:
-  python3 migrate_docs.py --dry-run    # inspect main/DOCS/.migration_map.txt
+  python3 migrate_docs.py --dry-run    # inspect DOCS/.migration_map.txt
   python3 migrate_docs.py --execute
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 from datetime import datetime
 
 ROOT = Path(__file__).resolve().parent
-DOCS_ROOT = ROOT / "main" / "DOCS"
+DOCS_ROOT = ROOT / "DOCS"
 
 # ---------------------------------------------------------------------------
 # 1. Hand-written authoritative classification
@@ -47,27 +47,27 @@ SPECIAL_HAND_MAP: dict[str, tuple[str, str, str, str, str]] = {
         "AI agent guidelines — how Claude/agents should collaborate on this repo."
     ),
     "README.md": ("DELETE", "", "", "", ""),
-    "main/SETUP.md": (
+    "SETUP.md": (
         "human_notes", "HUMAN_NOTES", "setup", "human_notes",
         "MacOS development environment setup instructions."
     ),
-    "main/ROOT_TODO.md": (
+    "ROOT_TODO.md": (
         "human_notes", "HUMAN_NOTES", "todo", "human_notes",
         "Active human-curated TODO list for the repo."
     ),
-    "main/bioseq/RESEARCH/CODE_GUIDELINES.md": (
+    "bioseq/RESEARCH/CODE_GUIDELINES.md": (
         "guidelines", "GUIDELINES", "code-style", "human_notes",
         "Additional code guidelines for the bioseq research/algorithms code."
     ),
     "REORG_PLAN.md": (
         "human_notes", "HUMAN_NOTES", "todo", "human_notes",
-        "Plan for the markdown reorganisation under main/DOCS/."
+        "Plan for the markdown reorganisation under DOCS/."
     ),
 }
 
 KEEP_IN_PLACE = {
-    "main/bench_framework/README.md",
-    "main/data/README.md",
+    "bench_framework/README.md",
+    "data/README.md",
 }
 
 # Generic basename set — when a file's slug is in this set, prepend parent dir.
@@ -316,8 +316,8 @@ def classify(rec: dict) -> tuple[str, str, list[str], str]:
         # Fallback
         return ("research", "RESEARCH", [topic], "ai_output")
 
-    # --- main/bioseq/RESEARCH/BENCHMARKING_SPEEDUP/ ---
-    if rel.startswith("main/bioseq/RESEARCH/BENCHMARKING_SPEEDUP/"):
+    # --- bioseq/RESEARCH/BENCHMARKING_SPEEDUP/ ---
+    if rel.startswith("bioseq/RESEARCH/BENCHMARKING_SPEEDUP/"):
         if "SPEC_BENCHMARKING_SPEEDUP_PROPOSAL" in bn_upper:
             return ("tech_spec", "BENCHMARK_FRAMEWORK", ["benchmarking-speedup"], "ai_output")
         if "POOR_RESULTS_REPORT" in bn_upper:
@@ -344,8 +344,8 @@ def classify(rec: dict) -> tuple[str, str, list[str], str]:
             return ("external_doc", "EXTERNAL_DOCS", ["minimizer-simd"], "external_dump")
         return ("impl_plan", "BENCHMARK_FRAMEWORK", ["benchmarking-speedup"], "ai_output")
 
-    # --- main/bioseq/RESEARCH/ (top level) ---
-    if rel.startswith("main/bioseq/RESEARCH/"):
+    # --- bioseq/RESEARCH/ (top level) ---
+    if rel.startswith("bioseq/RESEARCH/"):
         if "BLOCK_ALIGNER_IMPL" in bn_upper:
             return ("impl_plan", "IMPL_PLANS", ["block-aligner"], "ai_output")
         if "BLOCK_ALIGNER_PAPER" in bn_upper:
@@ -573,7 +573,7 @@ def build_migration(survey_path: Path) -> list[dict]:
         # Importance-class override (already encoded in the dir_class from classify())
         directory = dir_class
         slug = derive_slug(rel)
-        new_rel = f"main/DOCS/{directory}/{slug}__{r['doc_id']}.md"
+        new_rel = f"DOCS/{directory}/{slug}__{r['doc_id']}.md"
         dd_mm, ymd = parse_date(r.get("first_commit", ""))
         summary = auto_summary(r.get("head", ""), slug.replace("_", " ").title())
         plan.append({
@@ -617,7 +617,7 @@ def write_migration_summary(plan: list[dict], path: Path) -> None:
         if p["action"] == "delete":
             by_dir["__DELETE__"].append(p)
         else:
-            d = os.path.dirname(p["new"]).replace("main/DOCS/", "")
+            d = os.path.dirname(p["new"]).replace("DOCS/", "")
             by_dir[d].append(p)
     lines = ["# Migration summary", ""]
     for d in sorted(by_dir.keys()):
@@ -734,10 +734,10 @@ def regenerate_index(plan: list[dict]) -> None:
     for p in plan:
         if p["action"] != "move":
             continue
-        d = os.path.dirname(p["new"]).replace("main/DOCS/", "")
+        d = os.path.dirname(p["new"]).replace("DOCS/", "")
         by_dir[d].append(p)
     lines = ["# DOCS Index", "", "Auto-generated by `migrate_docs.py` / `newdoc.py index`.", ""]
-    lines.append("All documents in `main/DOCS/`, grouped by directory.")
+    lines.append("All documents in `DOCS/`, grouped by directory.")
     lines.append("Within a directory, the file with the **highest DOC id** is the most recent.")
     lines.append("")
     for d in sorted(by_dir.keys()):
@@ -755,7 +755,7 @@ def regenerate_index(plan: list[dict]) -> None:
     (DOCS_ROOT / "INDEX.md").write_text("\n".join(lines))
 
 def write_docs_readme() -> None:
-    content = """# main/DOCS — Documentation hub
+    content = """# DOCS — Documentation hub
 
 This directory holds all the prompts, reports, tech specs, and external doc dumps
 for the bioseqdb project. The structure is described in `../REORG_PLAN.md` (or

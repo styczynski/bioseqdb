@@ -1,0 +1,129 @@
+# End-to-end SQL benchmark target.
+# Mirrors bench_v10.cmake (AddCommonTargetX) but links the SQL client + Catch2.
+# Resolve every owned source-tree component from the repository-level CMake
+# source root. This file is included from bioseq/CMakeLists.txt, but the source
+# layout is rooted above that component.
+set(BIOSEQ_REPOSITORY_ROOT "${PROJECT_SOURCE_DIR}")
+set(BIOSEQ_DIR "${BIOSEQ_REPOSITORY_ROOT}/bioseq")
+set(BENCH_FRAMEWORK_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench_framework")
+set(BENCH_E2E_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench")
+
+# minimap2 CLI binary the bench shells out to. -D cache override wins; otherwise
+# default to PATH `minimap2`. The bench aborts at run time if the
+# binary is absent or any command exits non-zero.
+if(NOT DEFINED BIOSEQ_MINIMAP2_BIN OR BIOSEQ_MINIMAP2_BIN STREQUAL "")
+  set(BIOSEQ_MINIMAP2_BIN "minimap2")
+endif()
+# BIOSEQ_MINIMAP2_BIN defaults to the PATH-resolved executable above.
+
+# Module TUs the bench owns directly. The E2E driver lives in its primary
+# module; bench_e2e_main.cpp is only the executable launcher. The shared
+# NO_POSTGRES modules (IO reader, generator, sequences, instrumentation) arrive
+# via SHARED_MODULE_LIBS below. integration_tests/common.cppm is the SQL client;
+# it export-imports testing, so this target must own testing.cppm's BMI too.
+set(BENCH_E2E_MOD_FILES
+  "${BIOSEQ_DIR}/backend/common/testing.cppm"
+  "${BIOSEQ_DIR}/integration_tests/common.cppm"
+  "${BENCH_FRAMEWORK_DIR}/index.cppm"
+  "${BENCH_E2E_DIR}/e2e/index.cppm")
+
+AddCommonTargetX(
+  bioseq_bench_e2e
+  TYPE EXEC CXX 26
+  MAIN "bench_e2e_main\\.cpp"
+  RELOCATABLE NAME bioseq_bench_e2e
+  COMMENT "BioSeq end-to-end SQL (bioseq.load + mmsearch) benchmark"
+  VERSION ${INSTALL_VERSION} COMPONENT ${PROJECT_NAME}
+  INCLUDE_DIRS
+    "${BIOSEQ_DIR}" "${BIOSEQ_DIR}/backend/pg/include" "${BIOSEQ_DIR}/include2"
+    "${BIOSEQ_DIR}/backend"
+    "${BIOSEQ_REPOSITORY_ROOT}/vendor/fmtlog" "${BIOSEQ_REPOSITORY_ROOT}/vendor/fmt"
+    "${BIOSEQ_REPOSITORY_ROOT}/vendor/seqan3/include"
+  LINKS
+    safestring_static fmt reflectcpp::reflectcpp libassert::assert
+    foonathan_memory ftxui::component ftxui::dom ftxui::screen
+    simdjson::simdjson nlohmann_json_schema_validator::validator
+    TBB::tbb lfreist-hwinfo::hwinfo
+    PostgreSQL::PostgreSQL                     # libpq — the SQL client (NEW vs bench_v10)
+    sqlgen::sqlgen                             # sqlgen PostgresV2Connection (find_package imported target)
+    Catch2::Catch2                             # common.cppm `export import testing` (ASSERT macro)
+    Vulkan::Vulkan                             # Vulkan loader (bioseq_modules_nopg uses vulkan/shader_compiler)
+    Vulkan::glslang                            # GLSL→SPIR-V compiler (shader_compiler.cppm)
+    spirv-cross-msl                            # SPIR-V → MSL cross-compiler (MoltenVK path)
+    Vulkan::LayerSettings                      # validation-layer settings (Vulkan::Vulkan companion)
+  SHARED_MODULE_LIBS
+    bioseq_modules_nopg
+  SOURCES
+    "${BENCH_E2E_DIR}/bench_e2e_main.cpp"
+    "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
+  SUPPORT_CXX_MODULES
+  CXX_MOD_BASE_DIRS "${BIOSEQ_DIR}" "${BENCH_E2E_DIR}" "${BENCH_FRAMEWORK_DIR}"
+  CXX_MOD_FILES
+    ${BENCH_E2E_MOD_FILES}
+  HWY 1.3.0)
+
+# Compile the production serializer itself into a dedicated Catch2 executable.
+# This is deliberately a separate target instead of AddCommonTargetX(TESTS):
+# the latter changes the production executable's Catch2 main/definitions too.
+AddCommonTargetX(
+  bioseq_bench_e2e_tests_exec
+  TYPE EXEC CXX 26
+  RELOCATABLE NAME bioseq_bench_e2e_tests_exec
+  COMMENT "BioSeq E2E raw serializer contract tests"
+  VERSION ${INSTALL_VERSION} COMPONENT ${PROJECT_NAME}
+  INCLUDE_DIRS
+    "${BIOSEQ_DIR}" "${BIOSEQ_DIR}/backend/pg/include" "${BIOSEQ_DIR}/include2"
+    "${BIOSEQ_DIR}/backend"
+    "${BIOSEQ_REPOSITORY_ROOT}/vendor/fmtlog" "${BIOSEQ_REPOSITORY_ROOT}/vendor/fmt"
+    "${BIOSEQ_REPOSITORY_ROOT}/vendor/seqan3/include"
+  LINKS
+    safestring_static fmt reflectcpp::reflectcpp libassert::assert
+    foonathan_memory ftxui::component ftxui::dom ftxui::screen
+    simdjson::simdjson nlohmann_json_schema_validator::validator
+    TBB::tbb lfreist-hwinfo::hwinfo
+    PostgreSQL::PostgreSQL
+    sqlgen::sqlgen
+    Catch2::Catch2WithMain
+    Vulkan::Vulkan
+    Vulkan::glslang
+    spirv-cross-msl
+    Vulkan::LayerSettings
+  SHARED_MODULE_LIBS
+    bioseq_modules_nopg
+  SOURCES
+    "${BENCH_E2E_DIR}/bench_e2e_main_test.cpp"
+    "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
+  SUPPORT_CXX_MODULES
+  CXX_MOD_BASE_DIRS "${BIOSEQ_DIR}" "${BENCH_E2E_DIR}" "${BENCH_FRAMEWORK_DIR}"
+  CXX_MOD_FILES
+    ${BENCH_E2E_MOD_FILES}
+  HWY 1.3.0)
+
+# Match the project's generated Catch2 targets: ThinLTO can drop TLS init
+# wrappers for module-attached logging state in test executables.
+set_target_properties(bioseq_bench_e2e_tests_exec PROPERTIES
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+
+target_compile_definitions(bioseq_bench_e2e PRIVATE
+  "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bioseq_bench_e2e\""
+  "BIOSEQ_E2E_DATA_DIR=\"${BENCH_E2E_DIR}\""
+  "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_configuration.json\""
+  "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")
+
+if(TARGET bioseq_bench_e2e_tests_exec)
+  target_compile_definitions(bioseq_bench_e2e_tests_exec PRIVATE
+    BIOSEQ_E2E_CONTRACT_TEST=1
+    "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bioseq_bench_e2e\""
+    "BIOSEQ_E2E_DATA_DIR=\"${BENCH_E2E_DIR}\""
+    "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_configuration.json\""
+    "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")
+endif()
+
+if(APPLE)
+    target_link_options(bioseq_bench_e2e PRIVATE
+      -L/opt/homebrew/opt/llvm/lib/c++)
+    if(TARGET bioseq_bench_e2e_tests_exec)
+      target_link_options(bioseq_bench_e2e_tests_exec PRIVATE
+        -L/opt/homebrew/opt/llvm/lib/c++)
+    endif()
+endif()
